@@ -2097,7 +2097,8 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                          ctx_limit: int,
                          rolling_window: bool,
                          check_stop,
-                         chunk_timeout: int = None) -> List[Dict]:
+                         chunk_timeout: int = None,
+                         history_manager: HistoryManager = None) -> List[Dict]:
     """Process a batch of chapters in parallel with improved interrupt support.
 
     Contextual mode mirrors the main translator:
@@ -2197,38 +2198,33 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                     
                 # Update history if contextual is enabled and we got a valid response
                 if contextual_enabled and 'resp' in result and result['resp']:
-                    with _history_lock:
-                        # Find the user message content from the messages
-                        user_content = None
-                        for msg in msgs:
-                            if msg.get('role') == 'user':
-                                user_content = msg.get('content', '')
-                                break
-                        
-                        if user_content:
-                            # Add to history for next chapters in batch
-                            history.append({"role": "user", "content": user_content})
-                            assistant_entry = {"role": "assistant", "content": result['resp']}
-                            
-                            # Add raw content object if present (same as sequential mode)
-                            if 'raw_obj' in result and result['raw_obj']:
-                                raw_obj = result['raw_obj']
-                                # According to Google docs: "The `content` object automatically attaches 
-                                # the required thought_signature behind the scenes"
-                                # The raw_obj is the candidate.content object from Vertex AI
-                                assistant_entry["_raw_content_object"] = raw_obj
-                                
-                                # Check if thinking tags are present in the text
-                                if hasattr(raw_obj, 'parts'):
-                                    for part in raw_obj.parts:
-                                        if hasattr(part, 'text') and part.text:
-                                            if '<thinking>' in part.text:
-                                                print("📌 Preserving thought signature for context (batch mode - contains <thinking> tags)")
-                                                break
-                                else:
-                                    print("📌 Preserving raw content object for context (batch mode)")
-                            
-                            history.append(assistant_entry)
+                    # Find the user message content from the messages
+                    user_content = None
+                    for msg in msgs:
+                        if msg.get('role') == 'user':
+                            user_content = msg.get('content', '')
+                            break
+                    
+                    if user_content:
+                        try:
+                            if history_manager:
+                                history = history_manager.append_to_history(
+                                    user_content=user_content,
+                                    assistant_content=result['resp'],
+                                    hist_limit=ctx_limit,
+                                    reset_on_limit=not rolling_window,
+                                    rolling_window=rolling_window,
+                                    raw_assistant_object=result.get('raw_obj')
+                                )
+                            else:
+                                with _history_lock:
+                                    history.append({"role": "user", "content": user_content})
+                                    assistant_entry = {"role": "assistant", "content": result['resp']}
+                                    if 'raw_obj' in result and result['raw_obj']:
+                                        assistant_entry["_raw_content_object"] = result['raw_obj']
+                                    history.append(assistant_entry)
+                        except Exception as e:
+                            print(f"⚠️ Failed to save batch history for chapter {idx+1}: {e}")
                 
                 results.append(result)
             except Exception as e:
@@ -3440,65 +3436,17 @@ def main(log_callback=None, stop_callback=None):
                     if idx in batch_history_map:
                         user_content, assistant_content, raw_obj = batch_history_map[idx]
                         try:
-                            # Microsecond delay between history appends to prevent race conditions
-                            time.sleep(0.000001)
-                            with _history_lock:
-                                # Add user message to history
-                                history.append({"role": "user", "content": user_content})
-                                
-                                # Create assistant entry
-                                assistant_entry = {"role": "assistant", "content": assistant_content}
-                                
-                                # Add raw_obj directly (same as sequential mode)
-                                if raw_obj:
-                                    # Only keep if it contains a thought_signature
-                                    def _has_thought_sig(o):
-                                        try:
-                                            if hasattr(o, 'parts'):
-                                                for p in o.parts or []:
-                                                    if getattr(p, 'thought_signature', None):
-                                                        return True
-                                            if isinstance(o, dict):
-                                                if o.get('thought_signature'):
-                                                    return True
-                                                if 'parts' in o:
-                                                    for p in o.get('parts') or []:
-                                                        if isinstance(p, dict) and p.get('thought_signature'):
-                                                            return True
-                                        except Exception:
-                                            return False
-                                        return False
-                                    if _has_thought_sig(raw_obj):
-                                        api_type = os.getenv("API_TYPE", "gemini").lower()
-                                        if api_type == "vertex" and isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                            raw_obj['_from_vertex'] = True
-                                        assistant_entry["_raw_content_object"] = raw_obj
-                                        if hasattr(raw_obj, 'parts'):
-                                            for part in raw_obj.parts:
-                                                if hasattr(part, 'text') and part.text and '<thinking>' in part.text:
-                                                    print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
-                                                    break
-                                        else:
-                                            print(f"📌 Preserving raw content object for chapter {idx+1}")
-                                        print(f"📌 Preserving raw content object for chapter {idx+1}")
-                                
-                                history.append(assistant_entry)
+                            history = history_manager.append_to_history(
+                                user_content=user_content,
+                                assistant_content=assistant_content,
+                                hist_limit=ctx_limit,
+                                reset_on_limit=not rolling_window,
+                                rolling_window=rolling_window,
+                                raw_assistant_object=raw_obj
+                            )
                         except Exception as e:
                             print(f"⚠️ Failed to append Chapter {idx+1} to glossary history: {e}")
-                
-                # Save history to disk after batch completes
-                try:
-                    # Microsecond lock to prevent race conditions when saving history
-                    time.sleep(0.000001)
-                    with _history_lock:
-                        # Drop empty content field before serialization (batch)
-                        for msg in history:
-                            if msg.get("role") == "assistant" and msg.get("content") == "":
-                                msg["content"] = None
-                        history_manager.save_history(history)
-                        print(f"💾 Saved glossary history ({len(history)} messages)")
-                except Exception as e:
-                    print(f"⚠️ Failed to save glossary history: {e}")
+                print(f"💾 Saved glossary history ({len(history)} messages)")
             
             batch_elapsed = time.time() - batch_start_time
             print(f"[BATCH] Batch {batch_num+1} completed in {batch_elapsed:.1f}s total")
@@ -3968,71 +3916,17 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Add chunk to history if contextual
                             if contextual_enabled:
-                                # Microsecond lock to prevent race conditions when appending to history
-                                time.sleep(0.000001)
-                                with _history_lock:
-                                    history.append({"role": "user", "content": chunk_user_prompt})
-                                    
-                                    # Add assistant response with thought signature if available
-                                    assistant_entry = {"role": "assistant", "content": chunk_resp}
-                                if chunk_raw_obj:
-                                    # Serialize the raw object immediately to prevent bytes issues later
-                                    import base64
-                                    
-                                    def serialize_obj(obj):
-                                        """Recursively serialize an object, converting bytes to base64"""
-                                        if isinstance(obj, bytes):
-                                            return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
-                                        elif isinstance(obj, dict):
-                                            result = {}
-                                            for key, value in obj.items():
-                                                result[key] = serialize_obj(value)
-                                            return result
-                                        elif isinstance(obj, list):
-                                            return [serialize_obj(item) for item in obj]
-                                        elif isinstance(obj, (str, int, float, bool, type(None))):
-                                            return obj
-                                        elif hasattr(obj, '__dict__'):
-                                            # For objects with __dict__, try to extract what we can
-                                            result = {}
-                                            if hasattr(obj, 'parts'):
-                                                parts = []
-                                                try:
-                                                    for part in obj.parts:
-                                                        part_dict = {}
-                                                        # Only check known attributes
-                                                        for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
-                                                            if hasattr(part, attr):
-                                                                try:
-                                                                    value = getattr(part, attr)
-                                                                    if value is not None:
-                                                                        # Special handling for thought_signature to ensure it's accessible
-                                                                        if attr == 'thought_signature' and isinstance(value, bytes):
-                                                                            # Store it in a way unified_api_client expects
-                                                                            part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                                                            print(f"   🧠 Serialized thought signature: {len(value)} bytes")
-                                                                        else:
-                                                                            part_dict[attr] = serialize_obj(value)
-                                                                except:
-                                                                    pass
-                                                        if part_dict:
-                                                            parts.append(part_dict)
-                                                except:
-                                                    pass
-                                                if parts:
-                                                    result['parts'] = parts
-                                            if hasattr(obj, 'role'):
-                                                try:
-                                                    result['role'] = getattr(obj, 'role', None)
-                                                except:
-                                                    pass
-                                            return result if result else str(obj)
-                                        else:
-                                            return str(obj)
-                                    
-                                    assistant_entry["_raw_content_object"] = serialize_obj(chunk_raw_obj)
-                                    print("🧠 Saved thought signature to glossary history")
-                                    history.append(assistant_entry)
+                                try:
+                                    history = history_manager.append_to_history(
+                                        user_content=chunk_user_prompt,
+                                        assistant_content=chunk_resp,
+                                        hist_limit=ctx_limit,
+                                        reset_on_limit=not rolling_window,
+                                        rolling_window=rolling_window,
+                                        raw_assistant_object=chunk_raw_obj
+                                    )
+                                except Exception as e:
+                                    print(f"⚠️ Failed to save chunk {chunk_idx} history: {e}")
 
                         except Exception as e:
                             print(f"[Warning] Error processing chunk {chunk_idx} data: {e}")
@@ -4217,79 +4111,17 @@ def main(log_callback=None, stop_callback=None):
                         # Already added to history during chunk processing
                         pass
                     elif 'resp' in locals() and resp:
-                        # Single processing - add to history
-                        # Microsecond lock to prevent race conditions when appending to history
-                        time.sleep(0.000001)
-                        with _history_lock:
-                            history.append({"role": "user", "content": user_prompt})
-                            
-                            # Add assistant message with thought signature
-                            assistant_entry = {"role": "assistant", "content": resp}
-                        
-                        # Add thought signatures if available
-                        if 'raw_obj' in locals() and raw_obj:
-                            # According to Google docs: "The `content` object automatically attaches 
-                            # the required thought_signature behind the scenes"
-                            # So we should store the raw_obj directly as it's the candidate.content object
-                            # If raw_obj already has text, clear duplicate content field
-                            try:
-                                has_text_part = False
-                                parts = []
-                                if hasattr(raw_obj, 'parts'):
-                                    parts = raw_obj.parts or []
-                                elif isinstance(raw_obj, dict):
-                                    parts = raw_obj.get('parts', []) or []
-                                for p in parts:
-                                    if hasattr(p, 'text') and getattr(p, 'text', None):
-                                        has_text_part = True
-                                        break
-                                    if isinstance(p, dict) and p.get('text'):
-                                        has_text_part = True
-                                        break
-                                if has_text_part:
-                                    assistant_entry['content'] = ""
-                            except Exception:
-                                pass
-                                # Only keep raw_obj if it contains a thought_signature
-                                def _has_thought_sig(o):
-                                    try:
-                                        if hasattr(o, 'parts'):
-                                            for p in o.parts or []:
-                                                if getattr(p, 'thought_signature', None):
-                                                    return True
-                                        if isinstance(o, dict):
-                                            if o.get('thought_signature'):
-                                                return True
-                                            if 'parts' in o:
-                                                for p in o.get('parts') or []:
-                                                    if isinstance(p, dict) and p.get('thought_signature'):
-                                                        return True
-                                    except Exception:
-                                        return False
-                                    return False
-                                if _has_thought_sig(raw_obj):
-                                    assistant_entry["_raw_content_object"] = raw_obj
-                                    print("📌 Preserving thought signature for context (stored raw Content object)")
-                                    
-                            history.append(assistant_entry)
-                        
-                        # Save history using HistoryManager after adding entry
-                        # Microsecond lock to prevent race conditions when saving history
-                        time.sleep(0.000001)
-                        with _history_lock:
-                            # Drop empty content field before serialization
-                            if assistant_entry.get("content") == "":
-                                assistant_entry["content"] = None
-                            history_manager.save_history(history)
-                    
-                    # Reset history when limit reached without rolling window
-                    if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
-                        print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
-                        history = []
-                        # Microsecond lock to prevent race conditions when saving history
-                        time.sleep(0.000001)
-                        with _history_lock:
-                            history_manager.save_history(history)  # Save empty history
+                        try:
+                            history = history_manager.append_to_history(
+                                user_content=user_prompt,
+                                assistant_content=resp,
+                                hist_limit=ctx_limit,
+                                reset_on_limit=not rolling_window,
+                                rolling_window=rolling_window,
+                                raw_assistant_object=raw_obj if 'raw_obj' in locals() else None
+                            )
+                        except Exception as e:
+                            print(f"⚠️ Failed to save history for chapter {idx+1}: {e}")
 
                 save_progress(completed, glossary)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
