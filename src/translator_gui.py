@@ -2825,7 +2825,7 @@ Recent translations to summarize:
         # Add custom styling with unicode arrow and left padding for cog overlay
         self.profile_menu.setStyleSheet("""
             QComboBox {
-                padding-left: 26px;
+                padding-left: 34px;
             }
             QComboBox::down-arrow {
                 image: none;
@@ -2859,14 +2859,30 @@ Recent translations to summarize:
             "}"
         )
         self.profile_manage_btn.clicked.connect(self._open_profile_manager)
+        # Thin separator line between cog and text
+        from PySide6.QtWidgets import QFrame
+        self.profile_cog_separator = QFrame(self.profile_menu)
+        self.profile_cog_separator.setFrameShape(QFrame.VLine)
+        self.profile_cog_separator.setFrameShadow(QFrame.Plain)
+        self.profile_cog_separator.setLineWidth(1)
+        self.profile_cog_separator.setStyleSheet("color: #4a5568; background-color: #4a5568;")
+        self.profile_cog_separator.setFixedWidth(1)
 
+        # Position cog and separator inside combo without shifting layout
         # Position cog inside combo without shifting layout
         def _position_profile_cog():
             try:
                 h = self.profile_menu.height()
                 btn_h = self.profile_manage_btn.height()
                 y = max(0, (h - btn_h) // 2)
-                self.profile_manage_btn.move(4, y)
+                self.profile_manage_btn.move(6, y)
+
+                sep_h = h - 8
+                sep_y = max(0, (h - sep_h) // 2)
+                self.profile_cog_separator.setFixedHeight(max(12, sep_h))
+                self.profile_cog_separator.move(30, sep_y)
+                self.profile_cog_separator.raise_()
+                self.profile_manage_btn.raise_()
             except Exception:
                 pass
 
