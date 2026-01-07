@@ -2883,14 +2883,20 @@ Recent translations to summarize:
     
     def _open_profile_manager(self):
         """Open a dialog for managing profile order with drag-and-drop."""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QApplication
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QIcon
         
         dialog = QDialog(self)
         dialog.setWindowTitle("Manage Profiles")
-        dialog.setMinimumWidth(400)
-        dialog.setMinimumHeight(500)
+        
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog_width = int(screen.width() * 0.22)  # 22% of screen width
+        dialog_height = int(screen.height() * 0.40)  # 40% of screen height
+        dialog.setMinimumWidth(dialog_width)
+        dialog.setMinimumHeight(dialog_height)
+        dialog.resize(dialog_width, dialog_height)
         
         # Set icon
         try:
@@ -2903,16 +2909,17 @@ Recent translations to summarize:
         layout = QVBoxLayout(dialog)
         
         # Instructions
-        instructions = QLabel("Drag and drop profiles to reorder them:")
+        instructions = QLabel("Drag and drop profiles to reorder them (Ctrl+Click for multiple):")
         instructions.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(instructions)
         
         # Horizontal layout for list and buttons
         content_layout = QHBoxLayout()
         
-        # List widget with drag-and-drop
+        # List widget with drag-and-drop and multi-selection
         list_widget = QListWidget()
         list_widget.setDragDropMode(QListWidget.InternalMove)
+        list_widget.setSelectionMode(QListWidget.ExtendedSelection)  # Enable multi-selection
         list_widget.addItems(list(self.prompt_profiles.keys()))
         
         # Select current profile
@@ -2922,35 +2929,112 @@ Recent translations to summarize:
                 list_widget.setCurrentRow(i)
                 break
         
+        # History for undo/redo
+        history_stack = [self._get_list_order(list_widget)]
+        history_index = [0]  # Use list to make it mutable in nested functions
+        
+        def save_state():
+            # Remove any redo states
+            history_stack[history_index[0] + 1:] = []
+            # Add current state
+            history_stack.append(self._get_list_order(list_widget))
+            history_index[0] = len(history_stack) - 1
+            update_undo_redo_buttons()
+        
+        def update_undo_redo_buttons():
+            undo_btn.setEnabled(history_index[0] > 0)
+            redo_btn.setEnabled(history_index[0] < len(history_stack) - 1)
+        
         content_layout.addWidget(list_widget)
         
         # Vertical layout for reorder buttons
         button_column = QVBoxLayout()
-        button_column.addStretch()
+        
+        # Undo button
+        undo_btn = QPushButton("↶ Undo")
+        undo_btn.setToolTip("Undo last change")
+        undo_btn.setEnabled(False)
+        def do_undo():
+            if history_index[0] > 0:
+                history_index[0] -= 1
+                self._restore_list_order(list_widget, history_stack[history_index[0]])
+                update_undo_redo_buttons()
+        undo_btn.clicked.connect(do_undo)
+        button_column.addWidget(undo_btn)
+        
+        # Redo button
+        redo_btn = QPushButton("↷ Redo")
+        redo_btn.setToolTip("Redo last undone change")
+        redo_btn.setEnabled(False)
+        def do_redo():
+            if history_index[0] < len(history_stack) - 1:
+                history_index[0] += 1
+                self._restore_list_order(list_widget, history_stack[history_index[0]])
+                update_undo_redo_buttons()
+        redo_btn.clicked.connect(do_redo)
+        button_column.addWidget(redo_btn)
+        
+        button_column.addSpacing(10)
         
         # Move to Top button
         move_top_btn = QPushButton("⇈ Top")
-        move_top_btn.setToolTip("Move selected profile to top")
-        move_top_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'top'))
+        move_top_btn.setToolTip("Move selected profile(s) to top")
+        def move_top():
+            self._move_profile_in_list(list_widget, 'top')
+            save_state()
+        move_top_btn.clicked.connect(move_top)
         button_column.addWidget(move_top_btn)
         
         # Move Up button
         move_up_btn = QPushButton("↑ Up")
-        move_up_btn.setToolTip("Move selected profile up")
-        move_up_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'up'))
+        move_up_btn.setToolTip("Move selected profile(s) up")
+        def move_up():
+            self._move_profile_in_list(list_widget, 'up')
+            save_state()
+        move_up_btn.clicked.connect(move_up)
         button_column.addWidget(move_up_btn)
         
         # Move Down button
         move_down_btn = QPushButton("↓ Down")
-        move_down_btn.setToolTip("Move selected profile down")
-        move_down_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'down'))
+        move_down_btn.setToolTip("Move selected profile(s) down")
+        def move_down():
+            self._move_profile_in_list(list_widget, 'down')
+            save_state()
+        move_down_btn.clicked.connect(move_down)
         button_column.addWidget(move_down_btn)
         
         # Move to Bottom button
         move_bottom_btn = QPushButton("⇊ Bottom")
-        move_bottom_btn.setToolTip("Move selected profile to bottom")
-        move_bottom_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'bottom'))
+        move_bottom_btn.setToolTip("Move selected profile(s) to bottom")
+        def move_bottom():
+            self._move_profile_in_list(list_widget, 'bottom')
+            save_state()
+        move_bottom_btn.clicked.connect(move_bottom)
         button_column.addWidget(move_bottom_btn)
+        
+        button_column.addSpacing(10)
+        
+        # Delete button
+        delete_btn = QPushButton("❌ Delete")
+        delete_btn.setToolTip("Delete selected profile(s)")
+        delete_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+        def delete_profiles():
+            selected_items = list_widget.selectedItems()
+            if not selected_items:
+                return
+            
+            # Confirm deletion
+            from PySide6.QtWidgets import QMessageBox
+            profile_names = [item.text() for item in selected_items]
+            msg = f"Delete {len(profile_names)} profile(s)?\n\n" + "\n".join(profile_names)
+            reply = QMessageBox.question(dialog, "Confirm Delete", msg, 
+                                        QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                for item in selected_items:
+                    list_widget.takeItem(list_widget.row(item))
+                save_state()
+        delete_btn.clicked.connect(delete_profiles)
+        button_column.addWidget(delete_btn)
         
         button_column.addStretch()
         
@@ -2976,29 +3060,55 @@ Recent translations to summarize:
         
         dialog.exec()
     
+    def _get_list_order(self, list_widget):
+        """Get the current order of items in the list."""
+        return [list_widget.item(i).text() for i in range(list_widget.count())]
+    
+    def _restore_list_order(self, list_widget, order):
+        """Restore a specific order to the list."""
+        list_widget.clear()
+        list_widget.addItems(order)
+    
     def _move_profile_in_list(self, list_widget, direction):
-        """Move the selected profile in the list."""
-        current_row = list_widget.currentRow()
-        if current_row < 0:
+        """Move the selected profile(s) in the list."""
+        selected_items = list_widget.selectedItems()
+        if not selected_items:
             return
         
-        item = list_widget.takeItem(current_row)
+        # Get selected rows and sort them
+        selected_rows = sorted([list_widget.row(item) for item in selected_items])
         
-        if direction == 'up' and current_row > 0:
-            new_row = current_row - 1
-        elif direction == 'down' and current_row < list_widget.count():
-            new_row = current_row + 1
+        if direction == 'up':
+            if selected_rows[0] == 0:
+                return  # Already at top
+            for row in selected_rows:
+                item = list_widget.takeItem(row)
+                list_widget.insertItem(row - 1, item)
+                item.setSelected(True)
+        
+        elif direction == 'down':
+            if selected_rows[-1] == list_widget.count() - 1:
+                return  # Already at bottom
+            for row in reversed(selected_rows):
+                item = list_widget.takeItem(row)
+                list_widget.insertItem(row + 1, item)
+                item.setSelected(True)
+        
         elif direction == 'top':
-            new_row = 0
-        elif direction == 'bottom':
-            new_row = list_widget.count()
-        else:
-            # Invalid move, put item back
-            list_widget.insertItem(current_row, item)
-            return
+            if selected_rows[0] == 0:
+                return  # Already at top
+            items = [list_widget.takeItem(row) for row in reversed(selected_rows)]
+            for i, item in enumerate(reversed(items)):
+                list_widget.insertItem(i, item)
+                item.setSelected(True)
         
-        list_widget.insertItem(new_row, item)
-        list_widget.setCurrentRow(new_row)
+        elif direction == 'bottom':
+            if selected_rows[-1] == list_widget.count() - 1:
+                return  # Already at bottom
+            items = [list_widget.takeItem(row) for row in reversed(selected_rows)]
+            for item in reversed(items):
+                list_widget.addItem(item)
+                item.setSelected(True)
     
     def _save_profile_order(self, list_widget, dialog):
         """Save the new profile order from the list widget."""
