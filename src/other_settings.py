@@ -1775,7 +1775,6 @@ def _create_response_handling_section(self, parent):
     enable_thoughts_cb.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Adds model reasoning thoughts metadata to responses when supported. "
-        "It may be required to preserve thought signatures for gemini 3 contextual translation."
         "</p></qt>"
     )
     try:

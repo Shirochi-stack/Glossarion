@@ -6209,7 +6209,24 @@ class UnifiedClient:
                                 part_copy = part.copy()
                                 if is_thought:
                                     part_copy.pop('text', None)  # keep signature only
-                                filtered_parts.append(part_copy)
+
+                                # Remove null/empty fields except thought signatures
+                                allowed_keys = {'thought_signature', 'thoughtSignature', 'text'}
+                                keys_to_drop = []
+                                for k, v in part_copy.items():
+                                    if k in allowed_keys:
+                                        # Drop empty text
+                                        if k == 'text' and (v is None or v == ""):
+                                            keys_to_drop.append(k)
+                                        continue
+                                    if v is None or v == "" or v == [] or v == {}:
+                                        keys_to_drop.append(k)
+                                for k in keys_to_drop:
+                                    part_copy.pop(k, None)
+
+                                # Skip if nothing useful remains
+                                if part_copy:
+                                    filtered_parts.append(part_copy)
                             
                             if filtered_parts:
                                 # Save the filtered version
