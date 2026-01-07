@@ -6145,6 +6145,44 @@ class UnifiedClient:
             with self._file_write_lock:
                 thread_name = threading.current_thread().name
                 thread_id = threading.current_thread().ident
+
+                # --- Ensure messages have a user prompt and material content for payload visibility ---
+                if messages is None:
+                    messages = []
+                safe_msgs = []
+                user_found = False
+                for m in messages:
+                    if not isinstance(m, dict):
+                        continue
+                    msg = dict(m)
+                    # Recover text from raw_content_object if content is empty/None
+                    content = msg.get('content')
+                    if (content is None or content == "") and '_raw_content_object' in msg:
+                        raw_obj = msg['_raw_content_object']
+                        try:
+                            parts = []
+                            if hasattr(raw_obj, 'parts'):
+                                parts = raw_obj.parts or []
+                            elif isinstance(raw_obj, dict):
+                                parts = raw_obj.get('parts') or []
+                            texts = []
+                            for p in parts:
+                                if hasattr(p, 'text') and getattr(p, 'text', None):
+                                    texts.append(getattr(p, 'text'))
+                                elif isinstance(p, dict) and p.get('text'):
+                                    texts.append(p.get('text'))
+                            if texts:
+                                msg['content'] = "\n".join(texts)
+                        except Exception:
+                            pass
+                    if msg.get('content') is None:
+                        msg['content'] = ""
+                    if msg.get('role') == 'user':
+                        user_found = True
+                    safe_msgs.append(msg)
+                if not user_found:
+                    safe_msgs.append({'role': 'user', 'content': ''})
+                messages = safe_msgs
                 
                 # Extract chapter info for better tracking
                 chapter_info = self._extract_chapter_info(messages)
@@ -6182,11 +6220,21 @@ class UnifiedClient:
                     pass
                 
                 # Clean messages for payload - preserve thought signatures properly
+                import base64
+                def _encode_bytes(obj):
+                    if isinstance(obj, (bytes, bytearray)):
+                        return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
+                    if isinstance(obj, list):
+                        return [_encode_bytes(v) for v in obj]
+                    if isinstance(obj, dict):
+                        return {k: _encode_bytes(v) for k, v in obj.items()}
+                    return obj
+
                 cleaned_messages = []
                 for msg in messages:
                     cleaned_msg = msg.copy()
                     if '_raw_content_object' in cleaned_msg and cleaned_msg['_raw_content_object']:
-                        raw_obj = cleaned_msg['_raw_content_object']
+                        raw_obj = _encode_bytes(cleaned_msg['_raw_content_object'])
                         
                         # Preserve the structure for Gemini 3 models with thought signatures
                         # BUT filter out reasoning parts (thought: true)
