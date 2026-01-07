@@ -338,12 +338,11 @@ class HistoryManager:
                 import traceback
                 print(f"   Traceback: {traceback.format_exc()}")
                 pass
-
         # Drop raw_content_object if it lacks thought_signature
         if '_raw_content_object' in assistant_msg and not _has_thought_signature(assistant_msg['_raw_content_object']):
             assistant_msg.pop('_raw_content_object', None)
 
-        # If raw_content_object contains a non-empty text part, clear duplicate assistant content
+        # If raw_content_object carries text or thought signatures, clear duplicate assistant content
         try:
             ro = assistant_msg.get('_raw_content_object')
             if ro:
@@ -352,17 +351,22 @@ class HistoryManager:
                     parts = ro.parts or []
                 elif isinstance(ro, dict):
                     parts = ro.get('parts', []) or []
-                has_text = False
+                has_text_or_sig = False
                 for p in parts:
                     if hasattr(p, 'text') and getattr(p, 'text', None):
-                        has_text = True
+                        has_text_or_sig = True
                         break
-                    if isinstance(p, dict) and p.get('text'):
-                        has_text = True
-                        break
-                if has_text:
+                    if isinstance(p, dict):
+                        if p.get('text'):
+                            has_text_or_sig = True
+                            break
+                        if p.get('thought_signature'):
+                            has_text_or_sig = True
+                            break
+                if has_text_or_sig:
                     assistant_msg['content'] = ""
         except Exception:
+            pass
             pass
         # If content is now empty, set to None so it gets omitted when serialized
         if assistant_msg.get('content') == "":

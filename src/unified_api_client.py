@@ -6237,7 +6237,7 @@ class UnifiedClient:
                         raw_obj = _encode_bytes(cleaned_msg['_raw_content_object'])
                         
                         # Preserve the structure for Gemini 3 models with thought signatures
-                        # BUT filter out reasoning parts (thought: true)
+                        # BUT filter out reasoning parts (thought: true) and null signatures
                         if isinstance(raw_obj, dict) and 'parts' in raw_obj:
                             # Filter out reasoning parts **except** ones carrying thought_signature
                             filtered_parts = []
@@ -6258,13 +6258,14 @@ class UnifiedClient:
                                 if is_thought:
                                     part_copy.pop('text', None)  # keep signature only
 
-                                # Remove null/empty fields except thought signatures
+                                # Remove null/empty fields; drop null thought_signature as well
                                 allowed_keys = {'thought_signature', 'thoughtSignature', 'text'}
                                 keys_to_drop = []
                                 for k, v in part_copy.items():
                                     if k in allowed_keys:
-                                        # Drop empty text
-                                        if k == 'text' and (v is None or v == ""):
+                                        if k in ('thought_signature', 'thoughtSignature') and not v:
+                                            keys_to_drop.append(k)
+                                        elif k == 'text' and (v is None or v == ""):
                                             keys_to_drop.append(k)
                                         continue
                                     if v is None or v == "" or v == [] or v == {}:
