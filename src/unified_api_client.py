@@ -4097,22 +4097,23 @@ class UnifiedClient:
                     truncation_retry_attempts = max(1, int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1") or "1"))
                     attempts_remaining = internal_retries - (attempt + 1)
                     if retry_truncated_enabled:
-                        print(f"  🔄 RETRY_TRUNCATED enabled - attempting to retry with configured token limit")
-                        
-                        # Get the max retry tokens limit (this is the target, not the minimum)
-                        max_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+                        print(f"  🔄 RETRY_TRUNCATED enabled - attempting truncation retry")
+
+                        # Get the retry token target; non-positive means use current limit
+                        configured_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
                         current_max_tokens = max_tokens or 8192
-                        
+                        target_tokens = configured_retry_tokens if configured_retry_tokens > 0 else current_max_tokens
+                        new_max_tokens = max(current_max_tokens, target_tokens)
+
                         # Prevent infinite recursion: only allow one truncation retry chain per request
                         already_tried_truncation = bool(retry_reason and "truncation_retry" in str(retry_reason))
-                        
+
                         # Respect internal retry budget (from Other Settings → MAX_RETRIES)
                         if attempts_remaining <= 0:
                             print(f"  📊 No internal retries remaining ({internal_retries}); skipping truncation retry")
                         else:
                             allowed_attempts = min(truncation_retry_attempts, attempts_remaining)
 
-                            # Helper: run a bounded retry with optional increased token limit
                             def _run_truncation_retry(new_tokens: int, reason_suffix: str):
                                 tls = self._get_thread_local_client()
                                 prev_override = getattr(tls, 'max_retries_override', None)
@@ -4131,40 +4132,20 @@ class UnifiedClient:
                                     return retry_content, retry_finish_reason
                                 finally:
                                     tls.max_retries_override = prev_override
-                            
-                            if current_max_tokens < max_retry_tokens:
-                                # Use the configured limit directly, not double
-                                new_max_tokens = max_retry_tokens
-                                print(f"  📊 Retrying with configured token limit: {current_max_tokens} → {new_max_tokens} (up to {allowed_attempts} attempt(s))")
-                                for attempt_idx in range(allowed_attempts):
-                                    try:
-                                        retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}")
-                                        if retry_finish_reason not in ['length', 'max_tokens']:
-                                            print(f"  ✅ Truncation retry #{attempt_idx+1} succeeded: {len(retry_content)} chars")
-                                            return retry_content, retry_finish_reason
-                                        else:
-                                            print(f"  ⚠️ Retry #{attempt_idx+1} was also truncated")
-                                    except Exception as retry_error:
-                                        print(f"  ❌ Truncation retry #{attempt_idx+1} failed: {retry_error}")
-                                print(f"  ⚠️ All truncation retries ({allowed_attempts}) exhausted at higher token limit; returning original response")
-                                self._truncation_retries_exhausted = True
-                            elif current_max_tokens == max_retry_tokens and not already_tried_truncation:
-                                # Retry at same limit, honoring configured attempts
-                                print(f"  📊 At configured max_retry_tokens ({max_retry_tokens}) - retrying up to {allowed_attempts} time(s) at same limit")
-                                for attempt_idx in range(allowed_attempts):
-                                    try:
-                                        retry_content, retry_finish_reason = _run_truncation_retry(current_max_tokens, f"equal_{finish_reason}_{attempt_idx+1}")
-                                        if retry_finish_reason not in ['length', 'max_tokens']:
-                                            print(f"  ✅ Equal-limit truncation retry #{attempt_idx+1} succeeded: {len(retry_content)} chars")
-                                            return retry_content, retry_finish_reason
-                                        else:
-                                            print(f"  ⚠️ Equal-limit retry #{attempt_idx+1} was also truncated")
-                                    except Exception as retry_error:
-                                        print(f"  ❌ Equal-limit truncation retry #{attempt_idx+1} failed: {retry_error}")
-                                print(f"  ⚠️ All equal-limit truncation retries ({allowed_attempts}) exhausted; returning original response")
-                                self._truncation_retries_exhausted = True
-                            else:
-                                print(f"  📊 Already at max retry tokens ({current_max_tokens}) and retry already attempted, not retrying")
+
+                            print(f"  📊 Truncation retry limit: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
+                            for attempt_idx in range(allowed_attempts):
+                                try:
+                                    retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}")
+                                    if retry_finish_reason not in ['length', 'max_tokens']:
+                                        print(f"  ✅ Truncation retry #{attempt_idx+1} succeeded: {len(retry_content)} chars")
+                                        return retry_content, retry_finish_reason
+                                    else:
+                                        print(f"  ⚠️ Retry #{attempt_idx+1} was also truncated")
+                                except Exception as retry_error:
+                                    print(f"  ❌ Truncation retry #{attempt_idx+1} failed: {retry_error}")
+                            print(f"  ⚠️ All truncation retries ({allowed_attempts}) exhausted; returning original response")
+                            self._truncation_retries_exhausted = True
                     else:
                         print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
                 

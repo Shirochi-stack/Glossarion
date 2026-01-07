@@ -3559,27 +3559,21 @@ class TranslationProcessor:
                 
                 # Debug logging to verify the toggle state
                 #print(f"    DEBUG: finish_reason='{finish_reason}', truncation_enabled={truncation_retry_enabled}, split_retry_enabled={split_retry_enabled}")
-                if finish_reason == "length" and truncation_retry_enabled:
-                    if truncation_retry_count < truncation_retry_limit:
-                        # For truncated responses, use the set minimum retry tokens (not double)
+                if finish_reason == "length":
+                    if truncation_retry_enabled and truncation_retry_count < truncation_retry_limit:
+                        # Always attempt a truncation retry, even if token limits are equal
                         new_token_limit = self.config.MAX_RETRY_TOKENS
-                        
-                        if new_token_limit != self.config.MAX_OUTPUT_TOKENS:
-                            retry_needed = True
-                            retry_reason = "truncated output"
-                            retry_limit_for_reason = truncation_retry_limit
-                            old_limit = self.config.MAX_OUTPUT_TOKENS
-                            self.config.MAX_OUTPUT_TOKENS = new_token_limit
-                            truncation_retry_count += 1
-                            print(f"    🔄 TRUNCATION RETRY: Attempt {truncation_retry_count}/{truncation_retry_limit} — tokens {old_limit} → {new_token_limit}")
-                        else:
-                            print(f"    ⚠️ TRUNCATION DETECTED: Token adjustment not needed - already at configured limit {self.config.MAX_OUTPUT_TOKENS}")
-                    else:
+                        retry_needed = True
+                        retry_reason = "truncated output"
+                        retry_limit_for_reason = truncation_retry_limit
+                        old_limit = self.config.MAX_OUTPUT_TOKENS
+                        self.config.MAX_OUTPUT_TOKENS = new_token_limit
+                        truncation_retry_count += 1
+                        print(f"    🔄 TRUNCATION RETRY: Attempt {truncation_retry_count}/{truncation_retry_limit} — tokens {old_limit} → {new_token_limit}")
+                    elif truncation_retry_enabled:
                         print(f"    ⚠️ TRUNCATION DETECTED: Max truncation retries ({truncation_retry_limit}) reached - accepting truncated response")
-                elif finish_reason == "length" and not truncation_retry_enabled:
-                    print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
-                elif finish_reason == "length":
-                    print(f"    ⚠️ TRUNCATION DETECTED: Unexpected condition - check logic")
+                    else:
+                        print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
 
                 # Treat split failures like truncation for auto-retry
                 split_failed_in_finish = bool(finish_reason and 'split' in str(finish_reason).lower())
@@ -9860,20 +9854,19 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"    🔄 Setting finish_reason to 'length' to trigger auto-retry logic")
                                 finish_reason = "length"
                                 
-                                # If retry is enabled, call translate_with_retry again with increased tokens
+                                # If retry is enabled, call translate_with_retry again (even at same token limit)
                                 retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
-                                if retry_truncated_enabled and config.MAX_OUTPUT_TOKENS < config.MAX_RETRY_TOKENS:
-                                    print(f"    🔄 Retrying with increased token limit...")
-                                    # Temporarily increase max tokens
+                                if retry_truncated_enabled:
+                                    print(f"    🔄 Retrying after char-ratio truncation check...")
                                     original_max = config.MAX_OUTPUT_TOKENS
-                                    config.MAX_OUTPUT_TOKENS = config.MAX_RETRY_TOKENS
+                                    # Use the configured retry cap; if non-positive, stick with current
+                                    target_tokens = config.MAX_RETRY_TOKENS if config.MAX_RETRY_TOKENS > 0 else original_max
+                                    config.MAX_OUTPUT_TOKENS = max(original_max, target_tokens)
                                     
-                                    # Retry the translation
                                     result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
                                         msgs, chunk_html, c, chunk_idx, total_chunks
                                     )
                                     
-                                    # Restore original max tokens
                                     config.MAX_OUTPUT_TOKENS = original_max
                                     
                                     if result_retry and len(result_retry) > len(result):
