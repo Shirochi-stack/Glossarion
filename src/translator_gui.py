@@ -10840,6 +10840,7 @@ Important rules:
             default_qa_settings = {
                 'foreign_char_threshold': 10,
                 'excluded_characters': '',
+                'source_language': 'auto',
                 'target_language': 'english',
                 'check_encoding_issues': False,
                 'check_repetition': True,

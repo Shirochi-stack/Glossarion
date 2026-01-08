@@ -4176,11 +4176,11 @@ def _normalize_lang_for_multiplier(lang: str) -> str:
     return mapping.get(s, s)
 
 
-def _get_wc_multiplier(qa_settings):
-    try:
-        lang = _normalize_lang_for_multiplier(qa_settings.get('target_language', 'english'))
-    except Exception:
-        lang = 'english'
+def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, is_cjk: bool = None):
+    """
+    Choose multiplier based on SOURCE language (expected expansion source→target).
+    Priority: explicit source_lang_hint > qa_settings['source_language'] > CJK heuristic > target_language > other > 1.0
+    """
     multipliers = {}
     try:
         mults = qa_settings.get('word_count_multipliers', {})
@@ -4188,8 +4188,39 @@ def _get_wc_multiplier(qa_settings):
             multipliers = mults
     except Exception:
         multipliers = {}
-    if lang in multipliers:
-        return multipliers[lang]
+
+    def pick(lang_key):
+        if not lang_key or lang_key == 'auto':
+            return None
+        try:
+            norm = _normalize_lang_for_multiplier(lang_key)
+            return multipliers.get(norm)
+        except Exception:
+            return None
+
+    # 1) explicit hint from caller
+    m = pick(source_lang_hint)
+    if m:
+        return m
+
+    # 2) configured source_language
+    m = pick(qa_settings.get('source_language', None))
+    if m:
+        return m
+
+    # 3) heuristic: CJK content detected in source
+    if is_cjk is True:
+        for candidate in ['chinese', 'japanese', 'korean']:
+            if candidate in multipliers:
+                return multipliers[candidate]
+        if 'other' in multipliers:
+            return multipliers['other']
+        return 1.0
+
+    # 4) fallback to target_language (legacy)
+    m = pick(qa_settings.get('target_language', 'english'))
+    if m:
+        return m
     if 'other' in multipliers:
         return multipliers['other']
     return 1.0
@@ -4303,7 +4334,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             
             # Calculate ratio (raw) then normalize by expected multiplier
             ratio = translated_wc / max(1, original_wc)
-            multiplier = _get_wc_multiplier(qa_settings or {})
+            multiplier = _get_wc_multiplier(qa_settings or {}, source_lang_hint=qa_settings.get('source_language') if qa_settings else None, is_cjk=is_cjk)
             ratio_norm = ratio / max(0.01, multiplier)
             
             # Define VERY PERMISSIVE ratio ranges for novel translation
@@ -4771,7 +4802,7 @@ def process_html_file_batch(args):
                 
                 if original_wc is not None:
                         ratio = translated_wc / original_wc
-                        multiplier = _get_wc_multiplier(qa_settings)
+                        multiplier = _get_wc_multiplier(qa_settings, source_lang_hint=qa_settings.get('source_language'))
                         ratio_norm = ratio / max(0.01, multiplier)
                         # For text files, use same reasonable bounds as EPUB
                         is_reasonable = 0.7 <= ratio_norm <= 2.0

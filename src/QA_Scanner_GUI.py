@@ -247,6 +247,7 @@ class QAScannerMixin:
             'foreign_char_threshold': 10,
             'excluded_characters': '',
             'target_language': 'english',
+            'source_language': 'auto',
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,
@@ -2004,16 +2005,46 @@ class QAScannerMixin:
         foreign_layout = QVBoxLayout(foreign_group)
         foreign_layout.setContentsMargins(20, 15, 20, 15)
         scroll_layout.addWidget(foreign_group)
-        
+
+        # Source Language setting (for multiplier selection)
+        source_lang_widget = QWidget()
+        source_lang_layout = QHBoxLayout(source_lang_widget)
+        source_lang_layout.setContentsMargins(0, 0, 0, 6)
+
+        source_lang_label = QLabel("Source language (for word-count multiplier):")
+        source_lang_label.setFont(QFont('Arial', 10))
+        source_lang_layout.addWidget(source_lang_label)
+
+        source_language_options = [
+            'Auto', 'Chinese (Simplified)', 'Chinese (Traditional)', 'Chinese',
+            'Japanese', 'Korean', 'English', 'Spanish', 'French', 'German',
+            'Italian', 'Portuguese', 'Russian', 'Arabic', 'Hindi', 'Turkish',
+            'Hebrew', 'Thai', 'Other'
+        ]
+        source_lang_combo = QComboBox()
+        source_lang_combo.setEditable(True)
+        source_lang_combo.addItems(source_language_options)
+        source_lang_combo.setCurrentText(qa_settings.get('source_language', 'Auto').title())
+        source_lang_combo.setMinimumWidth(170)
+        disable_wheel_event(source_lang_combo)
+        source_lang_layout.addWidget(source_lang_combo)
+
+        source_lang_hint = QLabel("(Auto = detect via script/CJK heuristics)")
+        source_lang_hint.setFont(QFont('Arial', 9))
+        source_lang_hint.setStyleSheet("color: gray;")
+        source_lang_layout.addWidget(source_lang_hint)
+        source_lang_layout.addStretch()
+        foreign_layout.addWidget(source_lang_widget)
+
         # Target Language setting
         target_lang_widget = QWidget()
         target_lang_layout = QHBoxLayout(target_lang_widget)
         target_lang_layout.setContentsMargins(0, 0, 0, 10)
-        
+
         target_lang_label = QLabel("Target language:")
         target_lang_label.setFont(QFont('Arial', 10))
         target_lang_layout.addWidget(target_lang_label)
-        
+
         # Capitalize the stored value for display in combobox
         stored_language = qa_settings.get('target_language', 'english')
         display_language = stored_language.capitalize()
@@ -2023,7 +2054,7 @@ class QAScannerMixin:
             'Chinese (Traditional)', 'Japanese', 'Korean', 'Turkish',
             'Chinese', 'Hebrew', 'Thai'
         ]
-        
+
         target_language_combo = QComboBox()
         target_language_combo.setEditable(True)
         target_language_combo.addItems(target_language_options)
@@ -2034,7 +2065,7 @@ class QAScannerMixin:
         target_language_combo.setMinimumWidth(150)
         disable_wheel_event(target_language_combo)
         target_lang_layout.addWidget(target_language_combo)
-        
+
         target_lang_hint = QLabel("(characters from other scripts will be flagged)")
         target_lang_hint.setFont(QFont('Arial', 9))
         target_lang_hint.setStyleSheet("color: gray;")
@@ -2828,7 +2859,8 @@ class QAScannerMixin:
                 core_settings_to_save = {
                     'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
                     'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
-'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
+                    'source_language': (source_lang_combo, lambda x: _normalize_target_language(x.currentText()) if x.currentText().strip().lower() != 'auto' else 'auto'),
+                    'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
                     'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
