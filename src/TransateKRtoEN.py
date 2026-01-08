@@ -4598,7 +4598,16 @@ class BatchTranslationProcessor:
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
+                # If the failure was triggered by an abort/prohibited chunk, mark as qa_failed with issue
+                if abort_chunks.is_set():
+                    self.update_progress_fn(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed",
+                        qa_issues_found=["PROHIBITED_CONTENT"],
+                        chapter_obj=chapter
+                    )
+                else:
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
             # No history for failed chapters
             return False, actual_num, None, None, None
