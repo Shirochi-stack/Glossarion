@@ -4361,7 +4361,7 @@ class BatchTranslationProcessor:
                 if result:
                     # Remove chunk markers from result
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-                    return result, chunk_idx, raw_obj, is_truncated
+                    return result, chunk_idx, raw_obj, is_truncated, finish_reason
                 else:
                     raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
             
@@ -4386,7 +4386,21 @@ class BatchTranslationProcessor:
                         raise Exception("Translation stopped by user")
                     
                     try:
-                        result, chunk_idx, raw_obj, is_truncated = future.result()
+                        result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
+
+                        # Immediate QA fail: stop remaining chunks and mark chapter
+                        if finish_reason in ("content_filter", "prohibited_content", "error"):
+                            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                            with self.progress_lock:
+                                self.update_progress_fn(
+                                    idx, actual_num, content_hash, fname,
+                                    status="qa_failed",
+                                    qa_issues_found=["PROHIBITED_CONTENT"],
+                                    chapter_obj=chapter
+                                )
+                                self.save_progress_fn()
+                            chunk_executor.shutdown(wait=False, cancel_futures=True)
+                            return False, actual_num, None, None, None
                         if result:
                             # Store result at correct index to maintain order
                             with chunks_lock:
