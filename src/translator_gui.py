@@ -5685,19 +5685,31 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
         try:
+            # Determine active profile (sync with UI)
+            current_profile = self.profile_var
+            try:
+                if hasattr(self, 'profile_menu'):
+                    selected = self.profile_menu.currentText().strip()
+                    if selected:
+                        current_profile = selected
+                        self.profile_var = selected
+                        self.config['active_profile'] = selected
+            except Exception:
+                pass
             # AUTO-SWITCH PROFILE BASED ON EXTRACTION MODE
             # Check if profile name contains BeautifulSoup or html2text
-            current_profile = self.profile_var
             if current_profile:
-                profile_lower = current_profile.lower()
+                # Normalize for case/spacing/underscores/hyphens
+                import re
+                profile_norm = re.sub(r'[^a-z0-9]', '', current_profile.lower())
                 
                 # Check if profile indicates an extraction mode
-                if 'beautifulsoup' in profile_lower:
+                if 'beautifulsoup' in profile_norm:
                     # Switch to BeautifulSoup extraction mode
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = 'standard'
                         self.append_log(f"🔄 Auto-switched to BeautifulSoup extraction (profile: {current_profile})")
-                elif 'html2text' in profile_lower:
+                elif 'html2text' in profile_norm:
                     # Switch to html2text extraction mode  
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = 'enhanced'
