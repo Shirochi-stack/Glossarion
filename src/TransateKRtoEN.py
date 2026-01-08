@@ -4325,8 +4325,6 @@ class BatchTranslationProcessor:
                 # if raw_obj:
                 #     print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
                 
-                print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
-                
                 # Treat truncation retries exhaustion as truncation even if finish_reason changed
                 # In batch mode each worker has its own thread-local client; check that flag too
                 try:
@@ -4355,11 +4353,11 @@ class BatchTranslationProcessor:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
                     is_truncated = True
-                    # Normalize finish_reason to length for downstream logic
-                    if finish_reason not in ["length", "max_tokens"]:
-                        finish_reason = "length"
                 else:
                     is_truncated = False
+                
+                # Log after normalization
+                print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 
                 if result:
                     # Remove chunk markers from result
