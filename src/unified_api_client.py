@@ -797,12 +797,7 @@ class UnifiedClient:
                 continue
             role = m.get("role")
             if role in ("assistant", "model"):
-                built = self._build_gemini3_model_message(m)
-                # CONTEXTUAL FIX: Gemini 3 + contextual history can produce empty assistant stubs.
-                # Skip assistant/model messages that have no parts/text to prevent blank entries.
-                if self._is_gemini_3_model() and (not built.get("parts")):
-                    continue
-                normalized.append(built)
+                normalized.append(self._build_gemini3_model_message(m))
             else:
                 normalized.append(dict(m))
         return normalized
@@ -6288,8 +6283,15 @@ class UnifiedClient:
                                 msg['content'] = "\n".join(texts)
                         except Exception:
                             pass
-                    if msg.get('content') is None:
-                        msg['content'] = ""
+                    # For Gemini 3 payloads: if content is empty but parts exist, drop the empty content field
+                    if self._is_gemini_3_model():
+                        if msg.get('content') in ("", None) and msg.get('parts'):
+                            msg.pop('content', None)
+                        elif msg.get('content') is None:
+                            msg['content'] = ""
+                    else:
+                        if msg.get('content') is None:
+                            msg['content'] = ""
                     if msg.get('role') == 'user':
                         user_found = True
                     safe_msgs.append(msg)
