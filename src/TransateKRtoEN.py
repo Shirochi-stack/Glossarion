@@ -6103,7 +6103,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.start()
     
     timeout = chunk_timeout
-    check_interval = 0.5
+    # Poll quickly so abort signals (user stop or prohibited content) cancel calls fast
+    check_interval = 0.1
     elapsed = 0
     
     while True:
