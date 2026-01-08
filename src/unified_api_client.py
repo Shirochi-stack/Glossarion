@@ -4228,17 +4228,20 @@ class UnifiedClient:
                                 finally:
                                     tls.max_retries_override = prev_override
 
-                            print(f"  📊 Truncation retry limit: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
+                            print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
+                            trunc_success_logged = False
                             for attempt_idx in range(allowed_attempts):
                                 try:
                                     retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}")
                                     if retry_finish_reason not in ['length', 'max_tokens']:
-                                        print(f"  ✅ Truncation retry #{attempt_idx+1} succeeded: {len(retry_content)} chars")
+                                        if not trunc_success_logged:
+                                            print(f"  ✅ Truncation retry #{attempt_idx+1}/{allowed_attempts} succeeded: {len(retry_content)} chars")
+                                            trunc_success_logged = True
                                         return retry_content, retry_finish_reason
                                     else:
-                                        print(f"  ⚠️ Retry #{attempt_idx+1} was also truncated")
+                                        print(f"  ⚠️ Retry #{attempt_idx+1}/{allowed_attempts} was also truncated")
                                 except Exception as retry_error:
-                                    print(f"  ❌ Truncation retry #{attempt_idx+1} failed: {retry_error}")
+                                    print(f"  ❌ Truncation retry #{attempt_idx+1}/{allowed_attempts} failed: {retry_error}")
                             print(f"  ⚠️ All truncation retries ({allowed_attempts}) exhausted; returning original response")
                             self._truncation_retries_exhausted = True
                     else:
