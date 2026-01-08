@@ -94,6 +94,41 @@ def get_chapter_terminology(is_text_file, chapter_data=None):
             return "Section"
     return "Chapter"
 
+
+def extract_text_from_raw_content(raw_obj) -> str:
+    """
+    Safely extract human-readable text from a Gemini raw_content_object.
+    Skips reasoning-only parts (thought=True) but preserves normal text.
+    """
+    try:
+        parts = []
+        if hasattr(raw_obj, 'parts'):
+            parts = raw_obj.parts or []
+        elif isinstance(raw_obj, dict):
+            parts = raw_obj.get('parts', []) or []
+
+        texts = []
+        for p in parts:
+            is_thought = False
+            text_val = None
+
+            if hasattr(p, 'thought'):
+                is_thought = bool(getattr(p, 'thought', False))
+            elif isinstance(p, dict):
+                is_thought = bool(p.get('thought', False))
+
+            if hasattr(p, 'text'):
+                text_val = getattr(p, 'text', None)
+            elif isinstance(p, dict):
+                text_val = p.get('text')
+
+            if text_val and not is_thought:
+                texts.append(str(text_val))
+
+        return "\n".join(texts).strip()
+    except Exception:
+        return ""
+
 def _merge_split_paragraphs(html_body: str) -> str:
     """Merge paragraphs that were artificially split across PDF pages.
     
@@ -4043,40 +4078,70 @@ class BatchTranslationProcessor:
                         trimmed = history[-hist_limit * 2:]
                         include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
 
-                        memory_blocks = []
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            content = h.get('content', '')
-                            if not content:
-                                continue
-                            # Optionally skip previous source text when disabled
-                            if role == 'user' and not include_source:
-                                continue
-                            if role == 'user':
-                                prefix = (
-                                    "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
-                                    "This is prior source content provided for context only.\\n"
-                                    "Do NOT translate or repeat this text directly in your response.\\n\\n"
-                                )
-                            else:
-                                prefix = (
-                                    "[MEMORY - PREVIOUS TRANSLATION]\\n"
-                                    "This is prior translated content provided for context only.\\n"
-                                    "Do NOT repeat or re-output this translation.\\n\\n"
-                                )
-                            footer = "\\n\\n[END MEMORY BLOCK]\\n"
-                            memory_blocks.append(prefix + content + footer)
+                        model_lower = getattr(self.config, 'MODEL', '').lower()
+                        is_gemini_3 = ('gemini-3' in model_lower) or ('gemini-exp-' in model_lower)
 
-                        if memory_blocks:
-                            combined_memory = "\n".join(memory_blocks)
-                            # Present history as an assistant message so the model
-                            # treats it as prior context, not a new user instruction.
-                            memory_msgs = [{
-                                'role': 'assistant',
-                                'content': combined_memory
-                            }]
+                        if is_gemini_3:
+                            # Preserve raw content (thought signatures) and reconstruct text when missing
+                            for h in trimmed:
+                                if not isinstance(h, dict):
+                                    continue
+                                role = h.get('role', 'user')
+                                raw_obj = h.get('_raw_content_object')
+                                content = h.get('content') or ""
+
+                                if (not content) and raw_obj:
+                                    content = extract_text_from_raw_content(raw_obj)
+
+                                # Skip empty entries unless raw content exists
+                                if not content and raw_obj is None:
+                                    continue
+
+                                if role == 'user' and not include_source:
+                                    continue
+
+                                msg = {'role': role}
+                                if content:
+                                    msg['content'] = content
+                                if raw_obj is not None:
+                                    msg['_raw_content_object'] = raw_obj
+                                memory_msgs.append(msg)
+                        else:
+                            # Original memory block approach for non-Gemini 3 models
+                            memory_blocks = []
+                            for h in trimmed:
+                                if not isinstance(h, dict):
+                                    continue
+                                role = h.get('role', 'user')
+                                content = h.get('content', '')
+                                if not content:
+                                    continue
+                                # Optionally skip previous source text when disabled
+                                if role == 'user' and not include_source:
+                                    continue
+                                if role == 'user':
+                                    prefix = (
+                                        "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
+                                        "This is prior source content provided for context only.\\n"
+                                        "Do NOT translate or repeat this text directly in your response.\\n\\n"
+                                    )
+                                else:
+                                    prefix = (
+                                        "[MEMORY - PREVIOUS TRANSLATION]\\n"
+                                        "This is prior translated content provided for context only.\\n"
+                                        "Do NOT repeat or re-output this translation.\\n\\n"
+                                    )
+                                footer = "\\n\\n[END MEMORY BLOCK]\\n"
+                                memory_blocks.append(prefix + content + footer)
+
+                            if memory_blocks:
+                                combined_memory = "\\n".join(memory_blocks)
+                                # Present history as an assistant message so the model
+                                # treats it as prior context, not a new user instruction.
+                                memory_msgs = [{
+                                    'role': 'assistant',
+                                    'content': combined_memory
+                                }]
                     except Exception as e:
                         print(f"⚠️ Failed to build contextual memory for batch chunk: {e}")
                         memory_msgs = []
@@ -4531,17 +4596,43 @@ class BatchTranslationProcessor:
                     hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
                     trimmed = history[-hist_limit * 2:]
                     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
-                    
-                    for h in trimmed:
-                        if not isinstance(h, dict):
-                            continue
-                        role = h.get('role', 'user')
-                        content = h.get('content', '')
-                        
-                        if role == 'user' and not include_source:
-                            memory_msgs.append({"role": "user", "content": "[Previous chapter - source hidden]"})
-                        else:
-                            memory_msgs.append({"role": role, "content": content})
+                    model_lower = getattr(self.config, 'MODEL', '').lower()
+                    is_gemini_3 = ('gemini-3' in model_lower) or ('gemini-exp-' in model_lower)
+
+                    if is_gemini_3:
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            raw_obj = h.get('_raw_content_object')
+                            content = h.get('content') or ""
+
+                            if (not content) and raw_obj:
+                                content = extract_text_from_raw_content(raw_obj)
+
+                            if role == 'user' and not include_source:
+                                continue
+
+                            if not content and raw_obj is None:
+                                continue
+
+                            msg = {'role': role}
+                            if content:
+                                msg['content'] = content
+                            if raw_obj is not None:
+                                msg['_raw_content_object'] = raw_obj
+                            memory_msgs.append(msg)
+                    else:
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            content = h.get('content', '')
+                            
+                            if role == 'user' and not include_source:
+                                memory_msgs.append({"role": "user", "content": "[Previous chapter - source hidden]"})
+                            else:
+                                memory_msgs.append({"role": role, "content": content})
                 except Exception as e:
                     print(f"   ⚠️ Failed to load history for merged group: {e}")
             
@@ -9690,36 +9781,24 @@ def main(log_callback=None, stop_callback=None):
                             if not isinstance(h, dict):
                                 continue
                             role = h.get('role', 'user')
-                            content = h.get('content', '')
-                            if not content:
-                                continue
+                            raw_obj = h.get('_raw_content_object')
+                            content = h.get('content') or ""
+
+                            if (not content) and raw_obj:
+                                content = extract_text_from_raw_content(raw_obj)
                             
                             # Skip user messages if not including source
                             if role == 'user' and not include_source:
                                 continue
-                            
-                            # Build message preserving raw content object if present
-                            # When we have _raw_content_object with parts, don't include content field
-                            # to avoid duplication (the text is already in the parts)
-                            if '_raw_content_object' in h:
-                                # Check if raw object has parts (which would contain the text)
-                                raw_obj = h['_raw_content_object']
-                                has_parts = False
-                                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                    has_parts = True
-                                elif hasattr(raw_obj, 'parts'):
-                                    has_parts = True
-                                
-                                if has_parts and role == 'assistant':
-                                    # For assistant messages with parts in raw object, omit content field
-                                    # The text is already in the parts
-                                    msg = {'role': role, '_raw_content_object': raw_obj}
-                                else:
-                                    # Include both content and raw object (for user messages or when no parts)
-                                    msg = {'role': role, 'content': content, '_raw_content_object': raw_obj}
-                            else:
-                                # No raw object, just include content normally
-                                msg = {'role': role, 'content': content}
+
+                            if not content and raw_obj is None:
+                                continue
+
+                            msg = {'role': role}
+                            if content:
+                                msg['content'] = content
+                            if raw_obj is not None:
+                                msg['_raw_content_object'] = raw_obj
                             memory_msgs.append(msg)
                     else:
                         # Original memory block approach for other models

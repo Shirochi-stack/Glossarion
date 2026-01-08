@@ -64,6 +64,37 @@ class HistoryManager:
                         return []
         return []
     
+    def _has_thought_signature(self, obj) -> bool:
+        """
+        Detect presence of a thought signature on raw Gemini content objects.
+        Supports both snake_case (thought_signature) and camelCase (thoughtSignature)
+        forms that appear across Gemini 3 SDK / wire formats.
+        """
+        try:
+            # Google SDK Content object
+            if hasattr(obj, "parts"):
+                for p in getattr(obj, "parts", []) or []:
+                    if getattr(p, "thought_signature", None) or getattr(p, "thoughtSignature", None):
+                        return True
+                    # Some SDKs may expose signatures inside dict-like parts
+                    if hasattr(p, "__dict__") and (
+                        p.__dict__.get("thought_signature") or p.__dict__.get("thoughtSignature")
+                    ):
+                        return True
+
+            # Dict / JSON-serialized form
+            if isinstance(obj, dict):
+                if obj.get("thought_signature") or obj.get("thoughtSignature"):
+                    return True
+                for part in obj.get("parts", []) or []:
+                    if isinstance(part, dict) and (
+                        part.get("thought_signature") or part.get("thoughtSignature")
+                    ):
+                        return True
+            return False
+        except Exception:
+            return False
+
     def _make_json_serializable(self, obj):
         """Recursively convert objects to JSON-serializable format"""
         if isinstance(obj, bytes):
@@ -133,7 +164,7 @@ class HistoryManager:
                     for part in obj.parts:
                         part_dict = {}
                         # Check for common attributes including text
-                        for attr in ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']:
+                        for attr in ['text', 'thought', 'thought_signature', 'thoughtSignature', 'inline_data', 'function_call', 'function_response']:
                             if hasattr(part, attr):
                                 value = getattr(part, attr, None)
                                 if value is not None:
@@ -264,22 +295,6 @@ class HistoryManager:
         
         assistant_msg = {"role": "assistant", "content": assistant_content}
 
-        def _has_thought_signature(obj) -> bool:
-            try:
-                if hasattr(obj, 'parts'):
-                    for p in obj.parts or []:
-                        if getattr(p, 'thought_signature', None):
-                            return True
-                if isinstance(obj, dict):
-                    if obj.get('thought_signature'):
-                        return True
-                    if 'parts' in obj:
-                        for p in obj.get('parts') or []:
-                            if isinstance(p, dict) and p.get('thought_signature'):
-                                return True
-                return False
-            except Exception:
-                return False
 
         if raw_assistant_object is not None:
             try:
@@ -339,7 +354,7 @@ class HistoryManager:
                 print(f"   Traceback: {traceback.format_exc()}")
                 pass
         # Drop raw_content_object if it lacks thought_signature
-        if '_raw_content_object' in assistant_msg and not _has_thought_signature(assistant_msg['_raw_content_object']):
+        if '_raw_content_object' in assistant_msg and not self._has_thought_signature(assistant_msg['_raw_content_object']):
             assistant_msg.pop('_raw_content_object', None)
 
         # If raw_content_object carries text or thought signatures, clear duplicate assistant content
@@ -360,7 +375,7 @@ class HistoryManager:
                         if p.get('text'):
                             has_text_or_sig = True
                             break
-                        if p.get('thought_signature'):
+                        if p.get('thought_signature') or p.get('thoughtSignature'):
                             has_text_or_sig = True
                             break
                 if has_text_or_sig:
