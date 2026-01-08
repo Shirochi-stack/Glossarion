@@ -4394,6 +4394,7 @@ class BatchTranslationProcessor:
                         # Immediate QA fail: stop remaining chunks and mark chapter
                         if finish_reason in ("content_filter", "prohibited_content") or abort_chunks.is_set():
                             abort_chunks.set()
+                            print(f"⚠️ Aborting remaining chunks for Chapter {actual_num} due to {finish_reason or 'unknown error'} (chunk {chunk_idx}/{total_chunks})")
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             with self.progress_lock:
                                 self.update_progress_fn(
