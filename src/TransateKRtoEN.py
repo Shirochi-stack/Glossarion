@@ -4128,12 +4128,13 @@ class BatchTranslationProcessor:
             
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
             chunks_lock = threading.Lock()
+            abort_chunks = threading.Event()
             
             def process_chunk(chunk_data):
                 """Process a single chunk in parallel"""
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 
-                if self.check_stop_fn():
+                if self.check_stop_fn() or abort_chunks.is_set():
                     return None, chunk_idx
                 
                 # Build user prompt for this chunk
@@ -4322,11 +4323,13 @@ class BatchTranslationProcessor:
                 
                 # Use the raw object directly from send_with_interrupt
                 raw_obj = raw_obj_from_send
-                # if raw_obj:
-                #     print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
-                
+                # Abort immediately if provider flagged content filter / prohibited / empty-error
+                if finish_reason in ("content_filter", "prohibited_content") or (not result and finish_reason == "error"):
+                    abort_chunks.set()
+                    return None, chunk_idx, raw_obj, False, finish_reason
+
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
-                
+
                 # Treat truncation retries exhaustion as truncation even if finish_reason changed
                 # In batch mode each worker has its own thread-local client; check that flag too
                 try:
@@ -4389,7 +4392,8 @@ class BatchTranslationProcessor:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
 
                         # Immediate QA fail: stop remaining chunks and mark chapter
-                        if finish_reason in ("content_filter", "prohibited_content", "error"):
+                        if finish_reason in ("content_filter", "prohibited_content") or abort_chunks.is_set():
+                            abort_chunks.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             with self.progress_lock:
                                 self.update_progress_fn(
@@ -4401,7 +4405,8 @@ class BatchTranslationProcessor:
                                 self.save_progress_fn()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             return False, actual_num, None, None, None
-                        if result:
+
+                        if result and not abort_chunks.is_set():
                             # Store result at correct index to maintain order
                             with chunks_lock:
                                 translated_chunks[chunk_idx - 1] = result  # chunk_idx is 1-based
