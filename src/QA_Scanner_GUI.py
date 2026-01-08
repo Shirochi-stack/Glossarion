@@ -269,8 +269,41 @@ class QAScannerMixin:
             'cache_content_hashes': 5000,
             'cache_semantic_fingerprint': 2000,
             'cache_structural_signature': 2000,
-            'cache_translation_artifacts': 1000             
+            'cache_translation_artifacts': 1000,
+            'word_count_multipliers': {
+                'english': 1.0,
+                'spanish': 1.10,
+                'french': 1.10,
+                'german': 1.05,
+                'italian': 1.05,
+                'portuguese': 1.10,
+                'russian': 1.15,
+                'arabic': 1.15,
+                'hindi': 1.10,
+                'turkish': 1.05,
+                'chinese': 1.60,
+                'chinese (simplified)': 1.60,
+                'chinese (traditional)': 1.60,
+                'japanese': 1.40,
+                'korean': 1.35,
+                'hebrew': 1.05,
+                'thai': 1.10
+            }             
+          
         })
+        # Ensure multipliers include all defaults
+        wordcount_defaults = qa_settings.get('word_count_multipliers', {})
+        if not wordcount_defaults or not isinstance(wordcount_defaults, dict):
+            wordcount_defaults = {}
+        for _k, _v in {
+            'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
+            'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
+            'chinese': 1.60, 'chinese (simplified)': 1.60, 'chinese (traditional)': 1.60,
+            'japanese': 1.40, 'korean': 1.35, 'hebrew': 1.05, 'thai': 1.10,
+            'other': 1.0
+        }.items():
+            wordcount_defaults.setdefault(_k, _v)
+        qa_settings['word_count_multipliers'] = wordcount_defaults
         # Keep QA target language aligned with the main target language.
         # This ensures the scanner respects the same language the user
         # selected for translation.
@@ -1942,6 +1975,18 @@ class QAScannerMixin:
         # Helper function to disable mousewheel on spinboxes and comboboxes
         def disable_wheel_event(widget):
             widget.wheelEvent = lambda event: event.ignore()
+
+        # Word count multiplier defaults (ensure available for sliders and reset)
+        wordcount_defaults = qa_settings.get('word_count_multipliers', {})
+        if not isinstance(wordcount_defaults, dict):
+            wordcount_defaults = {}
+        for _k, _v in {
+            'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
+            'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
+            'chinese': 1.60, 'chinese (simplified)': 1.60, 'chinese (traditional)': 1.60,
+            'japanese': 1.40, 'korean': 1.35, 'hebrew': 1.05, 'thai': 1.10
+        }.items():
+            wordcount_defaults.setdefault(_k, _v)
         
         # Title
         title_label = QLabel("QA Scanner Settings")
@@ -2160,6 +2205,76 @@ class QAScannerMixin:
         wordcount_desc.setWordWrap(True)
         wordcount_desc.setMaximumWidth(700)
         wordcount_layout.addWidget(wordcount_desc)
+
+        # Word count multiplier sliders (2-column grid)
+        multipliers_label = QLabel("Expected translation length multiplier (translated words ÷ source words)")
+        multipliers_label.setFont(QFont('Arial', 10, QFont.Bold))
+        wordcount_layout.addWidget(multipliers_label)
+
+        multiplier_hint = QLabel("Adjust per-language expansion. 100% = same length as source; 150% = 1.5x longer.")
+        multiplier_hint.setFont(QFont('Arial', 9))
+        multiplier_hint.setStyleSheet("color: gray;")
+        multiplier_hint.setWordWrap(True)
+        multiplier_hint.setMaximumWidth(700)
+        wordcount_layout.addWidget(multiplier_hint)
+
+        multiplier_grid_widget = QWidget()
+        multiplier_grid = QGridLayout(multiplier_grid_widget)
+        multiplier_grid.setContentsMargins(0, 6, 0, 6)
+        multiplier_grid.setHorizontalSpacing(16)
+        multiplier_grid.setVerticalSpacing(8)
+        wordcount_layout.addWidget(multiplier_grid_widget)
+
+        # Keep slider refs for saving
+        word_multiplier_sliders = {}
+        # Ordered language list for stable UI
+        multiplier_order = [
+            'english', 'spanish', 'french', 'german', 'italian', 'portuguese',
+            'russian', 'arabic', 'hindi', 'turkish',
+            'chinese', 'chinese (simplified)', 'chinese (traditional)',
+            'japanese', 'korean', 'hebrew', 'thai', 'other'
+        ]
+
+        # Build sliders in 2 columns
+        for idx, lang_key in enumerate(multiplier_order):
+            row = idx // 2
+            col = idx % 2
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+
+            display_name = lang_key.capitalize() if '(' not in lang_key else lang_key.title()
+            lang_label = QLabel(display_name + ":")
+            lang_label.setFont(QFont('Arial', 9))
+            row_layout.addWidget(lang_label)
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setMinimum(10)   # 0.10x
+            slider.setMaximum(1000) # 10.0x
+            slider.setSingleStep(5)
+            slider.setTickInterval(50)
+            slider.setMinimumWidth(150)
+            slider.wheelEvent = lambda event: event.ignore()
+            current_mult = wordcount_defaults.get(lang_key, 1.0)
+            slider.setValue(int(current_mult * 100))
+            row_layout.addWidget(slider)
+
+            value_label = QLabel(f"{current_mult*100:.0f}%")
+            value_label.setFont(QFont('Arial', 9, QFont.Bold))
+            value_label.setMinimumWidth(42)
+            value_label.setAlignment(Qt.AlignRight)
+            row_layout.addWidget(value_label)
+
+            def make_update(lbl):
+                def _update(val):
+                    lbl.setText(f"{val}%")
+                return _update
+            slider.valueChanged.connect(make_update(value_label))
+
+            word_multiplier_sliders[lang_key] = slider
+            multiplier_grid.addWidget(row_widget, row, col)
+
+        wordcount_layout.addSpacing(6)
  
         # Show current EPUB status and allow selection
         epub_widget = QWidget()
@@ -2796,6 +2911,15 @@ class QAScannerMixin:
                         self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
                     if failed_cache_vars:
                         self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
+                # Save word count multipliers
+                try:
+                    wc_mults = {}
+                    for lang_key, slider in word_multiplier_sliders.items():
+                        wc_mults[lang_key] = slider.value() / 100.0
+                    qa_settings['word_count_multipliers'] = wc_mults
+                except Exception as e:
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] Failed to save word count multipliers: {e}")
                 
                 # AI Hunter config with debugging
                 if debug_mode:
@@ -2981,6 +3105,10 @@ class QAScannerMixin:
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
 
+                # Reset word count multipliers to defaults
+                for lang_key, slider in word_multiplier_sliders.items():
+                    default_val = wordcount_defaults.get(lang_key, 1.0)
+                    slider.setValue(int(default_val * 100))
                 check_glossary_checkbox.setChecked(True)
                 check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)

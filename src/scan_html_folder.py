@@ -4142,7 +4142,47 @@ def detect_multiple_headers(html_content):
     
     return False, len(headers), []
 
-def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print, merge_info=None):
+def _normalize_lang_for_multiplier(lang: str) -> str:
+    if not lang:
+        return 'english'
+    s = lang.strip().lower()
+    mapping = {
+        'en': 'english',
+        'es': 'spanish',
+        'fr': 'french',
+        'de': 'german',
+        'pt': 'portuguese',
+        'it': 'italian',
+        'ru': 'russian',
+        'ja': 'japanese',
+        'ko': 'korean',
+        'zh': 'chinese',
+        'zh-cn': 'chinese (simplified)',
+        'zh-tw': 'chinese (traditional)',
+    }
+    return mapping.get(s, s)
+
+
+def _get_wc_multiplier(qa_settings):
+    try:
+        lang = _normalize_lang_for_multiplier(qa_settings.get('target_language', 'english'))
+    except Exception:
+        lang = 'english'
+    multipliers = {}
+    try:
+        mults = qa_settings.get('word_count_multipliers', {})
+        if isinstance(mults, dict):
+            multipliers = mults
+    except Exception:
+        multipliers = {}
+    if lang in multipliers:
+        return multipliers[lang]
+    if 'other' in multipliers:
+        return multipliers['other']
+    return 1.0
+
+
+def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print, merge_info=None, qa_settings=None):
     """Cross-reference word counts between original and translated files.
     
     Matches translated files to original EPUB chapters by filename.
@@ -4248,8 +4288,10 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             # Count words in translated text
             translated_wc = len(translated_text.split())
             
-            # Calculate ratio
+            # Calculate ratio (raw) then normalize by expected multiplier
             ratio = translated_wc / max(1, original_wc)
+            multiplier = _get_wc_multiplier(qa_settings or {})
+            ratio_norm = ratio / max(0.01, multiplier)
             
             # Define VERY PERMISSIVE ratio ranges for novel translation
             if is_cjk:
@@ -4267,8 +4309,8 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 typical_min = 0.8
                 typical_max = 1.2
             
-            is_reasonable = min_ratio <= ratio <= max_ratio
-            is_typical = typical_min <= ratio <= typical_max
+            is_reasonable = min_ratio <= ratio_norm <= max_ratio
+            is_typical = typical_min <= ratio_norm <= typical_max
             percentage = ratio * 100
             
             result = {
@@ -4277,6 +4319,8 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 'original_wc': original_wc,
                 'translated_wc': translated_wc,
                 'ratio': ratio,
+                'normalized_ratio': ratio_norm,
+                'multiplier': multiplier,
                 'percentage': percentage,
                 'is_reasonable': is_reasonable,
                 'is_typical': is_typical,
@@ -4284,27 +4328,27 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             }
             
             # Add descriptive warnings for extreme but acceptable ratios
-            if ratio < 0.5:
+            if ratio_norm < 0.5:
                 result['warning'] = 'very_concise_translation'
                 result['warning_desc'] = 'Translation is less than 50% of original - possible summary style'
-            elif ratio < typical_min:
+            elif ratio_norm < typical_min:
                 result['warning'] = 'concise_translation'
                 result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat concise'
-            elif ratio > 4.0:
+            elif ratio_norm > 4.0:
                 result['warning'] = 'very_expansive_translation'
                 result['warning_desc'] = 'Translation is over 400% of original - extensive additions'
-            elif ratio > typical_max:
+            elif ratio_norm > typical_max:
                 result['warning'] = 'expansive_translation'
                 result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat expansive'
             
             # Only flag as error if REALLY extreme
             if not is_reasonable:
-                if ratio < min_ratio:
+                if ratio_norm < min_ratio:
                     result['error'] = 'possibly_missing_content'
-                    result['error_desc'] = f'Translation is only {percentage:.0f}% of original'
+                    result['error_desc'] = f'Translation is only {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
                 else:
                     result['error'] = 'possibly_excessive_content'
-                    result['error_desc'] = f'Translation is {percentage:.0f}% of original'
+                    result['error_desc'] = f'Translation is {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
             
             return result
     
@@ -4383,6 +4427,8 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         
         # Calculate ratio (translated words / original words)
         ratio = translated_wc / max(1, original_wc)
+        multiplier = _get_wc_multiplier(qa_settings)
+        ratio_norm = ratio / max(0.01, multiplier)
         
         # Define VERY PERMISSIVE ratio ranges for novel translation
         # These are much looser to accommodate extreme translation cases
@@ -4401,8 +4447,8 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             typical_min = 0.8
             typical_max = 1.2
         
-        is_reasonable = min_ratio <= ratio <= max_ratio
-        is_typical = typical_min <= ratio <= typical_max
+        is_reasonable = min_ratio <= ratio_norm <= max_ratio
+        is_typical = typical_min <= ratio_norm <= typical_max
         
         # Calculate percentage difference for logging
         percentage = (ratio * 100)
@@ -4420,27 +4466,27 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         }
         
         # Add descriptive warnings for extreme but acceptable ratios
-        if ratio < 0.5:
+        if ratio_norm < 0.5:
             result['warning'] = 'very_concise_translation'
             result['warning_desc'] = 'Translation is less than 50% of original - possible summary style'
-        elif ratio < typical_min:
+        elif ratio_norm < typical_min:
             result['warning'] = 'concise_translation'
             result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat concise'
-        elif ratio > 4.0:
+        elif ratio_norm > 4.0:
             result['warning'] = 'very_expansive_translation'
             result['warning_desc'] = 'Translation is over 400% of original - extensive additions'
-        elif ratio > typical_max:
+        elif ratio_norm > typical_max:
             result['warning'] = 'expansive_translation'
             result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat expansive'
         
         # Only flag as unreasonable if REALLY extreme
         if not is_reasonable:
-            if ratio < min_ratio:
+            if ratio_norm < min_ratio:
                 result['error'] = 'possibly_missing_content'
-                result['error_desc'] = f'Translation is only {percentage:.0f}% of original'
+                result['error_desc'] = f'Translation is only {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
             else:
                 result['error'] = 'possibly_excessive_content'
-                result['error_desc'] = f'Translation is {percentage:.0f}% of original'
+                result['error_desc'] = f'Translation is {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
         
         return result
     
@@ -4712,9 +4758,11 @@ def process_html_file_batch(args):
                 
                 if original_wc is not None:
                         ratio = translated_wc / original_wc
+                        multiplier = _get_wc_multiplier(qa_settings)
+                        ratio_norm = ratio / max(0.01, multiplier)
                         # For text files, use same reasonable bounds as EPUB
-                        is_reasonable = 0.7 <= ratio <= 2.0
-                        is_typical = 0.8 <= ratio <= 1.5
+                        is_reasonable = 0.7 <= ratio_norm <= 2.0
+                        is_typical = 0.8 <= ratio_norm <= 1.5
                         
                         word_count_check = {
                             'found_match': True,
@@ -4722,6 +4770,8 @@ def process_html_file_batch(args):
                             'original_wc': original_wc,
                             'translated_wc': translated_wc,
                             'ratio': ratio,
+                            'normalized_ratio': ratio_norm,
+                            'multiplier': multiplier,
                             'percentage': ratio * 100,
                             'is_reasonable': is_reasonable,
                             'is_typical': is_typical,
@@ -4741,7 +4791,8 @@ def process_html_file_batch(args):
                     filename, 
                     raw_text,
                     dummy_log,
-                    merge_info
+                    merge_info,
+                    qa_settings
                 )
                 
                 if wc_result['found_match']:

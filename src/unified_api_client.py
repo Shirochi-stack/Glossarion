@@ -4185,7 +4185,11 @@ class UnifiedClient:
                     
                     # Check if retry on truncation is enabled
                     retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
-                    truncation_retry_attempts = max(1, int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1") or "1"))
+                    # Use new Other Settings variable; fallback to 1 if missing/invalid
+                    try:
+                        truncation_retry_attempts = max(1, int(os.getenv("AUTO_RETRY_TRUNCATED_ATTEMPTS", "1")))
+                    except Exception:
+                        truncation_retry_attempts = 1
                     attempts_remaining = internal_retries - (attempt + 1)
                     if retry_truncated_enabled:
                         print(f"  🔄 RETRY_TRUNCATED enabled - attempting truncation retry")
@@ -4250,7 +4254,7 @@ class UnifiedClient:
                     time.sleep(0.1)  # System stability pause after API completion
                 
                 # If the provider signaled a content filter, elevate to prohibited_content to trigger retries
-                if finish_reason == 'content_filter':
+                if finish_reason in ['content_filter', 'prohibited_content']:
                     raise UnifiedClientError(
                         "Content blocked by provider",
                         error_type="prohibited_content",
