@@ -4146,6 +4146,19 @@ def _normalize_lang_for_multiplier(lang: str) -> str:
     if not lang:
         return 'english'
     s = lang.strip().lower()
+
+    # Handle Chinese variants first (keep simplified/traditional)
+    if 'chinese' in s:
+        if 'traditional' in s or 'zh-tw' in s or 'tw' in s:
+            return 'chinese (traditional)'
+        if 'simplified' in s or 'zh-cn' in s or 'cn' in s:
+            return 'chinese (simplified)'
+        return 'chinese'
+
+    # Strip parenthetical region labels like "(US)" and split region codes like "en-US"
+    s = re.sub(r'\s*\(.*?\)\s*', '', s)
+    s = re.split(r'[-_]', s)[0]
+
     mapping = {
         'en': 'english',
         'es': 'spanish',
@@ -4157,8 +4170,8 @@ def _normalize_lang_for_multiplier(lang: str) -> str:
         'ja': 'japanese',
         'ko': 'korean',
         'zh': 'chinese',
-        'zh-cn': 'chinese (simplified)',
-        'zh-tw': 'chinese (traditional)',
+        'zhcn': 'chinese (simplified)',
+        'zhtw': 'chinese (traditional)',
     }
     return mapping.get(s, s)
 
@@ -4780,7 +4793,7 @@ def process_html_file_batch(args):
                         
                         # Only mark as issue if ratio is unreasonable
                         if not is_reasonable:
-                            issues.append(f"word_count_mismatch_ratio_{ratio:.2f}")
+                            issues.append(f"word_count_mismatch_ratio_{ratio:.2f}_mult_{multiplier:.2f}_norm_{ratio_norm:.2f}")
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
                     pass
@@ -4799,7 +4812,7 @@ def process_html_file_batch(args):
                     word_count_check = wc_result
                     # Only mark as issue if ratio is unreasonable (outside safe bounds)
                     if not wc_result['is_reasonable']:
-                        issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
+                        issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}_mult_{wc_result.get('multiplier', 1.0):.2f}_norm_{wc_result.get('normalized_ratio', wc_result['ratio']):.2f}")
                 else:
                     word_count_check = wc_result
                     issues.append("word_count_no_match_found")
