@@ -797,7 +797,12 @@ class UnifiedClient:
                 continue
             role = m.get("role")
             if role in ("assistant", "model"):
-                normalized.append(self._build_gemini3_model_message(m))
+                built = self._build_gemini3_model_message(m)
+                # CONTEXTUAL FIX: Gemini 3 + contextual history can produce empty assistant stubs.
+                # Skip assistant/model messages that have no parts/text to prevent blank entries.
+                if self._is_gemini_3_model() and (not built.get("parts")):
+                    continue
+                normalized.append(built)
             else:
                 normalized.append(dict(m))
         return normalized
