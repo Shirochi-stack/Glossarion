@@ -4355,6 +4355,9 @@ class BatchTranslationProcessor:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
                     is_truncated = True
+                    # Normalize finish_reason to length for downstream logic
+                    if finish_reason not in ["length", "max_tokens"]:
+                        finish_reason = "length"
                 else:
                     is_truncated = False
                 
