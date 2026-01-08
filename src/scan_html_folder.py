@@ -4042,12 +4042,8 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         if len(text) < min_file_length:
                             continue
                         
-                        # Check if text contains CJK characters
-                        has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
-                                      '\u3040' <= char <= '\u309f' or  # Hiragana
-                                      '\u30a0' <= char <= '\u30ff' or  # Katakana
-                                      '\uac00' <= char <= '\ud7af'     # Korean
-                                      for char in text)
+                        script_hint = detect_dominant_script(text)
+                        has_cjk = script_hint in ['cjk', 'japanese', 'korean']
                         
                         if has_cjk:
                             word_count = count_cjk_words(text)
@@ -4060,6 +4056,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'filename': basename,
                             'full_path': file_path,
                             'is_cjk': has_cjk,
+                            'script': script_hint,
                             'spine_index': spine_index
                         }
                         extracted_count += 1
@@ -4106,7 +4103,8 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'word_count': word_count,
                             'filename': os.path.basename(file_path),
                             'full_path': file_path,
-                            'is_cjk': has_cjk
+                            'is_cjk': has_cjk,
+                            'script': script_hint
                         }
                     except Exception as e:
                         continue
@@ -4142,6 +4140,36 @@ def detect_multiple_headers(html_content):
     
     return False, len(headers), []
 
+
+def detect_dominant_script(text):
+    """Heuristic dominant script detection to drive auto source-language multiplier.
+    Returns one of: cjk, japanese, korean, cyrillic, arabic, hebrew, thai, devanagari, latin, other
+    """
+    ranges = [
+        ('cjk', [(0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x20000, 0x2A6DF), (0x2A700, 0x2B73F)]),
+        ('japanese', [(0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF), (0xFF65, 0xFF9F)]),
+        ('korean', [(0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F), (0xD7B0, 0xD7FF)]),
+        ('cyrillic', [(0x0400, 0x04FF), (0x0500, 0x052F)]),
+        ('arabic', [(0x0600, 0x06FF), (0x0750, 0x077F)]),
+        ('hebrew', [(0x0590, 0x05FF)]),
+        ('thai', [(0x0E00, 0x0E7F)]),
+        ('devanagari', [(0x0900, 0x097F)]),
+        ('latin', [(0x0020, 0x024F), (0x1E00, 0x1EFF)]),
+    ]
+    counts = {k: 0 for k, _ in ranges}
+    for ch in text[:20000]:  # sample first 20k chars for speed
+        code = ord(ch)
+        for key, spans in ranges:
+            if any(start <= code <= end for start, end in spans):
+                counts[key] += 1
+                break
+    if not counts:
+        return 'other'
+    dominant = max(counts.items(), key=lambda kv: kv[1])
+    if dominant[1] == 0:
+        return 'other'
+    return dominant[0]
+
 def _normalize_lang_for_multiplier(lang: str) -> str:
     if not lang:
         return 'english'
@@ -4176,7 +4204,7 @@ def _normalize_lang_for_multiplier(lang: str) -> str:
     return mapping.get(s, s)
 
 
-def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, is_cjk: bool = None):
+def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, script_hint: str = None, is_cjk: bool = None, log_fn=None):
     """
     Choose multiplier based on SOURCE language (expected expansion source→target).
     Priority: explicit source_lang_hint > qa_settings['source_language'] > CJK heuristic > target_language > other > 1.0
@@ -4190,7 +4218,7 @@ def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, is_cjk: bool =
         multipliers = {}
 
     def pick(lang_key):
-        if not lang_key or lang_key == 'auto':
+        if not lang_key or str(lang_key).lower() == 'auto':
             return None
         try:
             norm = _normalize_lang_for_multiplier(lang_key)
@@ -4201,25 +4229,40 @@ def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, is_cjk: bool =
     # 1) explicit hint from caller
     m = pick(source_lang_hint)
     if m:
+        if log_fn:
+            log_fn(f"   [WC] Source language hint: {source_lang_hint} -> mult {m}")
         return m
 
     # 2) configured source_language
     m = pick(qa_settings.get('source_language', None))
     if m:
+        if log_fn:
+            log_fn(f"   [WC] Using configured source_language: {qa_settings.get('source_language')} -> mult {m}")
         return m
 
-    # 3) heuristic: CJK content detected in source
+    # 3) script hint auto-detected
+    m = pick(script_hint)
+    if m:
+        if log_fn:
+            log_fn(f"   [WC] Auto-detected script '{script_hint}' -> mult {m}")
+        return m
+
+    # 4) heuristic: CJK content detected in source
     if is_cjk is True:
         for candidate in ['chinese', 'japanese', 'korean']:
             if candidate in multipliers:
+                if log_fn:
+                    log_fn(f"   [WC] CJK heuristic -> {candidate} mult {multipliers[candidate]}")
                 return multipliers[candidate]
         if 'other' in multipliers:
             return multipliers['other']
         return 1.0
 
-    # 4) fallback to target_language (legacy)
+    # 5) fallback to target_language (legacy)
     m = pick(qa_settings.get('target_language', 'english'))
     if m:
+        if log_fn:
+            log_fn(f"   [WC] Fallback target_language {qa_settings.get('target_language', 'english')} -> mult {m}")
         return m
     if 'other' in multipliers:
         return multipliers['other']
@@ -4334,7 +4377,13 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             
             # Calculate ratio (raw) then normalize by expected multiplier
             ratio = translated_wc / max(1, original_wc)
-            multiplier = _get_wc_multiplier(qa_settings or {}, source_lang_hint=qa_settings.get('source_language') if qa_settings else None, is_cjk=is_cjk)
+            multiplier = _get_wc_multiplier(
+                qa_settings or {},
+                source_lang_hint=qa_settings.get('source_language') if qa_settings else None,
+                script_hint=(original_counts.get(spine_idx) or {}).get('script'),
+                is_cjk=is_cjk,
+                log_fn=log
+            )
             ratio_norm = ratio / max(0.01, multiplier)
             
             # Define VERY PERMISSIVE ratio ranges for novel translation
@@ -4802,7 +4851,13 @@ def process_html_file_batch(args):
                 
                 if original_wc is not None:
                         ratio = translated_wc / original_wc
-                        multiplier = _get_wc_multiplier(qa_settings, source_lang_hint=qa_settings.get('source_language'))
+                        multiplier = _get_wc_multiplier(
+                            qa_settings,
+                            source_lang_hint=qa_settings.get('source_language'),
+                            script_hint=None,
+                            is_cjk=is_cjk,
+                            log_fn=dummy_log
+                        )
                         ratio_norm = ratio / max(0.01, multiplier)
                         # For text files, use same reasonable bounds as EPUB
                         is_reasonable = 0.7 <= ratio_norm <= 2.0
@@ -4824,7 +4879,9 @@ def process_html_file_batch(args):
                         
                         # Only mark as issue if ratio is unreasonable
                         if not is_reasonable:
-                            issues.append(f"word_count_mismatch_ratio_{ratio:.2f}_mult_{multiplier:.2f}_norm_{ratio_norm:.2f}")
+                            issues.append(
+                                f"word_count_mismatch: translated={ratio:.2f}x source (expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f})"
+                            )
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
                     pass
@@ -4843,7 +4900,9 @@ def process_html_file_batch(args):
                     word_count_check = wc_result
                     # Only mark as issue if ratio is unreasonable (outside safe bounds)
                     if not wc_result['is_reasonable']:
-                        issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}_mult_{wc_result.get('multiplier', 1.0):.2f}_norm_{wc_result.get('normalized_ratio', wc_result['ratio']):.2f}")
+                        issues.append(
+                            f"word_count_mismatch: translated={wc_result['ratio']:.2f}x source (expected≈{wc_result.get('multiplier', 1.0):.2f}x, normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f})"
+                        )
                 else:
                     word_count_check = wc_result
                     issues.append("word_count_no_match_found")
