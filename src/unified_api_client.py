@@ -10103,9 +10103,9 @@ class UnifiedClient:
                     image_data = None  # Store extracted image data
                     
                     # Try the simple .text property first (most common)
-                    if hasattr(response, 'text'):
+                    # IMPORTANT: when streaming, keep the aggregated text_parts; only fill in if empty
+                    if hasattr(response, 'text') and not text_content:
                         try:
-                            # Safe assignment - handle if .text returns None
                             extracted_text = response.text
                             if extracted_text:
                                 text_content = extracted_text
