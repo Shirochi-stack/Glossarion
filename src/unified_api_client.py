@@ -801,6 +801,18 @@ class UnifiedClient:
             else:
                 normalized.append(dict(m))
         return normalized
+
+    def _strip_empty_content(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove content fields that are empty strings to avoid useless payload entries."""
+        cleaned = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            msg = dict(m)
+            if msg.get("content") == "":
+                msg.pop("content", None)
+            cleaned.append(msg)
+        return cleaned
         # 2) Safety indicators in raw response/error details
         response_str = ""
         if response is not None:
@@ -6228,6 +6240,8 @@ class UnifiedClient:
                 # Normalize messages to Gemini 3 model-role format only for native endpoint
                 if self._is_gemini_3_model() and not (os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"):
                     messages = self._normalize_gemini3_messages(messages)
+                # Drop empty content fields
+                messages = self._strip_empty_content(messages)
 
                 # --- Ensure messages have a user prompt and material content for payload visibility ---
                 if messages is None:
@@ -9438,6 +9452,8 @@ class UnifiedClient:
         # Normalize assistant/model messages to Gemini 3 model-role format (native endpoint only)
         if is_gemini_3 and not use_openai_endpoint:
             messages = self._normalize_gemini3_messages(messages)
+        # Drop empty content fields
+        messages = self._strip_empty_content(messages)
         
         # Configure safety settings
         safety_settings = None
