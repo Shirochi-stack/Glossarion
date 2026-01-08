@@ -1976,18 +1976,21 @@ class QAScannerMixin:
         def disable_wheel_event(widget):
             widget.wheelEvent = lambda event: event.ignore()
 
-        # Word count multiplier defaults (ensure available for sliders and reset)
-        wordcount_defaults = qa_settings.get('word_count_multipliers', {})
-        if not isinstance(wordcount_defaults, dict):
-            wordcount_defaults = {}
-        for _k, _v in {
+        # Word count multiplier defaults (factory)
+        base_multiplier_defaults = {
             'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
             'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
             'chinese': 1.60, 'chinese (simplified)': 1.60, 'chinese (traditional)': 1.60,
-            'japanese': 1.40, 'korean': 1.35, 'hebrew': 1.05, 'thai': 1.10
-        }.items():
-            wordcount_defaults.setdefault(_k, _v)
-        
+            'japanese': 1.40, 'korean': 1.35, 'hebrew': 1.05, 'thai': 1.10,
+            'other': 1.0
+        }
+        # Merge current settings over factory defaults for initial display
+        wordcount_defaults = dict(base_multiplier_defaults)
+        user_mults = qa_settings.get('word_count_multipliers', {})
+        if isinstance(user_mults, dict):
+            wordcount_defaults.update(user_mults)
+        # Immutable factory defaults for reset
+        default_wordcount_defaults = dict(base_multiplier_defaults)
         # Title
         title_label = QLabel("QA Scanner Settings")
         title_label.setFont(QFont('Arial', 24, QFont.Bold))
@@ -2248,30 +2251,35 @@ class QAScannerMixin:
             lang_label.setFont(QFont('Arial', 9))
             row_layout.addWidget(lang_label)
 
+            # Slider
             slider = QSlider(Qt.Horizontal)
             slider.setMinimum(10)   # 0.10x
             slider.setMaximum(1000) # 10.0x
             slider.setSingleStep(5)
             slider.setTickInterval(50)
-            slider.setMinimumWidth(150)
+            slider.setMinimumWidth(140)
             slider.wheelEvent = lambda event: event.ignore()
             current_mult = wordcount_defaults.get(lang_key, 1.0)
             slider.setValue(int(current_mult * 100))
             row_layout.addWidget(slider)
 
-            value_label = QLabel(f"{current_mult*100:.0f}%")
-            value_label.setFont(QFont('Arial', 9, QFont.Bold))
-            value_label.setMinimumWidth(42)
-            value_label.setAlignment(Qt.AlignRight)
-            row_layout.addWidget(value_label)
+            # Editable spinbox (same range, %)
+            spin = QSpinBox()
+            spin.setMinimum(10)
+            spin.setMaximum(1000)
+            spin.setSingleStep(1)
+            spin.setValue(int(current_mult * 100))
+            spin.setSuffix("%")
+            spin.setMinimumWidth(70)
+            spin.wheelEvent = lambda event: event.ignore()
+            row_layout.addWidget(spin)
 
-            def make_update(lbl):
-                def _update(val):
-                    lbl.setText(f"{val}%")
-                return _update
-            slider.valueChanged.connect(make_update(value_label))
+            # Keep in sync both ways
+            slider.valueChanged.connect(spin.setValue)
+            spin.valueChanged.connect(slider.setValue)
 
             word_multiplier_sliders[lang_key] = slider
+            word_multiplier_sliders[f"{lang_key}__spin"] = spin
             multiplier_grid.addWidget(row_widget, row, col)
 
         wordcount_layout.addSpacing(6)
@@ -2914,8 +2922,12 @@ class QAScannerMixin:
                 # Save word count multipliers
                 try:
                     wc_mults = {}
-                    for lang_key, slider in word_multiplier_sliders.items():
-                        wc_mults[lang_key] = slider.value() / 100.0
+                    for lang_key, widget in word_multiplier_sliders.items():
+                        if lang_key.endswith('__spin'):
+                            base_key = lang_key[:-6]
+                            wc_mults[base_key] = widget.value() / 100.0
+                        elif f"{lang_key}__spin" not in word_multiplier_sliders:
+                            wc_mults[lang_key] = widget.value() / 100.0
                     qa_settings['word_count_multipliers'] = wc_mults
                 except Exception as e:
                     if debug_mode:
@@ -3106,9 +3118,14 @@ class QAScannerMixin:
                 check_artifacts_checkbox.setChecked(False)
 
                 # Reset word count multipliers to defaults
-                for lang_key, slider in word_multiplier_sliders.items():
-                    default_val = wordcount_defaults.get(lang_key, 1.0)
-                    slider.setValue(int(default_val * 100))
+                for lang_key, widget in word_multiplier_sliders.items():
+                    if lang_key.endswith('__spin'):
+                        base_key = lang_key[:-6]
+                        default_val = default_wordcount_defaults.get(base_key, 1.0)
+                        widget.setValue(int(default_val * 100))
+                    elif f"{lang_key}__spin" not in word_multiplier_sliders:
+                        default_val = default_wordcount_defaults.get(lang_key, 1.0)
+                        widget.setValue(int(default_val * 100))
                 check_glossary_checkbox.setChecked(True)
                 check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)
