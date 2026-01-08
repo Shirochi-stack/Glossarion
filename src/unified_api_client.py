@@ -722,6 +722,85 @@ class UnifiedClient:
         # 1) Suspicious finish reasons with empty content
         if not extracted_content and finish_reason in ['length', 'stop', 'max_tokens', None]:
             return True
+    def _build_gemini3_model_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert an assistant/model message to Gemini 3 parts format using assistant role
+        (text + thought_signature parts). Assistant role is accepted by both endpoints.
+        """
+        import base64
+
+        content = msg.get("content") or ""
+        raw_obj = msg.get("_raw_content_object")
+        parts_out = []
+
+        # Extract text parts from raw_obj if present
+        candidate_parts = []
+        if hasattr(raw_obj, "parts"):
+            candidate_parts = raw_obj.parts or []
+        elif isinstance(raw_obj, dict):
+            candidate_parts = raw_obj.get("parts", []) or []
+
+        text_added = False
+        for p in candidate_parts:
+            text_val = None
+            if hasattr(p, "text"):
+                text_val = getattr(p, "text", None)
+            elif isinstance(p, dict):
+                text_val = p.get("text")
+            if text_val:
+                parts_out.append({"text": str(text_val)})
+                text_added = True
+
+        if content and not text_added:
+            parts_out.append({"text": str(content)})
+
+        # Extract thought signature from raw_obj or its parts
+        sig = None
+        if isinstance(raw_obj, dict):
+            sig = raw_obj.get("thought_signature") or raw_obj.get("thoughtSignature")
+        if sig is None and hasattr(raw_obj, "thought_signature"):
+            sig = getattr(raw_obj, "thought_signature", None)
+        if sig is None and hasattr(raw_obj, "thoughtSignature"):
+            sig = getattr(raw_obj, "thoughtSignature", None)
+        if sig is None:
+            for p in candidate_parts:
+                if hasattr(p, "thought_signature") and getattr(p, "thought_signature", None):
+                    sig = getattr(p, "thought_signature")
+                    break
+                if hasattr(p, "thoughtSignature") and getattr(p, "thoughtSignature", None):
+                    sig = getattr(p, "thoughtSignature")
+                    break
+                if isinstance(p, dict):
+                    sig = p.get("thought_signature") or p.get("thoughtSignature")
+                    if sig:
+                        break
+
+        if sig is not None:
+            if isinstance(sig, dict) and sig.get("_type") == "bytes" and sig.get("data"):
+                data_b64 = sig["data"]
+            elif isinstance(sig, (bytes, bytearray)):
+                data_b64 = base64.b64encode(sig).decode("utf-8")
+            else:
+                data_b64 = str(sig)
+            parts_out.append({"thought_signature": {"_type": "bytes", "data": data_b64}})
+
+        if not parts_out and content:
+            parts_out.append({"text": str(content)})
+
+        return {"role": "assistant", "parts": parts_out}
+
+    def _normalize_gemini3_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure assistant/model messages are in Gemini 3 model-role format."""
+        normalized = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            if role in ("assistant", "model"):
+                normalized.append(self._build_gemini3_model_message(m))
+            else:
+                normalized.append(dict(m))
+        return normalized
         # 2) Safety indicators in raw response/error details
         response_str = ""
         if response is not None:
@@ -6146,6 +6225,10 @@ class UnifiedClient:
                 thread_name = threading.current_thread().name
                 thread_id = threading.current_thread().ident
 
+                # Normalize messages to Gemini 3 model-role format only for native endpoint
+                if self._is_gemini_3_model() and not (os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"):
+                    messages = self._normalize_gemini3_messages(messages)
+
                 # --- Ensure messages have a user prompt and material content for payload visibility ---
                 if messages is None:
                     messages = []
@@ -7333,8 +7416,33 @@ class UnifiedClient:
         for msg_idx, msg in enumerate(messages):
             role = msg.get('role', 'user')
             
+            # Gemini 3 normalization may set role to 'assistant' with parts
+            if role == 'assistant' and msg.get('parts'):
+                # Build Content directly from provided parts
+                parts = []
+                for p in msg.get('parts') or []:
+                    if isinstance(p, dict):
+                        if 'text' in p and p['text']:
+                            parts.append(Part.from_text(p['text']))
+                        elif 'thought_signature' in p and p['thought_signature']:
+                            ts = p['thought_signature']
+                            if isinstance(ts, dict) and ts.get('_type') == 'bytes' and ts.get('data'):
+                                import base64
+                                try:
+                                    ts_bytes = base64.b64decode(ts['data'])
+                                    parts.append(Part(thought_signature=ts_bytes))
+                                except Exception:
+                                    pass
+                    # ignore non-dict parts for safety
+                if parts:
+                    content_list.append(Content(role='model', parts=parts))
+                else:
+                    # fallback to text if parts empty
+                    text_val = msg.get('content') or '.'
+                    content_list.append(Content(role='model', parts=[Part.from_text(text_val)]))
+
             # For assistant messages with _raw_content_object, reconstruct Content with thought signatures
-            if role == 'assistant' and '_raw_content_object' in msg:
+            elif role == 'assistant' and '_raw_content_object' in msg:
                 raw_obj = msg['_raw_content_object']
                 
                 # If it's already a Content object, use it directly
@@ -9326,6 +9434,10 @@ class UnifiedClient:
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
         is_gemini_3 = self._is_gemini_3_model()
+
+        # Normalize assistant/model messages to Gemini 3 model-role format (native endpoint only)
+        if is_gemini_3 and not use_openai_endpoint:
+            messages = self._normalize_gemini3_messages(messages)
         
         # Configure safety settings
         safety_settings = None

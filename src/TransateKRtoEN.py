@@ -129,6 +129,89 @@ def extract_text_from_raw_content(raw_obj) -> str:
     except Exception:
         return ""
 
+
+def build_gemini_model_message(content: str = "", raw_obj=None) -> dict:
+    """
+    Build a Gemini 3-compatible assistant-role message with parts:
+      - text part (when available)
+      - thought_signature part (when available)
+    Using assistant keeps roles valid while preserving parts for Gemini 3.
+    """
+    import base64
+
+    parts = []
+
+    # Prefer text from raw_obj parts if present; else use provided content
+    text_added = False
+    if raw_obj:
+        candidate_parts = []
+        if hasattr(raw_obj, "parts"):
+            candidate_parts = raw_obj.parts or []
+        elif isinstance(raw_obj, dict):
+            candidate_parts = raw_obj.get("parts", []) or []
+
+        for p in candidate_parts:
+            if hasattr(p, "text") and getattr(p, "text", None):
+                parts.append({"text": str(getattr(p, "text"))})
+                text_added = True
+            elif isinstance(p, dict) and p.get("text"):
+                parts.append({"text": str(p.get("text"))})
+                text_added = True
+
+    if content and not text_added:
+        parts.append({"text": str(content)})
+
+    # Find thought signature (snake or camel case, bytes or dict)
+    sig_bytes = None
+    if raw_obj:
+        def _extract_sig_from_part(part):
+            ts = None
+            if hasattr(part, "thought_signature"):
+                ts = getattr(part, "thought_signature", None)
+            elif hasattr(part, "thoughtSignature"):
+                ts = getattr(part, "thoughtSignature", None)
+            elif isinstance(part, dict):
+                ts = part.get("thought_signature") or part.get("thoughtSignature")
+            return ts
+
+        # Check top-level then parts
+        top_ts = None
+        if isinstance(raw_obj, dict):
+            top_ts = raw_obj.get("thought_signature") or raw_obj.get("thoughtSignature")
+        if hasattr(raw_obj, "thought_signature"):
+            top_ts = getattr(raw_obj, "thought_signature", None)
+        if hasattr(raw_obj, "thoughtSignature"):
+            top_ts = getattr(raw_obj, "thoughtSignature", None)
+        if top_ts is not None:
+            sig_bytes = top_ts
+        else:
+            cand_parts = []
+            if hasattr(raw_obj, "parts"):
+                cand_parts = raw_obj.parts or []
+            elif isinstance(raw_obj, dict):
+                cand_parts = raw_obj.get("parts", []) or []
+            for p in cand_parts:
+                ts = _extract_sig_from_part(p)
+                if ts is not None:
+                    sig_bytes = ts
+                    break
+
+    if sig_bytes is not None:
+        if isinstance(sig_bytes, dict) and sig_bytes.get("_type") == "bytes" and sig_bytes.get("data"):
+            data_b64 = sig_bytes.get("data")
+        elif isinstance(sig_bytes, (bytes, bytearray)):
+            data_b64 = base64.b64encode(sig_bytes).decode("utf-8")
+        else:
+            # If provided as string (already b64) keep as-is
+            data_b64 = str(sig_bytes)
+        parts.append({"thought_signature": {"_type": "bytes", "data": data_b64}})
+
+    # Fallback to text-only part if nothing found
+    if not parts and content:
+        parts.append({"text": str(content)})
+
+    return {"role": "assistant", "parts": parts} if parts else {"role": "assistant", "parts": []}
+
 def _merge_split_paragraphs(html_body: str) -> str:
     """Merge paragraphs that were artificially split across PDF pages.
     
@@ -4596,43 +4679,25 @@ class BatchTranslationProcessor:
                     hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
                     trimmed = history[-hist_limit * 2:]
                     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
-                    model_lower = getattr(self.config, 'MODEL', '').lower()
-                    is_gemini_3 = ('gemini-3' in model_lower) or ('gemini-exp-' in model_lower)
+                    for h in trimmed:
+                        if not isinstance(h, dict):
+                            continue
+                        role = h.get('role', 'user')
+                        raw_obj = h.get('_raw_content_object')
+                        content = h.get('content') or ""
 
-                    if is_gemini_3:
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            raw_obj = h.get('_raw_content_object')
-                            content = h.get('content') or ""
+                        if role == 'user' and not include_source:
+                            continue
 
-                            if (not content) and raw_obj:
-                                content = extract_text_from_raw_content(raw_obj)
+                        if (not content) and raw_obj is None:
+                            continue
 
-                            if role == 'user' and not include_source:
-                                continue
-
-                            if not content and raw_obj is None:
-                                continue
-
-                            msg = {'role': role}
-                            if content:
-                                msg['content'] = content
-                            if raw_obj is not None:
-                                msg['_raw_content_object'] = raw_obj
-                            memory_msgs.append(msg)
-                    else:
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            content = h.get('content', '')
-                            
-                            if role == 'user' and not include_source:
-                                memory_msgs.append({"role": "user", "content": "[Previous chapter - source hidden]"})
-                            else:
-                                memory_msgs.append({"role": role, "content": content})
+                        msg = {'role': role}
+                        if content:
+                            msg['content'] = content
+                        if raw_obj is not None:
+                            msg['_raw_content_object'] = raw_obj
+                        memory_msgs.append(msg)
                 except Exception as e:
                     print(f"   ⚠️ Failed to load history for merged group: {e}")
             
@@ -9759,88 +9824,33 @@ def main(log_callback=None, stop_callback=None):
                     user_prompt = chunk_html
                 
                 if config.CONTEXTUAL:
-                    # The load_history() method already handles its own locking internally
-                    # Don't acquire the lock here to avoid deadlock
                     history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
 
-                    # Check if using Gemini 3 model that needs thought signatures preserved
-                    is_gemini_3 = False
-                    model_name = getattr(config, 'MODEL', '').lower()
-                    if 'gemini-3' in model_name or 'gemini-exp-' in model_name:
-                        is_gemini_3 = True
-                    
-                    # Determine whether to include previous source text (user messages) as memory
                     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
-                    
-                    if is_gemini_3:
-                        # For Gemini 3, preserve raw objects for thought signatures
-                        memory_msgs = []
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            raw_obj = h.get('_raw_content_object')
-                            content = h.get('content') or ""
 
-                            if (not content) and raw_obj:
-                                content = extract_text_from_raw_content(raw_obj)
-                            
-                            # Skip user messages if not including source
-                            if role == 'user' and not include_source:
-                                continue
+                    memory_msgs = []
+                    for h in trimmed:
+                        if not isinstance(h, dict):
+                            continue
+                        role = h.get('role', 'user')
+                        raw_obj = h.get('_raw_content_object')
+                        content = h.get('content') or ""
 
-                            if not content and raw_obj is None:
-                                continue
+                        if role == 'user' and not include_source:
+                            continue
 
-                            msg = {'role': role}
-                            if content:
-                                msg['content'] = content
-                            if raw_obj is not None:
-                                msg['_raw_content_object'] = raw_obj
-                            memory_msgs.append(msg)
-                    else:
-                        # Original memory block approach for other models
-                        # Collect memory blocks (source + translation) and emit as a single assistant message
-                        memory_blocks = []
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            content = h.get('content', '')
-                            if not content:
-                                continue
+                        # Skip empty entries lacking both content and raw object
+                        if (not content) and raw_obj is None:
+                            continue
 
-                            # Optionally skip previous source text when disabled
-                            if role == 'user' and not include_source:
-                                continue
-
-                            if role == 'user':
-                                prefix = (
-                                    "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
-                                    "This is prior source content provided for context only.\\n"
-                                    "Do NOT translate or repeat this text directly in your response.\\n\\n"
-                                )
-                            else:
-                                prefix = (
-                                    "[MEMORY - PREVIOUS TRANSLATION]\\n"
-                                    "This is prior translated content provided for context only.\\n"
-                                    "Do NOT repeat or re-output this translation.\\n\\n"
-                                )
-                            footer = "\\n\\n[END MEMORY BLOCK]\n"
-                            memory_blocks.append(prefix + content + footer)
-
-                        if memory_blocks:
-                            combined_memory = "\n".join(memory_blocks)
-                            # Always present history as an assistant message so the model
-                            # treats it as prior context, not a new user instruction.
-                            memory_msgs = [{
-                                'role': 'assistant',
-                                'content': combined_memory
-                            }]
-                        else:
-                            memory_msgs = []
+                        msg = {'role': role}
+                        if content:
+                            msg['content'] = content
+                        if raw_obj is not None:
+                            msg['_raw_content_object'] = raw_obj
+                        memory_msgs.append(msg)
                 else:
                     history = []  # Set empty history when not contextual
                     trimmed = []
