@@ -4135,7 +4135,7 @@ class BatchTranslationProcessor:
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 
                 if self.check_stop_fn() or abort_chunks.is_set():
-                    return None, chunk_idx
+                    return None, chunk_idx, None, False, "aborted"
                 
                 # Build user prompt for this chunk
                 if total_chunks > 1:
@@ -4311,20 +4311,27 @@ class BatchTranslationProcessor:
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                 }
+                def combined_stop():
+                    # Abort when user stops OR another chunk marked prohibited content
+                    return self.check_stop_fn() or abort_chunks.is_set()
                 result, finish_reason, raw_obj_from_send = send_with_interrupt(
                     chapter_msgs,
                     self.client,
                     self.config.TEMP,
                     self.config.MAX_OUTPUT_TOKENS,
-                    self.check_stop_fn,
+                    combined_stop,
                     context='translation',
                     chapter_context=chapter_ctx,
                 )
                 
                 # Use the raw object directly from send_with_interrupt
                 raw_obj = raw_obj_from_send
-                # Abort immediately if provider flagged content filter / prohibited / empty-error
-                if finish_reason in ("content_filter", "prohibited_content") or (not result and finish_reason == "error"):
+                # Abort immediately on provider safety stop or any error/empty result
+                if (
+                    (finish_reason and finish_reason.lower() in ("content_filter", "prohibited_content", "error"))
+                    or (finish_reason and ("content_filter" in finish_reason.lower() or "prohibited" in finish_reason.lower()))
+                    or not result
+                ):
                     abort_chunks.set()
                     return None, chunk_idx, raw_obj, False, finish_reason
 
@@ -4374,8 +4381,13 @@ class BatchTranslationProcessor:
             
             last_chunk_raw_obj = None
             chapter_truncated = False  # Track if any chunk was truncated
-            
-            with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
+            from concurrent.futures import CancelledError
+
+            chunk_executor = ThreadPoolExecutor(
+                max_workers=max_chunk_workers,
+                thread_name_prefix=f"Ch{actual_num}Chunk"
+            )
+            try:
                 # Submit all chunks
                 future_to_chunk = {chunk_executor.submit(process_chunk, chunk_data): chunk_data[1] 
                                   for chunk_data in chunks}
@@ -4383,7 +4395,9 @@ class BatchTranslationProcessor:
                 # Collect results as they complete
                 completed_chunks = 0
                 for future in as_completed(future_to_chunk):
-                    if self.check_stop_fn():
+                    # Stop early if any chunk signalled abort (prohibited) or user stop
+                    if self.check_stop_fn() or abort_chunks.is_set():
+                        abort_chunks.set()
                         print("❌ Translation stopped during chunk processing")
                         chunk_executor.shutdown(wait=False, cancel_futures=True)
                         raise Exception("Translation stopped by user")
@@ -4392,7 +4406,12 @@ class BatchTranslationProcessor:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
 
                         # Immediate QA fail: stop remaining chunks and mark chapter
-                        if finish_reason in ("content_filter", "prohibited_content") or abort_chunks.is_set():
+                        if (
+                            abort_chunks.is_set()
+                            or (finish_reason and finish_reason.lower() in ("content_filter", "prohibited_content", "error"))
+                            or (finish_reason and ("content_filter" in finish_reason.lower() or "prohibited" in finish_reason.lower()))
+                            or not result
+                        ):
                             abort_chunks.set()
                             print(f"⚠️ Aborting remaining chunks for Chapter {actual_num} due to {finish_reason or 'unknown error'} (chunk {chunk_idx}/{total_chunks})")
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -4421,10 +4440,24 @@ class BatchTranslationProcessor:
                                     chapter_truncated = True
                             
                             print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
+                    except CancelledError:
+                        chunk_idx = future_to_chunk.get(future, "?")
+                        if abort_chunks.is_set():
+                            print(f"ℹ️ Chunk {chunk_idx}/{total_chunks} cancelled due to abort")
+                            continue
+                        raise
                     except Exception as e:
                         chunk_idx = future_to_chunk[future]
                         print(f"❌ Chunk {chunk_idx}/{total_chunks} failed: {e}")
+                        abort_chunks.set()
+                        chunk_executor.shutdown(wait=False, cancel_futures=True)
                         raise
+            finally:
+                # Avoid waiting on other chunk threads when we've aborted for prohibited content
+                if not abort_chunks.is_set():
+                    chunk_executor.shutdown(wait=True)
+                else:
+                    chunk_executor.shutdown(wait=False, cancel_futures=True)
             
             # Verify all chunks completed
             if None in translated_chunks:
