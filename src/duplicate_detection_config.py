@@ -37,6 +37,8 @@ def get_duplicate_detection_config():
     
     # Get base threshold from slider (can be overridden by preset)
     base_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90'))
+    partial_weight = float(os.getenv('GLOSSARY_PARTIAL_RATIO_WEIGHT', '0') or 0.0)
+    partial_weight = max(0.0, min(1.0, partial_weight))
     
     configs = {
         'auto': {
@@ -76,6 +78,9 @@ def get_duplicate_detection_config():
     # Filter out algorithms that aren't available in this environment.
     # This avoids misleading config and prevents slow per-comparison ImportError handling.
     algorithms = list(config.get('algorithms', []))
+    # Disable partial-ratio when weight is 0
+    if partial_weight <= 0:
+        algorithms = [a for a in algorithms if a != 'partial']
     if not _HAS_RAPIDFUZZ:
         algorithms = [a for a in algorithms if a not in ('token_sort', 'partial')]
     if not _HAS_JELLYFISH:
@@ -86,6 +91,7 @@ def get_duplicate_detection_config():
     # Return a copy so callers can safely mutate without affecting defaults.
     resolved = dict(config)
     resolved['algorithms'] = algorithms
+    resolved['partial_ratio_weight'] = partial_weight
     return resolved
 
 
@@ -119,6 +125,7 @@ def calculate_similarity_with_config(name1, name2, config=None):
         config = get_duplicate_detection_config()
 
     algorithms = config.get('algorithms', [])
+    partial_weight = max(0.0, min(1.0, config.get('partial_ratio_weight', 1.0)))
     best = 0.0
 
     # Basic ratio (Levenshtein-like)
@@ -133,8 +140,9 @@ def calculate_similarity_with_config(name1, name2, config=None):
     if _HAS_RAPIDFUZZ:
         if 'token_sort' in algorithms:
             best = max(best, _rf_fuzz.token_sort_ratio(n1_lower, n2_lower) / 100.0)
-        if 'partial' in algorithms:
-            best = max(best, _rf_fuzz.partial_ratio(n1_lower, n2_lower) / 100.0)
+        if 'partial' in algorithms and partial_weight > 0:
+            partial_score = _rf_fuzz.partial_ratio(n1_lower, n2_lower) / 100.0
+            best = max(best, partial_score * partial_weight)
 
     # Jaro-Winkler (designed for names)
     if 'jaro_winkler' in algorithms and _HAS_JELLYFISH:

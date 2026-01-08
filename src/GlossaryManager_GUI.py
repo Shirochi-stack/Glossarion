@@ -577,6 +577,12 @@ class GlossaryManagerMixin:
                     algo_map = {0: 'auto', 1: 'strict', 2: 'balanced', 3: 'aggressive', 4: 'basic'}
                     self.glossary_duplicate_algorithm_var = algo_map.get(algo_index, 'auto')
                     self.config['glossary_duplicate_algorithm'] = self.glossary_duplicate_algorithm_var
+
+                # Partial ratio weight (substring matcher)
+                if hasattr(self, 'partial_ratio_slider'):
+                    self.partial_ratio_weight = self.partial_ratio_slider.value() / 100.0
+                    self.config['glossary_partial_ratio_weight'] = self.partial_ratio_weight
+                    self.glossary_partial_ratio_weight_var = self.partial_ratio_weight
                 
                 # Save auto compression state
                 if hasattr(self, 'glossary_auto_compression_checkbox'):
@@ -1044,6 +1050,50 @@ class GlossaryManagerMixin:
         update_algo_description(self.duplicate_algo_combo.currentIndex())
         
         self.duplicate_algo_combo.currentIndexChanged.connect(update_algo_description)
+
+        # Partial ratio strength slider (controls substring matching weight)
+        partial_label = QLabel("Partial ratio strength (substring matcher):")
+        duplicate_frame_layout.addWidget(partial_label)
+
+        partial_desc = QLabel("0 disables substring matching; higher values increase partial-ratio influence.")
+        duplicate_frame_layout.addWidget(partial_desc)
+
+        partial_slider_row = QWidget()
+        partial_slider_layout = QHBoxLayout(partial_slider_row)
+        partial_slider_layout.setContentsMargins(0, 5, 0, 0)
+        duplicate_frame_layout.addWidget(partial_slider_row)
+
+        self.partial_ratio_weight = float(self.config.get('glossary_partial_ratio_weight', 0.0))
+
+        self.partial_ratio_slider = QSlider(Qt.Horizontal)
+        self.partial_ratio_slider.setMinimum(0)
+        self.partial_ratio_slider.setMaximum(100)
+        self.partial_ratio_slider.setValue(int(self.partial_ratio_weight * 100))
+        self._disable_slider_mousewheel(self.partial_ratio_slider)
+        partial_slider_layout.addWidget(self.partial_ratio_slider)
+
+        self.partial_ratio_value_label = QLabel(f"{self.partial_ratio_weight:.2f}")
+        partial_slider_layout.addWidget(self.partial_ratio_value_label)
+
+        self.partial_ratio_desc_label = QLabel("")
+        duplicate_frame_layout.addWidget(self.partial_ratio_desc_label)
+
+        def update_partial_ratio_label(value):
+            weight = value / 100.0
+            self.partial_ratio_weight = weight
+            self.partial_ratio_value_label.setText(f"{weight:.2f}")
+            if weight == 0:
+                desc = "Disabled (no substring matching)"
+            elif weight <= 0.30:
+                desc = "Very light substring influence"
+            elif weight <= 0.60:
+                desc = "Moderate substring influence"
+            else:
+                desc = "Strong substring influence (may over-merge)"
+            self.partial_ratio_desc_label.setText(desc)
+
+        self.partial_ratio_slider.valueChanged.connect(update_partial_ratio_label)
+        update_partial_ratio_label(self.partial_ratio_slider.value())
         
         # Honorifics filter toggle
         if not hasattr(self, 'disable_honorifics_checkbox'):
