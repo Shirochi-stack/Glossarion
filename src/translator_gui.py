@@ -742,7 +742,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.9.5"
+        __version__ = "6.9.6"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -815,7 +815,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.9.5')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.9.6')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2327,7 +2327,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v6.9.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.9.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -5685,31 +5685,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
         try:
-            # Determine active profile (sync with UI)
-            current_profile = self.profile_var
-            try:
-                if hasattr(self, 'profile_menu'):
-                    selected = self.profile_menu.currentText().strip()
-                    if selected:
-                        current_profile = selected
-                        self.profile_var = selected
-                        self.config['active_profile'] = selected
-            except Exception:
-                pass
             # AUTO-SWITCH PROFILE BASED ON EXTRACTION MODE
             # Check if profile name contains BeautifulSoup or html2text
+            current_profile = self.profile_var
             if current_profile:
-                # Normalize for case/spacing/underscores/hyphens
-                import re
-                profile_norm = re.sub(r'[^a-z0-9]', '', current_profile.lower())
+                profile_lower = current_profile.lower()
                 
                 # Check if profile indicates an extraction mode
-                if 'beautifulsoup' in profile_norm:
+                if 'beautifulsoup' in profile_lower:
                     # Switch to BeautifulSoup extraction mode
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = 'standard'
                         self.append_log(f"🔄 Auto-switched to BeautifulSoup extraction (profile: {current_profile})")
-                elif 'html2text' in profile_norm:
+                elif 'html2text' in profile_lower:
                     # Switch to html2text extraction mode  
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = 'enhanced'
@@ -10837,49 +10825,7 @@ Important rules:
             # Set defaults for settings that might not exist yet
             self.config.setdefault('glossary_auto_backup', True)
             self.config.setdefault('glossary_max_backups', 50)
-            default_qa_settings = {
-                'foreign_char_threshold': 10,
-                'excluded_characters': '',
-                'source_language': 'auto',
-                'target_language': 'english',
-                'check_encoding_issues': False,
-                'check_repetition': True,
-                'check_translation_artifacts': False,
-                'check_glossary_leakage': True,
-                'min_file_length': 0,
-                'report_format': 'detailed',
-                'auto_save_report': True,
-                'check_word_count_ratio': True,
-                'check_multiple_headers': True,
-                'warn_name_mismatch': True,
-                'check_missing_html_tag': True,
-                'check_paragraph_structure': True,
-                'check_invalid_nesting': False,
-                'paragraph_threshold': 0.3,
-                'cache_enabled': True,
-                'cache_auto_size': False,
-                'cache_show_stats': False,
-                'word_count_multipliers': {
-                    'english': 1.0,
-                    'spanish': 1.10,
-                    'french': 1.10,
-                    'german': 1.05,
-                    'italian': 1.05,
-                    'portuguese': 1.10,
-                    'russian': 1.15,
-                    'arabic': 1.15,
-                    'hindi': 1.10,
-                    'turkish': 1.05,
-                    'chinese': 1.60,
-                    'chinese (simplified)': 1.60,
-                    'chinese (traditional)': 1.60,
-                    'japanese': 1.40,
-                    'korean': 1.35,
-                    'hebrew': 1.05,
-                    'thai': 1.10,
-                    'other': 1.0
-                }
-            }
+            default_qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': False, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
             # Image compression defaults
@@ -11776,7 +11722,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.9.5...")
+    print("🚀 Starting Glossarion v6.9.6...")
     
     # Initialize splash screen
     splash_manager = None
