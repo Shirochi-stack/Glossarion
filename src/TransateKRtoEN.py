@@ -9829,28 +9829,62 @@ def main(log_callback=None, stop_callback=None):
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
 
                     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+                    model_name = getattr(config, 'MODEL', '').lower()
+                    is_gemini_3 = ('gemini-3' in model_name) or ('gemini-exp-' in model_name)
 
                     memory_msgs = []
-                    for h in trimmed:
-                        if not isinstance(h, dict):
-                            continue
-                        role = h.get('role', 'user')
-                        raw_obj = h.get('_raw_content_object')
-                        content = h.get('content') or ""
+                    if is_gemini_3:
+                        # Pass-through for Gemini 3 (raw objects preserved)
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            raw_obj = h.get('_raw_content_object')
+                            content = h.get('content') or ""
+                            if (not content) and raw_obj:
+                                content = extract_text_from_raw_content(raw_obj)
+                            if role == 'user' and not include_source:
+                                continue
+                            if (not content) and raw_obj is None:
+                                continue
+                            msg = {'role': role}
+                            if content:
+                                msg['content'] = content
+                            if raw_obj is not None:
+                                msg['_raw_content_object'] = raw_obj
+                            memory_msgs.append(msg)
+                    else:
+                        # Prefix+content+footer for non-Gemini models
+                        memory_blocks = []
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            content = h.get('content', '')
+                            if not content:
+                                continue
+                            if role == 'user' and not include_source:
+                                continue
+                            if role == 'user':
+                                prefix = (
+                                    "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
+                                    "This is prior source content provided for context only.\\n"
+                                    "Do NOT translate or repeat this text directly in your response.\\n\\n"
+                                )
+                            else:
+                                prefix = (
+                                    "[MEMORY - PREVIOUS TRANSLATION]\\n"
+                                    "This is prior translated content provided for context only.\\n"
+                                    "Do NOT repeat or re-output this translation.\\n\\n"
+                                )
+                            footer = "\\n\\n[END MEMORY BLOCK]\\n"
+                            memory_blocks.append(prefix + content + footer)
 
-                        if role == 'user' and not include_source:
-                            continue
-
-                        # Skip empty entries lacking both content and raw object
-                        if (not content) and raw_obj is None:
-                            continue
-
-                        msg = {'role': role}
-                        if content:
-                            msg['content'] = content
-                        if raw_obj is not None:
-                            msg['_raw_content_object'] = raw_obj
-                        memory_msgs.append(msg)
+                        if memory_blocks:
+                            combined_memory = "\\n".join(memory_blocks)
+                            memory_msgs = [{'role': 'assistant', 'content': combined_memory}]
+                        else:
+                            memory_msgs = []
                 else:
                     history = []  # Set empty history when not contextual
                     trimmed = []

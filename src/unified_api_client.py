@@ -6237,9 +6237,20 @@ class UnifiedClient:
                 thread_name = threading.current_thread().name
                 thread_id = threading.current_thread().ident
 
-                # Normalize messages to Gemini 3 model-role format only for native endpoint
-                if self._is_gemini_3_model() and not (os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"):
+                is_g3 = self._is_gemini_3_model()
+                # Normalize messages for Gemini 3 (both native and OpenAI-compatible)
+                if is_g3:
                     messages = self._normalize_gemini3_messages(messages)
+                else:
+                    # Non-Gemini-3: drop raw content objects to preserve classic prompt flow
+                    stripped = []
+                    for m in messages or []:
+                        if not isinstance(m, dict):
+                            continue
+                        m = dict(m)
+                        m.pop("_raw_content_object", None)
+                        stripped.append(m)
+                    messages = stripped
                 # Drop empty content fields
                 messages = self._strip_empty_content(messages)
 
@@ -9450,8 +9461,18 @@ class UnifiedClient:
         is_gemini_3 = self._is_gemini_3_model()
 
         # Normalize assistant/model messages to Gemini 3 model-role format (native endpoint only)
-        if is_gemini_3 and not use_openai_endpoint:
+        if is_gemini_3:
             messages = self._normalize_gemini3_messages(messages)
+        else:
+            # Non-Gemini-3: drop raw content objects to preserve classic prompt flow
+            stripped = []
+            for m in messages or []:
+                if not isinstance(m, dict):
+                    continue
+                m = dict(m)
+                m.pop("_raw_content_object", None)
+                stripped.append(m)
+            messages = stripped
         # Drop empty content fields
         messages = self._strip_empty_content(messages)
         

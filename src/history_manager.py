@@ -357,7 +357,7 @@ class HistoryManager:
         if '_raw_content_object' in assistant_msg and not self._has_thought_signature(assistant_msg['_raw_content_object']):
             assistant_msg.pop('_raw_content_object', None)
 
-        # If raw_content_object carries text or thought signatures, clear duplicate assistant content
+        # If raw_content_object carries a thought signature, clear duplicate assistant content
         try:
             ro = assistant_msg.get('_raw_content_object')
             if ro:
@@ -366,19 +366,17 @@ class HistoryManager:
                     parts = ro.parts or []
                 elif isinstance(ro, dict):
                     parts = ro.get('parts', []) or []
-                has_text_or_sig = False
+                has_sig = False
                 for p in parts:
-                    if hasattr(p, 'text') and getattr(p, 'text', None):
-                        has_text_or_sig = True
-                        break
                     if isinstance(p, dict):
-                        if p.get('text'):
-                            has_text_or_sig = True
-                            break
                         if p.get('thought_signature') or p.get('thoughtSignature'):
-                            has_text_or_sig = True
+                            has_sig = True
                             break
-                if has_text_or_sig:
+                    else:
+                        if getattr(p, 'thought_signature', None) or getattr(p, 'thoughtSignature', None):
+                            has_sig = True
+                            break
+                if has_sig:
                     assistant_msg['content'] = ""
         except Exception:
             pass
