@@ -3555,9 +3555,13 @@ class TranslationProcessor:
         
         result = None
         finish_reason = None
+
+        # Fallback stop callback (overridden later for chunked chapters)
+        def local_stop_cb():
+            return self.check_stop() if hasattr(self, "check_stop") else False
         
         while True:
-            if self.check_stop():
+            if local_stop_cb():
                 return None, None, None
             
             try:
@@ -3652,7 +3656,7 @@ class TranslationProcessor:
                     self.client,
                     current_temp,
                     current_max_tokens,
-                    self.check_stop,
+                    local_stop_cb,
                     chunk_timeout,
                     context='translation',
                     chapter_context=chapter_ctx,
@@ -4133,7 +4137,7 @@ class BatchTranslationProcessor:
                 """Process a single chunk in parallel"""
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 
-                if self.check_stop_fn():
+                if local_stop_cb():
                     return None, chunk_idx
                 
                 # Build user prompt for this chunk
@@ -4315,7 +4319,7 @@ class BatchTranslationProcessor:
                     self.client,
                     self.config.TEMP,
                     self.config.MAX_OUTPUT_TOKENS,
-                    self.check_stop_fn,
+                    local_stop_cb,
                     context='translation',
                     chapter_context=chapter_ctx,
                 )
@@ -4368,10 +4372,17 @@ class BatchTranslationProcessor:
             # Use ThreadPoolExecutor to process chunks in parallel
             # Use same batch size as chapter-level parallelism
             max_chunk_workers = min(total_chunks, self.config.BATCH_SIZE)
-            
+
+            # Shared abort flag for this chapter's chunks (set when a chunk hits prohibited content)
+            chunk_abort_event = threading.Event()
+
+            # Stop callback that also checks the per-chapter abort flag
+            def local_stop_cb():
+                return (self.check_stop_fn() if hasattr(self, "check_stop_fn") else False) or chunk_abort_event.is_set()
+
             last_chunk_raw_obj = None
             chapter_truncated = False  # Track if any chunk was truncated
-            
+
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit all chunks
                 future_to_chunk = {chunk_executor.submit(process_chunk, chunk_data): chunk_data[1] 
@@ -4380,7 +4391,7 @@ class BatchTranslationProcessor:
                 # Collect results as they complete
                 completed_chunks = 0
                 for future in as_completed(future_to_chunk):
-                    if self.check_stop_fn():
+                    if local_stop_cb():
                         print("❌ Translation stopped during chunk processing")
                         chunk_executor.shutdown(wait=False, cancel_futures=True)
                         raise Exception("Translation stopped by user")
@@ -4390,6 +4401,8 @@ class BatchTranslationProcessor:
 
                         # Immediate QA fail: stop remaining chunks and mark chapter
                         if finish_reason in ("content_filter", "prohibited_content", "error"):
+                            # Signal other chunk workers to abort quickly (chapter-local only)
+                            chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             with self.progress_lock:
                                 self.update_progress_fn(
@@ -4419,7 +4432,6 @@ class BatchTranslationProcessor:
                         chunk_idx = future_to_chunk[future]
                         print(f"❌ Chunk {chunk_idx}/{total_chunks} failed: {e}")
                         raise
-            
             # Verify all chunks completed
             if None in translated_chunks:
                 missing = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is None]
