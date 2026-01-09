@@ -5655,11 +5655,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Clear the progress line (like original)
     print()  # New line after progress indicator
     
-    # Sort results by derived chapter number (GUI-style), fallback to original order
+    # Build spine index map (basename -> spine_index) when available
+    spine_index_map = {}
+    try:
+        for sidx, info in original_word_counts.items():
+            if isinstance(info, dict) and info.get('spine_index') is not None:
+                spine_index_map[os.path.basename(info.get('filename', ''))] = info.get('spine_index')
+    except Exception:
+        spine_index_map = {}
+
     def _extract_num_for_sort(res):
         num = res.get('normalized_chapter_num')
         if num is None:
-            # Reuse filename extractor from normalize_chapter_numbers scope
             try:
                 fname = res.get('filename')
                 base = os.path.basename(fname) if fname else ""
@@ -5681,8 +5688,28 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             except Exception:
                 pass
         return num
-    
-    results.sort(key=lambda r: (_extract_num_for_sort(r) is None, _extract_num_for_sort(r) or 1e9, r.get('file_index', 0)))
+
+    def _spine_idx_for_sort(res):
+        # Prefer spine index from map via original filename if available
+        try:
+            wc = res.get('word_count_check') or {}
+            orig = wc.get('original_file') or ''
+            base = os.path.basename(orig)
+            if base in spine_index_map:
+                return spine_index_map[base]
+        except Exception:
+            pass
+        return None
+
+    results.sort(
+        key=lambda r: (
+            _spine_idx_for_sort(r) is None,
+            _spine_idx_for_sort(r) or 1e9,
+            _extract_num_for_sort(r) is None,
+            _extract_num_for_sort(r) or 1e9,
+            r.get('file_index', 0),
+        )
+    )
     
     # Renumber file_index to match sorted order for report clarity
     for new_idx, res in enumerate(results):
