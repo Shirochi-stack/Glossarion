@@ -1526,6 +1526,17 @@ Text to analyze:
             
             # Accept the close event - this will naturally end the Qt event loop
             event.accept()
+            # Propagate global stop to UnifiedClient so in-flight calls exit cleanly
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.set_global_cancellation(True)
+                try:
+                    import logging
+                    logging.getLogger("unified_api_client").info("⏹️ Global stop requested from translator GUI close")
+                except Exception:
+                    pass
+            except Exception:
+                pass
             
             # Quit the application - this will cause app.exec() to return
             from PySide6.QtWidgets import QApplication
