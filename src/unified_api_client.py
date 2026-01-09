@@ -1271,6 +1271,15 @@ class UnifiedClient:
     
     def __init__(self, api_key: str, model: str, output_dir: str = "Output"):
         """Initialize the unified client with enhanced thread safety"""
+        # Clear any lingering global stop/cancel state when starting a new client context
+        global global_stop_flag
+        global_stop_flag = False
+        try:
+            self.set_global_cancellation(False)
+        except Exception:
+            pass
+        self._cancelled = False
+        
         # Store original values
         self.original_api_key = api_key
         self.original_model = model
