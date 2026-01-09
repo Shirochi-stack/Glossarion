@@ -7031,12 +7031,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
                 
             except Exception as e:
-                # For other exceptions, show full details
-                self.append_log(f"❌ Translation error: {e}")
-                if hasattr(self, 'append_log_with_api_error_detection'):
-                    self.append_log_with_api_error_detection(str(e))
-                import traceback
-                self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                # Suppress noisy traceback when user stops/cancels
+                err_str = str(e).lower()
+                if "cancelled by user" in err_str or "canceled by user" in err_str or "operation cancelled" in err_str or "operation canceled" in err_str:
+                    self.append_log("❌ Translation stopped by user")
+                else:
+                    # For other exceptions, show full details
+                    self.append_log(f"❌ Translation error: {e}")
+                    if hasattr(self, 'append_log_with_api_error_detection'):
+                        self.append_log_with_api_error_detection(str(e))
+                    import traceback
+                    self.append_log(f"❌ Full error: {traceback.format_exc()}")
                 return False
             
             finally:
