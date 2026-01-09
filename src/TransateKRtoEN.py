@@ -4266,6 +4266,10 @@ class BatchTranslationProcessor:
                     + memory_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
+
+                # Abort immediately if a prior chunk triggered stop/prohibition
+                if local_stop_cb():
+                    raise UnifiedClientError("Chunk aborted due to earlier failure", error_type="cancelled")
                 
                 # Log combined prompt token count, including assistant/memory tokens when present
                 total_tokens = 0
