@@ -1536,7 +1536,16 @@ Text to analyze:
             
             print("[CLOSE] Close event handling completed")
             
-            # DO NOT call sys.exit() from here - let the main function handle it
+            # Use immediate hard exit to prevent lingering background processes (especially for .exe)
+            # This is safer than relying on Python shutdown which waits for non-daemon threads
+            import os
+            import signal
+            try:
+                # Force-kill self
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                pass
+            os._exit(0)
             
         except Exception as e:
             print(f"[CLOSE] Error during close: {e}")
@@ -5523,6 +5532,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if hasattr(self._main_module, 'set_stop_flag'):
                     self._main_module.set_stop_flag(False)
         except:
+            pass
+        # Reset unified_api_client global cancellation (streaming stop) for new runs
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(False)
+            elif hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient.set_global_cancellation(False)
+        except Exception:
             pass
         
         # Update button immediately to show translation is starting
@@ -12006,17 +12024,16 @@ if __name__ == "__main__":
             print(f"[MAIN] Error during Qt cleanup: {e}")
         
         print(f"[MAIN] Main function completed with exit code {exit_code}, calling sys.exit({exit_code})...")
-        # Exit with the code returned by Qt event loop
-        import sys
+        
+        # Force hard exit to prevent lingering background threads
+        import os
+        import signal
         try:
-            sys.exit(exit_code)
-        except SystemExit as e:
-            print(f"[MAIN] SystemExit raised with code: {e.code}")
-            raise  # Re-raise to actually exit
-        except Exception as e:
-            print(f"[MAIN] Unexpected error during sys.exit: {e}")
-            import os
-            os._exit(exit_code)
+            # Kill current process explicitly
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            pass
+        os._exit(exit_code)
         
     except Exception as e:
         print(f"❌ Failed to start application: {e}")

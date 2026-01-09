@@ -169,6 +169,9 @@ logger = logging.getLogger(__name__)
 # Set up logging
 logger = logging.getLogger(__name__)
 
+# Global stop indicator used by GUI to interrupt in-flight requests.
+global_stop_flag = False
+
 # Enable HTTP request logging for debugging
 def setup_http_logging():
     """Enable detailed HTTP request/response logging for debugging"""
@@ -8538,18 +8541,29 @@ class UnifiedClient:
         """
         Check if stop was requested by checking global flag, local cancelled flag, and class-level cancellation
         """
-        # Check class-level global cancellation first
-        if self.is_globally_cancelled():
+        global global_stop_flag
+
+        # Module-level flag set by GUI
+        if global_stop_flag:
+            self._cancelled = True
             return True
-            
-        # Check local cancelled flag (more reliable in threading context)
+
+        # Class-level global cancellation
+        if self.is_globally_cancelled():
+            self._cancelled = True
+            return True
+
+        # Instance-level flag
         if getattr(self, '_cancelled', False):
             return True
-            
+
         try:
             # Import the stop check function from the main translation module
             from TransateKRtoEN import is_stop_requested
-            return is_stop_requested()
+            stopped = is_stop_requested()
+            if stopped:
+                self._cancelled = True
+            return stopped
         except ImportError:
             # Fallback if import fails
             return False
@@ -11260,8 +11274,21 @@ class UnifiedClient:
                         text_parts = []
                         log_buf = []  # Always define to avoid UnboundLocalError
                         finish_reason = 'stop'
+
+                        def _check_cancel_during_stream():
+                            if self._is_stop_requested():
+                                self._cancelled = True
+                                try:
+                                    if hasattr(resp, "close"):
+                                        resp.close()
+                                except Exception:
+                                    pass
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                        _check_cancel_during_stream()
                         
                         for event in resp:
+                            _check_cancel_during_stream()
                             try:
                                 frag_collected = False
                                 # 1) Standard OpenAI stream chunk
@@ -13652,3 +13679,25 @@ class UnifiedClient:
                 )
             else:
                 raise UnifiedClientError(error_msg)
+
+
+# Compatibility stop helpers so GUI buttons can interrupt streaming requests cleanly
+def set_stop_flag(value: bool = True):
+    """
+    Set the module-level stop flag and propagate it to UnifiedClient's global cancellation
+    state. Called by translator_gui stop buttons.
+    """
+    global global_stop_flag
+    global_stop_flag = bool(value)
+    try:
+        UnifiedClient.set_global_cancellation(global_stop_flag)
+    except Exception:
+        pass
+
+
+def is_stop_requested() -> bool:
+    """Expose combined stop state for legacy callers."""
+    try:
+        return global_stop_flag or UnifiedClient.is_globally_cancelled()
+    except Exception:
+        return global_stop_flag
