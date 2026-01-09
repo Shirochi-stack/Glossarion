@@ -390,7 +390,7 @@ class APIKeyPool:
                     key_id = f"Key#{key_index+1} ({key.model})"
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
                     
-                    print(f"Marked key {key_id} with an error code")
+                    logger.debug(f"Marked key {key_id} with an error code")
                     time.sleep(0.5)  # Brief pause to improve retry responsiveness
                     logger.debug("💤 Pausing briefly to improve retry responsiveness after marking key error")
 
@@ -402,7 +402,7 @@ class APIKeyPool:
                 self.keys[key_index].mark_success()
                 
                 key = self.keys[key_index]
-                print(f"Marked key {key_index} ({key.model}) as successful")
+                logger.debug(f"Marked key {key_index} ({key.model}) as successful")
     
     def release_thread_assignment(self, thread_id: int = None):
         """Release key assignment for a thread"""
@@ -422,7 +422,7 @@ class APIKeyPool:
                         if not self._keys_in_use[key_index]:
                             del self._keys_in_use[key_index]
                 
-                print(f"Released key assignment for thread {thread_id}")
+                logger.debug(f"Released key assignment for thread {thread_id}")
 
     def get_all_keys(self) -> List[APIKeyEntry]:
         """Get all keys in the pool"""
