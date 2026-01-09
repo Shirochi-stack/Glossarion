@@ -1978,17 +1978,20 @@ class ImageTranslator:
                     print(f"   📊 Chunk compression: {actual_original_size:.1f}KB → {compressed_size:.1f}KB ({compression_ratio:.1f}% reduction)")
             
             # Get custom image chunk prompt template from environment
-            image_chunk_prompt_template = os.getenv("IMAGE_CHUNK_PROMPT", "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned. {context}")
+            image_chunk_prompt_template = os.getenv(
+                "IMAGE_CHUNK_PROMPT",
+                "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
+            )
             
-            # Build context for this chunk
-            chunk_context = image_chunk_prompt_template.format(
+            # Build assistant prompt for this chunk
+            chunk_prompt = image_chunk_prompt_template.format(
                 chunk_idx=i+1,
                 total_chunks=num_chunks,
                 context=context
             )
             
-            # Translate chunk WITH CONTEXT
-            translation = self._call_vision_api(chunk_bytes, chunk_context, check_stop_fn)
+            # Translate chunk WITH CONTEXT; send chunk prompt as assistant message
+            translation = self._call_vision_api(chunk_bytes, chunk_prompt, check_stop_fn)
             
             if translation:
                 # Clean AI artifacts from chunk
@@ -2009,7 +2012,7 @@ class ImageTranslator:
                 # Store context for next chunks
                 if self.contextual_enabled:
                     self.image_chunk_context.append({
-                        "user": chunk_context,
+                        "assistant_prompt": chunk_prompt,
                         "assistant": chunk_text
                     })
                 
@@ -2044,7 +2047,7 @@ class ImageTranslator:
         """Set the current chapter number for progress tracking"""
         self.current_chapter_num = chapter_num
 
-    def _call_vision_api(self, image_data, context, check_stop_fn):
+    def _call_vision_api(self, image_data, assistant_prompt, check_stop_fn):
         """Make the actual API call for vision translation with retry support"""
         # Build messages - NO HARDCODED PROMPT
         messages = [
@@ -2058,17 +2061,16 @@ class ImageTranslator:
                 print(f"   📚 Including ALL {len(self.image_chunk_context)} previous chunks as context")
                 
                 for ctx in self.image_chunk_context:
-                    messages.extend([
-                        {"role": "user", "content": ctx["user"]},
-                        {"role": "assistant", "content": ctx["assistant"]}
-                    ])
+                    if ctx.get("assistant_prompt"):
+                        messages.append({"role": "assistant", "content": ctx["assistant_prompt"]})
+                    messages.append({"role": "assistant", "content": ctx["assistant"]})
         
-        # Add current chunk with mandatory text prompt
-        # API requires non-empty text content when sending images
-        user_content = context if context and context.strip() else "Please translate the text in this image."
+        # Add current chunk prompt as assistant, then minimal user request (required by API)
+        if assistant_prompt and assistant_prompt.strip():
+            messages.append({"role": "assistant", "content": assistant_prompt})
         messages.append({
             "role": "user", 
-            "content": user_content
+            "content": "Please translate the text in this image chunk."
         })
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
