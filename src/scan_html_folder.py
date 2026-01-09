@@ -1383,7 +1383,9 @@ def normalize_chapter_numbers(results):
                 num = _extract_num_from_filename(result.get('filename'))
         # Treat absurdly large numbers as invalid and fall back to filename
         if isinstance(num, int) and num > 1_000_000:
-            num = _extract_num_from_filename(result.get('filename')) or num
+            alt = _extract_num_from_filename(result.get('filename'))
+            if alt is not None:
+                num = alt
         if num is not None:
             result['normalized_chapter_num'] = num
 
@@ -5653,8 +5655,38 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Clear the progress line (like original)
     print()  # New line after progress indicator
     
-    # Sort results by file index to maintain order
-    results.sort(key=lambda x: x['file_index'])
+    # Sort results by derived chapter number (GUI-style), fallback to original order
+    def _extract_num_for_sort(res):
+        num = res.get('normalized_chapter_num')
+        if num is None:
+            # Reuse filename extractor from normalize_chapter_numbers scope
+            try:
+                fname = res.get('filename')
+                base = os.path.basename(fname) if fname else ""
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                while True:
+                    new_base, ext = os.path.splitext(base)
+                    if not ext:
+                        break
+                    base = new_base
+                m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+                if m_dec:
+                    major = int(m_dec.group(1).lstrip("0") or "0")
+                    minor = int(m_dec.group(2))
+                    return float(f"{major}.{minor:02d}")
+                nums = re.findall(r"(\d+)", base)
+                if nums:
+                    return int(nums[-1])
+            except Exception:
+                pass
+        return num
+    
+    results.sort(key=lambda r: (_extract_num_for_sort(r) is None, _extract_num_for_sort(r) or 1e9, r.get('file_index', 0)))
+    
+    # Renumber file_index to match sorted order for report clarity
+    for new_idx, res in enumerate(results):
+        res['file_index'] = new_idx
     
     log("\n✅ Initial scan complete.")
     
