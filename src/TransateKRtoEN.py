@@ -2926,6 +2926,14 @@ class ContentProcessor:
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
 # =====================================================
+STOP_LOGGED = False
+
+def log_stop_once(message="❌ Translation stopped by user request."):
+    """Print a single stop message per run."""
+    global STOP_LOGGED
+    if not STOP_LOGGED:
+        print(message)
+        STOP_LOGGED = True
     
 class TranslationProcessor:
     """Handles the translation of individual chapters"""
@@ -2966,7 +2974,7 @@ class TranslationProcessor:
     def check_stop(self):
         """Check if translation should stop"""
         if self.stop_callback and self.stop_callback():
-            print("❌ Translation stopped by user request.")
+            log_stop_once()
             return True
     
     def check_duplicate_content(self, result, idx, prog, out, actual_num=None):
@@ -6850,7 +6858,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 # =====================================================
 def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection and progress tracking"""
-    
+    global STOP_LOGGED
+    STOP_LOGGED = False
     config = TranslationConfig()
     builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
     
@@ -6895,7 +6904,7 @@ def main(log_callback=None, stop_callback=None):
     
     def check_stop():
         if stop_callback and stop_callback():
-            print("❌ Translation stopped by user request.")
+            log_stop_once()
             return True
         return is_stop_requested()
     
