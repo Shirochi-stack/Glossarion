@@ -4319,6 +4319,13 @@ class BatchTranslationProcessor:
                 if hasattr(self.client, '_current_output_file'):
                     self.client._current_output_file = fname
 
+                # Set thread-local label so downstream logs include chapter/chunk
+                try:
+                    tls = self.client._get_thread_local_client()
+                    tls.current_request_label = f"Chapter {actual_num} (chunk {chunk_idx}/{total_chunks})"
+                except Exception:
+                    pass
+
                 print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
                 chapter_ctx = {
                     'chapter': actual_num,

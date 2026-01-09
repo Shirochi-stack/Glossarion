@@ -1577,6 +1577,7 @@ class UnifiedClient:
             self._thread_local.cohere_client = None
             self._thread_local.client_type = None
             self._thread_local.current_request_label = None
+            self._thread_local.chapter_context = None
             self._thread_local.output_token_limit = None
             
             # THREAD-LOCAL CACHE
@@ -4396,7 +4397,11 @@ class UnifiedClient:
                     or " 400 " in error_str
                     or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown'))
                 ):
-                    print(f"❌ Prohibited content detected: {error_str[:200]}")
+                    try:
+                        label = self._extract_chapter_label(messages)
+                    except Exception:
+                        label = "request"
+                    print(f"❌ Prohibited content detected in {label}: {error_str[:200]}")
                     
                     # PREVENT INFINITE LOOP: Don't attempt fallback if we're already a fallback client
                     if getattr(self, '_is_retry_client', False):
@@ -8567,6 +8572,23 @@ class UnifiedClient:
     def _extract_chapter_label(self, messages) -> str:
         """Extract a concise chapter/chunk label from messages for logging."""
         try:
+            # Prefer thread-local label set by _log_pre_stagger
+            try:
+                tls = self._get_thread_local_client()
+                ctx = getattr(tls, "chapter_context", None)
+                if ctx:
+                    chap = ctx.get("chapter")
+                    chunk = ctx.get("chunk")
+                    total = ctx.get("total_chunks")
+                    if chap is not None and chunk and total:
+                        return f"Chapter {chap} (chunk {chunk}/{total})"
+                    if chap is not None:
+                        return f"Chapter {chap}"
+                if hasattr(tls, "current_request_label") and tls.current_request_label:
+                    return tls.current_request_label
+            except Exception:
+                pass
+
             s = str(messages)
             import re
             chap = None
@@ -8586,6 +8608,24 @@ class UnifiedClient:
         except Exception:
             pass
         return "request"
+
+    def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None):
+        """Store chapter/chunk context on thread-local state for logging."""
+        try:
+            tls = self._get_thread_local_client()
+            tls.chapter_context = {
+                "chapter": chapter,
+                "chunk": chunk,
+                "total_chunks": total_chunks,
+            }
+            # Also set a friendly label for paths that only read current_request_label
+            if chapter is not None:
+                if chunk and total_chunks:
+                    tls.current_request_label = f"Chapter {chapter} (chunk {chunk}/{total_chunks})"
+                else:
+                    tls.current_request_label = f"Chapter {chapter}"
+        except Exception:
+            pass
 
     def _log_pre_stagger(self, messages, context: Optional[str] = None) -> None:
         """Emit a pre-stagger log line so users see what's being sent before delay."""
