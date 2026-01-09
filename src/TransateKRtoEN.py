@@ -4132,13 +4132,13 @@ class BatchTranslationProcessor:
             
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
             
+            # Initialize shared structures for chunk processing (works for 1 or many chunks)
+            translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
+            chunks_lock = threading.Lock()
+            chunk_abort = False
+
             if total_chunks > 1:
                 print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
-            
-                # Process chunks (sequential when batch mode is off)
-                translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
-                chunks_lock = threading.Lock()
-                chunk_abort = False
             
             def process_chunk(chunk_data):
                 """Process a single chunk in parallel"""
