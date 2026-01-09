@@ -4962,8 +4962,11 @@ class UnifiedClient:
                         print(f"{log_prefix} Traceback:\n{tb}")
                         continue
                     
-                    print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
-                    print(f"{log_prefix} Traceback:\n{tb}")
+                    if e.error_type == "cancelled":
+                        print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
+                    else:
+                        print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
+                        print(f"{log_prefix} Traceback:\n{tb}")
                     continue
                     
                 except Exception as e:
