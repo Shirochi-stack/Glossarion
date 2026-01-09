@@ -4682,6 +4682,10 @@ class UnifiedClient:
         
         # THREAD-SAFE RECURSION CHECK: Use thread-local storage
         tls = self._get_thread_local_client()
+
+        # Honor global/instance stop before entering fallback rotation
+        if self._is_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         
         # Check if THIS THREAD is already in a retry (unified check for both text and image)
         retry_flag = 'in_image_retry' if image_data else 'in_retry'
@@ -4766,6 +4770,8 @@ class UnifiedClient:
             # Try each fallback key in the list (all of them, no arbitrary limit)
             max_attempts = len(fallback_keys)
             for idx, fallback_data in enumerate(fallback_keys):
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 label = fallback_data.get('label', 'Fallback')
                 fallback_key = fallback_data.get('api_key')
                 fallback_model = fallback_data.get('model')
@@ -4985,6 +4991,8 @@ class UnifiedClient:
         Try fallback API keys directly when main key fails (single-key mode).
         Used when fallback keys are enabled in single-key mode.
         """
+        if self._is_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         # PER-REQUEST TRACKING: Prevent infinite loops
         tls = self._get_thread_local_client()
         
@@ -5029,6 +5037,8 @@ class UnifiedClient:
             # Try each fallback key (all of them, no arbitrary limit)
             max_attempts = len(configured_fallbacks)
             for idx, fb in enumerate(configured_fallbacks):
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 fallback_key = fb.get('api_key')
                 fallback_model = fb.get('model')
                 fallback_google_creds = fb.get('google_credentials')
