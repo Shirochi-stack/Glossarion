@@ -251,6 +251,10 @@ def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, 
         # Enabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=0 to disable
         if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
             return
+
+        # Abort immediately if a stop/cancel has been requested
+        if getattr(self, "_is_stop_requested", None) and self._is_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         out_dir = out_dir or _payloads_dir()
         try:
             os.makedirs(out_dir, exist_ok=True)
@@ -1889,7 +1893,10 @@ class UnifiedClient:
         """Wait for a key to become available (called outside lock)"""
         thread_name = threading.current_thread().name
         
-        # Check if cancelled first
+        # Check if cancelled or globally stopped first
+        if self._is_stop_requested():
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         if self._cancelled:
             if not self._is_stop_requested():
                 logger.info(f"[Thread-{thread_name}] Operation cancelled, not waiting for key")
@@ -1921,6 +1928,10 @@ class UnifiedClient:
         # Wait with cancellation check
         wait_start = time.time()
         while time.time() - wait_start < wait_time:
+            if self._is_stop_requested():
+                self._cancelled = True
+                print(f"[Thread-{thread_name}] Wait cancelled by user")
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             if self._cancelled:
                 print(f"[Thread-{thread_name}] Wait cancelled by user")
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -1993,6 +2004,11 @@ class UnifiedClient:
         """Handle rate limit by marking current thread's key and getting a new one (thread-safe)"""
         if not self._multi_key_mode:  # Check INSTANCE variable
             return
+        
+        # Honor global/instance stop immediately
+        if self._is_stop_requested():
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
@@ -3249,6 +3265,10 @@ class UnifiedClient:
                 attempt = 0
                 
                 while True:  # Indefinite retry loop when enabled
+                    # Abort immediately if stop was requested
+                    if self._is_stop_requested():
+                        self._cancelled = True
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     try:
                         if image_data is None:
                             return self._send_internal(messages, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
@@ -3260,6 +3280,10 @@ class UnifiedClient:
                         
                         # Handle rate limit errors with key rotation
                         if e.error_type == "rate_limit" or self._is_rate_limit_error(e):
+                            # If stop requested after the error, abort before rotation
+                            if self._is_stop_requested():
+                                self._cancelled = True
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             attempt += 1
                             
                             if indefinite_retry_enabled:
@@ -4317,6 +4341,11 @@ class UnifiedClient:
                 
                 print(f"UnifiedClient error: {e}")
                 
+                # Abort all further handling if stop was requested during error processing
+                if self._is_stop_requested():
+                    self._cancelled = True
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
                 # Check if it's a rate limit error - handle according to mode
                 error_str = str(e).lower()
                 if self._is_rate_limit_error(e):
@@ -4528,6 +4557,9 @@ class UnifiedClient:
                 
                 # Check if it's a rate limit error - handle according to mode
                 if self._is_rate_limit_error(e):
+                    if self._is_stop_requested():
+                        self._cancelled = True
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     # In multi-key mode, always re-raise to let _send_core handle key rotation
                     if self._multi_key_mode:
                         print(f"🔄 Unexpected rate limit error - multi-key mode active, re-raising for key rotation")
