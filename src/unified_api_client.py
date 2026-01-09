@@ -11297,6 +11297,10 @@ class UnifiedClient:
                             elif is_402:
                                 # Just log the error, skip full traceback for 402 payment errors
                                 print(f"🛑 [{provider}] SDK error: {sdk_err}")
+                            elif "429" in err_str or "rate limit" in err_str or "quota" in err_str or "resource_exhausted" in err_str.lower() or "resource exhausted" in err_str.lower():
+                                # Rate limit: terse log, no traceback
+                                print(f"🛑 [{provider}] SDK rate limit: {sdk_err}")
+                                raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
                             else:
                                 # Full traceback for other errors
                                 import traceback
