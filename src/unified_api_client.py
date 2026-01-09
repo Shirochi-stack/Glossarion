@@ -4952,7 +4952,8 @@ class UnifiedClient:
                         print(f"{log_prefix} ❌ Transient server error {http_status}: {str(e)[:200]}")
                         continue
                     tb = traceback.format_exc()
-                    if e.error_type == "cancelled":
+                    error_str_lower = str(e).lower()
+                    if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:
                         print(f"{log_prefix} Operation was cancelled during retry")
                         return None
                     
@@ -4962,11 +4963,11 @@ class UnifiedClient:
                         print(f"{log_prefix} Traceback:\n{tb}")
                         continue
                     
-                    if e.error_type == "cancelled":
+                    if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:
                         print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
                     else:
                         print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
-                        print(f"{log_prefix} Traceback:\n{tb}")
+                        print(f"{log_prefix} Traceback:\\n{tb}")
                     continue
                     
                 except Exception as e:
