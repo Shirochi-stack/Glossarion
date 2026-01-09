@@ -1983,11 +1983,11 @@ class ImageTranslator:
                 "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
             )
             
-            # Build assistant prompt for this chunk
+            # Build assistant prompt for this chunk (text only)
             chunk_prompt = image_chunk_prompt_template.format(
                 chunk_idx=i+1,
                 total_chunks=num_chunks,
-                context=context
+                context=""
             )
             
             # Translate chunk WITH CONTEXT; send chunk prompt as assistant message
@@ -2065,12 +2065,12 @@ class ImageTranslator:
                         messages.append({"role": "assistant", "content": ctx["assistant_prompt"]})
                     messages.append({"role": "assistant", "content": ctx["assistant"]})
         
-        # Add current chunk prompt as assistant, then minimal user request (required by API)
+        # Add current chunk prompt as assistant; user message only carries the image payload (no extra text)
         if assistant_prompt and assistant_prompt.strip():
             messages.append({"role": "assistant", "content": assistant_prompt})
         messages.append({
-            "role": "user", 
-            "content": "Please translate the text in this image chunk."
+            "role": "user",
+            "content": ""
         })
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
