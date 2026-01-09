@@ -3635,6 +3635,45 @@ def update_progress_file(folder_path, results, log):
             return f"{n_int:03d}"
         except Exception:
             return str(num)
+    def _extract_num_from_filename(fname: str):
+        """Best-effort chapter number from filename (mirrors GUI behavior)."""
+        if not fname:
+            return None
+        base = os.path.basename(fname)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        # Strip all extensions, including double ones
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = new_base
+        # Decimal form like 003_02 -> 3.02
+        m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+        if m_dec:
+            major = int(m_dec.group(1).lstrip("0") or "0")
+            minor = int(m_dec.group(2))
+            return float(f"{major}.{minor:02d}")
+        # Last numeric run
+        nums = re.findall(r"(\d+)", base)
+        if nums:
+            return int(nums[-1])
+        # Special/no-digit files -> 0 to match GUI special-files convention
+        return 0
+
+    def _choose_log_num(chapter_info, fallback_num=None, filename=None):
+        """Prefer actual/raw numbers; then derive from filename; then fallback."""
+        for key in ("actual_num", "raw_chapter_num", "chapter_num"):
+            num = chapter_info.get(key)
+            if isinstance(num, (int, float)) and num != 0:
+                return num
+        if filename:
+            num = _extract_num_from_filename(filename)
+            if num is not None:
+                return num
+        if isinstance(fallback_num, (int, float)) and fallback_num != 0:
+            return fallback_num
+        return None
 
     affected_chapters_for_log = []
     if updated_nums_for_log is not None:
@@ -3645,12 +3684,11 @@ def update_progress_file(folder_path, results, log):
             if chapter_num is not None:
                 affected_chapters_for_log.append(chapter_num)
             else:
-                fallback_num = faulty_row.get("file_index", 0) + 1
-                if faulty_row.get("filename"):
-                    match = re.search(r'response_(\\d+)', faulty_row["filename"])
-                    if match:
-                        fallback_num = int(match.group(1))
-                affected_chapters_for_log.append(fallback_num)
+                fname = faulty_row.get("filename")
+                derived = _extract_num_from_filename(fname) if fname else None
+                if derived is None:
+                    derived = faulty_row.get("file_index", 0) + 1
+                affected_chapters_for_log.append(derived)
 
     if affected_chapters_for_log:
         log(f"📝 Chapters marked for re-translation: {', '.join(_fmt_ch(c) for c in sorted(set(affected_chapters_for_log)))}")
@@ -3669,6 +3707,26 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     """Update new format progress file with content hash support.
     Returns (faulty_nums, resolved_nums) for cleaner logging."""
     log("[INFO] Detected new progress format")
+    def _extract_num_from_filename(fname: str):
+        if not fname:
+            return None
+        base = os.path.basename(fname)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = new_base
+        m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+        if m_dec:
+            major = int(m_dec.group(1).lstrip("0") or "0")
+            minor = int(m_dec.group(2))
+            return float(f"{major}.{minor:02d}")
+        nums = re.findall(r"(\d+)", base)
+        if nums:
+            return int(nums[-1])
+        return 0
     
     # Build multiple mappings to find chapters
     output_file_to_chapter_key = {}
@@ -3798,15 +3856,18 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     updated_count = 0
     updated_nums_for_log = []
 
-    def _choose_log_num(chapter_info, fallback_num=None):
-        # Prefer actual_num if valid, then raw_chapter_num, then provided fallback
-        num = chapter_info.get("actual_num")
-        if isinstance(num, (int, float)) and num != 0:
-            return num
-        num = chapter_info.get("raw_chapter_num")
-        if isinstance(num, (int, float)) and num != 0:
-            return num
-        return fallback_num
+    def _choose_log_num(chapter_info, fallback_num=None, filename=None):
+        for key in ("actual_num", "raw_chapter_num", "chapter_num"):
+            num = chapter_info.get(key)
+            if isinstance(num, (int, float)) and num != 0:
+                return num
+        if filename:
+            num = _extract_num_from_filename(filename)
+            if num is not None:
+                return num
+        if isinstance(fallback_num, (int, float)) and fallback_num != 0:
+            return fallback_num
+        return None
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
         chapter_key, is_merged_child, file_chapter_num = find_chapter_key(faulty_filename)
@@ -3841,7 +3902,11 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             updated_count += 1
             
             # Use chapter_num from faulty_row if available, otherwise fall back to actual_num
-            chapter_num = _choose_log_num(chapter_info, faulty_row.get("chapter_num") or faulty_row.get("file_index", 0) + 1)
+            chapter_num = _choose_log_num(
+                chapter_info,
+                faulty_row.get("chapter_num") or faulty_row.get("file_index", 0) + 1,
+                faulty_filename,
+            )
             log(f"   └─ Marked chapter {chapter_num} as qa_failed (was: {old_status})")
             updated_nums_for_log.append(chapter_num)
             
@@ -3925,7 +3990,11 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             # Keep content_hash/output_file untouched
 
             resolved_count += 1
-            chapter_num = _choose_log_num(chapter_info, resolved_row.get("chapter_num") or file_chapter_num)
+            chapter_num = _choose_log_num(
+                chapter_info,
+                resolved_row.get("chapter_num") or file_chapter_num,
+                filename,
+            )
             log(f"   ✅ Marked chapter {chapter_num} as completed (QA issues resolved, was: {old_status})")
             resolved_nums_for_log.append(chapter_num)
 
