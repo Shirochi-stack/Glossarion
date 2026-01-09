@@ -2068,10 +2068,8 @@ class ImageTranslator:
         # Add current chunk prompt as assistant; user message only carries the image payload (no extra text)
         if assistant_prompt and assistant_prompt.strip():
             messages.append({"role": "assistant", "content": assistant_prompt})
-        messages.append({
-            "role": "user",
-            "content": ""
-        })
+        # User message carries only the image payload; no empty text part
+        messages.append({"role": "user"})
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
             image_idx = getattr(self, 'current_image_index', 0)
