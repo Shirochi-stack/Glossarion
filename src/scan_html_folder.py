@@ -445,6 +445,26 @@ def _get_cache_key(text, max_length=10000):
     if len(text) > max_length:
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
     return text
+
+def _count_words_normalized(text: str) -> int:
+    """
+    Normalize text before counting words:
+      - Remove HTML entities (e.g., &nbsp;, &#123;) as whitespace
+      - Decode remaining entities
+      - Collapse whitespace
+      - Count unicode word tokens (letters/numbers/apostrophes)
+    """
+    if not isinstance(text, str):
+        return 0
+    # First strip entities completely to avoid counting them
+    text = re.sub(r'&[A-Za-z0-9#]+;', ' ', text)
+    # Decode any remaining entities defensively
+    text = html_lib.unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text:
+        return 0
+    tokens = re.findall(r"[0-9A-Za-z\u00C0-\uFFFF']+", text)
+    return len(tokens)
     
 def extract_text_from_html(file_path):
     """Extract text from HTML or TXT file
@@ -4048,7 +4068,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         if has_cjk:
                             word_count = count_cjk_words(text)
                         else:
-                            word_count = len(text.split())
+                            word_count = _count_words_normalized(text)
                         
                         # Store using spine index as the authoritative chapter number
                         word_counts[spine_index] = {
@@ -4088,7 +4108,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             continue
                         
                         # Check if text contains CJK characters
-                        has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
+                        has_cjk = any('\\u4e00' <= char <= '\\u9fff' or  # Chinese
                                       '\u3040' <= char <= '\u309f' or  # Hiragana
                                       '\u30a0' <= char <= '\u30ff' or  # Katakana
                                       '\uac00' <= char <= '\ud7af'     # Korean
@@ -4097,7 +4117,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         if has_cjk:
                             word_count = count_cjk_words(text)
                         else:
-                            word_count = len(text.split())
+                            word_count = _count_words_normalized(text)
                         
                         word_counts[idx] = {
                             'word_count': word_count,
@@ -4373,7 +4393,34 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                     log(f"      Base: {original_wc_base}, Combined: {original_wc}")
             
             # Count words in translated text
-            translated_wc = len(translated_text.split())
+            translated_wc = _count_words_normalized(translated_text)
+            
+            # If both sides are effectively empty, treat as reasonable and skip mismatch
+            if original_wc < 5 and translated_wc < 2:
+                ratio = translated_wc / max(1, original_wc)
+                multiplier = _get_wc_multiplier(
+                    qa_settings or {},
+                    source_lang_hint=qa_settings.get('source_language') if qa_settings else None,
+                    script_hint=(original_counts.get(spine_idx) or {}).get('script'),
+                    is_cjk=is_cjk,
+                    log_fn=log
+                )
+                ratio_norm = ratio / max(0.01, multiplier)
+                return {
+                    'found_match': True,
+                    'chapter_num': spine_idx,
+                    'original_wc': original_wc,
+                    'translated_wc': translated_wc,
+                    'ratio': ratio,
+                    'normalized_ratio': ratio_norm,
+                    'multiplier': multiplier,
+                    'percentage': ratio * 100,
+                    'is_reasonable': True,
+                    'is_typical': True,
+                    'original_file': count_info['filename'],
+                    'warning': 'empty_chapter',
+                    'warning_desc': 'Chapter is essentially empty; word count check skipped'
+                }
             
             # Calculate ratio (raw) then normalize by expected multiplier
             ratio = translated_wc / max(1, original_wc)
@@ -4401,6 +4448,11 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 max_ratio = 1.5
                 typical_min = 0.8
                 typical_max = 1.2
+            
+            # Relax bounds for very short originals to avoid flagging wrappers/covers
+            if original_wc < 20:
+                min_ratio = 0.0
+                typical_min = 0.0
             
             is_reasonable = min_ratio <= ratio_norm <= max_ratio
             is_typical = typical_min <= ratio_norm <= typical_max
@@ -4829,7 +4881,7 @@ def process_html_file_batch(args):
                 # Try to find matching original chunk (exact match first)
                 if clean_filename in original_word_counts:
                     # Found matching chunk!
-                    translated_wc = len(raw_text.split())
+                    translated_wc = _count_words_normalized(raw_text)
                     original_wc = original_word_counts[clean_filename]
                 else:
                     # Try matching with different extension (e.g., chunk_1.html vs chunk_1.txt)
@@ -4841,7 +4893,7 @@ def process_html_file_batch(args):
                             break
                     
                     if matched_key:
-                        translated_wc = len(raw_text.split())
+                        translated_wc = _count_words_normalized(raw_text)
                         original_wc = original_word_counts[matched_key]
                         clean_filename = matched_key  # Update for display
                     else:
@@ -4850,38 +4902,56 @@ def process_html_file_batch(args):
                         original_wc = None
                 
                 if original_wc is not None:
-                        ratio = translated_wc / original_wc
-                        multiplier = _get_wc_multiplier(
-                            qa_settings,
-                            source_lang_hint=qa_settings.get('source_language'),
-                            script_hint=None,
-                            is_cjk=is_cjk,
-                            log_fn=dummy_log
-                        )
-                        ratio_norm = ratio / max(0.01, multiplier)
-                        # For text files, use same reasonable bounds as EPUB
-                        is_reasonable = 0.7 <= ratio_norm <= 2.0
-                        is_typical = 0.8 <= ratio_norm <= 1.5
-                        
-                        word_count_check = {
-                            'found_match': True,
-                            'chapter_num': clean_filename,
-                            'original_wc': original_wc,
-                            'translated_wc': translated_wc,
-                            'ratio': ratio,
-                            'normalized_ratio': ratio_norm,
-                            'multiplier': multiplier,
-                            'percentage': ratio * 100,
-                            'is_reasonable': is_reasonable,
-                            'is_typical': is_typical,
-                            'original_file': clean_filename
-                        }
-                        
-                        # Only mark as issue if ratio is unreasonable
-                        if not is_reasonable:
-                            issues.append(
-                                f"word_count_mismatch: translated={ratio:.2f}x source (expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f})"
+                        # If both sides are basically empty, skip mismatch
+                        if original_wc < 5 and translated_wc < 2:
+                            word_count_check = {
+                                'found_match': True,
+                                'chapter_num': clean_filename,
+                                'original_wc': original_wc,
+                                'translated_wc': translated_wc,
+                                'ratio': 0 if original_wc == 0 else translated_wc / original_wc,
+                                'normalized_ratio': 0.0,
+                                'multiplier': 1.0,
+                                'percentage': 0.0,
+                                'is_reasonable': True,
+                                'is_typical': True,
+                                'original_file': clean_filename,
+                                'warning': 'empty_chapter',
+                                'warning_desc': 'Chapter is essentially empty; word count check skipped'
+                            }
+                        else:
+                            ratio = translated_wc / original_wc
+                            multiplier = _get_wc_multiplier(
+                                qa_settings,
+                                source_lang_hint=qa_settings.get('source_language'),
+                                script_hint=None,
+                                is_cjk=is_cjk,
+                                log_fn=dummy_log
                             )
+                            ratio_norm = ratio / max(0.01, multiplier)
+                            # For text files, use same reasonable bounds as EPUB
+                            is_reasonable = 0.7 <= ratio_norm <= 2.0
+                            is_typical = 0.8 <= ratio_norm <= 1.5
+                            
+                            word_count_check = {
+                                'found_match': True,
+                                'chapter_num': clean_filename,
+                                'original_wc': original_wc,
+                                'translated_wc': translated_wc,
+                                'ratio': ratio,
+                                'normalized_ratio': ratio_norm,
+                                'multiplier': multiplier,
+                                'percentage': ratio * 100,
+                                'is_reasonable': is_reasonable,
+                                'is_typical': is_typical,
+                                'original_file': clean_filename
+                            }
+                            
+                            # Only mark as issue if ratio is unreasonable
+                            if not is_reasonable:
+                                issues.append(
+                                    f"word_count_mismatch: translated={ratio:.2f}x source (expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f})"
+                                )
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
                     pass
@@ -4898,8 +4968,8 @@ def process_html_file_batch(args):
                 
                 if wc_result['found_match']:
                     word_count_check = wc_result
-                    # Only mark as issue if ratio is unreasonable (outside safe bounds)
-                    if not wc_result['is_reasonable']:
+                    # Only mark as issue if ratio is unreasonable (outside safe bounds) and not an empty-chapter skip
+                    if not wc_result.get('warning') == 'empty_chapter' and not wc_result['is_reasonable']:
                         issues.append(
                             f"word_count_mismatch: translated={wc_result['ratio']:.2f}x source (expected≈{wc_result.get('multiplier', 1.0):.2f}x, normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f})"
                         )
