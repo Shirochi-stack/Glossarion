@@ -463,8 +463,28 @@ def _count_words_normalized(text: str) -> int:
     text = re.sub(r'\s+', ' ', text).strip()
     if not text:
         return 0
-    tokens = re.findall(r"[0-9A-Za-z\u00C0-\uFFFF']+", text)
+    tokens = TOKEN_RE.findall(text)
     return len(tokens)
+
+# Precompiled token regex and simple cache for word counts
+TOKEN_RE = re.compile(r"[0-9A-Za-z\u00C0-\uFFFF']+")
+_wordcount_cache = {}
+
+def _count_words_cached(text: str) -> int:
+    """
+    Cached wrapper around _count_words_normalized.
+    Caches by hash of first 50KB of text to avoid repeated recomputation.
+    """
+    if not isinstance(text, str):
+        return 0
+    sample = text[:50000]
+    key = hashlib.sha256(sample.encode('utf-8', errors='ignore')).hexdigest()
+    cached = _wordcount_cache.get(key)
+    if cached is not None:
+        return cached
+    wc = _count_words_normalized(text)
+    _wordcount_cache[key] = wc
+    return wc
     
 def extract_text_from_html(file_path):
     """Extract text from HTML or TXT file
@@ -4068,7 +4088,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         if has_cjk:
                             word_count = count_cjk_words(text)
                         else:
-                            word_count = _count_words_normalized(text)
+                            word_count = _count_words_cached(text)
                         
                         # Store using spine index as the authoritative chapter number
                         word_counts[spine_index] = {
@@ -4393,7 +4413,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                     log(f"      Base: {original_wc_base}, Combined: {original_wc}")
             
             # Count words in translated text
-            translated_wc = _count_words_normalized(translated_text)
+            translated_wc = _count_words_cached(translated_text)
             
             # If both sides are effectively empty, treat as reasonable and skip mismatch
             if original_wc < 5 and translated_wc < 2:
@@ -4881,7 +4901,7 @@ def process_html_file_batch(args):
                 # Try to find matching original chunk (exact match first)
                 if clean_filename in original_word_counts:
                     # Found matching chunk!
-                    translated_wc = _count_words_normalized(raw_text)
+                    translated_wc = _count_words_cached(raw_text)
                     original_wc = original_word_counts[clean_filename]
                 else:
                     # Try matching with different extension (e.g., chunk_1.html vs chunk_1.txt)
@@ -4893,7 +4913,7 @@ def process_html_file_batch(args):
                             break
                     
                     if matched_key:
-                        translated_wc = _count_words_normalized(raw_text)
+                        translated_wc = _count_words_cached(raw_text)
                         original_wc = original_word_counts[matched_key]
                         clean_filename = matched_key  # Update for display
                     else:
