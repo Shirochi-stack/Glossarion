@@ -55,13 +55,13 @@ def _normalize_target_language(display_text):
         "ja": "japanese",
         "korean": "korean",
         "ko": "korean",
-        # Chinese variants → single canonical "chinese"
+        # Chinese variants (keep distinct)
         "chinese": "chinese",
-        "chinese (simplified)": "chinese",
-        "chinese (traditional)": "chinese",
+        "chinese (simplified)": "chinese (simplified)",
+        "chinese (traditional)": "chinese (traditional)",
         "zh": "chinese",
-        "zh-cn": "chinese",
-        "zh-tw": "chinese",
+        "zh-cn": "chinese (simplified)",
+        "zh-tw": "chinese (traditional)",
         # RTL / other scripts
         "arabic": "arabic",
         "ar": "arabic",
@@ -77,6 +77,26 @@ def _normalize_target_language(display_text):
     # Fallback: use the first word (e.g. "english (us)" → "english")
     first = s.split()[0]
     return mapping.get(first, first)
+
+
+def _normalize_source_language(display_text):
+    """
+    Normalize source language without collapsing Chinese variants.
+    Returns lowercase labels that align with word_count_multipliers keys.
+    """
+    if not display_text:
+        return 'auto'
+    s = display_text.strip().lower()
+    if s == 'auto':
+        return 'auto'
+    # Keep distinct variants for Chinese
+    if 'chinese' in s:
+        if 'traditional' in s:
+            return 'chinese (traditional)'
+        if 'simplified' in s:
+            return 'chinese (simplified)'
+        return 'chinese'
+    return s
 
 
 
@@ -2016,7 +2036,7 @@ class QAScannerMixin:
         source_lang_layout.addWidget(source_lang_label)
 
         source_language_options = [
-            'Auto', 'Chinese (Simplified)', 'Chinese (Traditional)', 'Chinese',
+            'Auto', 'Chinese (Simplified)', 'Chinese (Traditional)',
             'Japanese', 'Korean', 'English', 'Spanish', 'French', 'German',
             'Italian', 'Portuguese', 'Russian', 'Arabic', 'Hindi', 'Turkish',
             'Hebrew', 'Thai', 'Other'
@@ -2025,7 +2045,7 @@ class QAScannerMixin:
         source_lang_combo.setEditable(True)
         source_lang_combo.addItems(source_language_options)
         source_lang_combo.setCurrentText(qa_settings.get('source_language', 'Auto').title())
-        source_lang_combo.setMinimumWidth(170)
+        source_lang_combo.setMinimumWidth(240)
         disable_wheel_event(source_lang_combo)
         source_lang_layout.addWidget(source_lang_combo)
 
@@ -2052,13 +2072,16 @@ class QAScannerMixin:
             'English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese',
             'Russian', 'Arabic', 'Hindi', 'Chinese (Simplified)',
             'Chinese (Traditional)', 'Japanese', 'Korean', 'Turkish',
-            'Chinese', 'Hebrew', 'Thai'
+            'Hebrew', 'Thai'
         ]
 
         target_language_combo = QComboBox()
         target_language_combo.setEditable(True)
         target_language_combo.addItems(target_language_options)
 
+        target_language_combo.setMinimumWidth(360)
+        target_language_combo.setMinimumContentsLength(24)  # ensure popup and line edit stay wide
+        target_language_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # Prefer the main GUI's target language for display if available
         initial_display = self.config.get('output_language') or display_language
         target_language_combo.setCurrentText(initial_display)
@@ -2859,7 +2882,7 @@ class QAScannerMixin:
                 core_settings_to_save = {
                     'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
                     'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
-                    'source_language': (source_lang_combo, lambda x: _normalize_target_language(x.currentText()) if x.currentText().strip().lower() != 'auto' else 'auto'),
+                    'source_language': (source_lang_combo, lambda x: _normalize_source_language(x.currentText())),
                     'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
                     'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
