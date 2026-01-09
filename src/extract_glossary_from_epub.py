@@ -86,7 +86,6 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
     if use_fallback_keys:
         # If enabled, ensure the instance knows it
         client.use_fallback_keys = True
-        client._multi_key_mode = True # Fallback keys imply multi-key logic might be needed
     else:
         # If disabled, force disable on the client
         client.use_fallback_keys = False
