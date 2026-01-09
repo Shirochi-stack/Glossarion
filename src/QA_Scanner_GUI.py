@@ -228,37 +228,13 @@ class QAScannerMixin:
     def open_latest_qa_report(self):
         """Open the most recently found QA report (validation_results.html)."""
         try:
-            candidates = []
-            if getattr(self, 'last_qa_report_path', None) and os.path.exists(self.last_qa_report_path):
-                candidates.append(self.last_qa_report_path)
-
-            candidate_dirs = set()
-            try:
-                candidate_dirs.add(os.getcwd())
-                candidate_dirs.add(os.path.dirname(os.path.abspath(__file__)))
-            except Exception:
-                pass
-
-            if hasattr(self, 'selected_files') and self.selected_files:
-                for f in self.selected_files:
-                    try:
-                        candidate_dirs.add(os.path.dirname(os.path.abspath(f)))
-                    except Exception:
-                        continue
-
-            for d in candidate_dirs:
-                report_path = os.path.join(d, "validation_results.html")
-                if os.path.exists(report_path):
-                    candidates.append(report_path)
-
-            if not candidates:
-                QMessageBox.information(self, "QA Report", "No QA report found. Run a QA scan first.")
+            path = getattr(self, 'last_qa_report_path', None)
+            if not path or not os.path.exists(path):
+                QMessageBox.information(self, "QA Report", "QA report does not exist. Run a QA scan first.")
                 return
-
-            latest = max(candidates, key=lambda p: os.path.getmtime(p))
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(latest)))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
             if hasattr(self, 'append_log'):
-                self.append_log(f"📄 Opened QA report: {os.path.basename(latest)}")
+                self.append_log(f"📄 Opened QA report: {os.path.basename(path)}")
         except Exception as e:
             try:
                 if hasattr(self, 'append_log'):
