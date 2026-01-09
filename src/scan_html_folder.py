@@ -1351,11 +1351,41 @@ def extract_chapter_info(filename, text):
 
 def normalize_chapter_numbers(results):
     """Normalize chapter numbers to handle different formats"""
+    def _extract_num_from_filename(name: str):
+        if not name:
+            return None
+        base = os.path.basename(name)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = new_base
+        m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+        if m_dec:
+            major = int(m_dec.group(1).lstrip("0") or "0")
+            minor = int(m_dec.group(2))
+            return float(f"{major}.{minor:02d}")
+        nums = re.findall(r"(\d+)", base)
+        if nums:
+            return int(nums[-1])
+        return None
+
     for result in results:
-        # If we have a chapter number, ensure it's normalized
-        if result.get('chapter_num') is not None:
-            # This helps match chapter 2 with 002, etc.
-            result['normalized_chapter_num'] = int(result['chapter_num'])
+        num = result.get('chapter_num')
+        if num is None:
+            num = _extract_num_from_filename(result.get('filename'))
+        else:
+            try:
+                num = int(num)
+            except Exception:
+                num = _extract_num_from_filename(result.get('filename'))
+        # Treat absurdly large numbers as invalid and fall back to filename
+        if isinstance(num, int) and num > 1_000_000:
+            num = _extract_num_from_filename(result.get('filename')) or num
+        if num is not None:
+            result['normalized_chapter_num'] = num
 
 def fuzzy_match_chapter_numbers(text1, text2, num1, num2):
     """Check if chapter numbers might be the same despite OCR errors"""
@@ -3631,8 +3661,7 @@ def update_progress_file(folder_path, results, log):
         try:
             if isinstance(num, float) and not num.is_integer():
                 return f"{num:.2f}"
-            n_int = int(num)
-            return f"{n_int:03d}"
+            return str(int(num))
         except Exception:
             return str(num)
     def _extract_num_from_filename(fname: str):
