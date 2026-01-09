@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButt
                                QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
                                QRadioButton, QButtonGroup, QGroupBox, QComboBox,
                                QFileDialog, QMessageBox, QSizePolicy)
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject
-from PySide6.QtGui import QFont, QPixmap, QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QUrl
+from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices
 import threading
 import traceback
 
@@ -224,6 +224,48 @@ class QAScannerMixin:
             }
         """)
         return radio
+
+    def open_latest_qa_report(self):
+        """Open the most recently found QA report (validation_results.html)."""
+        try:
+            candidates = []
+            if getattr(self, 'last_qa_report_path', None) and os.path.exists(self.last_qa_report_path):
+                candidates.append(self.last_qa_report_path)
+
+            candidate_dirs = set()
+            try:
+                candidate_dirs.add(os.getcwd())
+                candidate_dirs.add(os.path.dirname(os.path.abspath(__file__)))
+            except Exception:
+                pass
+
+            if hasattr(self, 'selected_files') and self.selected_files:
+                for f in self.selected_files:
+                    try:
+                        candidate_dirs.add(os.path.dirname(os.path.abspath(f)))
+                    except Exception:
+                        continue
+
+            for d in candidate_dirs:
+                report_path = os.path.join(d, "validation_results.html")
+                if os.path.exists(report_path):
+                    candidates.append(report_path)
+
+            if not candidates:
+                QMessageBox.information(self, "QA Report", "No QA report found. Run a QA scan first.")
+                return
+
+            latest = max(candidates, key=lambda p: os.path.getmtime(p))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(latest)))
+            if hasattr(self, 'append_log'):
+                self.append_log(f"📄 Opened QA report: {os.path.basename(latest)}")
+        except Exception as e:
+            try:
+                if hasattr(self, 'append_log'):
+                    self.append_log(f"❌ Failed to open QA report: {e}")
+            except Exception:
+                pass
+            QMessageBox.warning(self, "QA Report", f"Failed to open QA report:\n{e}")
     
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
@@ -669,9 +711,30 @@ class QAScannerMixin:
             content_layout.addWidget(separator)
             content_layout.addSpacing(10)
             
-            # Add settings button layout
+            # Add settings/button layout
             button_layout = QHBoxLayout()
             button_layout.addStretch()
+
+            # Open QA report button (left of auto-search toggle)
+            open_report_btn = QPushButton("📁 Open QA Report")
+            open_report_btn.setMinimumWidth(130)
+            open_report_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #17a2b8;
+                    color: white;
+                    border: 1px solid #17a2b8;
+                    padding: 8px 10px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #138496;
+                    border-color: #117a8b;
+                }
+            """)
+            open_report_btn.clicked.connect(lambda: self.open_latest_qa_report())
+            button_layout.addWidget(open_report_btn)
+            button_layout.addSpacing(10)
             
             def show_qa_settings():
                 """Show QA Scanner settings dialog"""
@@ -1823,6 +1886,10 @@ class QAScannerMixin:
                         )
                         
                         successful_scans += 1
+                        # Record last generated report path for quick access
+                        report_path = os.path.join(current_folder, "validation_results.html")
+                        if os.path.exists(report_path):
+                            self.last_qa_report_path = report_path
                         if len(folders_to_scan) > 1:
                             self.append_log(f"✅ Folder '{folder_name}' scan completed successfully")
                     
