@@ -4139,22 +4139,45 @@ class UnifiedClient:
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
                     is_likely_safety_filter = self._detect_safety_filter(messages, extracted_content, finish_reason, response, getattr(self, 'client_type', 'unknown'))
-                    # Treat explicit content filters as safety regardless of detection heuristics
-                    if _is_content_blocked(finish_reason):
-                        is_likely_safety_filter = True
-
+                    
+                    # Try fallback keys for safety filter detection
                     if is_likely_safety_filter:
-                        # Force a prohibited_content error to trigger fallback logic rather than silently finalizing empty
-                        raise UnifiedClientError(
-                            "Content blocked by provider",
-                            error_type="prohibited_content",
-                            http_status=400,
-                            details={"finish_reason": finish_reason or "content_filter"}
-                        )
-
-                    # Finalize empty handling (non-safety empty)
+                        # PREVENT INFINITE LOOP: Don't attempt fallback if we're already a fallback client
+                        if getattr(self, '_is_retry_client', False):
+                            print(f"[RETRY CLIENT] Already in fallback, not recursing further")
+                            # Just finalize the empty response without trying more fallbacks
+                        elif self._multi_key_mode:
+                            # Multi-key mode: try main key retry
+                            if not main_key_attempted and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None):
+                                main_key_attempted = True
+                                try:
+                                    retry_res = self._retry_with_main_key(messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data)
+                                    if retry_res:
+                                        content, fr = retry_res
+                                        if content and content.strip() and len(content) > 10:
+                                            return content, fr
+                                except Exception:
+                                    pass
+                        else:
+                            # Single-key mode: try fallback keys if enabled
+                            use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                            if use_fallback_keys:
+                                print(f"[FALLBACK DIRECT] Safety filter detected in empty response - trying fallback keys")
+                                try:
+                                    retry_res = self._try_fallback_keys_direct(
+                                        messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                                    )
+                                    if retry_res:
+                                        res_content, res_fr = retry_res
+                                        if res_content and res_content.strip():
+                                            print(f"✅ Fallback key succeeded for safety filter")
+                                            return res_content, res_fr
+                                except Exception as e:
+                                    print(f"❌ Fallback key retry failed: {e}")
+                    
+                    # Finalize empty handling
                     req_type = 'image' if image_data else 'text'
-                    # Attach usage info for transparency even on empty results
+                    # Attach usage info for transparency even on empty/safety-filtered results
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
                                 
@@ -4356,15 +4379,6 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                        # If still blocked, rotate to a different pool key and retry this attempt
-                        if attempt < internal_retries - 1:
-                            try:
-                                print("🔄 Prohibited content - rotating key and retrying (multi-key mode)")
-                                self._handle_rate_limit_for_thread()
-                                time.sleep(0.1)
-                                continue
-                            except Exception as rotation_error:
-                                print(f"⚠️ Key rotation after prohibited content failed: {rotation_error}")
                     else:
                         # Single-key mode: Check if fallback keys are enabled
                         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
