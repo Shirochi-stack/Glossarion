@@ -4127,11 +4127,10 @@ class BatchTranslationProcessor:
             if total_chunks > 1:
                 print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
             
-            # Process chunks in parallel (batch mode doesn't use context between chunks)
-            # threading and ThreadPoolExecutor already imported at top of function
-            
-            translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
-            chunks_lock = threading.Lock()
+                # Process chunks (sequential when batch mode is off)
+                translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
+                chunks_lock = threading.Lock()
+                chunk_abort = False
             
             def process_chunk(chunk_data):
                 """Process a single chunk in parallel"""
@@ -4432,6 +4431,10 @@ class BatchTranslationProcessor:
                         chunk_idx = future_to_chunk[future]
                         print(f"❌ Chunk {chunk_idx}/{total_chunks} failed: {e}")
                         raise
+            if chunk_abort:
+                print(f"⚠️ Chapter {actual_num}: aborted due to prohibited content; skipping remaining chunks")
+                return False, actual_num, None, None, None
+
             # Verify all chunks completed
             if None in translated_chunks:
                 missing = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is None]
@@ -9964,6 +9967,18 @@ def main(log_callback=None, stop_callback=None):
                 result, finish_reason, raw_obj = translation_processor.translate_with_retry(
                     msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=merge_group_len
                 )
+
+                # If this chunk was blocked/prohibited, stop remaining chunks and mark QA fail
+                if finish_reason in ("content_filter", "prohibited_content", "error"):
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    progress_manager.update(idx, actual_num, content_hash, fname,
+                                             status="qa_failed",
+                                             qa_issues_found=["PROHIBITED_CONTENT"],
+                                             chapter_obj=c)
+                    progress_manager.save()
+                    print(f"❌ Chunk {chunk_idx}/{total_chunks} hit content filter/prohibited; aborting chapter {actual_num}")
+                    chunk_abort = True
+                    break
                 
                 # Check if result is None or contains failure markers
                 # Only check for failure markers if response is short (< 50 chars)
