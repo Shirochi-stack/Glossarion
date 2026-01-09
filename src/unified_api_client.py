@@ -4121,6 +4121,9 @@ class UnifiedClient:
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
                     is_likely_safety_filter = self._detect_safety_filter(messages, extracted_content, finish_reason, response, getattr(self, 'client_type', 'unknown'))
+                    # Treat explicit content filters as safety regardless of detection heuristics
+                    if finish_reason in ['content_filter', 'prohibited_content']:
+                        is_likely_safety_filter = True
                     
                     # Try fallback keys for safety filter detection
                     if is_likely_safety_filter:
