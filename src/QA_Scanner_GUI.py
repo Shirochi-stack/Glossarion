@@ -228,13 +228,41 @@ class QAScannerMixin:
     def open_latest_qa_report(self):
         """Open the most recently found QA report (validation_results.html)."""
         try:
-            path = getattr(self, 'last_qa_report_path', None)
-            if not path or not os.path.exists(path):
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            newest = None
+            newest_mtime = -1
+
+            search_roots = []
+            if override_dir and os.path.isdir(override_dir):
+                search_roots.append(os.path.normpath(override_dir))
+            else:
+                search_roots.append(os.getcwd())
+
+            for root_dir in search_roots:
+                for root, _, files in os.walk(root_dir):
+                    for fname in files:
+                        if fname.lower() == "validation_results.html":
+                            candidate = os.path.join(root, fname)
+                            try:
+                                mtime = os.path.getmtime(candidate)
+                            except Exception:
+                                mtime = 0
+                            if mtime > newest_mtime:
+                                newest_mtime = mtime
+                                newest = candidate
+
+            # Fallback to cached path only if nothing found in current search
+            if not newest and getattr(self, 'last_qa_report_path', None) and os.path.exists(self.last_qa_report_path):
+                newest = self.last_qa_report_path
+
+            if not newest or not os.path.exists(newest):
                 QMessageBox.information(self, "QA Report", "QA report does not exist. Run a QA scan first.")
                 return
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+
+            self.last_qa_report_path = newest
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(newest)))
             if hasattr(self, 'append_log'):
-                self.append_log(f"📄 Opened QA report: {os.path.basename(path)}")
+                self.append_log(f"📄 Opened QA report: {os.path.basename(newest)}")
         except Exception as e:
             try:
                 if hasattr(self, 'append_log'):
