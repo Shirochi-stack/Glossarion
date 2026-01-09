@@ -3608,8 +3608,10 @@ def update_progress_file(folder_path, results, log):
     # Detect progress format version
     is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
     
+    updated_nums_for_log = None
+    resolved_nums_for_log = None
     if is_new_format:
-        update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path)
+        updated_nums_for_log, resolved_nums_for_log = update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path)
     else:
         update_legacy_format_progress(prog, faulty_chapters, resolved_chapters, log)
     
@@ -3625,35 +3627,47 @@ def update_progress_file(folder_path, results, log):
         raise
     
     # Log affected chapters - use the already extracted chapter numbers
+    def _fmt_ch(num):
+        try:
+            if isinstance(num, float) and not num.is_integer():
+                return f"{num:.2f}"
+            n_int = int(num)
+            return f"{n_int:03d}"
+        except Exception:
+            return str(num)
+
     affected_chapters_for_log = []
-    for faulty_row in faulty_chapters:
-        # Use the chapter_num that was already extracted during scan
-        chapter_num = faulty_row.get("chapter_num")
-        if chapter_num is not None:
-            affected_chapters_for_log.append(chapter_num)
-        else:
-            # Fallback if somehow chapter_num wasn't extracted
-            fallback_num = faulty_row.get("file_index", 0) + 1
-            if faulty_row.get("filename"):
-                match = re.search(r'response_(\d+)', faulty_row["filename"])
-                if match:
-                    fallback_num = int(match.group(1))
-            affected_chapters_for_log.append(fallback_num)
+    if updated_nums_for_log is not None:
+        affected_chapters_for_log = updated_nums_for_log
+    else:
+        for faulty_row in faulty_chapters:
+            chapter_num = faulty_row.get("chapter_num")
+            if chapter_num is not None:
+                affected_chapters_for_log.append(chapter_num)
+            else:
+                fallback_num = faulty_row.get("file_index", 0) + 1
+                if faulty_row.get("filename"):
+                    match = re.search(r'response_(\\d+)', faulty_row["filename"])
+                    if match:
+                        fallback_num = int(match.group(1))
+                affected_chapters_for_log.append(fallback_num)
 
     if affected_chapters_for_log:
-        log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters_for_log))}")
+        log(f"📝 Chapters marked for re-translation: {', '.join(_fmt_ch(c) for c in sorted(set(affected_chapters_for_log)))}")
     
     # Log resolved chapters (those that had qa_failed but now pass)
-    resolved_nums_for_log = []
-    for resolved_row in resolved_chapters:
-        chapter_num = resolved_row.get("chapter_num")
-        if chapter_num is not None:
-            resolved_nums_for_log.append(chapter_num)
+    if resolved_nums_for_log is None:
+        resolved_nums_for_log = []
+        for resolved_row in resolved_chapters:
+            chapter_num = resolved_row.get("chapter_num")
+            if chapter_num is not None:
+                resolved_nums_for_log.append(chapter_num)
     if resolved_nums_for_log:
-        log(f"✅ Chapters cleared of QA issues: {', '.join(str(c) for c in sorted(set(resolved_nums_for_log)))}")
+        log(f"✅ Chapters cleared of QA issues: {', '.join(_fmt_ch(c) for c in sorted(set(resolved_nums_for_log)))}")
 
 def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path):
-    """Update new format progress file with content hash support"""
+    """Update new format progress file with content hash support.
+    Returns (faulty_nums, resolved_nums) for cleaner logging."""
     log("[INFO] Detected new progress format")
     
     # Build multiple mappings to find chapters
@@ -3782,6 +3796,17 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
         return chapter_key, is_merged_child, file_chapter_num
     
     updated_count = 0
+    updated_nums_for_log = []
+
+    def _choose_log_num(chapter_info, fallback_num=None):
+        # Prefer actual_num if valid, then raw_chapter_num, then provided fallback
+        num = chapter_info.get("actual_num")
+        if isinstance(num, (int, float)) and num != 0:
+            return num
+        num = chapter_info.get("raw_chapter_num")
+        if isinstance(num, (int, float)) and num != 0:
+            return num
+        return fallback_num
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
         chapter_key, is_merged_child, file_chapter_num = find_chapter_key(faulty_filename)
@@ -3816,10 +3841,9 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             updated_count += 1
             
             # Use chapter_num from faulty_row if available, otherwise fall back to actual_num
-            chapter_num = faulty_row.get("chapter_num")
-            if chapter_num is None:
-                chapter_num = chapter_info.get('actual_num', faulty_row.get("file_index", 0) + 1)
+            chapter_num = _choose_log_num(chapter_info, faulty_row.get("chapter_num") or faulty_row.get("file_index", 0) + 1)
             log(f"   └─ Marked chapter {chapter_num} as qa_failed (was: {old_status})")
+            updated_nums_for_log.append(chapter_num)
             
             # IMPORTANT: Don't remove from content_hashes or chapter_chunks
             # Just mark as qa_failed so it will be retranslated
@@ -3874,11 +3898,13 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                 }
                 log(f"   └─ Created qa_failed entry for chapter {chapter_num}")
                 updated_count += 1
+                updated_nums_for_log.append(chapter_num)
     
     log(f"🔧 Updated {updated_count} chapters in new format")
 
     # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
     resolved_count = 0
+    resolved_nums_for_log = []
     for resolved_row in resolved_chapters:
         filename = resolved_row["filename"]
         chapter_key, is_merged_child, file_chapter_num = find_chapter_key(filename)
@@ -3899,11 +3925,14 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             # Keep content_hash/output_file untouched
 
             resolved_count += 1
-            chapter_num = resolved_row.get("chapter_num") or chapter_info.get("actual_num", file_chapter_num)
+            chapter_num = _choose_log_num(chapter_info, resolved_row.get("chapter_num") or file_chapter_num)
             log(f"   ✅ Marked chapter {chapter_num} as completed (QA issues resolved, was: {old_status})")
+            resolved_nums_for_log.append(chapter_num)
 
     if resolved_count:
         log(f"🔧 Cleared qa_failed status for {resolved_count} chapter(s)")
+
+    return updated_nums_for_log, resolved_nums_for_log
 
 def update_legacy_format_progress(prog, faulty_chapters, resolved_chapters, log):
     """Update legacy format progress file"""
@@ -4685,6 +4714,8 @@ def process_html_file_batch(args):
         except Exception as e:
             # Skip files that can't be read
             continue
+        # Quick per-file word-count hint for downstream checks
+        translated_wc_hint = _count_words_cached(raw_text) if isinstance(raw_text, str) else 0
         
         # Check minimum file length
         min_length = qa_settings.get('min_file_length', 0)
@@ -4846,6 +4877,10 @@ def process_html_file_batch(args):
             has_issues, html_issues = check_html_structure_issues(full_path, dummy_log, check_body_tag=check_body_tag, check_header_tags=check_header_tags_enabled)
             
             if has_issues:
+                # Skip structural warnings for essentially empty wrapper files
+                if translated_wc_hint < 10 and set(html_issues) == {'missing_html_structure'}:
+                    html_issues = []
+                    has_issues = False
                 for issue in html_issues:
                     if issue == 'missing_html_structure':
                         issues.append("missing_html_tag")
@@ -4890,6 +4925,16 @@ def process_html_file_batch(args):
             # Create dummy log for worker
             def dummy_log(msg):
                 pass
+            
+            # Quick shortcut: if translated content is essentially empty, skip word-count checks entirely
+            if translated_wc_hint < 2:
+                word_count_check = {
+                    'found_match': False,
+                    'reason': 'translated_text_empty',
+                    'translated_wc': translated_wc_hint
+                }
+                # Do not add issues; let structural/other checks handle empties
+                check_word_count = False
             
             # For text files, compare against corresponding chunk from word_count folder
             if text_file_mode and original_word_counts:
@@ -4970,7 +5015,9 @@ def process_html_file_batch(args):
                             # Only mark as issue if ratio is unreasonable
                             if not is_reasonable:
                                 issues.append(
-                                    f"word_count_mismatch: translated={ratio:.2f}x source (expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f})"
+                                    f"word_count_mismatch: translated={ratio:.2f}x source "
+                                    f"(expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f}, "
+                                    f"counts: src={original_wc}, dst={translated_wc})"
                                 )
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
@@ -4991,11 +5038,13 @@ def process_html_file_batch(args):
                     # Only mark as issue if ratio is unreasonable (outside safe bounds) and not an empty-chapter skip
                     if not wc_result.get('warning') == 'empty_chapter' and not wc_result['is_reasonable']:
                         issues.append(
-                            f"word_count_mismatch: translated={wc_result['ratio']:.2f}x source (expected≈{wc_result.get('multiplier', 1.0):.2f}x, normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f})"
+                            f"word_count_mismatch: translated={wc_result['ratio']:.2f}x source "
+                            f"(expected≈{wc_result.get('multiplier', 1.0):.2f}x, "
+                            f"normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f}, "
+                            f"counts: src={wc_result.get('original_wc','?')}, dst={wc_result.get('translated_wc','?')})"
                         )
                 else:
                     word_count_check = wc_result
-                    issues.append("word_count_no_match_found")
         
         # Create result dictionary
         result = {
