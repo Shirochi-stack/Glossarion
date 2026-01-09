@@ -9849,17 +9849,18 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
                         
-                # Get custom chunk prompt template from environment
-                chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}")
-                
+                # Get custom chunk prompt template from environment; send as a separate assistant message
+                chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]")
+                chunk_prompt_msg = []
                 if total_chunks > 1:
-                    user_prompt = chunk_prompt_template.format(
-                        chunk_idx=chunk_idx,
-                        total_chunks=total_chunks,
-                        chunk_html=chunk_html
-                    )
-                else:
-                    user_prompt = chunk_html
+                    chunk_prompt_msg = [{
+                        "role": "assistant",
+                        "content": chunk_prompt_template.format(
+                            chunk_idx=chunk_idx,
+                            total_chunks=total_chunks
+                        )
+                    }]
+                user_prompt = chunk_html
                 
                 if config.CONTEXTUAL:
                     history = history_manager.load_history()
@@ -9964,7 +9965,7 @@ def main(log_callback=None, stop_callback=None):
                         summary_msgs_list = [{"role": "assistant", "content": summary_content}]
 
                 # Build final message list for this chunk
-                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
+                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + chunk_prompt_msg + [{"role": "user", "content": user_prompt}]
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
