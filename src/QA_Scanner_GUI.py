@@ -2345,6 +2345,22 @@ class QAScannerMixin:
         multiplier_hint.setWordWrap(True)
         multiplier_hint.setMaximumWidth(700)
         wordcount_layout.addWidget(multiplier_hint)
+        
+        # Auto toggle for using default multipliers
+        auto_multipliers_widget = QWidget()
+        auto_multipliers_layout = QHBoxLayout(auto_multipliers_widget)
+        auto_multipliers_layout.setContentsMargins(0, 10, 0, 10)
+        
+        auto_multipliers_checkbox = self._create_styled_checkbox("Auto: Use recommended default multipliers")
+        auto_multipliers_checkbox.setChecked(qa_settings.get('use_auto_multipliers', True))  # Enabled by default
+        auto_multipliers_layout.addWidget(auto_multipliers_checkbox)
+        
+        auto_multipliers_hint = QLabel("(disable to customize per-language ratios)")
+        auto_multipliers_hint.setFont(QFont('Arial', 9))
+        auto_multipliers_hint.setStyleSheet("color: gray;")
+        auto_multipliers_layout.addWidget(auto_multipliers_hint)
+        auto_multipliers_layout.addStretch()
+        wordcount_layout.addWidget(auto_multipliers_widget)
 
         multiplier_grid_widget = QWidget()
         multiplier_grid = QGridLayout(multiplier_grid_widget)
@@ -2353,8 +2369,9 @@ class QAScannerMixin:
         multiplier_grid.setVerticalSpacing(8)
         wordcount_layout.addWidget(multiplier_grid_widget)
 
-        # Keep slider refs for saving
+        # Keep slider refs for saving and enabling/disabling
         word_multiplier_sliders = {}
+        word_multiplier_labels = []
         # Ordered language list for stable UI
         multiplier_order = [
             'english', 'spanish', 'french', 'german', 'italian', 'portuguese',
@@ -2405,7 +2422,38 @@ class QAScannerMixin:
 
             word_multiplier_sliders[lang_key] = slider
             word_multiplier_sliders[f"{lang_key}__spin"] = spin
+            word_multiplier_labels.append(lang_label)
             multiplier_grid.addWidget(row_widget, row, col)
+        
+        # Function to toggle multiplier controls based on auto checkbox
+        def toggle_multiplier_controls(auto_enabled):
+            for lang_key in multiplier_order:
+                slider = word_multiplier_sliders.get(lang_key)
+                spin = word_multiplier_sliders.get(f"{lang_key}__spin")
+                
+                if slider:
+                    slider.setEnabled(not auto_enabled)
+                
+                if spin:
+                    spin.setEnabled(not auto_enabled)
+                    # Apply disabled styling to spinbox
+                    if auto_enabled:
+                        spin.setStyleSheet("background-color: #303030; color: #808080;")
+                    else:
+                        spin.setStyleSheet("")  # Restore default styling
+            
+            # Apply enable/disable styling to labels
+            for label in word_multiplier_labels:
+                if auto_enabled:
+                    label.setStyleSheet("color: #808080;")  # Gray out when disabled
+                else:
+                    label.setStyleSheet("color: white;")  # White when enabled
+        
+        # Connect auto checkbox to toggle function
+        auto_multipliers_checkbox.toggled.connect(toggle_multiplier_controls)
+        
+        # Set initial state
+        toggle_multiplier_controls(auto_multipliers_checkbox.isChecked())
 
         wordcount_layout.addSpacing(6)
  
@@ -3047,13 +3095,26 @@ class QAScannerMixin:
                         self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
                 # Save word count multipliers
                 try:
-                    wc_mults = {}
-                    for lang_key, widget in word_multiplier_sliders.items():
-                        if lang_key.endswith('__spin'):
-                            base_key = lang_key[:-6]
-                            wc_mults[base_key] = widget.value() / 100.0
-                        elif f"{lang_key}__spin" not in word_multiplier_sliders:
-                            wc_mults[lang_key] = widget.value() / 100.0
+                    # Save auto toggle state
+                    use_auto = auto_multipliers_checkbox.isChecked()
+                    qa_settings['use_auto_multipliers'] = use_auto
+                    
+                    # If auto is enabled, use default values; otherwise use slider values
+                    if use_auto:
+                        wc_mults = dict(default_wordcount_defaults)
+                        if debug_mode:
+                            self.append_log("🔍 [DEBUG] Using default word count multipliers (auto mode)")
+                    else:
+                        wc_mults = {}
+                        for lang_key, widget in word_multiplier_sliders.items():
+                            if lang_key.endswith('__spin'):
+                                base_key = lang_key[:-6]
+                                wc_mults[base_key] = widget.value() / 100.0
+                            elif f"{lang_key}__spin" not in word_multiplier_sliders:
+                                wc_mults[lang_key] = widget.value() / 100.0
+                        if debug_mode:
+                            self.append_log("🔍 [DEBUG] Using custom word count multipliers (manual mode)")
+                    
                     qa_settings['word_count_multipliers'] = wc_mults
                 except Exception as e:
                     if debug_mode:
