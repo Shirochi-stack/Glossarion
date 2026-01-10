@@ -1490,6 +1490,10 @@ class QAScannerMixin:
                                     except Exception:
                                         pass
                                 
+                                # Auto-detect text file mode if source file is .txt or .pdf
+                                if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
+                                    text_file_mode = True
+                                
                                 if text_file_mode:
                                     # For text mode, check for both .txt AND .html files (PDFs generate .html)
                                     target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
