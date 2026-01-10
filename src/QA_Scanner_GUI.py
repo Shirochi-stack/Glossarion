@@ -2436,11 +2436,11 @@ class QAScannerMixin:
                 
                 if spin:
                     spin.setEnabled(not auto_enabled)
-                    # Apply disabled styling to spinbox
+                    # Apply enable/disable styling to spinbox
                     if auto_enabled:
                         spin.setStyleSheet("background-color: #303030; color: #808080;")
                     else:
-                        spin.setStyleSheet("")  # Restore default styling
+                        spin.setStyleSheet("background-color: #404040; color: white;")  # Enabled styling
             
             # Apply enable/disable styling to labels
             for label in word_multiplier_labels:
@@ -3307,6 +3307,9 @@ class QAScannerMixin:
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
 
+                # Reset auto multipliers checkbox to default (enabled)
+                auto_multipliers_checkbox.setChecked(True)
+                
                 # Reset word count multipliers to defaults
                 for lang_key, widget in word_multiplier_sliders.items():
                     if lang_key.endswith('__spin'):
