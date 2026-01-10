@@ -5041,10 +5041,27 @@ def process_html_file_batch(args):
                             # Only flag if the source file had header tags to begin with
                             source_had_headers = False
                             if original_word_counts:
-                                # Try to find the matching source file
-                                if not text_file_mode and chapter_num and chapter_num in original_word_counts:
-                                    # EPUB mode: use chapter_num
-                                    source_had_headers = original_word_counts[chapter_num].get('has_headers', True)
+                                # Try to find the matching source file by FILENAME, not chapter_num
+                                # chapter_num can be unreliable as it's extracted from filename/content
+                                matched_source = None
+                                
+                                if not text_file_mode:
+                                    # EPUB mode: match by filename
+                                    search_basename = os.path.splitext(filename.lower())[0]
+                                    if search_basename.startswith('response_'):
+                                        search_basename = search_basename[9:]
+                                    
+                                    # Search through original_word_counts by matching filenames
+                                    for key, value in original_word_counts.items():
+                                        if isinstance(value, dict):
+                                            orig_filename = value.get('filename', '').lower()
+                                            orig_basename = os.path.splitext(orig_filename)[0]
+                                            if orig_basename == search_basename:
+                                                matched_source = value
+                                                break
+                                    
+                                    if matched_source:
+                                        source_had_headers = matched_source.get('has_headers', True)
                                 elif text_file_mode:
                                     # Text mode: match by filename
                                     clean_filename = filename.lower()
@@ -6059,7 +6076,8 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
                 (" ..." if len(malformed_tags_found) > 3 else ""))
         
         # Check for unclosed HTML tags - Check common tags with simple logic
-        tags_to_check = ['html', 'head', 'p', 'div', 'span']
+        # Note: Excluding 'head' since it's metadata and often missing in translated content
+        tags_to_check = ['html', 'p', 'div', 'span']
         if check_body_tag:
             tags_to_check.insert(1, 'body')  # Add body after html if enabled
         problematic_tags = []
@@ -6085,10 +6103,9 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         
         # Check 5: Basic HTML structure validation - only check for consistency, not completeness
         # Define all structure check variables
+        # Note: Not checking 'head' tag since it's metadata and often missing/irrelevant in translated content
         html_open_exists = bool(re.search(r'<html[^>]*>', content_lower))
         html_close_exists = bool(re.search(r'</html>', content_lower))
-        head_open_exists = bool(re.search(r'<head[^>]*>', content_lower))
-        head_close_exists = bool(re.search(r'</head>', content_lower))
         body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
         body_close_exists = bool(re.search(r'</body>', content_lower))
         
@@ -6111,11 +6128,6 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
             missing_structure.append('closing </html>')
         elif html_close_exists and not html_open_exists:
             missing_structure.append('opening <html>')
-            
-        if head_open_exists and not head_close_exists:
-            missing_structure.append('closing </head>')
-        elif head_close_exists and not head_open_exists:
-            missing_structure.append('opening <head>')
             
         # Only check body tags if enabled
         if check_body_tag:
