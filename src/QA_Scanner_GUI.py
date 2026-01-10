@@ -2070,10 +2070,10 @@ class QAScannerMixin:
 
         # Word count multiplier defaults (factory)
         base_multiplier_defaults = {
-            'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
-            'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
-            'chinese': 1.60, 'chinese (simplified)': 1.60, 'chinese (traditional)': 1.60,
-            'japanese': 1.40, 'korean': 1.35, 'hebrew': 1.05, 'thai': 1.10,
+            'english': 1.0, 'spanish': 1.08, 'french': 1.10, 'german': 1.02, 'italian': 1.05,
+            'portuguese': 1.10, 'russian': 1.10, 'arabic': 0.95, 'hindi': 1.05, 'turkish': 0.65,
+            'chinese': 1.55, 'chinese (simplified)': 1.45, 'chinese (traditional)': 1.45,
+            'japanese': 1.35, 'korean': 1.30, 'hebrew': 1.02, 'thai': 1.08,
             'other': 1.0
         }
         # Merge current settings over factory defaults for initial display
