@@ -4599,10 +4599,28 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 typical_min = 0.8
                 typical_max = 1.2
             
-            # Relax bounds for very short originals to avoid flagging wrappers/covers
-            if original_wc < 20:
-                min_ratio = 0.0
-                typical_min = 0.0
+            # Relax bounds for short files to avoid false positives from small word count variations
+            # Example: 18→24 words = 133%, which shouldn't be flagged as an issue
+            if original_wc < 500:
+                if original_wc < 20:
+                    # Very short (< 20 words): essentially disable checks (title pages, etc.)
+                    min_ratio = 0.0
+                    max_ratio = 10.0
+                    typical_min = 0.0
+                    typical_max = 10.0
+                elif original_wc < 100:
+                    # Short (20-100 words): very relaxed thresholds
+                    # Small absolute differences create large percentage swings
+                    min_ratio = 0.3   # Allow 3:1 compression
+                    max_ratio = 4.0   # Allow 4:1 expansion
+                    typical_min = 0.5
+                    typical_max = 3.0
+                elif original_wc < 500:
+                    # Medium-short (100-500 words): moderately relaxed
+                    min_ratio = 0.5   # Allow 2:1 compression
+                    max_ratio = 3.0   # Allow 3:1 expansion
+                    typical_min = 0.7
+                    typical_max = 2.0
             
             is_reasonable = min_ratio <= ratio_norm <= max_ratio
             is_typical = typical_min <= ratio_norm <= typical_max
@@ -4741,6 +4759,29 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             max_ratio = 1.5
             typical_min = 0.8
             typical_max = 1.2
+        
+        # Relax bounds for short files to avoid false positives from small word count variations
+        # Example: 18→24 words = 133%, which shouldn't be flagged as an issue
+        if original_wc < 500:
+            if original_wc < 20:
+                # Very short (< 20 words): essentially disable checks (title pages, etc.)
+                min_ratio = 0.0
+                max_ratio = 10.0
+                typical_min = 0.0
+                typical_max = 10.0
+            elif original_wc < 100:
+                # Short (20-100 words): very relaxed thresholds
+                # Small absolute differences create large percentage swings
+                min_ratio = 0.3   # Allow 3:1 compression
+                max_ratio = 4.0   # Allow 4:1 expansion
+                typical_min = 0.5
+                typical_max = 3.0
+            elif original_wc < 500:
+                # Medium-short (100-500 words): moderately relaxed
+                min_ratio = 0.5   # Allow 2:1 compression
+                max_ratio = 3.0   # Allow 3:1 expansion
+                typical_min = 0.7
+                typical_max = 2.0
         
         is_reasonable = min_ratio <= ratio_norm <= max_ratio
         is_typical = typical_min <= ratio_norm <= typical_max
