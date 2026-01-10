@@ -1009,6 +1009,15 @@ def _create_danger_zone_section(self, parent):
             if 'use_fallback_keys' in current_config:
                 keys_to_preserve['use_fallback_keys'] = current_config['use_fallback_keys']
             
+            # 11. QA Scanner Excluded Characters
+            if 'qa_scanner_settings' in current_config:
+                qa_settings = current_config['qa_scanner_settings']
+                if isinstance(qa_settings, dict) and 'excluded_characters' in qa_settings:
+                    # Preserve only the excluded_characters field from QA settings
+                    if 'qa_scanner_settings' not in keys_to_preserve:
+                        keys_to_preserve['qa_scanner_settings'] = {}
+                    keys_to_preserve['qa_scanner_settings']['excluded_characters'] = qa_settings['excluded_characters']
+            
             # Show warning dialog
             msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
             msg.setWindowTitle("Reset to Defaults")
@@ -1025,7 +1034,8 @@ def _create_danger_zone_section(self, parent):
                 "• Google Vision Credentials Path\n"
                 "• Selected Model\n"
                 "• Prompt Profiles & Active Profile\n"
-                "• Multi-Key & Fallback Key Mode Toggles\n\n"
+                "• Multi-Key & Fallback Key Mode Toggles\n"
+                "• QA Scanner Excluded Characters\n\n"
                 "All other settings (history limits, custom endpoints, etc.) will be lost."
             )
             msg.setIcon(QMessageBox.Warning)

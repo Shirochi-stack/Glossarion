@@ -3739,6 +3739,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     Returns (faulty_nums, resolved_nums) for cleaner logging."""
     log("[INFO] Detected new progress format")
     def _extract_num_from_filename(fname: str):
+        import re
         if not fname:
             return None
         base = os.path.basename(fname)

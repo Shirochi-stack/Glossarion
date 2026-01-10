@@ -3232,12 +3232,15 @@ class QAScannerMixin:
             result = QMessageBox.question(
                 dialog,
                 "Reset to Defaults",
-                "Are you sure you want to reset all settings to defaults?",
+                "Are you sure you want to reset all settings to defaults?\n\n(Your excluded characters list will be preserved)",
                 QMessageBox.Yes | QMessageBox.No
             )
             if result == QMessageBox.Yes:
+                # Save current excluded characters before reset
+                saved_excluded_chars = excluded_text.toPlainText()
+                
                 threshold_spinbox.setValue(10)
-                excluded_text.clear()
+                # Don't clear excluded_text - preserve it
                 target_language_combo.setCurrentText('English')
                 check_encoding_checkbox.setChecked(False)
                 check_repetition_checkbox.setChecked(True)
