@@ -4220,6 +4220,9 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         else:
                             word_count = _count_words_cached(text)
                         
+                        # Check if source has header tags (h1-h6)
+                        has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                        
                         # Store using spine index as the authoritative chapter number
                         word_counts[spine_index] = {
                             'word_count': word_count,
@@ -4227,7 +4230,8 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'full_path': file_path,
                             'is_cjk': has_cjk,
                             'script': script_hint,
-                            'spine_index': spine_index
+                            'spine_index': spine_index,
+                            'has_headers': has_headers
                         }
                         extracted_count += 1
                         
@@ -4269,8 +4273,12 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         else:
                             word_count = _count_words_normalized(text)
                         
+                        # Check if source has header tags (h1-h6)
+                        has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                        
                         word_counts[idx] = {
                             'word_count': word_count,
+                            'has_headers': has_headers,
                             'filename': os.path.basename(file_path),
                             'full_path': file_path,
                             'is_cjk': has_cjk,
@@ -5027,10 +5035,43 @@ def process_html_file_batch(args):
                     if issue == 'missing_html_structure':
                         issues.append("missing_html_tag")
                     elif issue == 'missing_header_tags':
-                        # Check if this check is enabled
+                        # Check if this check is enabled AND if source file had headers
                         check_missing_header = qa_settings.get('check_missing_header_tags', True)
                         if check_missing_header:
-                            issues.append("missing_header_tags")
+                            # Only flag if the source file had header tags to begin with
+                            source_had_headers = False
+                            if original_word_counts:
+                                # Try to find the matching source file
+                                if not text_file_mode and chapter_num and chapter_num in original_word_counts:
+                                    # EPUB mode: use chapter_num
+                                    source_had_headers = original_word_counts[chapter_num].get('has_headers', True)
+                                elif text_file_mode:
+                                    # Text mode: match by filename
+                                    clean_filename = filename.lower()
+                                    if clean_filename.startswith('response_'):
+                                        clean_filename = clean_filename[9:]
+                                    
+                                    # Try exact match first
+                                    if clean_filename in original_word_counts:
+                                        if isinstance(original_word_counts[clean_filename], dict):
+                                            source_had_headers = original_word_counts[clean_filename].get('has_headers', True)
+                                    else:
+                                        # Try basename match
+                                        base_name = os.path.splitext(clean_filename)[0]
+                                        for key, value in original_word_counts.items():
+                                            if os.path.splitext(key)[0] == base_name and isinstance(value, dict):
+                                                source_had_headers = value.get('has_headers', True)
+                                                break
+                                else:
+                                    # Can't determine - assume source had headers (conservative)
+                                    source_had_headers = True
+                            else:
+                                # No source info available - assume source had headers (conservative)
+                                source_had_headers = True
+                            
+                            # Only add issue if source actually had header tags
+                            if source_had_headers:
+                                issues.append("missing_header_tags")
                     elif issue == 'insufficient_paragraph_tags':
                         issues.append("insufficient_paragraph_tags")
                     elif issue == 'unwrapped_text_content':
