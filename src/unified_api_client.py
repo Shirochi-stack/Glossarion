@@ -4242,7 +4242,7 @@ class UnifiedClient:
                     retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
                     # Use new Other Settings variable; fallback to 1 if missing/invalid
                     try:
-                        truncation_retry_attempts = max(1, int(os.getenv("AUTO_RETRY_TRUNCATED_ATTEMPTS", "1")))
+                        truncation_retry_attempts = max(1, int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1")))
                     except Exception:
                         truncation_retry_attempts = 1
                     attempts_remaining = internal_retries - (attempt + 1)
