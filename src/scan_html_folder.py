@@ -5185,11 +5185,15 @@ def process_html_file_batch(args):
                                 'warning_desc': 'Chapter is essentially empty; word count check skipped'
                             }
                         else:
+                            # Detect if text is CJK for proper multiplier calculation
+                            script_hint = detect_dominant_script(raw_text)
+                            is_cjk = script_hint in ['cjk', 'japanese', 'korean']
+                            
                             ratio = translated_wc / original_wc
                             multiplier = _get_wc_multiplier(
                                 qa_settings,
                                 source_lang_hint=qa_settings.get('source_language'),
-                                script_hint=None,
+                                script_hint=script_hint,
                                 is_cjk=is_cjk,
                                 log_fn=dummy_log
                             )
