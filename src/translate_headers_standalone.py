@@ -911,6 +911,12 @@ def run_translate_headers_gui(gui_instance):
                 os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
             ]
             
+            # Add output directory override if configured (matches QA scanner behavior)
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or gui_instance.config.get('output_directory')
+            if override_dir:
+                candidates.insert(0, os.path.join(override_dir, epub_base))
+                gui_instance.append_log(f"🔍 Checking override directory: {override_dir}")
+            
             output_dir = None
             checked_locations = []
             
