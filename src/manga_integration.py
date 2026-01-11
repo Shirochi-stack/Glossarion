@@ -4066,28 +4066,11 @@ class MangaTranslationTab(QObject):
         
         local_inpaint_layout.addWidget(model_path_frame)
 
-        # Model status with Open Output Folder button
-        status_frame = QWidget()
-        status_layout = QHBoxLayout(status_frame)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(10)
-        
+        # Model status
         self.local_model_status_label = QLabel("")
         status_font = QFont('Arial', 9)
         self.local_model_status_label.setFont(status_font)
-        status_layout.addWidget(self.local_model_status_label)
-        status_layout.addStretch()
-        
-        # Open Output Folder button
-        open_output_btn = QPushButton("📂 Open Output Folder")
-        open_output_btn.clicked.connect(self._open_output_folder)
-        open_output_btn.setStyleSheet(
-            "QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; border-radius: 3px; } "
-            "QPushButton:hover { background-color: #5a6268; }"
-        )
-        status_layout.addWidget(open_output_btn)
-        
-        local_inpaint_layout.addWidget(status_frame)
+        local_inpaint_layout.addWidget(self.local_model_status_label)
 
         # Download model button
         download_model_btn = QPushButton("📥 Download Model")
