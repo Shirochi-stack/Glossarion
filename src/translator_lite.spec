@@ -1029,7 +1029,10 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=['.'],  # Use custom hooks in current directory (bypasses PySide6.QtNetwork SSL check)
     hooksconfig={},
-    runtime_hooks=['pyi_rth_win32_runtime.py'],  # Fix R6034 runtime conflicts
+    runtime_hooks=[
+        'pyi_rth_win32_runtime.py',  # Fix R6034 runtime conflicts
+        'pyi_rth_suppress_tempdir_warning.py'  # Suppress PyInstaller temp directory cleanup warnings
+    ],
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

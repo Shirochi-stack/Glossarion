@@ -1132,7 +1132,11 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=['.', './hooks'],  # Custom hooks: R6034 fix + torch hooks
     hooksconfig={},
-    runtime_hooks=['pyi_rth_win32_runtime.py', 'hooks/rthook_torch.py'],  # Fix R6034 + torch env
+    runtime_hooks=[
+        'pyi_rth_win32_runtime.py',
+        'hooks/rthook_torch.py',  # Fix R6034 + torch env
+        'pyi_rth_suppress_tempdir_warning.py'  # Suppress PyInstaller temp directory cleanup warnings
+    ],
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

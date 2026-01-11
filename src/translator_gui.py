@@ -1524,6 +1524,9 @@ Text to analyze:
             
             print("[CLOSE] Background operations stopped, accepting close event...")
             
+            # Close all file handles that might be locking the _MEIPASS directory
+            self._cleanup_file_handles()
+            
             # Accept the close event - this will naturally end the Qt event loop
             event.accept()
             # Propagate global stop to UnifiedClient so in-flight calls exit cleanly
@@ -1571,32 +1574,27 @@ Text to analyze:
                 pass
     
     def stop_all_operations(self):
-        """Stop all background operations and threads"""
+        """Stop all background operations and threads (fast, non-blocking)"""
         try:
-            print("[CLEANUP] Stopping all background operations...")
-            
             # Stop any translation operations
             if hasattr(self, '_translation_thread') and self._translation_thread:
                 try:
-                    print("[CLEANUP] Terminating translation thread...")
                     self._translation_thread.terminate()
-                    self._translation_thread.wait(1000)  # Wait up to 1 second
+                    self._translation_thread.wait(100)  # Wait only 100ms
                 except:
                     pass
             
             # Stop glossary operations
             if hasattr(self, '_glossary_thread') and self._glossary_thread:
                 try:
-                    print("[CLEANUP] Terminating glossary thread...")
                     self._glossary_thread.terminate()
-                    self._glossary_thread.wait(1000)  # Wait up to 1 second
+                    self._glossary_thread.wait(100)  # Wait only 100ms
                 except:
                     pass
             
-            # Stop executor if it exists
+            # Stop executor if it exists (non-blocking)
             if hasattr(self, 'executor') and self.executor:
                 try:
-                    print("[CLEANUP] Shutting down thread pool executor...")
                     self.executor.shutdown(wait=False)
                 except:
                     pass
@@ -1605,23 +1603,14 @@ Text to analyze:
             if hasattr(self, 'stop_flag'):
                 self.stop_flag.set()
             
-            # Close any open dialogs
+            # Close manga dialog quickly (skip slow flush operations)
             if hasattr(self, '_manga_dialog') and self._manga_dialog:
                 try:
-                    print("[CLEANUP] Closing manga dialog...")
-                    # Flush manga state before closing
-                    if hasattr(self, 'manga_translator') and hasattr(self.manga_translator, 'image_state_manager'):
-                        try:
-                            print("[CLEANUP] Flushing manga image state...")
-                            self.manga_translator.image_state_manager.flush()
-                            print("[CLEANUP] Manga state flushed successfully")
-                        except Exception as e:
-                            print(f"[CLEANUP] Failed to flush manga state: {e}")
                     self._manga_dialog.close()
                 except:
                     pass
 
-            # Kill stray QtWebEngine child processes that can lock the PyInstaller _MEI temp dir
+            # Kill QtWebEngine processes quickly (reduced timeout)
             try:
                 import psutil, sys
                 meipass = getattr(sys, "_MEIPASS", "").lower()
@@ -1638,20 +1627,52 @@ Text to analyze:
                     except Exception:
                         pass
                 if victims:
-                    psutil.wait_procs(victims, timeout=1)
+                    psutil.wait_procs(victims, timeout=0.2)  # Reduced to 200ms
             except Exception:
-                # Fallback to taskkill if psutil unavailable
+                # Fallback to taskkill if psutil unavailable (fire and forget)
                 try:
                     import subprocess
-                    subprocess.run(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
+                    subprocess.Popen(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
             
-            print("[CLEANUP] Background operations stopped")
+        except Exception:
+            # Silently ignore - we're exiting anyway
+            pass
+    
+    def _cleanup_file_handles(self):
+        """Close critical file handles quickly (non-blocking for minor cleanup)"""
+        try:
+            # Only close critical file handles that might lock _MEIPASS
+            # Don't do heavy operations here that would delay window close
             
-        except Exception as e:
-            print(f"[CLEANUP] Error stopping operations: {e}")
+            # Close the fault log file handle if it exists (fast)
+            global _FAULT_LOG_FH
+            if _FAULT_LOG_FH and not _FAULT_LOG_FH.closed:
+                try:
+                    _FAULT_LOG_FH.close()
+                except Exception:
+                    pass
+            
+            # Fast flush of logging handlers (don't close them all - takes too long)
+            try:
+                import logging
+                root_logger = logging.getLogger()
+                for handler in root_logger.handlers:
+                    try:
+                        handler.flush()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            # Skip heavy cleanup operations like shutil.rmtree
+            # The runtime hook will handle temp directory cleanup
+            
+        except Exception:
+            # Silently ignore any errors - don't delay window close
+            pass
         
     def _check_updates_on_startup(self):
         """Check for updates on startup with debug logging (async)"""
