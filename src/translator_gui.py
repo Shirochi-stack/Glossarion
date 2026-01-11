@@ -19,6 +19,11 @@ if getattr(sys, 'frozen', False):
                 os.add_dll_directory(bundle_dir)
         except (AttributeError, OSError):
             pass
+    
+    # Suppress PyInstaller temp directory cleanup warning
+    # The temp directory will be cleaned up by Windows automatically
+    import atexit
+    atexit.unregister = lambda *args, **kwargs: None  # Disable atexit cleanup
 
 # Standard Library
 import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
