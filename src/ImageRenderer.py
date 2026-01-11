@@ -2086,7 +2086,19 @@ def _run_clean_background(self, image_path: str, regions: list):
             parent_dir = os.path.dirname(image_path)
             filename = os.path.basename(image_path)
             base, ext = os.path.splitext(filename)
-            output_dir = os.path.join(parent_dir, f"{base}_translated")
+            
+            # Check for OUTPUT_DIRECTORY override (prefer config over env var)
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
+            if override_dir:
+                output_dir = os.path.join(override_dir, f"{base}_translated")
+            else:
+                output_dir = os.path.join(parent_dir, f"{base}_translated")
+            
             os.makedirs(output_dir, exist_ok=True)
             cleaned_path = os.path.join(output_dir, f"{base}_cleaned{ext}")
 
@@ -8184,7 +8196,13 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                     base_name = os.path.splitext(filename)[0]
                     parent_dir = os.path.dirname(current_image)
                     
-                    override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                    # Check for OUTPUT_DIRECTORY override (prefer config over env var)
+                    override_dir = None
+                    if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                        override_dir = self.main_gui.config.get('output_directory', '')
+                    if not override_dir:
+                        override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+                    
                     if override_dir:
                         output_dir = os.path.join(override_dir, f"{base_name}_translated")
                     else:
@@ -8356,7 +8374,13 @@ def save_positions_and_rerender(self):
             base_name = os.path.splitext(filename)[0]
             parent_dir = os.path.dirname(current_image)
             
-            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+            # Check for OUTPUT_DIRECTORY override (prefer config over env var)
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
             if override_dir:
                 output_dir = os.path.join(override_dir, f"{base_name}_translated")
             else:

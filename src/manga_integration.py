@@ -11491,7 +11491,7 @@ class MangaTranslationTab(QObject):
                             # Check for OUTPUT_DIRECTORY override
                             override_dir = os.environ.get('OUTPUT_DIRECTORY')
                             if override_dir:
-                                parent_dir = os.path.join(override_dir, "translated_images")
+                                parent_dir = override_dir
                             else:
                                 parent_dir = os.path.dirname(filepath)
                             
@@ -11745,7 +11745,7 @@ class MangaTranslationTab(QObject):
                             # Check for OUTPUT_DIRECTORY override
                             override_dir = os.environ.get('OUTPUT_DIRECTORY')
                             if override_dir:
-                                parent_dir = os.path.join(override_dir, "translated_images")
+                                parent_dir = override_dir
                             else:
                                 parent_dir = os.path.dirname(filepath)
                             

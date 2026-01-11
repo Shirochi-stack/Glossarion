@@ -2186,26 +2186,43 @@ class MangaImagePreviewWidget(QWidget):
                     # Delete translated output image file
                     try:
                         if self.current_image_path:
+                            # Get OUTPUT_DIRECTORY override if set
+                            override_dir = None
+                            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                                override_dir = self.main_gui.config.get('output_directory', '')
+                            if not override_dir:
+                                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+                            
                             source_dir = os.path.dirname(self.current_image_path)
                             source_filename = os.path.basename(self.current_image_path)
                             source_name_no_ext = os.path.splitext(source_filename)[0]
-                            translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
                             
-                            # Delete translated output file (non-cleaned file) from isolated folder
-                            if os.path.exists(translated_folder):
-                                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-                                for filename in os.listdir(translated_folder):
-                                    name_lower = filename.lower()
-                                    # Find and delete files that match the source name but NOT cleaned files
-                                    if (name_lower.startswith(source_name_no_ext.lower()) and 
-                                        name_lower.endswith(image_extensions) and
-                                        '_cleaned' not in name_lower):
-                                        translated_path = os.path.join(translated_folder, filename)
-                                        try:
-                                            os.remove(translated_path)
-                                            print(f"[CLEAR] Deleted translated output: {os.path.basename(translated_path)}")
-                                        except Exception as e:
-                                            print(f"[CLEAR] Failed to delete translated output: {e}")
+                            # Build list of directories to check (override dir first, then source dir)
+                            search_dirs = []
+                            if override_dir:
+                                search_dirs.append(override_dir)
+                                print(f"[CLEAR] Checking OUTPUT_DIRECTORY override: {override_dir}")
+                            search_dirs.append(source_dir)
+                            
+                            # Check each directory for translated folder
+                            for check_dir in search_dirs:
+                                translated_folder = os.path.join(check_dir, f"{source_name_no_ext}_translated")
+                                
+                                # Delete translated output file (non-cleaned file) from isolated folder
+                                if os.path.exists(translated_folder):
+                                    image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                                    for filename in os.listdir(translated_folder):
+                                        name_lower = filename.lower()
+                                        # Find and delete files that match the source name but NOT cleaned files
+                                        if (name_lower.startswith(source_name_no_ext.lower()) and 
+                                            name_lower.endswith(image_extensions) and
+                                            '_cleaned' not in name_lower):
+                                            translated_path = os.path.join(translated_folder, filename)
+                                            try:
+                                                os.remove(translated_path)
+                                                print(f"[CLEAR] Deleted translated output: {os.path.basename(translated_path)}")
+                                            except Exception as e:
+                                                print(f"[CLEAR] Failed to delete translated output: {e}")
                     except Exception as e:
                         print(f"[CLEAR] Error deleting translated output: {e}")
                     try:
@@ -2967,10 +2984,12 @@ class MangaImagePreviewWidget(QWidget):
         import platform
         from PySide6.QtWidgets import QMessageBox
         
-        # Get output directory from config or environment (respecting other_settings.py override)
+        # Get output directory from config or environment (prefer config over env var)
         output_dir = None
         if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
-            output_dir = self.main_gui.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
+            output_dir = self.main_gui.config.get('output_directory', '')
+        if not output_dir:
+            output_dir = os.environ.get('OUTPUT_DIRECTORY', '')
         
         # If override is set, use it directly
         if output_dir:
@@ -3035,10 +3054,15 @@ class MangaImagePreviewWidget(QWidget):
             # Get parent directory of the first selected file
             first_file = self.manga_integration.selected_files[0]
             
-            # Check for OUTPUT_DIRECTORY override
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or (self.main_gui.config.get('output_directory', '') if hasattr(self, 'main_gui') and self.main_gui else '')
+            # Check for OUTPUT_DIRECTORY override (prefer config over env var)
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
             if override_dir:
-                parent_dir = os.path.join(override_dir, "translated_images")
+                parent_dir = override_dir
             else:
                 parent_dir = os.path.dirname(first_file)
             
@@ -3299,14 +3323,39 @@ class MangaImagePreviewWidget(QWidget):
                 print(f"[SRC] Display mode is 'original', using: {os.path.basename(source_image_path)}")
                 return source_image_path
             
+            # Get OUTPUT_DIRECTORY override if set
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
             # Build paths to check
             source_dir = os.path.dirname(source_image_path)
             source_filename = os.path.basename(source_image_path)
             source_name_no_ext = os.path.splitext(source_filename)[0]
             source_ext = os.path.splitext(source_filename)[1]
             
-            # Isolated folder path
-            translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
+            # Determine where to look for translated folder
+            # If OUTPUT_DIRECTORY is set, look there first; otherwise use source directory
+            search_dirs = []
+            if override_dir:
+                search_dirs.append(override_dir)  # Check override directory first
+                print(f"[SRC] Checking OUTPUT_DIRECTORY override: {override_dir}")
+            search_dirs.append(source_dir)  # Always check source directory as fallback
+            
+            # Try each search directory
+            translated_folder = None
+            for search_dir in search_dirs:
+                candidate_folder = os.path.join(search_dir, f"{source_name_no_ext}_translated")
+                if os.path.exists(candidate_folder):
+                    translated_folder = candidate_folder
+                    print(f"[SRC] Found translated folder: {translated_folder}")
+                    break
+            
+            # If no translated folder found, use first search directory for fallback path construction
+            if not translated_folder:
+                translated_folder = os.path.join(search_dirs[0], f"{source_name_no_ext}_translated")
             
             # If mode is 'translated', check for translated output first
             if mode == 'translated':
@@ -3344,7 +3393,7 @@ class MangaImagePreviewWidget(QWidget):
                         print(f"[SRC] State has cleaned_image_path: {os.path.basename(cand)}")
                         print(f"[SRC] Validating filename: '{cand_filename}' contains '_cleaned': {'_cleaned' in cand_filename}")
                         if '_cleaned' in cand_filename and not cand_filename.endswith('.json'):
-                            # Accept only if the path is inside the expected translated folder or the same directory
+                            # Accept if path is inside translated folder, source directory, or override directory
                             try:
                                 cand_abs = os.path.abspath(cand)
                                 tdir_abs = os.path.abspath(translated_folder)
@@ -3354,7 +3403,13 @@ class MangaImagePreviewWidget(QWidget):
                                         return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
                                     except Exception:
                                         return False
-                                if _under(cand_abs, tdir_abs) or _under(cand_abs, sdir_abs):
+                                # Check translated folder, source dir, and override dir
+                                is_valid = _under(cand_abs, tdir_abs) or _under(cand_abs, sdir_abs)
+                                if override_dir:
+                                    odir_abs = os.path.abspath(override_dir)
+                                    is_valid = is_valid or _under(cand_abs, odir_abs)
+                                
+                                if is_valid:
                                     cleaned_path = cand_abs
                                     print(f"[SRC] Found validated cleaned image from state: {os.path.basename(cleaned_path)}")
                                 else:
@@ -3381,12 +3436,14 @@ class MangaImagePreviewWidget(QWidget):
                         print(f"[SRC] Found cleaned image in isolated folder: {os.path.basename(cleaned_path)}")
                         break
             
-            # 3) Check same directory with _cleaned suffix
+            # 3) Check directories with _cleaned suffix (override dir first, then source dir)
             if not cleaned_path:
-                cleaned_candidate = os.path.join(source_dir, f"{source_name_no_ext}_cleaned{source_ext}")
-                if os.path.exists(cleaned_candidate):
-                    cleaned_path = cleaned_candidate
-                    print(f"[SRC] Found cleaned image in same directory: {os.path.basename(cleaned_path)}")
+                for check_dir in search_dirs:
+                    cleaned_candidate = os.path.join(check_dir, f"{source_name_no_ext}_cleaned{source_ext}")
+                    if os.path.exists(cleaned_candidate):
+                        cleaned_path = cleaned_candidate
+                        print(f"[SRC] Found cleaned image in directory: {os.path.basename(cleaned_path)}")
+                        break
             
             # Return cleaned image if found, otherwise original
             if cleaned_path and os.path.exists(cleaned_path):
