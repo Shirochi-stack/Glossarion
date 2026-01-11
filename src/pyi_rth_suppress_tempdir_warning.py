@@ -9,33 +9,26 @@ import os
 
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
     # We're running as a PyInstaller bundle
-    
-    # Override the cleanup function to suppress error dialogs
-    # PyInstaller's bootloader tries to remove _MEIPASS on exit
-    # but Windows may fail if files are still in use
-    
-    # Set environment variable to tell PyInstaller bootloader to ignore cleanup errors
-    # Note: This may not work with all PyInstaller versions
-    os.environ['_MEIPASS2'] = sys._MEIPASS
-    
-    # Store the _MEIPASS path for potential manual cleanup
+    # Store the _MEIPASS path for cleanup at exit only
     _meipass_path = sys._MEIPASS
     
-    # Register a cleanup function that silently attempts to remove the temp directory
-    # If it fails, that's okay - Windows will clean it up eventually
+    # IMPORTANT: Only register cleanup at exit, don't touch _MEIPASS during runtime
+    # The directory must remain accessible throughout the application's lifetime
+    # for SSL certificates, DLLs, and other bundled resources
     import atexit
-    import shutil
     
     @atexit.register
     def _silent_cleanup_meipass():
-        """Silently attempt to clean up PyInstaller's temporary directory.
+        """Silently attempt to clean up PyInstaller's temporary directory at exit.
         If cleanup fails (files still in use), it's ignored - Windows will clean up later.
+        This prevents the "Failed to remove temporary directory" warning dialog.
         """
         try:
-            # Try to remove the temp directory
-            if os.path.exists(_meipass_path):
+            import shutil
+            # Only try cleanup if directory still exists
+            if _meipass_path and os.path.exists(_meipass_path):
+                # Use ignore_errors=True to suppress any cleanup failures
                 shutil.rmtree(_meipass_path, ignore_errors=True)
         except Exception:
-            # Silently ignore any errors
-            # Windows will eventually clean up the temp directory
+            # Silently ignore any errors - Windows will clean up eventually
             pass

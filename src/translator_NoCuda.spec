@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v7.0.1 - PyInstaller Specification File
+Glossarion v7.0.2 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -17,7 +17,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'N_Glossarion_NoCuda v7.0.1'  # CHANGED: Updated version
+APP_NAME = 'N_Glossarion_NoCuda v7.0.2'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -1097,10 +1097,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=['.'],  # Custom hooks: R6034 fix + torch hooks
     hooksconfig={},
-    runtime_hooks=[
-        'pyi_rth_win32_runtime.py',  # Fix R6034 + torch env
-        'pyi_rth_suppress_tempdir_warning.py'  # Suppress PyInstaller temp directory cleanup warnings
-    ],
+    runtime_hooks=['pyi_rth_win32_runtime.py'],  # Fix R6034 + torch env
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
