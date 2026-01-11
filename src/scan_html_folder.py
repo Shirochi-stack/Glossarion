@@ -682,7 +682,7 @@ def detect_non_english_content(text, qa_settings=None):
     # Latin-based languages that need language detection
     latin_languages = ['english', 'spanish', 'french', 'german', 'portuguese', 'italian']
     
-    if target_language in latin_languages and len(filtered_text.strip()) > 50:
+    if target_language in latin_languages and len(filtered_text.strip()) > 100:
         # Try to detect the actual language of the text
         try:
             from langdetect import detect_langs
