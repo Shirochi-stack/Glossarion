@@ -1586,6 +1586,8 @@ class MangaImagePreviewWidget(QWidget):
             }
         """)
         self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
+        self.thumbnail_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.thumbnail_list.customContextMenuRequested.connect(self._show_thumbnail_context_menu)
         viewer_layout.addWidget(self.thumbnail_list)
         
         # Thumbnail list starts hidden
@@ -1850,6 +1852,33 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setStyleSheet("color: gray; font-size: 8pt;")
         self.file_label.setWordWrap(True)
         file_info_layout.addWidget(self.file_label, stretch=1)
+        
+        # Open Output Folder button
+        self.open_folder_btn = QPushButton("📂 Open Folder")
+        self.open_folder_btn.setMinimumHeight(24)
+        self.open_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                border: 1px solid #6c757d;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-size: 8pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+                border-color: #5a6268;
+            }
+            QPushButton:pressed {
+                background-color: #4e555b;
+            }
+        """)
+        self.open_folder_btn.wheelEvent = lambda event: None  # Disable scroll wheel
+        self.open_folder_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent focus on click
+        self.open_folder_btn.clicked.connect(self._open_output_folder)
+        self.open_folder_btn.setEnabled(True)  # Always enabled
+        file_info_layout.addWidget(self.open_folder_btn)
         
         # Download Images button
         self.download_btn = QPushButton("📥 Download Images")
@@ -2462,6 +2491,74 @@ class MangaImagePreviewWidget(QWidget):
         except Exception:
             pass
     
+    def _show_thumbnail_context_menu(self, position):
+        """Show context menu for thumbnail with option to open translated folder"""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtCore import Qt
+        import subprocess
+        import platform
+        
+        # Get the item at the clicked position
+        item = self.thumbnail_list.itemAt(position)
+        if not item:
+            return
+        
+        # Get the image path from the item
+        image_path = item.data(Qt.ItemDataRole.UserRole)
+        if not image_path or not os.path.exists(image_path):
+            return
+        
+        # Build path to translated folder
+        parent_dir = os.path.dirname(image_path)
+        source_name_no_ext = os.path.splitext(os.path.basename(image_path))[0]
+        translated_folder = os.path.join(parent_dir, f"{source_name_no_ext}_translated")
+        
+        # Create context menu
+        menu = QMenu(self)
+        # Remove the icon column space
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #3a3a3a;
+            }
+            QMenu::item {
+                padding: 5px 20px 5px 10px;
+                background-color: transparent;
+            }
+            QMenu::item:selected {
+                background-color: #3a3a3a;
+            }
+            QMenu::item:disabled {
+                color: #666666;
+            }
+        """)
+        
+        # Add "Open Translated Folder" action only if it exists
+        if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
+            open_folder_action = menu.addAction("📂 Open Translated Folder")
+            
+            def open_translated_folder():
+                try:
+                    if platform.system() == 'Windows':
+                        os.startfile(translated_folder)
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.run(['open', translated_folder])
+                    else:  # Linux and others
+                        subprocess.run(['xdg-open', translated_folder])
+                except Exception as e:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "Error", f"Failed to open folder:\n{str(e)}")
+            
+            open_folder_action.triggered.connect(open_translated_folder)
+        else:
+            # Show disabled message if no translated folder exists
+            no_folder_action = menu.addAction("⚠️ No translated folder yet")
+            no_folder_action.setEnabled(False)
+        
+        # Show the menu at the cursor position
+        menu.exec(self.thumbnail_list.mapToGlobal(position))
+    
     def _on_thumbnail_clicked(self, item):
         """Handle thumbnail click - load the corresponding image"""
         from PySide6.QtCore import Qt
@@ -2863,6 +2960,57 @@ class MangaImagePreviewWidget(QWidget):
             
         except Exception as e:
             print(f"[ERROR] Failed to cycle source display mode: {e}")
+    
+    def _open_output_folder(self):
+        """Open the output folder in file explorer, respecting output_directory override"""
+        import subprocess
+        import platform
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Get output directory from config or environment (respecting other_settings.py override)
+        output_dir = None
+        if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+            output_dir = self.main_gui.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
+        
+        # If override is set, use it directly
+        if output_dir:
+            # Ensure it exists
+            if not os.path.exists(output_dir):
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Failed to create output folder:\n{str(e)}")
+                    return
+        else:
+            # No override - check if we have selected files and use their parent directory
+            if hasattr(self, 'manga_integration') and self.manga_integration and \
+               hasattr(self.manga_integration, 'selected_files') and self.manga_integration.selected_files:
+                # Use parent directory of first selected file (where all *_translated folders are)
+                first_file = self.manga_integration.selected_files[0]
+                parent_dir = os.path.dirname(first_file)
+                
+                # Open the parent directory so user can see all translated subfolders
+                output_dir = parent_dir
+            else:
+                # No selected files - use default output folder
+                output_dir = os.path.join(os.getcwd(), 'output')
+                if not os.path.exists(output_dir):
+                    try:
+                        os.makedirs(output_dir, exist_ok=True)
+                    except Exception as e:
+                        QMessageBox.warning(self, "Error", f"Failed to create output folder:\n{str(e)}")
+                        return
+        
+        # Open folder in file explorer
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(output_dir)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', output_dir])
+            else:  # Linux and others
+                subprocess.run(['xdg-open', output_dir])
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to open folder:\n{str(e)}")
     
     def _on_download_images_clicked(self, silent=False):
         """Handle download images button - consolidate isolated images into structured folder
