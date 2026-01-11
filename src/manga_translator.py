@@ -753,6 +753,15 @@ class MangaTranslator:
             self._checked_out_inpainter = None
             self._inpainter_pool_key = None
             
+            # CRITICAL: Clear thread-local cache so next checkout gets from pool
+            try:
+                if hasattr(self, '_thread_local') and hasattr(self._thread_local, 'local_inpainters'):
+                    # Clear the specific key from thread-local cache
+                    if key in self._thread_local.local_inpainters:
+                        self._thread_local.local_inpainters[key] = None
+            except Exception:
+                pass
+            
             # Trigger immediate GUI pool tracker update
             try:
                 if hasattr(self, 'update_queue'):
@@ -9411,7 +9420,7 @@ class MangaTranslator:
             except Exception:
                 pass
         
-        key = (local_method, model_path or '')
+        key = (local_method or 'anime', model_path or '')
         
         # CRITICAL: Clean up pool entries that don't match current GUI settings FIRST
         # This MUST happen BEFORE checking desired count to ensure stale models are removed
@@ -13230,6 +13239,14 @@ class MangaTranslator:
                         
                         # Look for an available spare (not already checked out)
                         if spares:
+                            # Debug first attempt only
+                            if elapsed == 0:
+                                for idx, spare in enumerate(spares):
+                                    is_checked_out = spare in checked_out
+                                    is_none = spare is None
+                                    has_model_loaded = getattr(spare, 'model_loaded', False)
+                                    self._log(f"🔍 Inpainter spare[{idx}]: checked_out={is_checked_out}, is_none={is_none}, model_loaded={has_model_loaded}", "info")
+                            
                             for spare in spares:
                                 if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
                                     # Mark as checked out (don't remove from spares!)
