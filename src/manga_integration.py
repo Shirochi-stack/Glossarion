@@ -5899,7 +5899,7 @@ class MangaTranslationTab(QObject):
         # Full page context settings
         self.full_page_context_value = config.get('manga_full_page_context', True)
         
-        self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
+        full_page_context_prompt_default = (
             "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
@@ -5918,9 +5918,15 @@ class MangaTranslationTab(QObject):
             '}\n\n'
             'REMEMBER: Keep the [index] prefix in each JSON key exactly as shown in the input!'
         )
+        self.full_page_context_prompt = config.get('manga_full_page_context_prompt', full_page_context_prompt_default)
+        
+        # If full page context prompt wasn't in config, save it now
+        if 'manga_full_page_context_prompt' not in config:
+            self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
+            print("[MANGA_INIT] Saved default full page context prompt to config")
  
         # Load OCR prompt (UPDATED: Improved default)
-        self.ocr_prompt = config.get('manga_ocr_prompt', 
+        ocr_prompt_default = (
             "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
             "ABSOLUTE RULES:\n"
             "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
@@ -5952,6 +5958,12 @@ class MangaTranslationTab(QObject):
             "If image has text → Output: [that text]\n"
             "If image is truly blank → Output: [empty/no response]"
         )
+        self.ocr_prompt = config.get('manga_ocr_prompt', ocr_prompt_default)
+        
+        # If OCR prompt wasn't in config, save it now
+        if 'manga_ocr_prompt' not in config:
+            self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
+            print("[MANGA_INIT] Saved default OCR prompt to config")
         # Visual context setting
         self.visual_context_enabled_value = self.main_gui.config.get('manga_visual_context_enabled', True)
         self.qwen2vl_model_size = config.get('qwen2vl_model_size', '1')  # Default to '1' (2B)
