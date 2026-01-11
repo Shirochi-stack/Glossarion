@@ -11223,6 +11223,15 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             # Don't fail if overlay refresh fails - just log it
             pass
+        
+        # Honor OUTPUT_DIRECTORY override globally (like translator_gui.py does)
+        try:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.main_gui.config.get('output_directory')
+            if override_dir:
+                os.environ['OUTPUT_DIRECTORY'] = os.path.abspath(override_dir)
+                self._log(f"📁 Using output override: {os.environ['OUTPUT_DIRECTORY']}", "info")
+        except Exception as e:
+            self._log(f"⚠️ Could not apply OUTPUT_DIRECTORY override: {e}", "warning")
     
     def _on_create_cbz_toggle(self, state=None):
         """Handle create .cbz file at translation end toggle"""
@@ -11478,7 +11487,16 @@ class MangaTranslationTab(QObject):
                             # CRITICAL FIX: Create separate folder for EACH image to prevent overlays
                             # This enables thread-safe parallel translation and instant feedback
                             base_name = os.path.splitext(filename)[0]
-                            parent_dir = os.path.dirname(filepath)
+                            
+                            # Check for OUTPUT_DIRECTORY override from Other Settings
+                            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                            print(f"[PARALLEL DEBUG] OUTPUT_DIRECTORY = {override_dir}")
+                            if override_dir:
+                                parent_dir = os.path.join(override_dir, "translated_images")
+                                print(f"[PARALLEL DEBUG] Using override parent_dir = {parent_dir}")
+                            else:
+                                parent_dir = os.path.dirname(filepath)
+                                print(f"[PARALLEL DEBUG] Using default parent_dir = {parent_dir}")
                             
                             # Create unique folder per image for isolation
                             output_dir = os.path.join(parent_dir, f"{base_name}_translated")
@@ -11726,7 +11744,16 @@ class MangaTranslationTab(QObject):
                             # This enables thread-safe parallel translation and instant feedback
                             # Each image gets its own isolated folder like: image001_translated/image001.png
                             base_name = os.path.splitext(filename)[0]
-                            parent_dir = os.path.dirname(filepath)
+                            
+                            # Check for OUTPUT_DIRECTORY override from Other Settings
+                            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                            self._log(f"🔍 DEBUG: OUTPUT_DIRECTORY env var = {override_dir}", "info")
+                            if override_dir:
+                                parent_dir = os.path.join(override_dir, "translated_images")
+                                self._log(f"🔍 DEBUG: Using override parent_dir = {parent_dir}", "info")
+                            else:
+                                parent_dir = os.path.dirname(filepath)
+                                self._log(f"🔍 DEBUG: Using default parent_dir = {parent_dir}", "info")
                             
                             # Create unique folder per image for isolation
                             output_dir = os.path.join(parent_dir, f"{base_name}_translated")
