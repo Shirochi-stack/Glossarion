@@ -1473,12 +1473,6 @@ def _create_context_management_section(self, parent):
     current_output_dir = self.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
     self.output_dir_entry.setText(current_output_dir)
     
-    # Initialize environment variable from config (setText doesn't trigger textChanged)
-    if current_output_dir and current_output_dir.strip():
-        os.environ['OUTPUT_DIRECTORY'] = current_output_dir.strip()
-    elif 'OUTPUT_DIRECTORY' in os.environ:
-        del os.environ['OUTPUT_DIRECTORY']
-    
     def _on_output_dir_changed(text):
         try:
             text = text.strip()
