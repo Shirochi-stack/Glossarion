@@ -7898,17 +7898,51 @@ class MangaTranslationTab(QObject):
         # Get output directory from config or environment (respecting other_settings.py override)
         output_dir = self.main_gui.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
         
-        # If no override set, use default relative to current working directory
-        if not output_dir:
-            output_dir = os.path.join(os.getcwd(), 'output')
-        
-        # Ensure it exists
-        if not os.path.exists(output_dir):
-            try:
-                os.makedirs(output_dir, exist_ok=True)
-            except Exception as e:
-                QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
-                return
+        # If override is set, use it directly
+        if output_dir:
+            # Ensure it exists
+            if not os.path.exists(output_dir):
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
+                    return
+        else:
+            # No override - check if we have selected files and use their parent directory
+            if hasattr(self, 'selected_files') and self.selected_files:
+                # Use parent directory of first selected file
+                first_file = self.selected_files[0]
+                parent_dir = os.path.dirname(first_file)
+                
+                # Look for isolated *_translated folders in parent directory
+                translated_folders = []
+                if os.path.exists(parent_dir):
+                    for item in os.listdir(parent_dir):
+                        item_path = os.path.join(parent_dir, item)
+                        if os.path.isdir(item_path) and item.endswith('_translated'):
+                            translated_folders.append(item_path)
+                
+                # If we found translated folders, open the parent directory
+                if translated_folders:
+                    output_dir = parent_dir
+                else:
+                    # Fall back to default output folder in current working directory
+                    output_dir = os.path.join(os.getcwd(), 'output')
+                    if not os.path.exists(output_dir):
+                        try:
+                            os.makedirs(output_dir, exist_ok=True)
+                        except Exception as e:
+                            QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
+                            return
+            else:
+                # No selected files - use default output folder
+                output_dir = os.path.join(os.getcwd(), 'output')
+                if not os.path.exists(output_dir):
+                    try:
+                        os.makedirs(output_dir, exist_ok=True)
+                    except Exception as e:
+                        QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
+                        return
         
         # Open folder in file explorer
         try:
