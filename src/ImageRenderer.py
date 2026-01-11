@@ -2240,8 +2240,13 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
             uc = UnifiedClient(model=model, api_key=api_key)
             temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
             detector = temp_translator._get_thread_bubble_detector()
+            # Check if detector is None (pool checkout can return None)
+            if detector is None:
+                print(f"[DETECT_SYNC] Pool returned None, creating standalone detector")
+                detector = BubbleDetector()
+                temp_translator = None
             # Immediately update GUI pool tracker after checkout
-            if hasattr(self, 'update_queue'):
+            elif hasattr(self, 'update_queue'):
                 self.update_queue.put(('update_pool_tracker', None))
         except Exception as e:
             print(f"[DETECT_SYNC] Failed to get detector from pool, creating standalone: {e}")
