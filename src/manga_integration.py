@@ -4066,11 +4066,28 @@ class MangaTranslationTab(QObject):
         
         local_inpaint_layout.addWidget(model_path_frame)
 
-        # Model status
+        # Model status with Open Output Folder button
+        status_frame = QWidget()
+        status_layout = QHBoxLayout(status_frame)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(10)
+        
         self.local_model_status_label = QLabel("")
         status_font = QFont('Arial', 9)
         self.local_model_status_label.setFont(status_font)
-        local_inpaint_layout.addWidget(self.local_model_status_label)
+        status_layout.addWidget(self.local_model_status_label)
+        status_layout.addStretch()
+        
+        # Open Output Folder button
+        open_output_btn = QPushButton("📂 Open Output Folder")
+        open_output_btn.clicked.connect(self._open_output_folder)
+        open_output_btn.setStyleSheet(
+            "QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; border-radius: 3px; } "
+            "QPushButton:hover { background-color: #5a6268; }"
+        )
+        status_layout.addWidget(open_output_btn)
+        
+        local_inpaint_layout.addWidget(status_frame)
 
         # Download model button
         download_model_btn = QPushButton("📥 Download Model")
@@ -7872,6 +7889,38 @@ class MangaTranslationTab(QObject):
         
         print(f"DEBUG: UI update completed")
         
+    def _open_output_folder(self):
+        """Open the output folder in file explorer, respecting output_directory override"""
+        import subprocess
+        import platform
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Get output directory from config or environment (respecting other_settings.py override)
+        output_dir = self.main_gui.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
+        
+        # If no override set, use default relative to current working directory
+        if not output_dir:
+            output_dir = os.path.join(os.getcwd(), 'output')
+        
+        # Ensure it exists
+        if not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+            except Exception as e:
+                QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
+                return
+        
+        # Open folder in file explorer
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(output_dir)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', output_dir])
+            else:  # Linux and others
+                subprocess.run(['xdg-open', output_dir])
+        except Exception as e:
+            QMessageBox.warning(self.dialog, "Error", f"Failed to open folder:\n{str(e)}")
+    
     def _update_local_model_status(self):
         """Update local model status display"""
         path = self.local_model_path_value if hasattr(self, 'local_model_path_value') else ''
