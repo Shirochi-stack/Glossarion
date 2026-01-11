@@ -9546,13 +9546,14 @@ class MangaTranslator:
                             # Read directly from UI instance if available (more reliable than manga_settings)
                             try:
                                 current_method = local_method  # Use the method we're actually preloading
-                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_tab'):
                                     try:
-                                        current_method = self.main_gui.manga_translator.local_model_type_value
+                                        # Read from manga_tab (MangaTranslationTab instance), not manga_translator
+                                        current_method = self.main_gui.manga_tab.local_model_type_value
                                     except Exception:
-                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 else:
-                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 
                                 current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
                                 if current_model_path:
@@ -13210,7 +13211,12 @@ class MangaTranslator:
         
         # Not cached - try to check out from pool with polling
         import time
-        max_wait_time = 60  # Maximum 60 seconds
+        import os
+        
+        # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
+        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+        max_wait_time = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
+        
         poll_interval = 0.5  # Check every 0.5 seconds
         elapsed = 0
         
@@ -13895,7 +13901,11 @@ class MangaTranslator:
                             _ = self.translate_regions(regions, image_path)
                         return True
                 except Exception as te:
-                    self._log(f"❌ Translation task error: {te}", "error")
+                    import traceback
+                    error_msg = f"Translation task error: {type(te).__name__}: {str(te)}"
+                    self._log(f"❌ {error_msg}", "error")
+                    self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
+                    result['errors'].append(error_msg)
                     return False
             
             def _task_inpaint():
@@ -14042,16 +14052,27 @@ class MangaTranslator:
                     
                     # Get results with timing
                     import time
+                    import traceback
+                    import os
+                    
+                    # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
+                    retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
+                    
                     try:
-                        translate_ok = fut_translate.result(timeout=60)
+                        translate_ok = fut_translate.result(timeout=chunk_timeout)
                         self._log("✅ Translation task completed", "debug")
                     except Exception as e:
-                        self._log(f"⚠️ Translation failed: {e}", "warning")
+                        error_msg = f"Translation failed: {type(e).__name__}: {str(e)}"
+                        self._log(f"⚠️ {error_msg}", "warning")
+                        self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
+                        result['errors'].append(error_msg)
                         translate_ok = False
                     
                     try:
+                        # Use same timeout settings for inpainting
                         # Get the result from fut_inpaint
-                        fut_inpaint_result = fut_inpaint.result(timeout=60)
+                        fut_inpaint_result = fut_inpaint.result(timeout=chunk_timeout)
                         
                         # Check what we got back
                         if isinstance(fut_inpaint_result, concurrent.futures.Future):

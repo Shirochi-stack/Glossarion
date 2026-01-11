@@ -6463,6 +6463,10 @@ class MangaTranslationTab(QObject):
             self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
             self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
             
+            # Debug: Verify the config was updated
+            print(f"[OCR_PROMPT_SAVE] Saved OCR prompt to config: {len(self.ocr_prompt)} chars")
+            print(f"[OCR_PROMPT_SAVE] Config has key 'manga_ocr_prompt': {'manga_ocr_prompt' in self.main_gui.config}")
+            
             self._save_rendering_settings()
             self._log("✅ Updated prompts", "success")
             dialog.accept()
@@ -10197,12 +10201,17 @@ class MangaTranslationTab(QObject):
             self._log("⏳ Preparing configuration...", "info")
             
             # Reload OCR prompt from config (in case it was edited in the dialog)
+            print(f"[OCR_PROMPT_LOAD] Keys in config: {list(self.main_gui.config.keys())[:20]}...")  # Debug
+            print(f"[OCR_PROMPT_LOAD] Checking for 'manga_ocr_prompt' in config...")
             if 'manga_ocr_prompt' in self.main_gui.config:
                 self.ocr_prompt = self.main_gui.config['manga_ocr_prompt']
                 self._log(f"✅ Loaded OCR prompt from config ({len(self.ocr_prompt)} chars)", "info")
                 self._log(f"OCR Prompt preview: {self.ocr_prompt[:100]}...", "debug")
+                print(f"[OCR_PROMPT_LOAD] Successfully loaded OCR prompt: {len(self.ocr_prompt)} chars")
             else:
                 self._log("⚠️ manga_ocr_prompt not found in config, using default", "warning")
+                print(f"[OCR_PROMPT_LOAD] manga_ocr_prompt key NOT FOUND in config!")
+                print(f"[OCR_PROMPT_LOAD] Using instance ocr_prompt: {len(getattr(self, 'ocr_prompt', '')) if hasattr(self, 'ocr_prompt') else 0} chars")
             
             # Build OCR configuration
             ocr_config = {'provider': self.ocr_provider_value}
