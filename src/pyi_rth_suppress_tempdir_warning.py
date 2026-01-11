@@ -12,6 +12,16 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
     # Store the _MEIPASS path for cleanup at exit only
     _meipass_path = sys._MEIPASS
     
+    # Fix SSL certificate paths for bundled certifi
+    try:
+        import certifi
+        cafile = certifi.where()
+        os.environ['SSL_CERT_FILE'] = cafile
+        os.environ['REQUESTS_CA_BUNDLE'] = cafile
+        os.environ['CURL_CA_BUNDLE'] = cafile
+    except Exception:
+        pass
+    
     # IMPORTANT: Only register cleanup at exit, don't touch _MEIPASS during runtime
     # The directory must remain accessible throughout the application's lifetime
     # for SSL certificates, DLLs, and other bundled resources

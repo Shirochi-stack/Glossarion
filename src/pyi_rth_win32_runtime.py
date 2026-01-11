@@ -14,6 +14,12 @@ if sys.platform == 'win32':
     if hasattr(sys, '_MEIPASS'):
         # Running as PyInstaller bundle
         import ctypes
-        # Force Windows to use system runtime libraries
+        # Allow system libraries AND application directory for SSL certs
         kernel32 = ctypes.windll.kernel32
-        kernel32.SetDefaultDllDirectories(0x00001000)  # LOAD_LIBRARY_SEARCH_SYSTEM32
+        # 0x00001000: LOAD_LIBRARY_SEARCH_SYSTEM32
+        # 0x00000002: LOAD_LIBRARY_SEARCH_APPLICATION_DIR
+        # 0x00000100: LOAD_LIBRARY_SEARCH_USER_DIRS
+        kernel32.SetDefaultDllDirectories(0x00001000 | 0x00000002 | 0x00000100)
+        
+        # Also add _MEIPASS to DLL search path for bundled resources
+        kernel32.AddDllDirectory(sys._MEIPASS)
