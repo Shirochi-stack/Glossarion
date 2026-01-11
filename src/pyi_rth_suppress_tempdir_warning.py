@@ -12,13 +12,30 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
     # Store the _MEIPASS path for cleanup at exit only
     _meipass_path = sys._MEIPASS
     
-    # Fix SSL certificate paths for bundled certifi
+    # Fix SSL certificate paths BEFORE any SSL imports
     try:
+        import ssl
         import certifi
+        
+        # Get certifi CA bundle path
         cafile = certifi.where()
+        
+        # Set environment variables
         os.environ['SSL_CERT_FILE'] = cafile
         os.environ['REQUESTS_CA_BUNDLE'] = cafile
         os.environ['CURL_CA_BUNDLE'] = cafile
+        
+        # Monkey-patch ssl.create_default_context to use certifi
+        _original_create_default_context = ssl.create_default_context
+        
+        def _patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=None, capath=None, cadata=None):
+            # If no cafile is specified, use certifi's bundle
+            if cafile is None and capath is None and cadata is None:
+                cafile = certifi.where()
+            return _original_create_default_context(purpose=purpose, cafile=cafile, capath=capath, cadata=cadata)
+        
+        ssl.create_default_context = _patched_create_default_context
+        
     except Exception:
         pass
     
