@@ -11487,7 +11487,13 @@ class MangaTranslationTab(QObject):
                             # CRITICAL FIX: Create separate folder for EACH image to prevent overlays
                             # This enables thread-safe parallel translation and instant feedback
                             base_name = os.path.splitext(filename)[0]
-                            parent_dir = os.path.dirname(filepath)
+                            
+                            # Check for OUTPUT_DIRECTORY override
+                            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                            if override_dir:
+                                parent_dir = os.path.join(override_dir, "translated_images")
+                            else:
+                                parent_dir = os.path.dirname(filepath)
                             
                             # Create unique folder per image for isolation
                             output_dir = os.path.join(parent_dir, f"{base_name}_translated")
@@ -11735,7 +11741,13 @@ class MangaTranslationTab(QObject):
                             # This enables thread-safe parallel translation and instant feedback
                             # Each image gets its own isolated folder like: image001_translated/image001.png
                             base_name = os.path.splitext(filename)[0]
-                            parent_dir = os.path.dirname(filepath)
+                            
+                            # Check for OUTPUT_DIRECTORY override
+                            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                            if override_dir:
+                                parent_dir = os.path.join(override_dir, "translated_images")
+                            else:
+                                parent_dir = os.path.dirname(filepath)
                             
                             # Create unique folder per image for isolation
                             output_dir = os.path.join(parent_dir, f"{base_name}_translated")

@@ -3034,14 +3034,21 @@ class MangaImagePreviewWidget(QWidget):
             
             # Get parent directory of the first selected file
             first_file = self.manga_integration.selected_files[0]
-            parent_dir = os.path.dirname(first_file)
+            
+            # Check for OUTPUT_DIRECTORY override
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or (self.main_gui.config.get('output_directory', '') if hasattr(self, 'main_gui') and self.main_gui else '')
+            if override_dir:
+                parent_dir = os.path.join(override_dir, "translated_images")
+            else:
+                parent_dir = os.path.dirname(first_file)
             
             # Find all *_translated folders in the parent directory
             translated_folders = []
-            for item in os.listdir(parent_dir):
-                item_path = os.path.join(parent_dir, item)
-                if os.path.isdir(item_path) and item.endswith('_translated'):
-                    translated_folders.append(item_path)
+            if os.path.exists(parent_dir):
+                for item in os.listdir(parent_dir):
+                    item_path = os.path.join(parent_dir, item)
+                    if os.path.isdir(item_path) and item.endswith('_translated'):
+                        translated_folders.append(item_path)
             
             if not translated_folders:
                 if not silent:
