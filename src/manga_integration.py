@@ -3683,7 +3683,7 @@ class MangaTranslationTab(QObject):
         toggle_layout.setSpacing(10)
 
         self.context_checkbox = self._create_styled_checkbox("Enable Full Page Context Translation")
-        self.context_checkbox.setChecked(bool(getattr(self, 'full_page_context_value', self.main_gui.config.get('manga_full_page_context', False))))
+        self.context_checkbox.setChecked(bool(getattr(self, 'full_page_context_value', self.main_gui.config.get('manga_full_page_context', True))))
         self.context_checkbox.stateChanged.connect(self._on_context_toggle)
         toggle_layout.addWidget(self.context_checkbox)
 
@@ -5897,7 +5897,7 @@ class MangaTranslationTab(QObject):
         self.font_style_value = config.get('manga_font_style', 'Default')
         
         # Full page context settings
-        self.full_page_context_value = config.get('manga_full_page_context', False)
+        self.full_page_context_value = config.get('manga_full_page_context', True)
         
         self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
             "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "

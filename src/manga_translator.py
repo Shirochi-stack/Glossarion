@@ -13629,6 +13629,11 @@ class MangaTranslator:
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
                      batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
         """Process a single manga image through the full pipeline"""
+        # Defensive imports at function start to prevent UnboundLocalError
+        import os
+        import time
+        import traceback
+        
         # Re-hijack print to ensure manga logs go to manga GUI
         # This is needed because print may have been restored after previous translation
         try:
@@ -13901,7 +13906,6 @@ class MangaTranslator:
                             _ = self.translate_regions(regions, image_path)
                         return True
                 except Exception as te:
-                    import traceback
                     error_msg = f"Translation task error: {type(te).__name__}: {str(te)}"
                     self._log(f"❌ {error_msg}", "error")
                     self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
@@ -13925,7 +13929,6 @@ class MangaTranslator:
                     skip_flag = False
                     try:
                         # Priority 1: Check environment variable (set by toggle)
-                        import os
                         env_skip = os.environ.get('MANGA_SKIP_INPAINTING', '').strip()
                         if env_skip in ('1', 'true', 'True', 'TRUE'):
                             skip_flag = True
@@ -14051,10 +14054,6 @@ class MangaTranslator:
                     inpainted = None
                     
                     # Get results with timing
-                    import time
-                    import traceback
-                    import os
-                    
                     # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
                     retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
                     chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
