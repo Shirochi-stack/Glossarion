@@ -13180,11 +13180,21 @@ class MangaTranslator:
         """Get or create a LocalInpainter using pool system.
         Loads the requested model if needed.
         """
+        import os
+        import time
+        
+        # Log raw inputs for .exe debugging
+        self._log(f"🔍 Inpainter checkout - raw inputs: method={local_method}, path={model_path}", "info")
+        
         # Normalize the model path to ensure key consistency
+        original_path = model_path
         if model_path:
             try:
                 model_path = os.path.abspath(os.path.normpath(model_path))
-            except Exception:
+                if original_path != model_path:
+                    self._log(f"🔍 Path normalized: {original_path} -> {model_path}", "info")
+            except Exception as e:
+                self._log(f"⚠️ Path normalization failed: {e}", "warning")
                 pass
         
         key = (local_method or 'anime', model_path or '')
@@ -13212,9 +13222,6 @@ class MangaTranslator:
             return tl.local_inpainters[key]
         
         # Not cached - try to check out from pool with polling
-        import time
-        import os
-        
         # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         max_wait_time = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
@@ -13232,9 +13239,16 @@ class MangaTranslator:
                 with MangaTranslator._inpaint_pool_lock:
                     rec = MangaTranslator._inpaint_pool.get(key)
                     if elapsed == 0:
-                        self._log(f"📊 Pool lookup for key {key}: found={rec is not None}", "info")
+                        # Show all keys in pool for comparison
+                        all_keys = list(MangaTranslator._inpaint_pool.keys())
+                        self._log(f"📊 Pool has {len(all_keys)} key(s) total", "info")
+                        for pk in all_keys:
+                            self._log(f"   Pool key: {pk}", "info")
+                        self._log(f"📊 Lookup for key {key}: found={rec is not None}", "info")
                         if rec:
                             self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
+                        else:
+                            self._log(f"⚠️ KEY MISMATCH - requested key not in pool!", "warning")
                     if rec and isinstance(rec, dict):
                         spares = rec.get('spares') or []
                         # Initialize checked_out list if it doesn't exist
@@ -14029,6 +14043,11 @@ class MangaTranslator:
                             base, ext = os.path.splitext(image_path)
                         cleaned_path = f"{base}_cleaned{ext}"
                         
+                        # Ensure parent directory exists (respects OUTPUT_DIRECTORY)
+                        cleaned_dir = os.path.dirname(cleaned_path)
+                        if cleaned_dir:
+                            os.makedirs(cleaned_dir, exist_ok=True)
+                        
                         # Fast save with no compression
                         ext_lower = ext.lower()
                         if ext_lower == '.png':
@@ -14116,6 +14135,11 @@ class MangaTranslator:
                                     base, ext = os.path.splitext(image_path)
                                 cleaned_path = f"{base}_cleaned{ext}"
                                 
+                                # Ensure parent directory exists (respects OUTPUT_DIRECTORY)
+                                cleaned_dir = os.path.dirname(cleaned_path)
+                                if cleaned_dir:
+                                    os.makedirs(cleaned_dir, exist_ok=True)
+                                
                                 # Fast save with no compression
                                 ext_lower = ext.lower()
                                 if ext_lower == '.png':
@@ -14142,6 +14166,11 @@ class MangaTranslator:
                                 else:
                                     base, ext = os.path.splitext(image_path)
                                 cleaned_path = f"{base}_cleaned{ext}"
+                                
+                                # Ensure parent directory exists (respects OUTPUT_DIRECTORY)
+                                cleaned_dir = os.path.dirname(cleaned_path)
+                                if cleaned_dir:
+                                    os.makedirs(cleaned_dir, exist_ok=True)
                                 
                                 cv2.imwrite(cleaned_path, inpainted)
                                 
