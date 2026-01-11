@@ -10209,6 +10209,25 @@ class MangaTranslationTab(QObject):
             except Exception as e:
                 self._log(f"⚠️ Warning: Could not set thread limits: {e}", "warning")
             
+            # Log AI Bubble Detection settings for debugging
+            try:
+                manga_settings = self.main_gui.config.get('manga_settings', {})
+                ocr_settings = manga_settings.get('ocr', {})
+                bubble_enabled = ocr_settings.get('bubble_detection_enabled', False)
+                detect_empty = ocr_settings.get('detect_empty_bubbles', False)
+                use_rtdetr_for_ocr = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path', '')
+                
+                self._log(f"🤖 AI Bubble Detection: {'Enabled' if bubble_enabled else 'Disabled'}", "info")
+                if bubble_enabled:
+                    self._log(f"  • Detector Type: {detector_type}", "info")
+                    self._log(f"  • Model: {model_url if model_url else 'Default'}", "info")
+                    self._log(f"  • Use RT-DETR as Guide: {'Yes' if use_rtdetr_for_ocr else 'No'}", "info")
+                    self._log(f"  • Detect Empty Bubbles: {'Yes' if detect_empty else 'No'}", "info")
+            except Exception as e:
+                self._log(f"⚠️ Warning: Could not log bubble detection settings: {e}", "debug")
+            
             # Early feedback
             self._log("⏳ Preparing configuration...", "info")
             
