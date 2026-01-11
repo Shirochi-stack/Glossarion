@@ -7660,11 +7660,7 @@ class MangaTranslator:
             
             # Add contextual translations if enabled
             if self.contextual_enabled and self.history_manager:
-                # Microsecond lock to prevent race conditions when reading history
-                import time
-                time.sleep(0.000001)
-                with self.history_manager.lock:
-                    history_context = self._get_translation_history_context()
+                history_context = self._get_translation_history_context()
                 if history_context:
                     self._log(
                         f"🔗 Adding contextual memory from previous translations "
