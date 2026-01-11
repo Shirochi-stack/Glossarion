@@ -7913,27 +7913,35 @@ class MangaTranslationTab(QObject):
                 # Use parent directory of first selected file
                 first_file = self.selected_files[0]
                 parent_dir = os.path.dirname(first_file)
+                source_name_no_ext = os.path.splitext(os.path.basename(first_file))[0]
                 
-                # Look for isolated *_translated folders in parent directory
-                translated_folders = []
-                if os.path.exists(parent_dir):
-                    for item in os.listdir(parent_dir):
-                        item_path = os.path.join(parent_dir, item)
-                        if os.path.isdir(item_path) and item.endswith('_translated'):
-                            translated_folders.append(item_path)
+                # Check for the specific translated folder for the current file
+                translated_folder = os.path.join(parent_dir, f"{source_name_no_ext}_translated")
                 
-                # If we found translated folders, open the parent directory
-                if translated_folders:
-                    output_dir = parent_dir
+                if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
+                    # Open the specific translated folder for this file
+                    output_dir = translated_folder
                 else:
-                    # Fall back to default output folder in current working directory
-                    output_dir = os.path.join(os.getcwd(), 'output')
-                    if not os.path.exists(output_dir):
-                        try:
-                            os.makedirs(output_dir, exist_ok=True)
-                        except Exception as e:
-                            QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
-                            return
+                    # Look for any *_translated folders in parent directory
+                    translated_folders = []
+                    if os.path.exists(parent_dir):
+                        for item in os.listdir(parent_dir):
+                            item_path = os.path.join(parent_dir, item)
+                            if os.path.isdir(item_path) and item.endswith('_translated'):
+                                translated_folders.append(item_path)
+                    
+                    # If we found translated folders, open the first one
+                    if translated_folders:
+                        output_dir = translated_folders[0]
+                    else:
+                        # Fall back to default output folder in current working directory
+                        output_dir = os.path.join(os.getcwd(), 'output')
+                        if not os.path.exists(output_dir):
+                            try:
+                                os.makedirs(output_dir, exist_ok=True)
+                            except Exception as e:
+                                QMessageBox.warning(self.dialog, "Error", f"Failed to create output folder:\n{str(e)}")
+                                return
             else:
                 # No selected files - use default output folder
                 output_dir = os.path.join(os.getcwd(), 'output')
