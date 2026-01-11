@@ -13188,6 +13188,7 @@ class MangaTranslator:
                 pass
         
         key = (local_method or 'anime', model_path or '')
+        self._log(f"🔑 Checkout request for key: {key}", "info")
         
         # OPTIMIZATION: Check if we already have this exact instance checked out
         # This prevents re-checking out the same instance multiple times per panel
@@ -13230,6 +13231,10 @@ class MangaTranslator:
             try:
                 with MangaTranslator._inpaint_pool_lock:
                     rec = MangaTranslator._inpaint_pool.get(key)
+                    if elapsed == 0:
+                        self._log(f"📊 Pool lookup for key {key}: found={rec is not None}", "info")
+                        if rec:
+                            self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
                     if rec and isinstance(rec, dict):
                         spares = rec.get('spares') or []
                         # Initialize checked_out list if it doesn't exist
