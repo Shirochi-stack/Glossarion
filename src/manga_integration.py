@@ -11085,7 +11085,7 @@ class MangaTranslationTab(QObject):
         # Log the applied rendering and inpainting settings
         #self._log(f"Applied rendering settings:", "info")
         #self._log(f"  Background: {self.bg_style_value} @ {int(self.bg_opacity_value/255*100)}% opacity", "info")
-        import os
+        # os is already imported at module level - no need to import again
        #self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
        #self._log(f"  Minimum Font Size: {self.auto_min_size_value}pt", "info")
        #self._log(f"  Maximum Font Size: {self.max_font_size_value}pt", "info")
@@ -11141,8 +11141,12 @@ class MangaTranslationTab(QObject):
     
     def _translation_worker(self):
         """Worker thread for translation"""
-        # Track start time for performance reporting
+        # Defensive imports at function start to prevent UnboundLocalError
+        import os
+        import traceback
         import time
+        
+        # Track start time for performance reporting
         translation_start_time = time.time()
         
         try:
@@ -11157,7 +11161,6 @@ class MangaTranslationTab(QObject):
             # Propagate the GUI "Batch Translation" toggle into environment so Unified API Client applies it globally
             # for all providers (including custom endpoints).
             try:
-                import os as _os
                 # Support both Tkinter (with .get()) and PySide6 (plain value)
                 batch_enabled = False
                 if hasattr(self.main_gui, 'batch_translation_var'):
@@ -11165,7 +11168,7 @@ class MangaTranslationTab(QObject):
                         batch_enabled = bool(self.main_gui.batch_translation_var.get())
                     else:
                         batch_enabled = bool(self.main_gui.batch_translation_var)
-                _os.environ['BATCH_TRANSLATION'] = '1' if batch_enabled else '0'
+                os.environ['BATCH_TRANSLATION'] = '1' if batch_enabled else '0'
                 
                 # Use GUI batch size if available; default to 3 to match existing default
                 bs_val = None
@@ -11177,7 +11180,7 @@ class MangaTranslationTab(QObject):
                             bs_val = str(int(self.main_gui.batch_size_var))
                 except Exception:
                     bs_val = None
-                _os.environ['BATCH_SIZE'] = bs_val or _os.environ.get('BATCH_SIZE', '3')
+                os.environ['BATCH_SIZE'] = bs_val or os.environ.get('BATCH_SIZE', '3')
             except Exception:
                 # Non-fatal if env cannot be set
                 pass
@@ -11248,7 +11251,6 @@ class MangaTranslationTab(QObject):
                         self._log(f"⏱️ Local inpainting preload finished in {dt:.2f}s", "info")
                     except Exception as _e:
                         self._log(f"⚠️ Local inpainting preload failed: {_e}", "warning")
-                        import traceback
                         self._log(traceback.format_exc(), "debug")
             except Exception as preload_err:
                 self._log(f"⚠️ Inpainting preload setup failed: {preload_err}", "warning")
@@ -11286,7 +11288,6 @@ class MangaTranslationTab(QObject):
                         if self.stop_flag.is_set():
                             return False
                         from manga_translator import MangaTranslator
-                        import os
                         # Build full OCR config for this thread (mirror _start_translation)
                         ocr_config = {'provider': self.ocr_provider_value}
                         if ocr_config['provider'] == 'google':

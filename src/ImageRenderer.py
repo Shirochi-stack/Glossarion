@@ -3877,6 +3877,13 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
 
 def _translate_individually(self, recognized_texts: list, image_path: str) -> list:
     """Translate each text individually (original behavior)"""
+    # CRITICAL: Import these at function start to avoid UnboundLocalError in except blocks
+    import os
+    import json
+    import hashlib
+    import traceback
+    from unified_api_client import UnifiedClient
+    
     try:
         # Check if visual context is enabled (SAFE for background thread)
         # Prefer batch snapshot captured on UI thread, else fall back to config
@@ -3895,8 +3902,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         print(f"[DEBUG] Image path: {image_path}")
         
         # Get API key and model from main GUI once (same method as regular translation)
-        from unified_api_client import UnifiedClient
-        import os, json, hashlib
+        # (imports already done at top of function)
         
         # Get API key - support both PySide6 and Tkinter
         api_key = None
@@ -4146,7 +4152,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                 print(f"[DEBUG] Successfully translated text {i+1}")
                 
             except Exception as e:
-                import traceback
+                # traceback already imported at top of function
                 error_msg = f"Translation failed for '{text}': {str(e)}"
                 self._log(f"❌ {error_msg}", "error")
                 print(f"[DEBUG] {error_msg}")
@@ -4160,7 +4166,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         return translated_texts
         
     except Exception as e:
-        import traceback
+        # traceback already imported at top of function
         self._log(f"❌ Individual translation failed: {str(e)}", "error")
         print(f"[DEBUG] Individual translation error traceback: {traceback.format_exc()}")
         # Fallback to original texts
