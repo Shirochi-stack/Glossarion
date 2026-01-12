@@ -23,7 +23,30 @@ if getattr(sys, 'frozen', False):
     # Suppress PyInstaller temp directory cleanup warning
     # The temp directory will be cleaned up by Windows automatically
     import atexit
-    atexit.unregister = lambda *args, **kwargs: None  # Disable atexit cleanup
+    import warnings
+    
+    # Suppress the specific PyInstaller cleanup warning
+    warnings.filterwarnings('ignore', message='Failed to remove temporary directory')
+    
+    # Also suppress the warning from the bootloader's removal attempt
+    def _silent_remove_readonly(func, path, excinfo):
+        """Error handler for shutil.rmtree that silently ignores permission errors."""
+        import stat
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass  # Silently ignore cleanup failures
+    
+    # Override the bootloader's cleanup handler
+    import shutil
+    _original_rmtree = shutil.rmtree
+    def _quiet_rmtree(path, ignore_errors=False, onerror=None):
+        try:
+            return _original_rmtree(path, ignore_errors=True, onerror=_silent_remove_readonly)
+        except Exception:
+            pass  # Silently ignore all rmtree errors during shutdown
+    shutil.rmtree = _quiet_rmtree
 
 # Standard Library
 import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
@@ -1524,6 +1547,19 @@ Text to analyze:
         try:
             print("[CLOSE] Window closing...")
             
+            # Set a timeout timer to force exit if cleanup takes too long
+            import threading
+            import time
+            
+            def force_exit_after_timeout():
+                time.sleep(3)  # 3 second timeout
+                print("[CLOSE] Timeout reached - forcing immediate exit")
+                import os
+                os._exit(0)
+            
+            timeout_thread = threading.Thread(target=force_exit_after_timeout, daemon=True)
+            timeout_thread.start()
+            
             # Stop any background operations first
             self.stop_all_operations()
             
@@ -1531,6 +1567,7 @@ Text to analyze:
             
             # Accept the close event - this will naturally end the Qt event loop
             event.accept()
+            
             # Propagate global stop to UnifiedClient so in-flight calls exit cleanly
             try:
                 from unified_api_client import UnifiedClient
@@ -1580,6 +1617,32 @@ Text to analyze:
         try:
             print("[CLEANUP] Stopping all background operations...")
             
+            # Set stop flags FIRST
+            self.stop_requested = True
+            if hasattr(self, 'stop_flag'):
+                try:
+                    self.stop_flag.set()
+                except:
+                    pass
+            
+            # Cancel all running futures
+            futures_to_cancel = []
+            if hasattr(self, 'translation_future') and self.translation_future:
+                futures_to_cancel.append(('translation', self.translation_future))
+            if hasattr(self, 'glossary_future') and self.glossary_future:
+                futures_to_cancel.append(('glossary', self.glossary_future))
+            if hasattr(self, 'epub_future') and self.epub_future:
+                futures_to_cancel.append(('epub', self.epub_future))
+            if hasattr(self, 'qa_future') and self.qa_future:
+                futures_to_cancel.append(('qa', self.qa_future))
+            
+            for name, future in futures_to_cancel:
+                try:
+                    print(f"[CLEANUP] Cancelling {name} future...")
+                    future.cancel()
+                except:
+                    pass
+            
             # Stop any translation operations
             if hasattr(self, '_translation_thread') and self._translation_thread:
                 try:
@@ -1598,17 +1661,21 @@ Text to analyze:
                 except:
                     pass
             
-            # Stop executor if it exists
+            # Stop executor if it exists - FORCE immediate shutdown
             if hasattr(self, 'executor') and self.executor:
                 try:
                     print("[CLEANUP] Shutting down thread pool executor...")
-                    self.executor.shutdown(wait=False)
+                    # Try graceful shutdown first with short timeout
+                    self.executor.shutdown(wait=True, cancel_futures=True)
+                    print("[CLEANUP] Executor shutdown complete")
+                except TypeError:
+                    # Python < 3.9 doesn't have cancel_futures parameter
+                    try:
+                        self.executor.shutdown(wait=False)
+                    except:
+                        pass
                 except:
                     pass
-            
-            # Set any stop flags that might exist
-            if hasattr(self, 'stop_flag'):
-                self.stop_flag.set()
             
             # Close any open dialogs
             if hasattr(self, '_manga_dialog') and self._manga_dialog:
