@@ -1366,7 +1366,7 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         # Check question marks
         if orig_question_count > 0:
             loss_ratio = 1.0 - (trans_question_count / orig_question_count)
-            if loss_ratio >= threshold:
+            if loss_ratio > threshold:
                 has_mismatch = True
                 details.append({
                     'type': 'missing_question_marks',
@@ -1380,7 +1380,7 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         # Check exclamation marks
         if orig_exclamation_count > 0:
             loss_ratio = 1.0 - (trans_exclamation_count / orig_exclamation_count)
-            if loss_ratio >= threshold:
+            if loss_ratio > threshold:
                 has_mismatch = True
                 details.append({
                     'type': 'missing_exclamation_marks',

@@ -2245,7 +2245,7 @@ class QAScannerMixin:
         punct_threshold_layout = QHBoxLayout(punct_threshold_widget)
         punct_threshold_layout.setContentsMargins(20, 0, 0, 10)
         
-        punct_threshold_label = QLabel("Flag if lost ≥")
+        punct_threshold_label = QLabel("Flag if lost >")
         punct_threshold_label.setFont(QFont('Arial', 10))
         punct_threshold_layout.addWidget(punct_threshold_label)
         
