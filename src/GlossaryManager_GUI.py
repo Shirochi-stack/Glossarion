@@ -1063,7 +1063,7 @@ class GlossaryManagerMixin:
         partial_slider_layout.setContentsMargins(0, 5, 0, 0)
         duplicate_frame_layout.addWidget(partial_slider_row)
 
-        self.partial_ratio_weight = float(self.config.get('glossary_partial_ratio_weight', 0.0))
+        self.partial_ratio_weight = float(self.config.get('glossary_partial_ratio_weight', 0.45))
 
         self.partial_ratio_slider = QSlider(Qt.Horizontal)
         self.partial_ratio_slider.setMinimum(0)

@@ -10825,8 +10825,8 @@ Important rules:
             elif hasattr(self, 'partial_ratio_weight'):
                 weight = self.partial_ratio_weight
             else:
-                weight = self.config.get('glossary_partial_ratio_weight', 0.0)
-            self.config['glossary_partial_ratio_weight'] = max(0.0, min(1.0, float(weight or 0.0)))
+                weight = self.config.get('glossary_partial_ratio_weight', 0.45)
+            self.config['glossary_partial_ratio_weight'] = max(0.0, min(1.0, float(weight or 0.45)))
             
             # Target language from combo box
             if hasattr(self, 'glossary_target_language_combo'):
@@ -10967,7 +10967,7 @@ Important rules:
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
                     ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
-                    ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.0))),
+                    ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
                     ('GLOSSARY_TARGET_LANGUAGE', self.config.get('glossary_target_language', 'English')),
                 ]
                 for env_key, env_value in glossary_env_mappings:

@@ -37,7 +37,7 @@ def get_duplicate_detection_config():
     
     # Get base threshold from slider (can be overridden by preset)
     base_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90'))
-    partial_weight = float(os.getenv('GLOSSARY_PARTIAL_RATIO_WEIGHT', '0') or 0.0)
+    partial_weight = float(os.getenv('GLOSSARY_PARTIAL_RATIO_WEIGHT', '0.45') or 0.45)
     partial_weight = max(0.0, min(1.0, partial_weight))
     
     configs = {
