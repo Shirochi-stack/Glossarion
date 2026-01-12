@@ -1303,7 +1303,8 @@ def extract_epub_punctuation_info(epub_path, log=print):
                             punct_info[idx] = {
                                 'question_marks': question_count,
                                 'exclamation_marks': exclamation_count,
-                                'filename': os.path.basename(file_path)
+                                'filename': os.path.basename(file_path),
+                                'spine_index': idx  # Add for consistency with spine mode
                             }
                     except Exception as e:
                         continue
