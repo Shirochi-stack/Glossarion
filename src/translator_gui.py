@@ -1222,6 +1222,10 @@ Text to analyze:
         # Single line break toggle
         if not hasattr(self, 'enhanced_single_line_break_var'):
             self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
+        
+        # Markdown2 converter toggle
+        if not hasattr(self, 'use_markdown2_converter_var'):
+            self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
              
         # Initialize update manager AFTER config is loaded
         try:
@@ -7255,6 +7259,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ENHANCED_FILTERING": enhanced_filtering,
             "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', True) else "0",
             "ENHANCED_SINGLE_LINE_BREAK": "1" if getattr(self, 'enhanced_single_line_break_var', False) else "0",
+            "USE_MARKDOWN2_CONVERTER": "1" if getattr(self, 'use_markdown2_converter_var', False) else "0",
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
             
             # For new UI
@@ -10705,6 +10710,7 @@ Important rules:
                 ('file_filtering_level', ['file_filtering_level_var'], 'smart', str),
                 ('enhanced_preserve_structure', ['enhanced_preserve_structure_var'], True, bool),
                 ('enhanced_single_line_break', ['enhanced_single_line_break_var'], False, bool),
+                ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
                 

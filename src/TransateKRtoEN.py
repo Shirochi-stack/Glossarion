@@ -6742,7 +6742,49 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
-    # First, try to use markdown library with setext headers disabled
+    # Check if user prefers markdown2 (legacy behavior)
+    use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
+    
+    if use_markdown2:
+        # Use markdown2 for conversion (legacy behavior)
+        try:
+            import markdown2
+            
+            has_markdown = any([
+                '##' in plain_text,
+                '**' in plain_text,
+                '*' in plain_text and not '**' in plain_text,
+                '[' in plain_text and '](' in plain_text,
+                '```' in plain_text,
+                '> ' in plain_text,
+                '- ' in plain_text or '* ' in plain_text or '1. ' in plain_text
+            ])
+            
+            if has_markdown or preserve_structure:
+                html = markdown2.markdown(plain_text, extras=[
+                    'cuddled-lists',
+                    'fenced-code-blocks',
+                    'break-on-newline',
+                    'smarty-pants',
+                    'tables',
+                ])
+                
+                if not '<p>' in html:
+                    lines = html.split('\n')
+                    processed_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('<') and not line.endswith('>'):
+                            processed_lines.append(f'<p>{line}</p>')
+                        elif line:
+                            processed_lines.append(line)
+                    html = '\n'.join(processed_lines)
+                
+                return html
+        except ImportError:
+            print("⚠️ markdown2 not available, falling back to markdown library")
+    
+    # Use markdown library with setext headers disabled (default, recommended)
     try:
         import markdown
         from markdown.extensions import Extension
