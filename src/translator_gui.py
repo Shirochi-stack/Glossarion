@@ -1589,6 +1589,18 @@ Text to analyze:
             
             print("[CLOSE] Close event handling completed")
             
+            # CRITICAL: Block all multiprocessing before exit to prevent spawn errors
+            # Monkey-patch multiprocessing to prevent any new processes during shutdown
+            try:
+                import multiprocessing
+                original_process_init = multiprocessing.Process.__init__
+                def blocked_process_init(*args, **kwargs):
+                    print("[CLOSE] Blocked attempt to spawn process during shutdown")
+                    return
+                multiprocessing.Process.__init__ = blocked_process_init
+            except Exception:
+                pass
+            
             # Use immediate hard exit to prevent lingering background processes (especially for .exe)
             # This is safer than relying on Python shutdown which waits for non-daemon threads
             import os
@@ -1681,14 +1693,16 @@ Text to analyze:
             if hasattr(self, '_manga_dialog') and self._manga_dialog:
                 try:
                     print("[CLEANUP] Closing manga dialog...")
-                    # Flush manga state before closing
+                    # Flush manga state and stop worker before closing
                     if hasattr(self, 'manga_translator') and hasattr(self.manga_translator, 'image_state_manager'):
                         try:
                             print("[CLEANUP] Flushing manga image state...")
                             self.manga_translator.image_state_manager.flush()
-                            print("[CLEANUP] Manga state flushed successfully")
+                            print("[CLEANUP] Stopping manga state worker...")
+                            self.manga_translator.image_state_manager._stop_worker()
+                            print("[CLEANUP] Manga state worker stopped")
                         except Exception as e:
-                            print(f"[CLEANUP] Failed to flush manga state: {e}")
+                            print(f"[CLEANUP] Failed to cleanup manga state: {e}")
                     self._manga_dialog.close()
                 except:
                     pass
@@ -1719,6 +1733,27 @@ Text to analyze:
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
+            
+            # CRITICAL: Also terminate any Python child processes that might be multiprocessing workers
+            try:
+                import psutil
+                current_proc = psutil.Process()
+                children = current_proc.children(recursive=True)
+                for child in children:
+                    try:
+                        print(f"[CLEANUP] Terminating child process {child.pid}...")
+                        child.terminate()
+                    except Exception:
+                        pass
+                # Wait briefly for processes to terminate
+                gone, alive = psutil.wait_procs(children, timeout=0.5)
+                for p in alive:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[CLEANUP] Error terminating child processes: {e}")
             
             print("[CLEANUP] Background operations stopped")
             
