@@ -5330,7 +5330,7 @@ def process_html_file_batch(args):
                     orig_count = punct_issue.get('original_count', 0)
                     trans_count = punct_issue.get('translated_count', 0)
                     loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
-                    issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count}_{punct_symbol})")
+                    issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
                     
         # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
