@@ -318,7 +318,7 @@ class QAScannerMixin:
             'check_repetition': True,
             'check_translation_artifacts': False,
             'check_punctuation_mismatch': False,
-            'punctuation_loss_threshold': 50,
+            'punctuation_loss_threshold': 49,
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,
@@ -2252,7 +2252,7 @@ class QAScannerMixin:
         punct_threshold_spinbox = QSpinBox()
         punct_threshold_spinbox.setMinimum(0)
         punct_threshold_spinbox.setMaximum(100)
-        punct_threshold_spinbox.setValue(qa_settings.get('punctuation_loss_threshold', 50))
+        punct_threshold_spinbox.setValue(qa_settings.get('punctuation_loss_threshold', 49))
         punct_threshold_spinbox.setSuffix("%")
         punct_threshold_spinbox.setMinimumWidth(80)
         disable_wheel_event(punct_threshold_spinbox)
@@ -3344,7 +3344,7 @@ class QAScannerMixin:
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
                 check_punctuation_checkbox.setChecked(False)
-                punct_threshold_spinbox.setValue(50)
+                punct_threshold_spinbox.setValue(49)
 
                 # Reset auto multipliers checkbox to default (enabled)
                 auto_multipliers_checkbox.setChecked(True)
