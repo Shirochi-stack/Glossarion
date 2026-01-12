@@ -25,6 +25,53 @@ if getattr(sys, 'frozen', False):
     import atexit
     atexit.unregister = lambda *args, **kwargs: None  # Disable atexit cleanup
 
+# --- Helper utilities to quiet PyInstaller temp-dir warnings & stray children ---
+def _kill_child_process_tree(timeout=1.5):
+    """Terminate all child processes of the current process to free _MEIPASS locks.
+    Returns the number of children we attempted to stop.
+    """
+    count = 0
+    try:
+        import psutil, os
+        parent = psutil.Process(os.getpid())
+        children = parent.children(recursive=True)
+        count = len(children)
+        for proc in children:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        gone, alive = psutil.wait_procs(children, timeout=timeout)
+        for proc in alive:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    except Exception:
+        # Best-effort fallback using taskkill without raising
+        try:
+            import subprocess, os
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    return count
+
+
+def _preempt_temp_dir_warning():
+    """Best-effort suppression of PyInstaller temp-dir warning by removing locks early."""
+    try:
+        if not getattr(sys, "frozen", False):
+            return
+        # Kill any lingering children first so _MEIPASS can be removed
+        _kill_child_process_tree()
+        # Manually clear the extracted temp dir; ignore failures
+        temp_dir = getattr(sys, "_MEIPASS", None)
+        if temp_dir and os.path.isdir(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
 # Standard Library
 import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
 from logging.handlers import RotatingFileHandler
@@ -1534,6 +1581,12 @@ Text to analyze:
             
             # Stop any background operations first
             self.stop_all_operations()
+
+            # Aggressively free PyInstaller temp dir to avoid warning message box
+            try:
+                _preempt_temp_dir_warning()
+            except Exception:
+                pass
             
             print("[CLOSE] Background operations stopped, accepting close event...")
             
@@ -1660,6 +1713,18 @@ Text to analyze:
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
+
+            # Sweep any remaining children (e.g., helper workers) to avoid temp-dir locks
+            try:
+                _kill_child_process_tree()
+            except Exception:
+                pass
+
+            # Generic child-process sweep to release any remaining _MEIPASS locks
+            try:
+                _kill_child_process_tree()
+            except Exception:
+                pass
             
             print("[CLEANUP] Background operations stopped")
             
