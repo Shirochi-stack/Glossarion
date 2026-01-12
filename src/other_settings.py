@@ -4763,6 +4763,12 @@ def _create_processing_options_section(self, parent):
     markdown2_cb.setContentsMargins(0, 2, 0, 0)
     enhanced_opts_v.addWidget(markdown2_cb)
     
+    markdown2_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When enabled, uses the markdown2 library for conversion.<br>"
+        "When disabled, falls back to the standard markdown library."
+        "</p></qt>"
+    )
     markdown2_desc = QLabel("Use markdown2 library instead of markdown (may escape brackets)")
     markdown2_desc.setStyleSheet("color: gray; font-size: 8pt;")
     markdown2_desc.setContentsMargins(20, 0, 0, 3)
