@@ -6769,11 +6769,11 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                     'tables',
                 ])
 
-                # Post-process: Fix setext headers that were created from separator lines
-                # These are NOT real headers - just text followed by ==== or ----
-                # Convert all <h1> and <h2> back to <p> unless they start with # (ATX-style)
-                html = re.sub(r'<h1>(.*?)</h1>', r'<p>\1</p>', html)
-                html = re.sub(r'<h2>(.*?)</h2>', r'<p>\1</p>', html)
+                # Post-process: Fix setext headers that were created from separator lines.
+                # These are NOT real headers—just text followed by ==== or ----.
+                # Restore both the text AND the underline so nothing is lost.
+                html = re.sub(r'<h1>(.*?)</h1>', r'<p>\1</p>\n<p>====</p>', html)
+                html = re.sub(r'<h2>(.*?)</h2>', r'<p>\1</p>\n<p>----</p>', html)
                 
                 if not '<p>' in html:
                     lines = html.split('\n')
