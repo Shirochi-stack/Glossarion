@@ -3316,6 +3316,7 @@ class QAScannerMixin:
                 check_encoding_checkbox.setChecked(False)
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
+                check_punctuation_checkbox.setChecked(False)
 
                 # Reset auto multipliers checkbox to default (enabled)
                 auto_multipliers_checkbox.setChecked(True)
