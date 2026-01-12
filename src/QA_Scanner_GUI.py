@@ -2265,6 +2265,21 @@ class QAScannerMixin:
         punct_threshold_layout.addStretch()
         detection_layout.addWidget(punct_threshold_widget)
         
+        # Enable/disable punctuation threshold controls based on checkbox
+        def toggle_punctuation_threshold(checked):
+            punct_threshold_label.setEnabled(checked)
+            punct_threshold_spinbox.setEnabled(checked)
+            punct_threshold_hint.setEnabled(checked)
+            if checked:
+                punct_threshold_label.setStyleSheet("color: white;")
+                punct_threshold_hint.setStyleSheet("color: gray;")
+            else:
+                punct_threshold_label.setStyleSheet("color: #606060;")
+                punct_threshold_hint.setStyleSheet("color: #404040;")
+        
+        check_punctuation_checkbox.toggled.connect(toggle_punctuation_threshold)
+        toggle_punctuation_threshold(check_punctuation_checkbox.isChecked())  # Set initial state
+        
         check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
         check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
         detection_layout.addWidget(check_glossary_checkbox)
