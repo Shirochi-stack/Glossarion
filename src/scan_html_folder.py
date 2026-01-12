@@ -5319,11 +5319,18 @@ def process_html_file_batch(args):
                 
                 # Add to issues list for reporting
                 for punct_issue in punct_issues:
-                    punct_type = 'question' if 'question' in punct_issue['type'] else 'exclamation'
+                    # Determine the exact punctuation symbol for clearer logging
+                    if 'question' in punct_issue['type']:
+                        punct_symbol = '?'
+                        punct_name = 'question_marks'
+                    else:
+                        punct_symbol = '!'
+                        punct_name = 'exclamation_marks'
+                    
                     orig_count = punct_issue.get('original_count', 0)
                     trans_count = punct_issue.get('translated_count', 0)
                     loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
-                    issues.append(f"punctuation_mismatch_{punct_type}_{loss_pct}%_lost_({trans_count}/{orig_count})")
+                    issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count}_{punct_symbol})")
                     
         # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
