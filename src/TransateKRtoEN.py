@@ -3510,7 +3510,7 @@ class TranslationProcessor:
             max_duplicate_retries = 6
 
         try:
-            truncation_retry_limit = int(getattr(self.config, 'TRUNCATION_RETRY_ATTEMPTS', 1))
+            truncation_retry_limit = int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1"))
         except Exception:
             truncation_retry_limit = 1
         try:
@@ -4402,9 +4402,17 @@ class BatchTranslationProcessor:
             chapter_truncated = False  # Track if any chunk was truncated
 
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
-                # Submit all chunks
-                future_to_chunk = {chunk_executor.submit(process_chunk, chunk_data): chunk_data[1] 
-                                  for chunk_data in chunks}
+                # Submit chunks with staggered delay to respect THREAD_SUBMISSION_DELAY_SECONDS
+                thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+                future_to_chunk = {}
+                
+                for chunk_idx, chunk_data in enumerate(chunks):
+                    # Apply delay before submitting each chunk (except the first one)
+                    if chunk_idx > 0 and thread_delay > 0:
+                        time.sleep(thread_delay)
+                    
+                    future = chunk_executor.submit(process_chunk, chunk_data)
+                    future_to_chunk[future] = chunk_data[1]  # Store chunk index
                 
                 # Collect results as they complete
                 completed_chunks = 0
