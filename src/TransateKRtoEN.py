@@ -3907,6 +3907,9 @@ class BatchTranslationProcessor:
         self._batch_rolling_summary_lock = threading.Lock()
         self._batch_rolling_summary_text = ""  # exact rolling_summary.txt contents for current batch
         
+        # Global semaphore to limit total concurrent API calls across all chapters and chunks
+        self.api_concurrency_semaphore = threading.Semaphore(self.config.BATCH_SIZE)
+        
        # Optionally log multi-key status
         if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
             stats = self.client.get_stats()
@@ -4141,11 +4144,19 @@ class BatchTranslationProcessor:
                 print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
             
             def process_chunk(chunk_data):
-                """Process a single chunk in parallel"""
+                """Process a single chunk in parallel - semaphore limits concurrent API calls"""
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 
                 if local_stop_cb():
                     return None, chunk_idx
+                
+                # Do prompt building WITHOUT holding semaphore
+                # Then acquire semaphore ONLY for the API call
+                return process_chunk_inner(chunk_data)
+            
+            def process_chunk_inner(chunk_data):
+                """Inner chunk processing with semaphore held"""
+                chunk_html, chunk_idx, chunk_total = chunk_data
                 
                 # Build user prompt for this chunk
                 if total_chunks > 1:
@@ -4326,21 +4337,24 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
 
-                print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
                 chapter_ctx = {
                     'chapter': actual_num,
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                 }
-                result, finish_reason, raw_obj_from_send = send_with_interrupt(
-                    chapter_msgs,
-                    self.client,
-                    self.config.TEMP,
-                    self.config.MAX_OUTPUT_TOKENS,
-                    local_stop_cb,
-                    context='translation',
-                    chapter_context=chapter_ctx,
-                )
+                
+                # Acquire semaphore ONLY for the API call
+                with self.api_concurrency_semaphore:
+                    print(f"🔓 [SEMAPHORE] Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} ACQUIRED semaphore - starting API call now")
+                    result, finish_reason, raw_obj_from_send = send_with_interrupt(
+                        chapter_msgs,
+                        self.client,
+                        self.config.TEMP,
+                        self.config.MAX_OUTPUT_TOKENS,
+                        local_stop_cb,
+                        context='translation',
+                        chapter_context=chapter_ctx,
+                    )
                 
                 # Use the raw object directly from send_with_interrupt
                 raw_obj = raw_obj_from_send
@@ -4388,8 +4402,8 @@ class BatchTranslationProcessor:
                     raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
             
             # Use ThreadPoolExecutor to process chunks in parallel
-            # Use same batch size as chapter-level parallelism
-            max_chunk_workers = min(total_chunks, self.config.BATCH_SIZE)
+            # Semaphore controls actual concurrency across all chapters
+            max_chunk_workers = total_chunks
 
             # Shared abort flag for this chapter's chunks (set when a chunk hits prohibited content)
             chunk_abort_event = threading.Event()
@@ -4411,7 +4425,17 @@ class BatchTranslationProcessor:
                     if idx > 0 and thread_delay > 0:
                         chunk_num = chunk_data[1]  # Extract chunk number for logging
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
-                        time.sleep(thread_delay)
+                        
+                        # Interruptible sleep - check stop flag every 0.1s
+                        elapsed = 0
+                        check_interval = 0.1
+                        while elapsed < thread_delay:
+                            if local_stop_cb():
+                                print(f"🛑 Chunk submission delay interrupted")
+                                raise Exception("Translation stopped by user during chunk submission delay")
+                            sleep_chunk = min(check_interval, thread_delay - elapsed)
+                            time.sleep(sleep_chunk)
+                            elapsed += sleep_chunk
                     
                     # Now submit the chunk
                     future = chunk_executor.submit(process_chunk, chunk_data)
@@ -8699,6 +8723,7 @@ def main(log_callback=None, stop_callback=None):
             units_to_process = [[ch] for ch in chapters_to_translate]  # Wrap each chapter as single-item group
             is_merged_mode = False
         
+        # Process chapters in parallel - semaphore controls total API concurrency across all chunks
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
             if batching_mode == 'aggressive':
                 import threading
