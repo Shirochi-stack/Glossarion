@@ -1254,8 +1254,11 @@ def extract_epub_punctuation_info(epub_path, log=print):
                         if content is None:
                             continue
                         
-                        # Parse HTML and extract text
+                        # Parse HTML and extract ONLY VISIBLE text
                         soup = BeautifulSoup(content, 'html.parser')
+                        # Remove non-visible tags before extracting text
+                        for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                            tag.decompose()
                         text = soup.get_text()
                         
                         # Count punctuation
@@ -1294,6 +1297,9 @@ def extract_epub_punctuation_info(epub_path, log=print):
                     try:
                         content = zf.read(file_path).decode('utf-8', errors='ignore')
                         soup = BeautifulSoup(content, 'html.parser')
+                        # Remove non-visible tags before extracting text
+                        for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                            tag.decompose()
                         text = soup.get_text()
                         
                         question_count = text.count('?')
@@ -5775,6 +5781,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             with open(chunk_path, 'r', encoding='utf-8') as f:
                                 chunk_html = f.read()
                             soup = BeautifulSoup(chunk_html, 'html.parser')
+                            # Remove non-visible tags before extracting text
+                            for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                                tag.decompose()
                             text = soup.get_text()
                             
                             question_count = text.count('?')
