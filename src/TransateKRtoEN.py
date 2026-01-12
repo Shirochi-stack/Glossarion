@@ -4402,16 +4402,18 @@ class BatchTranslationProcessor:
             chapter_truncated = False  # Track if any chunk was truncated
 
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
-                # Submit chunks with staggered delay to respect THREAD_SUBMISSION_DELAY_SECONDS
+                # Submit chunks with staggered delay to prevent simultaneous starts
                 thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                 future_to_chunk = {}
                 
-                for chunk_idx, chunk_data in enumerate(chunks):
-                    # Apply delay before submitting each chunk (except the first one)
-                    if chunk_idx > 0 and thread_delay > 0:
-                        print(f"🧵 Applying {thread_delay}s delay before submitting chunk {chunk_data[1]}/{total_chunks}")
+                for idx, chunk_data in enumerate(chunks):
+                    # Sleep BEFORE submitting (except first chunk)
+                    if idx > 0 and thread_delay > 0:
+                        chunk_num = chunk_data[1]  # Extract chunk number for logging
+                        print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
                         time.sleep(thread_delay)
                     
+                    # Now submit the chunk
                     future = chunk_executor.submit(process_chunk, chunk_data)
                     future_to_chunk[future] = chunk_data[1]  # Store chunk index
                 
