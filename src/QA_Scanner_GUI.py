@@ -318,6 +318,7 @@ class QAScannerMixin:
             'check_repetition': True,
             'check_translation_artifacts': False,
             'check_punctuation_mismatch': False,
+            'punctuation_loss_threshold': 50,
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,
@@ -2239,6 +2240,31 @@ class QAScannerMixin:
         check_punctuation_checkbox.setChecked(qa_settings.get('check_punctuation_mismatch', False))
         detection_layout.addWidget(check_punctuation_checkbox)
         
+        # Punctuation loss threshold setting (indented under the checkbox)
+        punct_threshold_widget = QWidget()
+        punct_threshold_layout = QHBoxLayout(punct_threshold_widget)
+        punct_threshold_layout.setContentsMargins(20, 0, 0, 10)
+        
+        punct_threshold_label = QLabel("Flag if lost ≥")
+        punct_threshold_label.setFont(QFont('Arial', 10))
+        punct_threshold_layout.addWidget(punct_threshold_label)
+        
+        punct_threshold_spinbox = QSpinBox()
+        punct_threshold_spinbox.setMinimum(0)
+        punct_threshold_spinbox.setMaximum(100)
+        punct_threshold_spinbox.setValue(qa_settings.get('punctuation_loss_threshold', 50))
+        punct_threshold_spinbox.setSuffix("%")
+        punct_threshold_spinbox.setMinimumWidth(80)
+        disable_wheel_event(punct_threshold_spinbox)
+        punct_threshold_layout.addWidget(punct_threshold_spinbox)
+        
+        punct_threshold_hint = QLabel("(0 = flag all, 50 = flag if half lost, 100 = only flag if all lost)")
+        punct_threshold_hint.setFont(QFont('Arial', 9))
+        punct_threshold_hint.setStyleSheet("color: gray;")
+        punct_threshold_layout.addWidget(punct_threshold_hint)
+        punct_threshold_layout.addStretch()
+        detection_layout.addWidget(punct_threshold_widget)
+        
         check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
         check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
         detection_layout.addWidget(check_glossary_checkbox)
@@ -3016,6 +3042,7 @@ class QAScannerMixin:
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                     'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
+                    'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                     'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),
@@ -3317,6 +3344,7 @@ class QAScannerMixin:
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
                 check_punctuation_checkbox.setChecked(False)
+                punct_threshold_spinbox.setValue(50)
 
                 # Reset auto multipliers checkbox to default (enabled)
                 auto_multipliers_checkbox.setChecked(True)

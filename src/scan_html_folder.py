@@ -1326,7 +1326,7 @@ def extract_epub_punctuation_info(epub_path, log=print):
         log(f"❌ Error extracting punctuation info from EPUB: {e}")
         return {}
 
-def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuation_info, threshold=0.5):
+def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuation_info, threshold=0.5, qa_settings=None):
     """
     Detect significant punctuation mismatches by comparing translated text with original EPUB punctuation info.
     
@@ -1335,10 +1335,14 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         chapter_num: The chapter number to check
         original_punctuation_info: Dict from extract_epub_punctuation_info()
         threshold: Ratio threshold for flagging mismatches (0.5 = flag if 50% or more punctuation lost)
+        qa_settings: Optional dict with 'punctuation_loss_threshold' (0-100, default 50)
     
     Returns:
         tuple: (has_mismatch, details)
     """
+    # Get threshold from settings if provided (convert from percentage to ratio)
+    if qa_settings and 'punctuation_loss_threshold' in qa_settings:
+        threshold = qa_settings['punctuation_loss_threshold'] / 100.0
     try:
         # If no original punctuation info for this chapter, skip check
         if chapter_num not in original_punctuation_info:
@@ -5293,7 +5297,7 @@ def process_html_file_batch(args):
                             break
                 
                 if matched_punct_key:
-                    has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, matched_punct_key, original_punctuation_info)
+                    has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, matched_punct_key, original_punctuation_info, qa_settings=qa_settings)
             else:
                 # EPUB mode: match by spine index
                 search_basename = os.path.splitext(search_filename)[0]  # Remove extension
@@ -5303,7 +5307,7 @@ def process_html_file_batch(args):
                     
                     # EXACT match only
                     if orig_basename == search_basename:
-                        has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, spine_idx, original_punctuation_info)
+                        has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, spine_idx, original_punctuation_info, qa_settings=qa_settings)
                         matched_punct_key = spine_idx
                         break
             
