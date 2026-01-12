@@ -289,6 +289,10 @@ class ImageStateManager:
     def _start_worker(self):
         """Start worker process for async state operations"""
         try:
+            # Don't start worker if already shutting down
+            if getattr(self, '_mp_worker', None) and self._mp_worker.is_alive():
+                return
+            
             import multiprocessing as mp
             try:
                 self._mp_ctx = mp.get_context('spawn')
@@ -329,16 +333,53 @@ class ImageStateManager:
     def _stop_worker(self):
         """Stop worker process"""
         try:
-            if self._mp_enabled and self._mp_task_q:
-                self._mp_task_q.put({'type': 'shutdown'})
-            if self._mp_worker:
-                self._mp_worker.join(timeout=2.0)
+            # Disable multiprocessing first to prevent new tasks
+            self._mp_enabled = False
+            
+            # Send shutdown signal
+            if self._mp_task_q:
+                try:
+                    self._mp_task_q.put({'type': 'shutdown'}, timeout=0.5)
+                except Exception:
+                    pass
+            
+            # Wait for worker to finish
+            if self._mp_worker and self._mp_worker.is_alive():
+                try:
+                    self._mp_worker.join(timeout=1.0)
+                except Exception:
+                    pass
+                
+                # Force terminate if still alive
                 if self._mp_worker.is_alive():
-                    self._mp_worker.terminate()
-        except Exception:
-            pass
+                    try:
+                        self._mp_worker.terminate()
+                        self._mp_worker.join(timeout=0.5)
+                    except Exception:
+                        pass
+            
+            # Close queues to release handles
+            if self._mp_task_q:
+                try:
+                    self._mp_task_q.close()
+                    self._mp_task_q.join_thread()
+                except Exception:
+                    pass
+            
+            if self._mp_result_q:
+                try:
+                    self._mp_result_q.close()
+                    self._mp_result_q.join_thread()
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            print(f"[STATE] Error stopping worker: {e}")
         finally:
             self._mp_enabled = False
+            self._mp_worker = None
+            self._mp_task_q = None
+            self._mp_result_q = None
     
     def _load_state(self):
         """Load state from JSON file if it exists (synchronous on startup)"""
@@ -425,7 +466,7 @@ class ImageStateManager:
         self._states[image_path] = state
         if getattr(self, '_mp_enabled', False) and self._mp_task_q and save:
             try:
-                self._mp_task_q.put({'type': 'set_state', 'image_path': image_path, 'state': state})
+                self._mp_task_q.put({'type': 'set_state', 'image_path': image_path, 'state': state}, timeout=0.1)
             except Exception:
                 pass
         if save:
@@ -440,7 +481,7 @@ class ImageStateManager:
         print(f"[STATE DEBUG] update_state: {image_path} keys={list(updates.keys())}")
         if getattr(self, '_mp_enabled', False) and self._mp_task_q and save:
             try:
-                self._mp_task_q.put({'type': 'update_state', 'image_path': image_path, 'updates': updates})
+                self._mp_task_q.put({'type': 'update_state', 'image_path': image_path, 'updates': updates}, timeout=0.1)
             except Exception:
                 pass
         if save:
@@ -453,7 +494,7 @@ class ImageStateManager:
             del self._states[image_path]
             if getattr(self, '_mp_enabled', False) and self._mp_task_q:
                 try:
-                    self._mp_task_q.put({'type': 'clear_state', 'image_path': image_path})
+                    self._mp_task_q.put({'type': 'clear_state', 'image_path': image_path}, timeout=0.1)
                 except Exception:
                     pass
             if save:
@@ -464,7 +505,7 @@ class ImageStateManager:
         self._states.clear()
         if getattr(self, '_mp_enabled', False) and self._mp_task_q:
             try:
-                self._mp_task_q.put({'type': 'clear_all_states'})
+                self._mp_task_q.put({'type': 'clear_all_states'}, timeout=0.1)
             except Exception:
                 pass
         print(f"[STATE] Cleared all saved states")
@@ -727,6 +768,8 @@ class MangaTranslationTab(QObject):
         # Initialize auto-save progress tracking
         self._auto_save_in_progress = False
         
+        # Shutdown flag to prevent spawning new processes during cleanup
+        self._shutting_down = False
         
         # Record main GUI thread native id for selective demotion of background threads (Windows)
         try:
@@ -870,14 +913,21 @@ class MangaTranslationTab(QObject):
         try:
             def _bg_preload_models():
                 try:
+                    # Check shutdown flag before preloading
+                    if self._shutting_down:
+                        return
                     # Preload bubble detector first (lighter)
                     ImageRenderer._preload_shared_bubble_detector(self)
+                    # Check again before second preload
+                    if self._shutting_down:
+                        return
                     # Then preload inpainter (heavier, C++ worker process)
                     ImageRenderer._preload_shared_inpainter(self)
                 except Exception as e:
                     print(f"[INIT_PRELOAD] Background model preload failed: {e}")
             
-            threading.Thread(target=_bg_preload_models, daemon=True).start()
+            self._preload_thread = threading.Thread(target=_bg_preload_models, daemon=True)
+            self._preload_thread.start()
         except Exception:
             pass
         
@@ -940,6 +990,9 @@ class MangaTranslationTab(QObject):
         """Cleanup method called when dialog closes - prevents RAM leaks"""
         try:
             print("[CLEANUP] Starting MangaTranslationTab cleanup...")
+            
+            # Set shutdown flag to prevent new processes from spawning
+            self._shutting_down = True
             
             # Stop pool update timer
             if hasattr(self, 'pool_update_timer') and self.pool_update_timer:
