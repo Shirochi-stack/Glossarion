@@ -1512,52 +1512,68 @@ class UnifiedClient:
                 print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
  
     def _apply_thread_submission_delay(self):
-        # Get threading delay from environment (default 0.5)
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        """Enforce monotonic spacing between API calls across all threads.
+        Uses a 'next allowed send time' that advances atomically to prevent bursts.
+        """
+        try:
+            thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        except Exception:
+            thread_delay = 0.5
         
         if thread_delay <= 0:
             return
         
-        sleep_time = 0
-        should_log = False
-        log_message = ""
+        # Use monotonic clock to avoid system time adjustments
+        now = time.monotonic()
         
-        # HOLD LOCK ONLY BRIEFLY to check timing and update counter
+        # CRITICAL SECTION: Reserve next available slot
         with self._thread_submission_lock:
-            current_time = time.time()
-            time_since_last_submission = current_time - self._last_thread_submission_time
+            # Initialize on first call
+            if not hasattr(self, '_next_allowed_send_ts'):
+                self._next_allowed_send_ts = 0.0
             
-            if time_since_last_submission < thread_delay:
-                sleep_time = thread_delay - time_since_last_submission
-                # Update the timestamp NOW while we have the lock
-                self._last_thread_submission_time = time.time()
-                
-                # Determine if we should log (but don't log yet)
-                if self._thread_submission_count < 3:
-                    should_log = True
-                    log_message = f"🧵 [{threading.current_thread().name}] Thread delay: {sleep_time:.1f}s"
-                elif self._thread_submission_count == 3:
-                    should_log = True
-                    log_message = f"🧵 [Subsequent thread delays: {thread_delay}s each...]"
+            next_allowed = self._next_allowed_send_ts
+            wait = max(0.0, next_allowed - now)
+            
+            # Atomically reserve the next slot for this thread
+            if wait == 0.0:
+                # First thread or all caught up - start immediately
+                self._next_allowed_send_ts = now + thread_delay
+            else:
+                # Queue this thread after the last reserved slot
+                self._next_allowed_send_ts = next_allowed + thread_delay
+            
+            # Logging (inside lock to avoid race on counter)
+            if not hasattr(self, '_thread_submission_count'):
+                self._thread_submission_count = 0
+            
+            should_log = self._thread_submission_count < 3
+            if should_log:
+                log_message = f"🧵 [{threading.current_thread().name}] Reserved slot: wait {wait:.2f}s (delay={thread_delay}s)"
+            elif self._thread_submission_count == 3:
+                log_message = f"🧵 [Subsequent threads: {thread_delay}s spacing enforced...]"
+                should_log = True
+            else:
+                log_message = ""
             
             self._thread_submission_count += 1
-        # LOCK RELEASED HERE
+        # LOCK RELEASED - sleep outside lock
         
-        # NOW do the sleep OUTSIDE the lock
-        if sleep_time > 0:
-            if should_log:
+        if wait > 0:
+            if should_log and log_message:
                 print(log_message)
             
-            # Interruptible sleep
-            elapsed = 0
+            # Interruptible sleep in small chunks
+            elapsed = 0.0
             check_interval = 0.1
-            while elapsed < sleep_time:
+            while elapsed < wait:
                 if self._cancelled:
-                    print(f"🛑 Threading delay cancelled")
-                    return  # Exit early if cancelled
+                    print(f"🛑 Thread delay cancelled")
+                    return
                 
-                time.sleep(min(check_interval, sleep_time - elapsed))
-                elapsed += check_interval
+                sleep_chunk = min(check_interval, wait - elapsed)
+                time.sleep(sleep_chunk)
+                elapsed += sleep_chunk
         
     def _get_thread_local_client(self):
         """Get or create thread-local client"""
