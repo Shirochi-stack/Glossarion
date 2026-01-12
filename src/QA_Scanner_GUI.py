@@ -2272,9 +2272,11 @@ class QAScannerMixin:
             punct_threshold_hint.setEnabled(checked)
             if checked:
                 punct_threshold_label.setStyleSheet("color: white;")
+                punct_threshold_spinbox.setStyleSheet("color: white;")
                 punct_threshold_hint.setStyleSheet("color: gray;")
             else:
                 punct_threshold_label.setStyleSheet("color: #606060;")
+                punct_threshold_spinbox.setStyleSheet("color: #909090;")
                 punct_threshold_hint.setStyleSheet("color: #404040;")
         
         check_punctuation_checkbox.toggled.connect(toggle_punctuation_threshold)
