@@ -1218,6 +1218,10 @@ Text to analyze:
         # Preserve structure toggle
         if not hasattr(self, 'enhanced_preserve_structure_var'):
             self.enhanced_preserve_structure_var = self.config.get('enhanced_preserve_structure', True)
+        
+        # Single line break toggle
+        if not hasattr(self, 'enhanced_single_line_break_var'):
+            self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
              
         # Initialize update manager AFTER config is loaded
         try:
