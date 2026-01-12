@@ -3932,40 +3932,6 @@ class BatchTranslationProcessor:
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        # APPLY INTERRUPTIBLE THREADING DELAY FIRST
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
-        if thread_delay > 0:
-            # Check if we need to wait (same logic as unified_api_client)
-            if hasattr(self.client, '_thread_submission_lock') and hasattr(self.client, '_last_thread_submission_time'):
-                with self.client._thread_submission_lock:
-                    current_time = time.time()
-                    time_since_last = current_time - self.client._last_thread_submission_time
-                    
-                    if time_since_last < thread_delay:
-                        sleep_time = thread_delay - time_since_last
-                        thread_name = threading.current_thread().name
-                        
-                        # PRINT BEFORE THE DELAY STARTS
-                        idx, chapter = chapter_data  # Extract chapter info for better logging
-                        print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {idx+1}")
-                        
-                        # Interruptible sleep - check stop flag every 0.1 seconds
-                        elapsed = 0
-                        check_interval = 0.1
-                        while elapsed < sleep_time:
-                            if self.check_stop_fn():
-                                print(f"🛑 Threading delay interrupted by stop flag")
-                                raise Exception("Translation stopped by user during threading delay")
-                            
-                            sleep_chunk = min(check_interval, sleep_time - elapsed)
-                            time.sleep(sleep_chunk)
-                            elapsed += sleep_chunk
-                    
-                    self.client._last_thread_submission_time = time.time()
-                    if not hasattr(self.client, '_thread_submission_count'):
-                        self.client._thread_submission_count = 0
-                    self.client._thread_submission_count += 1
-        
         idx, chapter = chapter_data
         chap_num = chapter["num"]
         
@@ -3997,6 +3963,39 @@ class BatchTranslationProcessor:
                     actual_num = raw_num
                 
                 print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
+        
+        # APPLY INTERRUPTIBLE THREADING DELAY AFTER determining chapter number
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        if thread_delay > 0:
+            # Check if we need to wait (same logic as unified_api_client)
+            if hasattr(self.client, '_thread_submission_lock') and hasattr(self.client, '_last_thread_submission_time'):
+                with self.client._thread_submission_lock:
+                    current_time = time.time()
+                    time_since_last = current_time - self.client._last_thread_submission_time
+                    
+                    if time_since_last < thread_delay:
+                        sleep_time = thread_delay - time_since_last
+                        thread_name = threading.current_thread().name
+                        
+                        # Use actual_num now that it's been determined
+                        print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {actual_num}")
+                        
+                        # Interruptible sleep - check stop flag every 0.1 seconds
+                        elapsed = 0
+                        check_interval = 0.1
+                        while elapsed < sleep_time:
+                            if self.check_stop_fn():
+                                print(f"🛑 Threading delay interrupted by stop flag")
+                                raise Exception("Translation stopped by user during threading delay")
+                            
+                            sleep_chunk = min(check_interval, sleep_time - elapsed)
+                            time.sleep(sleep_chunk)
+                            elapsed += sleep_chunk
+                    
+                    self.client._last_thread_submission_time = time.time()
+                    if not hasattr(self.client, '_thread_submission_count'):
+                        self.client._thread_submission_count = 0
+                    self.client._thread_submission_count += 1
         
         # Initialize variables that might be needed in except block
         content_hash = None
@@ -9756,7 +9755,24 @@ def main(log_callback=None, stop_callback=None):
             
             translated_chunks = []
             
-            for chunk_html, chunk_idx, total_chunks in chunks:
+            for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
+                # Apply thread delay before processing chunk (except first chunk)
+                if chunk_idx_enumerate > 0 and total_chunks > 1:
+                    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+                    if thread_delay > 0:
+                        print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
+                        
+                        # Interruptible sleep - check stop flag every 0.1s
+                        elapsed = 0
+                        check_interval = 0.1
+                        while elapsed < thread_delay:
+                            if check_stop():
+                                print(f"🛑 Chunk delay interrupted")
+                                return
+                            sleep_chunk = min(check_interval, thread_delay - elapsed)
+                            time.sleep(sleep_chunk)
+                            elapsed += sleep_chunk
+                
                 chapter_key_str = content_hash
                 old_key_str = str(idx)
                 
