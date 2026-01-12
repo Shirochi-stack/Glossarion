@@ -4644,7 +4644,7 @@ def _create_processing_options_section(self, parent):
         self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
     
     if not hasattr(self, 'use_markdown2_converter_var'):
-        self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
+        self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', True)
     
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")
@@ -4749,7 +4749,7 @@ def _create_processing_options_section(self, parent):
     enhanced_opts_v.addWidget(single_break_desc)
     
     # Markdown2 converter option
-    markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter (Legacy)")
+    markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter")
     try:
         markdown2_cb.setChecked(bool(self.use_markdown2_converter_var))
     except Exception:
@@ -4763,7 +4763,7 @@ def _create_processing_options_section(self, parent):
     markdown2_cb.setContentsMargins(0, 2, 0, 0)
     enhanced_opts_v.addWidget(markdown2_cb)
     
-    markdown2_desc = QLabel("Use old markdown2 library instead of markdown (may escape brackets)")
+    markdown2_desc = QLabel("Use markdown2 library instead of markdown (may escape brackets)")
     markdown2_desc.setStyleSheet("color: gray; font-size: 8pt;")
     markdown2_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(markdown2_desc)

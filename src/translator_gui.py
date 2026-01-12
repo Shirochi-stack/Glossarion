@@ -1272,7 +1272,7 @@ Text to analyze:
         
         # Markdown2 converter toggle
         if not hasattr(self, 'use_markdown2_converter_var'):
-            self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
+            self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', True)
              
         # Initialize update manager AFTER config is loaded
         try:
