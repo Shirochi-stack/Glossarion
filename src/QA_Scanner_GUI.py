@@ -2258,7 +2258,7 @@ class QAScannerMixin:
         disable_wheel_event(punct_threshold_spinbox)
         punct_threshold_layout.addWidget(punct_threshold_spinbox)
         
-        punct_threshold_hint = QLabel("(0 = flag all, 50 = flag if half lost, 100 = only flag if all lost)")
+        punct_threshold_hint = QLabel("(0 = flag all, 49 = flag if half lost, 100 = only flag if all lost)")
         punct_threshold_hint.setFont(QFont('Arial', 9))
         punct_threshold_hint.setStyleSheet("color: gray;")
         punct_threshold_layout.addWidget(punct_threshold_hint)
