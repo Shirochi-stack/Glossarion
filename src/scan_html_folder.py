@@ -168,6 +168,8 @@ KOREAN_DASH_PATTERNS = [
 # Extended Korean separator characters to exclude from non-English detection
 KOREAN_SEPARATOR_CHARS = {
     'ㅡ',  # Korean dash/separator (U+3161)
+    'ー',  # Katakana-Hiragana prolonged sound mark (U+30FC) - used as dash
+    'ㄴ',  # Korean consonant nieun (U+3134) - used as bullet/marker
     '―',   # Horizontal bar (U+2015)
     '—',   # Em dash (U+2014)
     '–',   # En dash (U+2013)
