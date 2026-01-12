@@ -4302,6 +4302,11 @@ class UnifiedClient:
                             print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
                             trunc_success_logged = False
                             for attempt_idx in range(allowed_attempts):
+                                # Check for cancellation before each retry attempt
+                                if self._is_stop_requested():
+                                    print(f"  🛑 Truncation retry cancelled by user")
+                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                
                                 try:
                                     retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}")
                                     if retry_finish_reason not in ['length', 'max_tokens']:
@@ -4311,6 +4316,12 @@ class UnifiedClient:
                                         return retry_content, retry_finish_reason
                                     else:
                                         print(f"  ⚠️ Retry #{attempt_idx+1}/{allowed_attempts} was also truncated")
+                                except UnifiedClientError as retry_error:
+                                    # Re-raise cancellation errors immediately
+                                    if retry_error.error_type == "cancelled" or "cancelled" in str(retry_error).lower():
+                                        print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled")
+                                        raise
+                                    print(f"  ❌ Truncation retry #{attempt_idx+1}/{allowed_attempts} failed: {retry_error}")
                                 except Exception as retry_error:
                                     print(f"  ❌ Truncation retry #{attempt_idx+1}/{allowed_attempts} failed: {retry_error}")
                             print(f"  ⚠️ All truncation retries ({allowed_attempts}) exhausted; returning original response")
