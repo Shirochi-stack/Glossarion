@@ -4640,6 +4640,9 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'enhanced_preserve_structure_var'):
         self.enhanced_preserve_structure_var = self.config.get('enhanced_preserve_structure', True)
     
+    if not hasattr(self, 'enhanced_single_line_break_var'):
+        self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
+    
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")
     method_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
@@ -4721,6 +4724,26 @@ def _create_processing_options_section(self, parent):
     preserve_desc.setStyleSheet("color: gray; font-size: 8pt;")
     preserve_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(preserve_desc)
+    
+    # Single line break option
+    single_break_cb = self._create_styled_checkbox("Enable Single Line Break")
+    try:
+        single_break_cb.setChecked(bool(self.enhanced_single_line_break_var))
+    except Exception:
+        pass
+    def _on_single_break_toggle(checked):
+        try:
+            self.enhanced_single_line_break_var = bool(checked)
+        except Exception:
+            pass
+    single_break_cb.toggled.connect(_on_single_break_toggle)
+    single_break_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(single_break_cb)
+    
+    single_break_desc = QLabel("Use single newlines instead of double (may prevent setext header issues)")
+    single_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    single_break_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(single_break_desc)
     
     extraction_v.addWidget(self.enhanced_options_frame)
     

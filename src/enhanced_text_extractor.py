@@ -174,7 +174,9 @@ class EnhancedTextExtractor:
         
         # Layout settings
         self.h2t.body_width = 0
-        self.h2t.single_line_break = False
+        # Check environment variable for single line break setting
+        single_line_break = os.getenv('ENHANCED_SINGLE_LINE_BREAK', '0') == '1'
+        self.h2t.single_line_break = single_line_break
         
         # Content filtering
         self.h2t.ignore_links = False

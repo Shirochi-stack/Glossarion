@@ -6742,9 +6742,18 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
-    # First, try to use markdown2 for proper markdown conversion
+    # First, try to use markdown library with setext headers disabled
     try:
-        import markdown2
+        import markdown
+        from markdown.extensions import Extension
+        from markdown.blockprocessors import BlockProcessor
+        
+        # Custom extension to disable setext headers
+        class NoSetextHeadersExtension(Extension):
+            def extendMarkdown(self, md):
+                # Remove the setext header processor
+                if 'setextheader' in md.parser.blockprocessors:
+                    md.parser.blockprocessors.deregister('setextheader')
         
         # Check if the text contains markdown patterns
         has_markdown = any([
@@ -6758,18 +6767,20 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         ])
         
         if has_markdown or preserve_structure:
-            # Use markdown2 for proper conversion
-            html = markdown2.markdown(plain_text, extras=[
-                'cuddled-lists',       # Lists without blank lines
-                'fenced-code-blocks',  # Code blocks with ```
-                'break-on-newline',    # Treat single newlines as <br>
-                'smarty-pants',        # Smart quotes and dashes
-                'tables',              # Markdown tables
+            # Use markdown with setext headers disabled
+            # Don't use 'extra' as it escapes parentheses and brackets
+            md = markdown.Markdown(extensions=[
+                'nl2br',
+                'sane_lists',
+                'fenced_code',
+                'tables',
+                NoSetextHeadersExtension()
             ])
+            html = md.convert(plain_text)
             
             # Post-process to ensure proper paragraph structure
             if not '<p>' in html:
-                # If markdown2 didn't create paragraphs, wrap content
+                # If markdown didn't create paragraphs, wrap content
                 lines = html.split('\n')
                 processed_lines = []
                 for line in lines:
@@ -6783,7 +6794,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             return html
             
     except ImportError:
-        print("⚠️ markdown2 not available, using fallback HTML conversion")
+        print("⚠️ markdown not available, using fallback HTML conversion")
     
     # Fallback: Manual markdown-to-HTML conversion
     lines = plain_text.strip().split('\n')
