@@ -4308,6 +4308,11 @@ class UnifiedClient:
                                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                 
                                 try:
+                                    # Check again right before retry
+                                    if self._is_stop_requested():
+                                        print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled before starting")
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    
                                     retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}")
                                     if retry_finish_reason not in ['length', 'max_tokens']:
                                         if not trunc_success_logged:
