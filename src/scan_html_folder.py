@@ -6347,21 +6347,58 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         if result.get('translation_artifacts'):
             for artifact in result['translation_artifacts']:
                 if artifact['type'] == 'machine_translation':
+                    # Log with details about what was found
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        # Show first example with ellipsis if text is long
+                        first_example = examples[0]
+                        if len(first_example) > 50:
+                            first_example = first_example[:50] + '...'
+                        log(f"   📝 Found machine translation marker: '{first_example}'")
+                        if len(examples) > 1:
+                            log(f"      (and {len(examples) - 1} more occurrence(s))")
                     issues.append(f"machine_translation_markers_{artifact['count']}_found")
                 elif artifact['type'] == 'encoding_issues':
                     if qa_settings.get('check_encoding_issues', True):
+                        examples = artifact.get('examples', [])
+                        if examples:
+                            first_example = examples[0][:30] if len(examples[0]) > 30 else examples[0]
+                            log(f"   🔣 Found encoding issue: '{first_example}'")
                         issues.append(f"encoding_issues_{artifact['count']}_found")
                 elif artifact['type'] == 'repeated_watermarks':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        log(f"   🏷️ Found repeated watermark: '{examples[0]}'")
                     issues.append(f"repeated_watermarks_{artifact['count']}_found")
                 elif artifact['type'] == 'api_response_unavailable':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        log(f"   ⚠️ API response unavailable marker: '{examples[0]}'")
                     issues.append(f"api_response_unavailable_{artifact['count']}_found")
                 elif artifact['type'] == 'chapter_continuation':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        log(f"   🔗 Continuation marker: '{examples[0]}'")
                     issues.append(f"chapter_continuation_{artifact['count']}_found")
                 elif artifact['type'] == 'split_indicators':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:60] if len(examples[0]) > 60 else examples[0]
+                        log(f"   ✂️ Split indicator: '{first_example}'")
                     issues.append(f"split_indicators_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
                     severity = artifact.get('severity', 'medium')
+                    examples = artifact.get('examples', [])
+                    
+                    # Log with examples
+                    if examples:
+                        first_example = str(examples[0])[:80] if len(str(examples[0])) > 80 else str(examples[0])
+                        log(f"   📚 Glossary leakage detected ({artifact['type']}): '{first_example}'")
+                        if len(examples) > 1:
+                            log(f"      (and {len(examples) - 1} more example(s))")
+                    
                     if severity == 'critical':
+                        log(f"   ⚠️ CRITICAL glossary leakage - likely raw glossary data in translation")
                         issues.append(f"CRITICAL_{artifact['type']}_{artifact['count']}_found")
                     else:
                         issues.append(f"{artifact['type']}_{artifact['count']}_found")
