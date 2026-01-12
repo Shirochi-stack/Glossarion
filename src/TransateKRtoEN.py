@@ -4409,6 +4409,7 @@ class BatchTranslationProcessor:
                 for chunk_idx, chunk_data in enumerate(chunks):
                     # Apply delay before submitting each chunk (except the first one)
                     if chunk_idx > 0 and thread_delay > 0:
+                        print(f"🧵 Applying {thread_delay}s delay before submitting chunk {chunk_data[1]}/{total_chunks}")
                         time.sleep(thread_delay)
                     
                     future = chunk_executor.submit(process_chunk, chunk_data)
