@@ -953,10 +953,19 @@ class MangaTranslationTab(QObject):
                 self._parallel_save_system.shutdown()
                 self._parallel_save_system = None
             
-            # Flush image state manager
+            # Flush image state manager and stop worker process
             if hasattr(self, 'image_state_manager'):
+                print("[CLEANUP] Cancelling any pending save timers...")
+                # Cancel any pending save timer first
+                with self.image_state_manager._timer_lock:
+                    if self.image_state_manager._save_timer is not None:
+                        self.image_state_manager._save_timer.cancel()
+                        self.image_state_manager._save_timer = None
                 print("[CLEANUP] Flushing image state manager...")
                 self.image_state_manager.flush()
+                print("[CLEANUP] Stopping state manager worker process...")
+                self.image_state_manager._stop_worker()
+                print("[CLEANUP] State manager worker stopped")
             
             # Force garbage collection
             import gc
