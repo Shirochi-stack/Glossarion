@@ -184,7 +184,13 @@ TRANSLATION_ARTIFACTS = {
     'machine_translation': re.compile(r'(MTL note|TN:|Translator:|T/N:|TL note:|Translator\'s note:)', re.IGNORECASE),
     'encoding_issues': re.compile(r'[�□◇]{2,}'),
     'repeated_watermarks': re.compile(r'(\[[\w\s]+\.(?:com|net|org)\])\s*\1{2,}', re.IGNORECASE),
-    'chapter_continuation': re.compile(r'(to be continued|continued from|continuation of|cont\.)', re.IGNORECASE),
+    # Only flag system/translator markers, not authorial choices
+    # Catches: "***Continued from previous***", "Note: Continuation of chapter", "[Continues in next]"
+    # Does NOT catch: "To be continued" (authorial), "The story continued" (prose)
+    'chapter_continuation': re.compile(
+        r'(^|\n|\[|\*{2,}|\-{2,}|note:|TN:)\s*(continued from previous|continuation of chapter|continues? in next)',
+        re.IGNORECASE | re.MULTILINE
+    ),
     # Only match explicit artificial split language that's unlikely to be authorial intent
     # Catches: "split 1 of 2", "chunk 3 of 5", "section 1/3" (with slash)
     # Also catches leaked request merge markers that should have been stripped
@@ -6352,40 +6358,75 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     if examples:
                         # Show first example with ellipsis if text is long
                         first_example = examples[0]
-                        if len(first_example) > 50:
-                            first_example = first_example[:50] + '...'
-                        log(f"   📝 Found machine translation marker: '{first_example}'")
+                        display_example = first_example[:50] + '...' if len(first_example) > 50 else first_example
+                        log(f"   📝 Found machine translation marker: '{display_example}'")
                         if len(examples) > 1:
                             log(f"      (and {len(examples) - 1} more occurrence(s))")
-                    issues.append(f"machine_translation_markers_{artifact['count']}_found")
+                        # Include example in issues for report
+                        issue_text = f"machine_translation_marker: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"machine_translation_markers_{artifact['count']}_found")
                 elif artifact['type'] == 'encoding_issues':
                     if qa_settings.get('check_encoding_issues', True):
                         examples = artifact.get('examples', [])
                         if examples:
                             first_example = examples[0][:30] if len(examples[0]) > 30 else examples[0]
                             log(f"   🔣 Found encoding issue: '{first_example}'")
-                        issues.append(f"encoding_issues_{artifact['count']}_found")
+                            issue_text = f"encoding_issues: '{first_example[:20]}'"
+                            if artifact['count'] > 1:
+                                issue_text += f" (+{artifact['count']-1} more)"
+                            issues.append(issue_text)
+                        else:
+                            issues.append(f"encoding_issues_{artifact['count']}_found")
                 elif artifact['type'] == 'repeated_watermarks':
                     examples = artifact.get('examples', [])
                     if examples:
-                        log(f"   🏷️ Found repeated watermark: '{examples[0]}'")
-                    issues.append(f"repeated_watermarks_{artifact['count']}_found")
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   🏷️ Found repeated watermark: '{first_example}'")
+                        issue_text = f"repeated_watermark: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"repeated_watermarks_{artifact['count']}_found")
                 elif artifact['type'] == 'api_response_unavailable':
                     examples = artifact.get('examples', [])
                     if examples:
-                        log(f"   ⚠️ API response unavailable marker: '{examples[0]}'")
-                    issues.append(f"api_response_unavailable_{artifact['count']}_found")
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   ⚠️ API response unavailable marker: '{first_example}'")
+                        issue_text = f"api_unavailable: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"api_response_unavailable_{artifact['count']}_found")
                 elif artifact['type'] == 'chapter_continuation':
                     examples = artifact.get('examples', [])
                     if examples:
-                        log(f"   🔗 Continuation marker: '{examples[0]}'")
-                    issues.append(f"chapter_continuation_{artifact['count']}_found")
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   🔗 Continuation marker: '{first_example}'")
+                        # Include example in issues for report
+                        issue_text = f"chapter_continuation: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"chapter_continuation_{artifact['count']}_found")
                 elif artifact['type'] == 'split_indicators':
                     examples = artifact.get('examples', [])
                     if examples:
                         first_example = examples[0][:60] if len(examples[0]) > 60 else examples[0]
+                        display_example = first_example[:40] if len(first_example) > 40 else first_example
                         log(f"   ✂️ Split indicator: '{first_example}'")
-                    issues.append(f"split_indicators_{artifact['count']}_found")
+                        issue_text = f"split_indicator: '{display_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"split_indicators_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
                     severity = artifact.get('severity', 'medium')
                     examples = artifact.get('examples', [])
@@ -6397,11 +6438,23 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         if len(examples) > 1:
                             log(f"      (and {len(examples) - 1} more example(s))")
                     
-                    if severity == 'critical':
-                        log(f"   ⚠️ CRITICAL glossary leakage - likely raw glossary data in translation")
-                        issues.append(f"CRITICAL_{artifact['type']}_{artifact['count']}_found")
+                    # Add to issues with example
+                    if examples:
+                        example_text = str(examples[0])[:40] if len(str(examples[0])) > 40 else str(examples[0])
+                        if severity == 'critical':
+                            log(f"   ⚠️ CRITICAL glossary leakage - likely raw glossary data in translation")
+                            issue_text = f"CRITICAL_glossary_{artifact['type']}: '{example_text}'"
+                        else:
+                            issue_text = f"glossary_{artifact['type']}: '{example_text}'"
+                        
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
                     else:
-                        issues.append(f"{artifact['type']}_{artifact['count']}_found")
+                        if severity == 'critical':
+                            issues.append(f"CRITICAL_{artifact['type']}_{artifact['count']}_found")
+                        else:
+                            issues.append(f"{artifact['type']}_{artifact['count']}_found")
                 
         
         result['issues'] = issues

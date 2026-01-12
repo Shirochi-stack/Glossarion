@@ -23,30 +23,7 @@ if getattr(sys, 'frozen', False):
     # Suppress PyInstaller temp directory cleanup warning
     # The temp directory will be cleaned up by Windows automatically
     import atexit
-    import warnings
-    
-    # Suppress the specific PyInstaller cleanup warning
-    warnings.filterwarnings('ignore', message='Failed to remove temporary directory')
-    
-    # Also suppress the warning from the bootloader's removal attempt
-    def _silent_remove_readonly(func, path, excinfo):
-        """Error handler for shutil.rmtree that silently ignores permission errors."""
-        import stat
-        try:
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-        except Exception:
-            pass  # Silently ignore cleanup failures
-    
-    # Override the bootloader's cleanup handler
-    import shutil
-    _original_rmtree = shutil.rmtree
-    def _quiet_rmtree(path, ignore_errors=False, onerror=None):
-        try:
-            return _original_rmtree(path, ignore_errors=True, onerror=_silent_remove_readonly)
-        except Exception:
-            pass  # Silently ignore all rmtree errors during shutdown
-    shutil.rmtree = _quiet_rmtree
+    atexit.unregister = lambda *args, **kwargs: None  # Disable atexit cleanup
 
 # Standard Library
 import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
@@ -770,7 +747,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.0.5"
+        __version__ = "7.0.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -843,7 +820,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.0.5')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.0.7')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1547,19 +1524,6 @@ Text to analyze:
         try:
             print("[CLOSE] Window closing...")
             
-            # Set a timeout timer to force exit if cleanup takes too long
-            import threading
-            import time
-            
-            def force_exit_after_timeout():
-                time.sleep(3)  # 3 second timeout
-                print("[CLOSE] Timeout reached - forcing immediate exit")
-                import os
-                os._exit(0)
-            
-            timeout_thread = threading.Thread(target=force_exit_after_timeout, daemon=True)
-            timeout_thread.start()
-            
             # Stop any background operations first
             self.stop_all_operations()
             
@@ -1567,7 +1531,6 @@ Text to analyze:
             
             # Accept the close event - this will naturally end the Qt event loop
             event.accept()
-            
             # Propagate global stop to UnifiedClient so in-flight calls exit cleanly
             try:
                 from unified_api_client import UnifiedClient
@@ -1588,18 +1551,6 @@ Text to analyze:
                 app.quit()
             
             print("[CLOSE] Close event handling completed")
-            
-            # CRITICAL: Block all multiprocessing before exit to prevent spawn errors
-            # Monkey-patch multiprocessing to prevent any new processes during shutdown
-            try:
-                import multiprocessing
-                original_process_init = multiprocessing.Process.__init__
-                def blocked_process_init(*args, **kwargs):
-                    print("[CLOSE] Blocked attempt to spawn process during shutdown")
-                    return
-                multiprocessing.Process.__init__ = blocked_process_init
-            except Exception:
-                pass
             
             # Use immediate hard exit to prevent lingering background processes (especially for .exe)
             # This is safer than relying on Python shutdown which waits for non-daemon threads
@@ -1629,32 +1580,6 @@ Text to analyze:
         try:
             print("[CLEANUP] Stopping all background operations...")
             
-            # Set stop flags FIRST
-            self.stop_requested = True
-            if hasattr(self, 'stop_flag'):
-                try:
-                    self.stop_flag.set()
-                except:
-                    pass
-            
-            # Cancel all running futures
-            futures_to_cancel = []
-            if hasattr(self, 'translation_future') and self.translation_future:
-                futures_to_cancel.append(('translation', self.translation_future))
-            if hasattr(self, 'glossary_future') and self.glossary_future:
-                futures_to_cancel.append(('glossary', self.glossary_future))
-            if hasattr(self, 'epub_future') and self.epub_future:
-                futures_to_cancel.append(('epub', self.epub_future))
-            if hasattr(self, 'qa_future') and self.qa_future:
-                futures_to_cancel.append(('qa', self.qa_future))
-            
-            for name, future in futures_to_cancel:
-                try:
-                    print(f"[CLEANUP] Cancelling {name} future...")
-                    future.cancel()
-                except:
-                    pass
-            
             # Stop any translation operations
             if hasattr(self, '_translation_thread') and self._translation_thread:
                 try:
@@ -1673,36 +1598,30 @@ Text to analyze:
                 except:
                     pass
             
-            # Stop executor if it exists - FORCE immediate shutdown
+            # Stop executor if it exists
             if hasattr(self, 'executor') and self.executor:
                 try:
                     print("[CLEANUP] Shutting down thread pool executor...")
-                    # Try graceful shutdown first with short timeout
-                    self.executor.shutdown(wait=True, cancel_futures=True)
-                    print("[CLEANUP] Executor shutdown complete")
-                except TypeError:
-                    # Python < 3.9 doesn't have cancel_futures parameter
-                    try:
-                        self.executor.shutdown(wait=False)
-                    except:
-                        pass
+                    self.executor.shutdown(wait=False)
                 except:
                     pass
+            
+            # Set any stop flags that might exist
+            if hasattr(self, 'stop_flag'):
+                self.stop_flag.set()
             
             # Close any open dialogs
             if hasattr(self, '_manga_dialog') and self._manga_dialog:
                 try:
                     print("[CLEANUP] Closing manga dialog...")
-                    # Flush manga state and stop worker before closing
+                    # Flush manga state before closing
                     if hasattr(self, 'manga_translator') and hasattr(self.manga_translator, 'image_state_manager'):
                         try:
                             print("[CLEANUP] Flushing manga image state...")
                             self.manga_translator.image_state_manager.flush()
-                            print("[CLEANUP] Stopping manga state worker...")
-                            self.manga_translator.image_state_manager._stop_worker()
-                            print("[CLEANUP] Manga state worker stopped")
+                            print("[CLEANUP] Manga state flushed successfully")
                         except Exception as e:
-                            print(f"[CLEANUP] Failed to cleanup manga state: {e}")
+                            print(f"[CLEANUP] Failed to flush manga state: {e}")
                     self._manga_dialog.close()
                 except:
                     pass
@@ -1733,27 +1652,6 @@ Text to analyze:
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
-            
-            # CRITICAL: Also terminate any Python child processes that might be multiprocessing workers
-            try:
-                import psutil
-                current_proc = psutil.Process()
-                children = current_proc.children(recursive=True)
-                for child in children:
-                    try:
-                        print(f"[CLEANUP] Terminating child process {child.pid}...")
-                        child.terminate()
-                    except Exception:
-                        pass
-                # Wait briefly for processes to terminate
-                gone, alive = psutil.wait_procs(children, timeout=0.5)
-                for p in alive:
-                    try:
-                        p.kill()
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"[CLEANUP] Error terminating child processes: {e}")
             
             print("[CLEANUP] Background operations stopped")
             
@@ -2481,7 +2379,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.0.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.0.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -11890,7 +11788,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.0.5...")
+    print("🚀 Starting Glossarion v7.0.7...")
     
     # Initialize splash screen
     splash_manager = None
