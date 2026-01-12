@@ -166,7 +166,7 @@ class MangaSettingsDialog(QDialog):
             'cloud_inference_steps': 20,
             'cloud_timeout': 60,
             'manual_edit': {
-                'translate_prompt': 'translate this text to {language}',  # Prompt template with {language} placeholder
+                'translate_prompt': 'output only the {language} translation of this text:',  # Prompt template with {language} placeholder
                 'translate_target_language': 'English'  # Default language
             }
         }
