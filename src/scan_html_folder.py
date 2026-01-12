@@ -185,7 +185,14 @@ TRANSLATION_ARTIFACTS = {
     'encoding_issues': re.compile(r'[�□◇]{2,}'),
     'repeated_watermarks': re.compile(r'(\[[\w\s]+\.(?:com|net|org)\])\s*\1{2,}', re.IGNORECASE),
     'chapter_continuation': re.compile(r'(to be continued|continued from|continuation of|cont\.)', re.IGNORECASE),
-    'split_indicators': re.compile(r'(part \d+|section \d+|\(\d+/\d+\))', re.IGNORECASE),
+    # Only match explicit artificial split language that's unlikely to be authorial intent
+    # Catches: "split 1 of 2", "chunk 3 of 5", "section 1/3" (with slash)
+    # Also catches leaked request merge markers that should have been stripped
+    'split_indicators': re.compile(
+        r'(split\s+\d+\s+of\s+\d+|chunk\s+\d+\s+of\s+\d+|section\s+\d+/\d+|'
+        r'<h1[^>]*id=["\']split-\d+["\'][^>]*>.*?SPLIT\s+MARKER)',
+        re.IGNORECASE | re.DOTALL
+    ),
     'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE),
     
     'glossary_leakage_csv': re.compile(
