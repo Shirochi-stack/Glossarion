@@ -3460,19 +3460,36 @@ def check_split_chapters(split_candidates, results, duplicate_groups, duplicate_
                 next_filename = next_result['filename']
                 
                 # Look for systematic naming (e.g., file_1.html, file_2.html)
+                # IMPORTANT: Only flag as pattern match if the LAST number differs by 1
+                # This avoids false positives from files with similar names but different content
                 naming_pattern_match = False
-                if re.sub(r'\d+', 'X', current_filename) == re.sub(r'\d+', 'X', next_filename):
-                    # Files have same pattern with different numbers
-                    naming_pattern_match = True
+                
+                # Extract the last number before the extension from each filename
+                current_match = re.search(r'_(\d+)(?:\.[^.]+)?$', current_filename)
+                next_match = re.search(r'_(\d+)(?:\.[^.]+)?$', next_filename)
+                
+                if current_match and next_match:
+                    current_num = int(current_match.group(1))
+                    next_num = int(next_match.group(1))
+                    
+                    # Check if they're consecutive AND have same prefix
+                    if abs(next_num - current_num) == j:  # j is the step size in the loop
+                        # Verify they have the same base name (everything before the last number)
+                        current_base = current_filename[:current_match.start()]
+                        next_base = next_filename[:next_match.start()]
+                        
+                        if current_base == next_base:
+                            naming_pattern_match = True
                 
                 # Check if content flows naturally
                 should_check_flow = False
                 confidence_score = 0.0
                 
                 if indicators['is_systematic_split'] or naming_pattern_match:
-                    # Strong file naming evidence
+                    # File naming suggests possible split, but need to verify with content
+                    # IMPORTANT: Don't assume duplicate just from naming - verify content first
                     should_check_flow = True
-                    confidence_score = 0.85
+                    confidence_score = 0.50  # Lower initial confidence until content verified
                 elif same_chapter_number:
                     # Same chapter number is strong evidence
                     should_check_flow = True
@@ -3524,9 +3541,31 @@ def check_split_chapters(split_candidates, results, duplicate_groups, duplicate_
                     elif incomplete_dialogue or incomplete_dialogue_jp:
                         is_real_split = True
                         confidence_score = max(confidence_score, 0.8)
-                    elif same_chapter_number or indicators['is_systematic_split']:
-                        # With strong other evidence, be more lenient
-                        is_real_split = True
+                    elif same_chapter_number:
+                        # Same chapter number is strong evidence, but verify content similarity
+                        # Calculate actual similarity between full texts
+                        text1_full = results[idx].get('raw_text', '')
+                        text2_full = next_text
+                        
+                        # Only flag as duplicate if content is actually similar
+                        content_similarity = calculate_similarity_ratio(text1_full[:5000], text2_full[:5000])
+                        if content_similarity > 0.70:  # Require actual content similarity
+                            is_real_split = True
+                            confidence_score = content_similarity
+                        else:
+                            # Same chapter number but different content - likely different stories
+                            is_real_split = False
+                    elif indicators['is_systematic_split']:
+                        # Systematic naming alone is NOT enough - must verify content
+                        text1_full = results[idx].get('raw_text', '')
+                        text2_full = next_text
+                        
+                        content_similarity = calculate_similarity_ratio(text1_full[:5000], text2_full[:5000])
+                        if content_similarity > 0.70:  # Require actual content similarity
+                            is_real_split = True
+                            confidence_score = content_similarity
+                        else:
+                            is_real_split = False
                     
                     if is_real_split:
                         merge_duplicate_groups(duplicate_groups, current_filename, next_filename)
