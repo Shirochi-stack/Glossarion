@@ -317,6 +317,7 @@ class QAScannerMixin:
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,
+            'check_punctuation_mismatch': False,
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,
@@ -2234,6 +2235,10 @@ class QAScannerMixin:
         check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', False))
         detection_layout.addWidget(check_artifacts_checkbox)
         
+        check_punctuation_checkbox = self._create_styled_checkbox("Check ?! punctuation mismatches (compares with source file)")
+        check_punctuation_checkbox.setChecked(qa_settings.get('check_punctuation_mismatch', False))
+        detection_layout.addWidget(check_punctuation_checkbox)
+        
         check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
         check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
         detection_layout.addWidget(check_glossary_checkbox)
@@ -3010,6 +3015,7 @@ class QAScannerMixin:
                     'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
+                    'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                     'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),

@@ -1149,6 +1149,242 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
     except Exception as e:
         # Silent failure - if we can't check, don't report false positives
         return False, []
+
+def extract_epub_punctuation_info(epub_path, log=print):
+    """Extract question mark and exclamation mark counts for each chapter from the original EPUB.
+    
+    Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
+    This matches the image extraction logic.
+    
+    Returns a dict mapping spine index to punctuation info:
+    {
+        spine_index: {
+            'question_marks': int,
+            'exclamation_marks': int,
+            'filename': str
+        }
+    }
+    """
+    try:
+        import zipfile
+        from bs4 import BeautifulSoup
+        import os
+        
+        punct_info = {}
+        spine_files = {}  # Maps spine index to file info
+        
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Step 1: Read and parse content.opf to get SPINE ORDER
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}  # Maps item id to href
+            
+            try:
+                for fname in zf.namelist():
+                    if 'content.opf' in fname.lower():
+                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
+                        content_opf_path = fname
+                        break
+            except Exception as e:
+                log(f"⚠️ Could not read content.opf: {e}")
+            
+            # Parse manifest and spine from content.opf
+            if content_opf_data:
+                try:
+                    soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    
+                    # Build manifest map (id -> href)
+                    manifest = soup_opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+                    
+                    # Process spine in order
+                    spine = soup_opf.find('spine')
+                    if spine:
+                        spine_index = 1  # Start from 1 for chapter numbering
+                        for itemref in spine.find_all('itemref'):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest_map:
+                                href = manifest_map[idref]
+                                spine_files[spine_index] = {
+                                    'href': href,
+                                    'idref': idref
+                                }
+                                spine_index += 1
+                        
+                        if spine_files:
+                            log(f"📚 Found {len(spine_files)} chapters for punctuation extraction.")
+                except Exception as e:
+                    log(f"⚠️ Could not parse content.opf: {e}")
+            
+            # Step 2: Process files in spine order
+            if spine_files:
+                # Determine the base directory from content.opf location
+                base_dir = ''
+                if content_opf_path:
+                    base_dir = os.path.dirname(content_opf_path)
+                    if base_dir:
+                        base_dir = base_dir + '/'
+                
+                extracted_count = 0
+                for spine_index, file_info in sorted(spine_files.items()):
+                    try:
+                        file_path = file_info['href']
+                        
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            file_path,
+                            base_dir + file_path,
+                            'OEBPS/' + file_path,
+                            'OPS/' + file_path,
+                        ]
+                        
+                        content = None
+                        for try_path in possible_paths:
+                            try:
+                                content = zf.read(try_path).decode('utf-8', errors='ignore')
+                                break
+                            except KeyError:
+                                continue
+                        
+                        if content is None:
+                            continue
+                        
+                        # Parse HTML and extract text
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text()
+                        
+                        # Count punctuation
+                        question_count = text.count('?')
+                        exclamation_count = text.count('!')
+                        
+                        # Store if chapter has any punctuation
+                        if question_count > 0 or exclamation_count > 0:
+                            punct_info[spine_index] = {
+                                'question_marks': question_count,
+                                'exclamation_marks': exclamation_count,
+                                'filename': os.path.basename(file_path),
+                                'spine_index': spine_index
+                            }
+                            extracted_count += 1
+                        
+                    except Exception as e:
+                        continue
+                
+                if extracted_count > 0:
+                    total_questions = sum(info['question_marks'] for info in punct_info.values())
+                    total_exclamations = sum(info['exclamation_marks'] for info in punct_info.values())
+                    log(f"   Found ?! punctuation in {extracted_count} chapters ({total_questions}? + {total_exclamations}!)")
+            else:
+                # Fallback: No spine found, scan all HTML files
+                log("⚠️ Could not read spine order, falling back to file extraction")
+                
+                html_files = [f for f in zf.namelist() 
+                             if f.lower().endswith(('.html', '.xhtml', '.htm')) 
+                             and not f.startswith('__MACOSX')
+                             and 'cover' not in f.lower()]
+                
+                html_files.sort()
+                
+                for idx, file_path in enumerate(html_files, start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text()
+                        
+                        question_count = text.count('?')
+                        exclamation_count = text.count('!')
+                        
+                        if question_count > 0 or exclamation_count > 0:
+                            punct_info[idx] = {
+                                'question_marks': question_count,
+                                'exclamation_marks': exclamation_count,
+                                'filename': os.path.basename(file_path)
+                            }
+                    except Exception as e:
+                        continue
+                
+                if punct_info:
+                    total_questions = sum(info['question_marks'] for info in punct_info.values())
+                    total_exclamations = sum(info['exclamation_marks'] for info in punct_info.values())
+                    log(f"   Found ?! punctuation in {len(punct_info)} chapters (fallback mode) ({total_questions}? + {total_exclamations}!)")
+        
+        return punct_info
+        
+    except Exception as e:
+        log(f"❌ Error extracting punctuation info from EPUB: {e}")
+        return {}
+
+def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuation_info, threshold=0.5):
+    """
+    Detect significant punctuation mismatches by comparing translated text with original EPUB punctuation info.
+    
+    Args:
+        translated_text: The translated text content (string)
+        chapter_num: The chapter number to check
+        original_punctuation_info: Dict from extract_epub_punctuation_info()
+        threshold: Ratio threshold for flagging mismatches (0.5 = flag if 50% or more punctuation lost)
+    
+    Returns:
+        tuple: (has_mismatch, details)
+    """
+    try:
+        # If no original punctuation info for this chapter, skip check
+        if chapter_num not in original_punctuation_info:
+            return False, []
+        
+        orig_info = original_punctuation_info[chapter_num]
+        orig_question_count = orig_info['question_marks']
+        orig_exclamation_count = orig_info['exclamation_marks']
+        
+        # If no punctuation in original, nothing to check
+        if orig_question_count == 0 and orig_exclamation_count == 0:
+            return False, []
+        
+        # Count punctuation in translated text
+        trans_question_count = translated_text.count('?')
+        trans_exclamation_count = translated_text.count('!')
+        
+        details = []
+        has_mismatch = False
+        
+        # Check question marks
+        if orig_question_count > 0:
+            loss_ratio = 1.0 - (trans_question_count / orig_question_count)
+            if loss_ratio >= threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'missing_question_marks',
+                    'severity': 'medium',
+                    'original_count': orig_question_count,
+                    'translated_count': trans_question_count,
+                    'loss_ratio': loss_ratio,
+                    'description': f'Lost {int(loss_ratio*100)}% of question marks ({trans_question_count}/{orig_question_count})'
+                })
+        
+        # Check exclamation marks
+        if orig_exclamation_count > 0:
+            loss_ratio = 1.0 - (trans_exclamation_count / orig_exclamation_count)
+            if loss_ratio >= threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'missing_exclamation_marks',
+                    'severity': 'medium',
+                    'original_count': orig_exclamation_count,
+                    'translated_count': trans_exclamation_count,
+                    'loss_ratio': loss_ratio,
+                    'description': f'Lost {int(loss_ratio*100)}% of exclamation marks ({trans_exclamation_count}/{orig_exclamation_count})'
+                })
+        
+        return has_mismatch, details
+        
+    except Exception as e:
+        # Silent failure - if we can't check, don't report false positives
+        return False, []
     
 def extract_semantic_fingerprint(text):
     """Extract semantic fingerprint and signature from text - CACHED VERSION"""
@@ -4849,7 +5085,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
 
 def process_html_file_batch(args):
     """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
-    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info = args
+    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info = args
     batch_results = []
     
     # Import what we need inside the worker
@@ -5019,6 +5255,68 @@ def process_html_file_batch(args):
                 print(f"[IMAGE DEBUG] Exception during image check: {e}")
                 import traceback
                 print(traceback.format_exc())
+        
+        # Check for punctuation mismatches (if enabled)
+        check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
+        if check_punctuation and original_punctuation_info:
+            # Extract text for punctuation comparison
+            punct_text = raw_text
+            
+            # Match logic similar to image checking
+            search_filename = filename.lower()
+            if search_filename.startswith('response_'):
+                search_filename = search_filename[9:]  # Remove 'response_'
+            
+            has_punct_mismatch = False
+            punct_issues = []
+            matched_punct_key = None
+            
+            # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices
+            if text_file_mode:
+                # Direct filename match or basename match
+                if search_filename in original_punctuation_info:
+                    matched_punct_key = search_filename
+                else:
+                    # Try matching by basename (without extension)
+                    search_basename = os.path.splitext(search_filename)[0]
+                    for key, punct_info in original_punctuation_info.items():
+                        key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                        if key_basename == search_basename:
+                            matched_punct_key = key
+                            break
+                
+                if matched_punct_key:
+                    has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, matched_punct_key, original_punctuation_info)
+            else:
+                # EPUB mode: match by spine index
+                search_basename = os.path.splitext(search_filename)[0]  # Remove extension
+                for spine_idx, punct_info in original_punctuation_info.items():
+                    orig_filename = punct_info.get('filename', '').lower()
+                    orig_basename = os.path.splitext(orig_filename)[0]  # Remove extension
+                    
+                    # EXACT match only
+                    if orig_basename == search_basename:
+                        has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, spine_idx, original_punctuation_info)
+                        matched_punct_key = spine_idx
+                        break
+            
+            if has_punct_mismatch:
+                # Add to translation artifacts
+                for punct_issue in punct_issues:
+                    artifacts.append({
+                        'type': punct_issue['type'],
+                        'count': punct_issue.get('original_count', 0),
+                        'examples': [f"{punct_issue.get('translated_count', 0)}/{punct_issue.get('original_count', 0)}"],
+                        'severity': punct_issue.get('severity', 'medium')
+                    })
+                
+                # Add to issues list for reporting
+                for punct_issue in punct_issues:
+                    punct_type = 'question' if 'question' in punct_issue['type'] else 'exclamation'
+                    orig_count = punct_issue.get('original_count', 0)
+                    trans_count = punct_issue.get('translated_count', 0)
+                    loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
+                    issues.append(f"punctuation_mismatch_{punct_type}_{loss_pct}%_lost_({trans_count}/{orig_count})")
                     
         # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
@@ -5408,9 +5706,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     check_word_count = qa_settings.get('check_word_count_ratio', False)
     check_multiple_headers = qa_settings.get('check_multiple_headers', True)
     
-    # Extract word counts and image info from original EPUB/text file if needed
+    # Extract word counts, image info, and punctuation from original EPUB/text file if needed
     original_word_counts = {}
     original_image_info = {}  # For missing image detection
+    original_punctuation_info = {}  # For punctuation mismatch detection
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
     
@@ -5458,6 +5757,55 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log(f"   Found images in {len(original_image_info)} chapters ({total_images} total images)")
             else:
                 log(f"   No images found in EPUB (or unable to extract)")
+    
+    # Extract punctuation info from EPUB if punctuation mismatch check is enabled
+    check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
+    if check_punctuation:
+        if text_file_mode:
+            # For text file mode (PDF sources), extract punctuation from word_count folder
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log(f"❗ Extracting punctuation information from word_count folder")
+                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
+                if chunk_files:
+                    for chunk_file in chunk_files:
+                        chunk_path = os.path.join(word_count_folder, chunk_file)
+                        try:
+                            with open(chunk_path, 'r', encoding='utf-8') as f:
+                                chunk_html = f.read()
+                            soup = BeautifulSoup(chunk_html, 'html.parser')
+                            text = soup.get_text()
+                            
+                            question_count = text.count('?')
+                            exclamation_count = text.count('!')
+                            
+                            if question_count > 0 or exclamation_count > 0:
+                                original_punctuation_info[chunk_file] = {
+                                    'question_marks': question_count,
+                                    'exclamation_marks': exclamation_count,
+                                    'filename': chunk_file
+                                }
+                        except Exception as e:
+                            log(f"   ⚠️ Could not extract punctuation from {chunk_file}: {e}")
+                    
+                    if original_punctuation_info:
+                        total_questions = sum(info['question_marks'] for info in original_punctuation_info.values())
+                        total_exclamations = sum(info['exclamation_marks'] for info in original_punctuation_info.values())
+                        log(f"   Found ?! punctuation in {len(original_punctuation_info)} chunks ({total_questions}? + {total_exclamations}!)")
+                    else:
+                        log(f"   No ?! punctuation found in word_count folder HTML files")
+                else:
+                    log(f"   No HTML files found in word_count folder for punctuation extraction")
+        elif epub_path and os.path.exists(epub_path):
+            # For EPUB mode, extract from EPUB
+            log(f"❗ Extracting punctuation information from original EPUB: {os.path.basename(epub_path)}")
+            original_punctuation_info = extract_epub_punctuation_info(epub_path, log)
+            if original_punctuation_info:
+                total_questions = sum(info['question_marks'] for info in original_punctuation_info.values())
+                total_exclamations = sum(info['exclamation_marks'] for info in original_punctuation_info.values())
+                log(f"   Found ?! punctuation in {len(original_punctuation_info)} chapters ({total_questions}? + {total_exclamations}!)")
+            else:
+                log(f"   No ?! punctuation found in EPUB (or unable to extract)")
     
     if check_word_count:
         if text_file_mode:
@@ -5673,7 +6021,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Prepare worker data
     worker_args = []
     for batch in batches:
-        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info)
+        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info)
         worker_args.append(args)
     
     # Process files in parallel
