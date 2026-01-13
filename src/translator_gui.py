@@ -11654,7 +11654,8 @@ Important rules:
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
-                ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K'))),
+                # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
+                ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
 
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),

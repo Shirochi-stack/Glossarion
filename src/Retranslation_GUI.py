@@ -3028,9 +3028,8 @@ class RetranslationMixin:
                     for file in os.listdir(output_dir):
                         file_path = os.path.join(output_dir, file)
                         if (os.path.isfile(file_path) and 
-                            file.endswith('.html') and 
-                            file not in html_files and
-                            re.match(r'response_\d+_', file)):
+                            file.lower().endswith(('.html', '.xhtml', '.htm')) and 
+                            file not in html_files):
                             html_files.append(file)
                 except Exception as e:
                     print(f"Error scanning directory: {e}")
@@ -3621,11 +3620,10 @@ class RetranslationMixin:
         # Find files
         file_info = []
         
-        # Add HTML files
+        # Add HTML files (any .html/.xhtml/.htm, not just response_*)
         for file in os.listdir(output_dir):
-            if file.startswith('response_'):
-                # Allow response_{index}_{name}.html and compound extensions like .html.xhtml
-                match = re.match(r'^response_(\d+)_([^\.]*)\.(?:html?|xhtml|htm)(?:\.xhtml)?$', file, re.IGNORECASE)
+            if file.lower().endswith(('.html', '.xhtml', '.htm')):
+                match = re.match(r'^response_(\d+)_([^.]*).(?:html?|xhtml|htm)(?:\.xhtml)?$', file, re.IGNORECASE)
                 if match:
                     index = match.group(1)
                     base_name = match.group(2)
@@ -3830,19 +3828,17 @@ class RetranslationMixin:
                 traceback.print_exc()
                 has_progress_tracking = False
         
-        # Also scan directory for any HTML files not in progress
-        # Only include translated image files (response_*.html pattern)
-        # Also include generated image files (.png, .jpg, etc.)
+            # Also scan directory for any HTML files not in progress
+            # Include all .html/.xhtml/.htm files plus generated image files
         try:
             for file in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, file)
-                # Include HTML files matching response_NNN_*.html pattern
-                if (os.path.isfile(file_path) and 
-                    file.endswith('.html') and 
-                    file not in html_files and
-                    re.match(r'response_\d+_', file)):
+                    # Include HTML files (any name)
+                    if (os.path.isfile(file_path) and 
+                        file.lower().endswith(('.html', '.xhtml', '.htm')) and 
+                        file not in html_files):
                     html_files.append(file)
-                    print(f"Found untracked HTML file: {file}")
+                        print(f"Found HTML file: {file}")
                 # Also include generated image files (not in images/ subdirectory)
                 elif (os.path.isfile(file_path) and 
                       file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')) and
