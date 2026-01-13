@@ -4244,6 +4244,9 @@ class UnifiedClient:
                 if finish_reason in ['length', 'max_tokens']:
                     print(f"Response was truncated: {finish_reason}")
                     print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
+                    # If the user has already pressed Stop, abort before scheduling any retries
+                    if self._is_stop_requested():
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     
                     # ALWAYS log truncation failures
                     self._log_truncation_failure(
