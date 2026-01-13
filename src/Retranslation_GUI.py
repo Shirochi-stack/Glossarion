@@ -3533,6 +3533,54 @@ class RetranslationMixin:
             selection_count_label.setText(f"Selected: {count}")
         
         listbox.itemSelectionChanged.connect(update_selection_count)
+
+        # Right-click context menu to open translated/cover files
+        def _open_file_for_row(row):
+            if row < 0 or row >= len(file_info):
+                return
+            info = file_info[row]
+            path = info.get('path')
+            if not path or not os.path.exists(path):
+                self._show_message('error', "File Missing", f"File not found:\n{path}", parent=parent_dialog)
+                return
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=parent_dialog)
+
+        def _show_context_menu(pos):
+            item = listbox.itemAt(pos)
+            if not item:
+                return
+            row = listbox.row(item)
+            menu = QMenu(listbox)
+            menu.setStyleSheet(
+                "QMenu {"
+                "  padding: 4px;"
+                "  background-color: #2b2b2b;"
+                "  color: white;"
+                "  border: 1px solid #5a9fd4;"
+                "} "
+                "QMenu::icon { width: 0px; } "
+                "QMenu::item {"
+                "  padding: 6px 12px;"
+                "  background-color: transparent;"
+                "} "
+                "QMenu::item:selected {"
+                "  background-color: #17a2b8;"
+                "  color: white;"
+                "} "
+                "QMenu::item:pressed {"
+                "  background-color: #138496;"
+                "}"
+            )
+            act_open = menu.addAction("📂 Open File")
+            chosen = menu.exec(listbox.mapToGlobal(pos))
+            if chosen == act_open:
+                _open_file_for_row(row)
+
+        listbox.setContextMenuPolicy(Qt.CustomContextMenu)
+        listbox.customContextMenuRequested.connect(_show_context_menu)
         
         return {
             'type': 'individual_images',
@@ -3616,6 +3664,54 @@ class RetranslationMixin:
             selection_count_label.setText(f"Selected: {count}")
         
         listbox.itemSelectionChanged.connect(update_selection_count)
+
+        # Right-click context menu (Open File)
+        def _open_file_for_row(row):
+            if row < 0 or row >= len(file_info):
+                return
+            info = file_info[row]
+            path = info.get('path')
+            if not path or not os.path.exists(path):
+                self._show_message('error', "File Missing", f"File not found:\n{path}", parent=parent_dialog)
+                return
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=parent_dialog)
+
+        def _show_context_menu(pos):
+            item = listbox.itemAt(pos)
+            if not item:
+                return
+            row = listbox.row(item)
+            menu = QMenu(listbox)
+            menu.setStyleSheet(
+                "QMenu {"
+                "  padding: 4px;"
+                "  background-color: #2b2b2b;"
+                "  color: white;"
+                "  border: 1px solid #5a9fd4;"
+                "} "
+                "QMenu::icon { width: 0px; } "
+                "QMenu::item {"
+                "  padding: 6px 12px;"
+                "  background-color: transparent;"
+                "} "
+                "QMenu::item:selected {"
+                "  background-color: #17a2b8;"
+                "  color: white;"
+                "} "
+                "QMenu::item:pressed {"
+                "  background-color: #138496;"
+                "}"
+            )
+            act_open = menu.addAction("📂 Open File")
+            chosen = menu.exec(listbox.mapToGlobal(pos))
+            if chosen == act_open:
+                _open_file_for_row(row)
+
+        listbox.setContextMenuPolicy(Qt.CustomContextMenu)
+        listbox.customContextMenuRequested.connect(_show_context_menu)
         
         return {
             'type': 'image_folder',
@@ -3861,6 +3957,58 @@ class RetranslationMixin:
             selection_count_label.setText(f"Selected: {count}")
         
         listbox.itemSelectionChanged.connect(update_selection_count)
+
+        # ==== Context menu for image list ====
+        def _open_file_for_index(idx):
+            info_list = refresh_data.get('file_info', file_info)
+            if idx < 0 or idx >= len(info_list):
+                return
+            info = info_list[idx]
+            path = info.get('path')
+            if not path or not os.path.exists(path):
+                self._show_message('error', "File Missing", f"File not found:\n{path}", parent=dialog)
+                return
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=dialog)
+
+        def _show_context_menu(pos):
+            item = listbox.itemAt(pos)
+            if not item:
+                return
+            row = listbox.row(item)
+            menu = QMenu(listbox)
+            menu.setStyleSheet(
+                "QMenu {"
+                "  padding: 4px;"
+                "  background-color: #2b2b2b;"
+                "  color: white;"
+                "  border: 1px solid #5a9fd4;"
+                "} "
+                "QMenu::icon { width: 0px; } "
+                "QMenu::item {"
+                "  padding: 6px 12px;"
+                "  background-color: transparent;"
+                "} "
+                "QMenu::item:selected {"
+                "  background-color: #17a2b8;"
+                "  color: white;"
+                "} "
+                "QMenu::item:pressed {"
+                "  background-color: #138496;"
+                "}"
+            )
+            act_open = menu.addAction("📂 Open File")
+            act_delete = menu.addAction("🔁 Delete / Retranslate")
+            chosen = menu.exec(listbox.mapToGlobal(pos))
+            if chosen == act_open:
+                _open_file_for_index(row)
+            elif chosen == act_delete:
+                retranslate_selected()
+
+        listbox.setContextMenuPolicy(Qt.CustomContextMenu)
+        listbox.customContextMenuRequested.connect(_show_context_menu)
         
         # Button frame
         button_frame = QWidget()
