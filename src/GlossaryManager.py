@@ -619,17 +619,17 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if not chapter_split_enabled:
         print("📑 Chapter splitting disabled (GLOSSARY_ENABLE_CHAPTER_SPLIT=0) - processing without pre-splitting")
     
+    # Toggle: preserve chunks on stop
+    preserve_chunks = os.getenv("GLOSSARY_PRESERVE_LAST_CHUNKS", "0") == "1"
     if needs_chunking:
         # Prepare chunk processing
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
         agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
         
-    # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
-        # This prevents it from growing indefinitely across multiple runs
+        # ALWAYS clear incremental history at start
         if os.path.exists(incremental_dir):
             try:
                 import shutil
-                # Safely clear the entire incremental folder
                 for filename in os.listdir(incremental_dir):
                     file_path = os.path.join(incremental_dir, filename)
                     try:
@@ -643,8 +643,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             except Exception as e:
                 print(f"⚠️ Failed to clear incremental history: {e}")
         
-        # Ensure directory exists (if it was fully removed or didn't exist)
-        os.makedirs(incremental_dir, exist_ok=True)
+        # Only recreate incremental directory when preservation is enabled
+        if preserve_chunks:
+            os.makedirs(incremental_dir, exist_ok=True)
 
         if chapter_split_threshold == 0:
             # Use ChapterSplitter for token-based intelligent chunking
@@ -858,12 +859,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                             all_glossary_entries.append(line)
                             chunk_lines.append(line)
                     
-                    # Incremental update (per chunk file inside incremental_glossary folder)
-                    try:
-                        _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode)
-                        print(f"📑 Incremental write: chunk {chunk_idx} (+{len(chunk_lines)} entries)")
-                    except Exception as e2:
-                        print(f"⚠️ Incremental write failed for chunk {chunk_idx}: {e2}")
+                    # Incremental update (per chunk file) only if preservation is enabled
+                    if preserve_chunks:
+                        try:
+                            _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode)
+                            print(f"📑 Incremental write: chunk {chunk_idx} (+{len(chunk_lines)} entries)")
+                        except Exception as e2:
+                            print(f"⚠️ Incremental write failed for chunk {chunk_idx}: {e2}")
             finally:
                 if _prev_defer is None:
                     if "GLOSSARY_DEFER_SAVE" in os.environ:
@@ -885,11 +887,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # START WITH INCREMENTAL GLOSSARY AS BASE IF IT EXISTS AND IS LARGER
         # This ensures that if memory was lost (e.g. during a long sequential run), we rely on the disk backup
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
-        incremental_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
+        incremental_path = os.path.join(incremental_dir, "glossary.incremental.all.csv") if preserve_chunks else None
         base_entries = list(all_glossary_entries)
         using_incremental_as_base = False
         
-        if os.path.exists(incremental_path):
+        if incremental_path and os.path.exists(incremental_path):
             try:
                 with open(incremental_path, 'r', encoding='utf-8') as f:
                     inc_content = f.read()
@@ -977,8 +979,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         
         # Final sanitize to prevent stray headers and section titles at end
         csv_lines = _sanitize_final_glossary_lines(csv_lines, use_legacy_format)
-        # If user stopped and we have no entries, keep existing file to avoid wiping it
-        if is_stop_requested() and len(csv_lines) <= 1 and os.path.exists(on_disk_path):
+        # If user stopped, do not write partial glossary unless preservation toggle is on
+        if is_stop_requested() and not preserve_chunks:
+            print("🛑 Stop requested — skipping glossary.csv save (preserve toggle off)")
+            return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
+        if is_stop_requested() and len(csv_lines) <= 1:
             print("🛑 Stop requested with no new entries — preserving existing glossary.csv")
             return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
 

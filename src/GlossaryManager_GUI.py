@@ -495,6 +495,7 @@ class GlossaryManagerMixin:
                     ('glossary_auto_compression_checkbox', 'glossary_auto_compression_var'),
                     ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
                     ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
+                    ('glossary_preserve_last_chunks_checkbox', 'glossary_preserve_last_chunks_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -513,6 +514,13 @@ class GlossaryManagerMixin:
                 for checkbox_name, var_name in checkbox_to_var_mapping:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())
+
+                # Preserve last chunks: also sync config and env
+                if hasattr(self, 'glossary_preserve_last_chunks_checkbox'):
+                    preserve_val = self.glossary_preserve_last_chunks_checkbox.isChecked()
+                    self.config['glossary_preserve_last_chunks'] = preserve_val
+                    setattr(self, 'glossary_preserve_last_chunks_var', preserve_val)
+                    os.environ['GLOSSARY_PRESERVE_LAST_CHUNKS'] = '1' if preserve_val else '0'
                 
                 # Update glossary request merging checkbox
                 if hasattr(self, 'glossary_request_merging_checkbox'):
@@ -1915,6 +1923,25 @@ CRITICAL EXTRACTION RULES:
         label5 = QLabel("(Adds a description/context field for each glossary entry)")
         description_layout.addWidget(label5)
         description_layout.addStretch()
+
+        # Preserve chunks toggle (below Include Description)
+        preserve_widget = QWidget()
+        preserve_layout = QHBoxLayout(preserve_widget)
+        preserve_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(preserve_widget)
+
+        if not hasattr(self, 'glossary_preserve_last_chunks_checkbox'):
+            self.glossary_preserve_last_chunks_checkbox = self._create_styled_checkbox("Preserve last completed chunks")
+        self.glossary_preserve_last_chunks_checkbox.setChecked(self.config.get('glossary_preserve_last_chunks', False))
+        self.glossary_preserve_last_chunks_checkbox.setToolTip(
+            "If enabled, partial chunk results are kept and glossary.csv is written even after Stop.\nDefault off: no glossary.csv is written when stopped mid-run."
+        )
+        preserve_layout.addWidget(self.glossary_preserve_last_chunks_checkbox)
+
+        preserve_hint = QLabel("(Keep partial glossary when stopping mid-run)")
+        preserve_hint.setStyleSheet("color: gray;")
+        preserve_layout.addWidget(preserve_hint)
+        preserve_layout.addStretch()
         
         # Function to update description checkbox state based on gender context
         def update_description_state():
@@ -2201,7 +2228,6 @@ CRITICAL EXTRACTION RULES:
         target_lang_pair.layout().itemAt(0).widget().setToolTip("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns.")
         extraction_grid.addWidget(target_lang_pair, 2, 2, 1, 2)
         
-        # Row 4 - Max sentences and chapter split threshold
         # Max sentences for glossary (with inline hint)
         ms_cont = QWidget()
         ms_layout = QHBoxLayout(ms_cont)
@@ -2232,12 +2258,12 @@ CRITICAL EXTRACTION RULES:
         hint.setStyleSheet("color: gray;")
         ms_layout.addWidget(hint)
         ms_layout.addStretch()
-        extraction_grid.addWidget(ms_cont, 3, 0, 1, 2)
+        extraction_grid.addWidget(ms_cont, 4, 0, 1, 2)
         
         extraction_grid.addWidget(_pair(
             "Chapter split threshold:", self.glossary_chapter_split_threshold_entry,
             tooltip="Split large texts into chunks (0 = token-based; 100000 = split at 100k chars)."
-        ), 3, 2, 1, 2)
+        ), 4, 2, 1, 2)
         
         # Row 5 - Filter mode
         filter_label = QLabel("Filter mode:")
@@ -2247,12 +2273,12 @@ CRITICAL EXTRACTION RULES:
             "- Names with honorifics only\n"
             "- Names without honorifics & terms"
         )
-        extraction_grid.addWidget(filter_label, 4, 0)
+        extraction_grid.addWidget(filter_label, 5, 0)
         filter_widget = QWidget()
         filter_layout = QHBoxLayout(filter_widget)
         filter_layout.setContentsMargins(0, 0, 0, 0)
         filter_layout.setSpacing(8)
-        extraction_grid.addWidget(filter_widget, 4, 1, 1, 3)
+        extraction_grid.addWidget(filter_widget, 5, 1, 1, 3)
         
         if not hasattr(self, 'glossary_filter_mode_buttons'):
             self.glossary_filter_mode_buttons = {}
@@ -2277,24 +2303,24 @@ CRITICAL EXTRACTION RULES:
         # Row 6 - Strip honorifics
         strip_label = QLabel("Strip honorifics:")
         strip_label.setToolTip("Remove suffixes from extracted names (e.g., '-nim', '-san').")
-        extraction_grid.addWidget(strip_label, 5, 0)
+        extraction_grid.addWidget(strip_label, 6, 0)
         if not hasattr(self, 'strip_honorifics_checkbox'):
             self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
         self.strip_honorifics_checkbox.setToolTip("Remove suffixes from extracted names (e.g., '-nim', '-san').")
         # Always reload from config
         self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
-        extraction_grid.addWidget(self.strip_honorifics_checkbox, 5, 1, 1, 3)
+        extraction_grid.addWidget(self.strip_honorifics_checkbox, 6, 1, 1, 3)
         
         # Row 7 - Fuzzy matching threshold (reuse existing value)
         fuzzy_label = QLabel("Fuzzy threshold:")
         fuzzy_label.setToolTip("Similarity needed to merge duplicates.\n0.90 = very similar (recommended); 1.0 = exact match.")
-        extraction_grid.addWidget(fuzzy_label, 6, 0)
+        extraction_grid.addWidget(fuzzy_label, 7, 0)
         
         auto_fuzzy_widget = QWidget()
         auto_fuzzy_layout = QHBoxLayout(auto_fuzzy_widget)
         auto_fuzzy_layout.setContentsMargins(0, 0, 0, 0)
         auto_fuzzy_layout.setSpacing(8)
-        extraction_grid.addWidget(auto_fuzzy_widget, 6, 1, 1, 3)
+        extraction_grid.addWidget(auto_fuzzy_widget, 7, 1, 1, 3)
         
         # Always reload fuzzy threshold value from config
         try:
