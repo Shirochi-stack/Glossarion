@@ -131,7 +131,11 @@ if '--run-chapter-extraction' in sys.argv:
 # The frozen check can stay here for other purposes
 if getattr(sys, 'frozen', False):
     # Any other frozen-specific setup
-    pass
+    try:
+        import atexit
+        atexit.register(_preempt_temp_dir_warning)
+    except Exception:
+        pass
     
 # Manga translation support (optional)
 try:
@@ -1640,6 +1644,20 @@ Text to analyze:
         """Stop all background operations and threads"""
         try:
             print("[CLEANUP] Stopping all background operations...")
+
+            # Helper: force-close dialogs that override closeEvent to hide instead of close
+            def _force_close_dialog(dlg):
+                try:
+                    if dlg is None:
+                        return
+                    dlg.closeEvent = lambda event: event.accept()
+                    dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                    if hasattr(dlg, "accept"):
+                        dlg.accept()
+                    dlg.close()
+                    dlg.deleteLater()
+                except Exception:
+                    pass
             
             # Stop any translation operations
             if hasattr(self, '_translation_thread') and self._translation_thread:
@@ -1723,6 +1741,38 @@ Text to analyze:
             # Generic child-process sweep to release any remaining _MEIPASS locks
             try:
                 _kill_child_process_tree()
+            except Exception:
+                pass
+            # Remove temporary CBZ extraction folder if it exists
+            try:
+                temp_root = getattr(self, 'cbz_temp_root', None)
+                if temp_root and os.path.isdir(temp_root):
+                    shutil.rmtree(temp_root, ignore_errors=True)
+            except Exception:
+                pass
+
+            # Best-effort release of _MEIPASS locks to avoid temp-dir warning
+            try:
+                _preempt_temp_dir_warning()
+            except Exception:
+                pass
+
+            # Close auxiliary dialogs that may remain hidden
+            try:
+                _force_close_dialog(getattr(self, '_other_settings_dialog', None))
+            except Exception:
+                pass
+            try:
+                _force_close_dialog(getattr(self, '_multi_file_retranslation_dialog', None))
+            except Exception:
+                pass
+            try:
+                for dlg in getattr(self, '_image_retranslation_dialog_cache', {}).values():
+                    _force_close_dialog(dlg)
+            except Exception:
+                pass
+            try:
+                _force_close_dialog(getattr(self, '_qa_settings_dialog', None))
             except Exception:
                 pass
             

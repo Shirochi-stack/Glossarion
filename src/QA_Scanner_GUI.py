@@ -1968,6 +1968,11 @@ class QAScannerMixin:
         """Show QA Scanner settings dialog"""
         # Create settings dialog
         dialog = QDialog(parent_dialog)
+        try:
+            self._qa_settings_dialog = dialog
+            dialog.finished.connect(lambda *_: setattr(self, "_qa_settings_dialog", None))
+        except Exception:
+            pass
         # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
         # Set up icon path
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
