@@ -4349,5 +4349,8 @@ class RetranslationMixin:
         folder_key = os.path.abspath(folder_path)
         self._image_retranslation_dialog_cache[folder_key] = dialog
         
+        # Programmatically click the Refresh button once on open to ensure latest data (fires same slot)
+        QTimer.singleShot(0, btn_refresh.click)
+
         # Show the dialog (non-modal to allow interaction with other windows)
         dialog.show()
