@@ -205,6 +205,37 @@ class EnhancedTextExtractor:
             self.h2t.bypass_tables = True
             self.h2t.ignore_emphasis = True
             self.h2t.mark_code = False
+
+        # Optionally collapse excessive blank lines after conversion
+        try:
+            cfg = getattr(self, "config", {}) or {}
+            collapse_blanks = bool(cfg.get('collapse_blank_lines', False))
+        except Exception:
+            collapse_blanks = False
+        if os.getenv('COLLAPSE_BLANK_LINES', '0') == '1':
+            collapse_blanks = True
+
+        if collapse_blanks:
+            _orig_handle = self.h2t.handle
+            def _handle_with_collapse(html_text):
+                md = _orig_handle(html_text)
+                return re.sub(r'\\n{3,}', '\\n\\n', md)
+            self.h2t.handle = _handle_with_collapse
+
+    def html_to_markdown_with_cleanup(self, html_content: str) -> str:
+        """Convert HTML to markdown, then optionally collapse excessive blank lines."""
+        markdown = self.h2t.handle(html_content)
+
+        # Collapse 3+ consecutive newlines to a single blank line if enabled
+        try:
+            collapse_blanks = bool(self.config.get('collapse_blank_lines', False))
+        except Exception:
+            collapse_blanks = False
+
+        if collapse_blanks:
+            markdown = re.sub(r'\\n{3,}', '\\n\\n', markdown)
+
+        return markdown
     
     def _decode_entities(self, text: str) -> str:
         """Decode HTML entities to Unicode characters with CJK support"""

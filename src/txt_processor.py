@@ -83,7 +83,15 @@ class TextFileProcessor:
                     
                     # Convert to markdown if html2text is enabled
                     if self.html2text_enabled:
-                        content = self._html_to_markdown(content)
+                        # Use enhanced extractor cleanup if available on GUI/config
+                        try:
+                            from enhanced_text_extractor import EnhancedTextExtractor
+                            ete = EnhancedTextExtractor(filtering_mode=self.file_filtering_level_var if hasattr(self, 'file_filtering_level_var') else 'smart',
+                                                        preserve_structure=self.config.get('enhanced_preserve_structure', True))
+                            ete.config = getattr(self, 'config', {}) or {}
+                            content = ete.html_to_markdown_with_cleanup(content)
+                        except Exception:
+                            content = self._html_to_markdown(content)
                         print(f"✅ Converted HTML to Markdown")
             except Exception as e:
                 print(f"❌ Failed to extract text from PDF: {e}")
