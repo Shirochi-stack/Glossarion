@@ -1274,9 +1274,9 @@ Text to analyze:
         if not hasattr(self, 'enhanced_single_line_break_var'):
             self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
         
-        # Markdown2 converter toggle
+        # Markdown2 converter toggle (default OFF to avoid legacy converter)
         if not hasattr(self, 'use_markdown2_converter_var'):
-            self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', True)
+            self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
              
         # Initialize update manager AFTER config is loaded
         try:
