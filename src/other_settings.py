@@ -4642,6 +4642,9 @@ def _create_processing_options_section(self, parent):
     
     if not hasattr(self, 'enhanced_single_line_break_var'):
         self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
+
+    if not hasattr(self, 'html2text_escape_snob_var'):
+        self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', True)
     
     if not hasattr(self, 'use_markdown2_converter_var'):
         self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', True)
@@ -4747,6 +4750,26 @@ def _create_processing_options_section(self, parent):
     single_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
     single_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(single_break_desc)
+
+    # Escape snob option
+    escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
+    try:
+        escape_snob_cb.setChecked(bool(self.html2text_escape_snob_var))
+    except Exception:
+        pass
+    def _on_escape_snob_toggle(checked):
+        try:
+            self.html2text_escape_snob_var = bool(checked)
+        except Exception:
+            pass
+    escape_snob_cb.toggled.connect(_on_escape_snob_toggle)
+    escape_snob_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(escape_snob_cb)
+
+    escape_snob_desc = QLabel("When on, html2text escapes (), [], *, _ etc. Turn off for plainer text.")
+    escape_snob_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    escape_snob_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(escape_snob_desc)
     
     # Markdown2 converter option
     markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter")

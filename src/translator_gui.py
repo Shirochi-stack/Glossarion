@@ -2238,6 +2238,7 @@ Recent translations to summarize:
             # Preserve streaming logs during batch mode; must be initialized here so save_config
             # keeps the user's choice even if the Other Settings dialog is never opened.
             ('allow_batch_stream_logs_var', 'allow_batch_stream_logs', False),
+            ('html2text_escape_snob_var', 'html2text_escape_snob', True),
 
         ]
         
@@ -10775,6 +10776,7 @@ Important rules:
                 ('file_filtering_level', ['file_filtering_level_var'], 'smart', str),
                 ('enhanced_preserve_structure', ['enhanced_preserve_structure_var'], True, bool),
                 ('enhanced_single_line_break', ['enhanced_single_line_break_var'], False, bool),
+                ('html2text_escape_snob', ['html2text_escape_snob_var'], True, bool),
                 ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
@@ -11414,6 +11416,7 @@ Important rules:
                 ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', False) else '0'),
+                ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', True) else '0'),
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
