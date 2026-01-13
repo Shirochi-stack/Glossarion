@@ -4644,10 +4644,10 @@ def _create_processing_options_section(self, parent):
         self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
 
     if not hasattr(self, 'html2text_escape_snob_var'):
-        self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', True)
+        self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
     
     if not hasattr(self, 'use_markdown2_converter_var'):
-        self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', True)
+        self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
     
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")

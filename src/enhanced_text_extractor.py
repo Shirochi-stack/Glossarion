@@ -169,7 +169,7 @@ class EnhancedTextExtractor:
         
         # Core settings for Unicode preservation
         self.h2t.unicode_snob = True
-        self.h2t.escape_snob = os.getenv('HTML2TEXT_ESCAPE_SNOB', '1') == '1'
+        self.h2t.escape_snob = os.getenv('HTML2TEXT_ESCAPE_SNOB', '0') == '1'
         self.h2t.use_automatic_links = False
         
         # Layout settings
