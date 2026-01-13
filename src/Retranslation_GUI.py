@@ -3833,12 +3833,12 @@ class RetranslationMixin:
         try:
             for file in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, file)
-                    # Include HTML files (any name)
-                    if (os.path.isfile(file_path) and 
-                        file.lower().endswith(('.html', '.xhtml', '.htm')) and 
-                        file not in html_files):
+                # Include HTML files (any name)
+                if (os.path.isfile(file_path) and 
+                    file.lower().endswith(('.html', '.xhtml', '.htm')) and 
+                    file not in html_files):
                     html_files.append(file)
-                        print(f"Found HTML file: {file}")
+                    print(f"Found HTML file: {file}")
                 # Also include generated image files (not in images/ subdirectory)
                 elif (os.path.isfile(file_path) and 
                       file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')) and
