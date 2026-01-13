@@ -4740,6 +4740,8 @@ def _create_processing_options_section(self, parent):
     def _on_single_break_toggle(checked):
         try:
             self.enhanced_single_line_break_var = bool(checked)
+            self.config['enhanced_single_line_break'] = self.enhanced_single_line_break_var
+            os.environ['ENHANCED_SINGLE_LINE_BREAK'] = '1' if checked else '0'
         except Exception:
             pass
     single_break_cb.toggled.connect(_on_single_break_toggle)
@@ -4760,6 +4762,8 @@ def _create_processing_options_section(self, parent):
     def _on_escape_snob_toggle(checked):
         try:
             self.html2text_escape_snob_var = bool(checked)
+            self.config['html2text_escape_snob'] = self.html2text_escape_snob_var
+            os.environ['HTML2TEXT_ESCAPE_SNOB'] = '1' if checked else '0'
         except Exception:
             pass
     escape_snob_cb.toggled.connect(_on_escape_snob_toggle)
