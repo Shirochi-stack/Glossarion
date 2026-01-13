@@ -455,7 +455,7 @@ class QAScannerMixin:
 
             # Pre-create Quick Scan sample size spinbox so click handlers can capture it
             quick_sample_spinbox = QSpinBox()
-            quick_sample_spinbox.setMinimum(0)  # 0 = use full text (no downsampling)
+            quick_sample_spinbox.setMinimum(-1)  # -1 = use full text (no downsampling)
             quick_sample_spinbox.setMaximum(20000)
             quick_sample_spinbox.setSingleStep(500)
             quick_sample_spinbox.setValue(int(qa_settings.get('quick_scan_sample_size', 1000) or 1000))
@@ -740,7 +740,7 @@ class QAScannerMixin:
             qs_label.setStyleSheet("color: #f0f0f0;")
             qs_layout.addWidget(qs_label)
             qs_layout.addWidget(quick_sample_spinbox)
-            hint = QLabel("Used only for duplicate detection; 0 = full text, lower = faster, higher = more accurate")
+            hint = QLabel("Used only for duplicate detection; -1 = all text, 0 = disable check, lower = faster")
             hint.setStyleSheet("color: #9ca3af;")
             hint.setFont(QFont("Arial", 9))
             qs_layout.addWidget(hint)

@@ -107,6 +107,7 @@ class DuplicateDetectionConfig:
                 'skip_structural': True,
                 'skip_minhash': True,
                 'sample_size': 1000,  # Smaller sample
+                'disable_duplicate_check': False,
                 'check_all_pairs': False  # Never check all pairs
             },
             'custom': {
@@ -2565,6 +2566,11 @@ def detect_duplicates(results, log, should_stop, config):
     duplicate_groups = {}
     near_duplicate_groups = {}
     duplicate_confidence = defaultdict(float)
+
+    # Allow quick-scan users to disable duplicate detection explicitly
+    if config.mode == 'quick-scan' and config.thresholds.get('quick-scan', {}).get('disable_duplicate_check'):
+        log("⚡ Quick Scan: duplicate detection disabled (sample size set to 0)")
+        return duplicate_groups, near_duplicate_groups, duplicate_confidence
     
     total_files = len(results)
     dup_start_time = time.time()  # Track timing for progress estimates
@@ -6014,8 +6020,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         try:
             if qs_size is not None:
                 qs_val = int(qs_size)
-                if qs_val == 0:
+                # Reset disable flag each run
+                config.thresholds['quick-scan']['disable_duplicate_check'] = False
+                if qs_val == -1:
                     config.thresholds['quick-scan']['sample_size'] = None  # use full text
+                elif qs_val == 0:
+                    config.thresholds['quick-scan']['disable_duplicate_check'] = True
+                    config.thresholds['quick-scan']['sample_size'] = config.thresholds['quick-scan'].get('sample_size', 1000)
                 else:
                     qs_val = max(100, min(qs_val, 50000))
                     config.thresholds['quick-scan']['sample_size'] = qs_val
