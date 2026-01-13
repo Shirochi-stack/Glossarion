@@ -4753,30 +4753,6 @@ def _create_processing_options_section(self, parent):
     single_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(single_break_desc)
 
-    # Collapse excessive blank lines
-    if not hasattr(self, 'collapse_blank_lines_var'):
-        self.collapse_blank_lines_var = self.config.get('collapse_blank_lines', False)
-    collapse_blank_cb = self._create_styled_checkbox("Collapse excessive blank lines")
-    try:
-        collapse_blank_cb.setChecked(bool(self.collapse_blank_lines_var))
-    except Exception:
-        pass
-    def _on_collapse_blank_toggle(checked):
-        try:
-            self.collapse_blank_lines_var = bool(checked)
-            self.config['collapse_blank_lines'] = self.collapse_blank_lines_var
-            os.environ['COLLAPSE_BLANK_LINES'] = '1' if checked else '0'
-        except Exception:
-            pass
-    collapse_blank_cb.toggled.connect(_on_collapse_blank_toggle)
-    collapse_blank_cb.setContentsMargins(0, 2, 0, 0)
-    enhanced_opts_v.addWidget(collapse_blank_cb)
-
-    collapse_blank_desc = QLabel("Trim runs of 3+ newlines down to a single blank line.")
-    collapse_blank_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    collapse_blank_desc.setContentsMargins(20, 0, 0, 3)
-    enhanced_opts_v.addWidget(collapse_blank_desc)
-
     # Escape snob option
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
     try:
@@ -4800,7 +4776,7 @@ def _create_processing_options_section(self, parent):
     enhanced_opts_v.addWidget(escape_snob_desc)
     
     # Markdown2 converter option
-    markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter")
+    markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter (Legacy)")
     try:
         markdown2_cb.setChecked(bool(self.use_markdown2_converter_var))
     except Exception:
