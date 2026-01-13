@@ -6007,6 +6007,20 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if mode == 'custom' and qa_settings and 'custom_mode_settings' in qa_settings:
         custom_settings = qa_settings['custom_mode_settings']
     config = DuplicateDetectionConfig(mode, custom_settings)
+
+    # Allow configurable sample size for quick-scan
+    if mode == 'quick-scan' and qa_settings:
+        qs_size = qa_settings.get('quick_scan_sample_size')
+        try:
+            if qs_size is not None:
+                qs_val = int(qs_size)
+                if qs_val == 0:
+                    config.thresholds['quick-scan']['sample_size'] = None  # use full text
+                else:
+                    qs_val = max(100, min(qs_val, 50000))
+                    config.thresholds['quick-scan']['sample_size'] = qs_val
+        except Exception:
+            pass
     
     # Log mode info
     mode_messages = {

@@ -330,6 +330,7 @@ class QAScannerMixin:
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
+            'quick_scan_sample_size': 1000,
             'cache_enabled': True,
             'cache_auto_size': False,
             'cache_show_stats': False,
@@ -451,6 +452,15 @@ class QAScannerMixin:
             content_layout = QVBoxLayout(content_widget)
             content_layout.setContentsMargins(15, 10, 15, 10)
             main_layout.addWidget(content_widget)
+
+            # Pre-create Quick Scan sample size spinbox so click handlers can capture it
+            quick_sample_spinbox = QSpinBox()
+            quick_sample_spinbox.setMinimum(0)  # 0 = use full text (no downsampling)
+            quick_sample_spinbox.setMaximum(20000)
+            quick_sample_spinbox.setSingleStep(500)
+            quick_sample_spinbox.setValue(int(qa_settings.get('quick_scan_sample_size', 1000) or 1000))
+            quick_sample_spinbox.setMinimumWidth(110)
+            quick_sample_spinbox.wheelEvent = lambda event: event.ignore()
             
             # Title with subtitle
             title_label = QLabel("Select Detection Mode")
@@ -701,6 +711,18 @@ class QAScannerMixin:
                 def make_click_handler(mode_value):
                     def handler():
                         nonlocal selected_mode_value
+                        # Persist quick scan sample size before closing
+                        qa_settings['quick_scan_sample_size'] = quick_sample_spinbox.value()
+                        try:
+                            if hasattr(self, 'config'):
+                                if 'qa_scanner_settings' not in self.config:
+                                    self.config['qa_scanner_settings'] = {}
+                                self.config['qa_scanner_settings'].update(qa_settings)
+                                # Save quietly to persist between runs
+                                if hasattr(self, 'save_config'):
+                                    self.save_config(show_message=False)
+                        except Exception:
+                            pass
                         selected_mode_value = mode_value
                         mode_dialog.accept()
                     return handler
@@ -709,6 +731,21 @@ class QAScannerMixin:
                 card.mousePressEvent = lambda event, handler=make_click_handler(mi["value"]): handler()
         
         if selected_mode_value is None:
+            # Quick Scan sample size control
+            qs_row = QWidget()
+            qs_layout = QHBoxLayout(qs_row)
+            qs_layout.setContentsMargins(4, 8, 4, 4)
+            qs_label = QLabel("Quick Scan duplicate check sample size (characters):")
+            qs_label.setFont(QFont("Arial", 10))
+            qs_label.setStyleSheet("color: #f0f0f0;")
+            qs_layout.addWidget(qs_label)
+            qs_layout.addWidget(quick_sample_spinbox)
+            hint = QLabel("Used only for duplicate detection; 0 = full text, lower = faster, higher = more accurate")
+            hint.setStyleSheet("color: #9ca3af;")
+            hint.setFont(QFont("Arial", 9))
+            qs_layout.addWidget(hint)
+            qs_layout.addStretch()
+            content_layout.addWidget(qs_row)
             # Add separator line before buttons
             separator = QFrame()
             separator.setFrameShape(QFrame.HLine)
