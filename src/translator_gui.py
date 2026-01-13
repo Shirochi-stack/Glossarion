@@ -5709,6 +5709,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 unified_api_client.UnifiedClient.set_global_cancellation(False)
         except Exception:
             pass
+
+        # Prepare shared stop-file for glossary/translation workers
+        try:
+            import tempfile, os as _os
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE') or _os.path.join(
+                tempfile.gettempdir(), f"glossarion_glossary_stop_{_os.getpid()}.flag"
+            )
+            os.environ['GLOSSARY_STOP_FILE'] = stop_file
+            if _os.path.exists(stop_file):
+                _os.remove(stop_file)
+        except Exception:
+            pass
         
         # Update button immediately to show translation is starting
         if hasattr(self, 'button_run'):
@@ -7534,6 +7546,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             extract_glossary_from_epub.set_stop_flag(False)
         except:
             pass
+
+        # Clear shared stop file before starting extraction
+        try:
+            import tempfile, os as _os
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE') or _os.path.join(
+                tempfile.gettempdir(), f"glossarion_glossary_stop_{_os.getpid()}.flag"
+            )
+            os.environ['GLOSSARY_STOP_FILE'] = stop_file
+            if _os.path.exists(stop_file):
+                _os.remove(stop_file)
+        except Exception:
+            pass
         
         # Use shared executor
         self._ensure_executor()
@@ -9142,6 +9166,15 @@ Important rules:
         os.environ['TRANSLATION_CANCELLED'] = '1'
         
         self.stop_requested = True
+
+        # Touch stop file for cross-process glossary workers
+        try:
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+            if stop_file:
+                with open(stop_file, 'w', encoding='utf-8') as f:
+                    f.write('stop')
+        except Exception:
+            pass
         
         # Use the imported translation_stop_flag function from TransateKRtoEN
         # This was imported during lazy loading as: translation_stop_flag = TransateKRtoEN.set_stop_flag
@@ -9232,28 +9265,38 @@ Important rules:
             traceback.print_exc()
 
     def stop_glossary_extraction(self):
-       """Stop glossary extraction specifically"""
-       # Disable button immediately to prevent multiple clicks
-       if hasattr(self, 'glossary_button'):
-           self.glossary_button.setEnabled(False)
-           # Update text label instead of button text
-           if hasattr(self, 'glossary_text_label'):
-               self.glossary_text_label.setText("Stopping...")
-           self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
-       
-       self.stop_requested = True
-       if glossary_stop_flag:
-           glossary_stop_flag(True)
-       
-       try:
-           import extract_glossary_from_epub
-           if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-               extract_glossary_from_epub.set_stop_flag(True)
-       except: pass
-       
-       self.append_log("❌ Glossary extraction stop requested.")
-       self.append_log("⏳ Please wait... stopping after current API call completes.")
-       # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
+        """Stop glossary extraction specifically"""
+        # Disable button immediately to prevent multiple clicks
+        if hasattr(self, 'glossary_button'):
+            self.glossary_button.setEnabled(False)
+            # Update text label instead of button text
+            if hasattr(self, 'glossary_text_label'):
+                self.glossary_text_label.setText("Stopping...")
+            self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        
+        self.stop_requested = True
+        if glossary_stop_flag:
+            glossary_stop_flag(True)
+        
+        try:
+            import extract_glossary_from_epub
+            if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                extract_glossary_from_epub.set_stop_flag(True)
+        except:
+            pass
+
+        # Touch stop file for GlossaryManager subprocesses
+        try:
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+            if stop_file:
+                with open(stop_file, 'w', encoding='utf-8') as f:
+                    f.write('stop')
+        except Exception:
+            pass
+        
+        self.append_log("❌ Glossary extraction stop requested.")
+        self.append_log("⏳ Please wait... stopping after current API call completes.")
+        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
 
     def stop_epub_converter(self):

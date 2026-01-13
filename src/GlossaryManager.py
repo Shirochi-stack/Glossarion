@@ -48,6 +48,7 @@ _api_submission_lock = threading.Lock()
 _last_api_submission_time = 0
 _results_lock = threading.Lock()
 _file_write_lock = threading.Lock()
+_stop_requested = False
 BOOK_TITLE_RAW = None
 BOOK_TITLE_TRANSLATED = None
 BOOK_TITLE_VALUE = None  # Legacy support if needed, or remove? Keeping for safety but won't use.
@@ -243,9 +244,70 @@ _dedup_time = 0
 _io_time = 0
 
 
+def _get_stop_file_path():
+    """Return the stop-flag file path (shared across processes)."""
+    return os.environ.get("GLOSSARY_STOP_FILE") or os.path.join(tempfile.gettempdir(), "glossarion_glossary.stop")
+
+
+def set_stop_flag(value: bool):
+    """Set the module-level stop flag and propagate to shared channels."""
+    global _stop_requested
+    _stop_requested = bool(value)
+
+    # Mirror to environment for other components
+    os.environ["TRANSLATION_CANCELLED"] = "1" if value else "0"
+
+    # Touch/remove stop file for cross-process signalling
+    stop_path = _get_stop_file_path()
+    try:
+        if value:
+            with open(stop_path, "w", encoding="utf-8") as f:
+                f.write("stop")
+        else:
+            if os.path.exists(stop_path):
+                os.remove(stop_path)
+    except Exception:
+        pass
+
+    # Notify unified_api_client if present
+    try:
+        import unified_api_client
+        if hasattr(unified_api_client, "UnifiedClient"):
+            unified_api_client.UnifiedClient._global_cancelled = bool(value)
+        if hasattr(unified_api_client, "global_stop_flag"):
+            unified_api_client.global_stop_flag = bool(value)
+    except Exception:
+        pass
+
+
 # Function to check if stop is requested (can be overridden)
 def is_stop_requested():
-    """Check if stop has been requested - default implementation"""
+    """Check if stop has been requested from any source."""
+    if _stop_requested:
+        return True
+
+    # Environment toggle (set by GUI stop button)
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return True
+
+    # File-based stop flag for cross-process cancellation
+    try:
+        stop_path = _get_stop_file_path()
+        if stop_path and os.path.exists(stop_path):
+            return True
+    except Exception:
+        pass
+
+    # Unified API client global cancellation
+    try:
+        import unified_api_client
+        if getattr(unified_api_client, "global_stop_flag", False):
+            return True
+        if hasattr(unified_api_client, "UnifiedClient") and getattr(unified_api_client.UnifiedClient, "_global_cancelled", False):
+            return True
+    except Exception:
+        pass
+
     return False
 
 def set_output_redirect(log_callback=None):
@@ -619,17 +681,17 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if not chapter_split_enabled:
         print("📑 Chapter splitting disabled (GLOSSARY_ENABLE_CHAPTER_SPLIT=0) - processing without pre-splitting")
     
-    # Toggle: preserve chunks on stop
-    preserve_chunks = os.getenv("GLOSSARY_PRESERVE_LAST_CHUNKS", "0") == "1"
     if needs_chunking:
         # Prepare chunk processing
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
         agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
         
-        # ALWAYS clear incremental history at start
+    # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
+        # This prevents it from growing indefinitely across multiple runs
         if os.path.exists(incremental_dir):
             try:
                 import shutil
+                # Safely clear the entire incremental folder
                 for filename in os.listdir(incremental_dir):
                     file_path = os.path.join(incremental_dir, filename)
                     try:
@@ -643,9 +705,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             except Exception as e:
                 print(f"⚠️ Failed to clear incremental history: {e}")
         
-        # Only recreate incremental directory when preservation is enabled
-        if preserve_chunks:
-            os.makedirs(incremental_dir, exist_ok=True)
+        # Ensure directory exists (if it was fully removed or didn't exist)
+        os.makedirs(incremental_dir, exist_ok=True)
 
         if chapter_split_threshold == 0:
             # Use ChapterSplitter for token-based intelligent chunking
@@ -789,6 +850,10 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
 
             # Final sanitize to prevent stray headers
             all_csv_lines = _sanitize_final_glossary_lines(all_csv_lines, use_legacy_format)
+            # If user requested stop, avoid writing new glossary to disk
+            if is_stop_requested():
+                print("🛑 Stop requested — skipping final glossary write (batch mode)")
+                return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
 
             # If user stopped and we have no entries, keep existing file to avoid wiping it
             if is_stop_requested() and len(all_csv_lines) <= 1:
@@ -859,13 +924,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                             all_glossary_entries.append(line)
                             chunk_lines.append(line)
                     
-                    # Incremental update (per chunk file) only if preservation is enabled
-                    if preserve_chunks:
-                        try:
-                            _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode)
-                            print(f"📑 Incremental write: chunk {chunk_idx} (+{len(chunk_lines)} entries)")
-                        except Exception as e2:
-                            print(f"⚠️ Incremental write failed for chunk {chunk_idx}: {e2}")
+                    # Incremental update (per chunk file inside incremental_glossary folder)
+                    try:
+                        _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode)
+                        print(f"📑 Incremental write: chunk {chunk_idx} (+{len(chunk_lines)} entries)")
+                    except Exception as e2:
+                        print(f"⚠️ Incremental write failed for chunk {chunk_idx}: {e2}")
             finally:
                 if _prev_defer is None:
                     if "GLOSSARY_DEFER_SAVE" in os.environ:
@@ -887,11 +951,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # START WITH INCREMENTAL GLOSSARY AS BASE IF IT EXISTS AND IS LARGER
         # This ensures that if memory was lost (e.g. during a long sequential run), we rely on the disk backup
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
-        incremental_path = os.path.join(incremental_dir, "glossary.incremental.all.csv") if preserve_chunks else None
+        incremental_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
         base_entries = list(all_glossary_entries)
         using_incremental_as_base = False
         
-        if incremental_path and os.path.exists(incremental_path):
+        if os.path.exists(incremental_path):
             try:
                 with open(incremental_path, 'r', encoding='utf-8') as f:
                     inc_content = f.read()
@@ -979,12 +1043,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         
         # Final sanitize to prevent stray headers and section titles at end
         csv_lines = _sanitize_final_glossary_lines(csv_lines, use_legacy_format)
-        # If user stopped, do not write partial glossary unless preservation toggle is on
-        if is_stop_requested() and not preserve_chunks:
-            print("🛑 Stop requested — skipping glossary.csv save (preserve toggle off)")
-            return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
-        if is_stop_requested() and len(csv_lines) <= 1:
-            print("🛑 Stop requested with no new entries — preserving existing glossary.csv")
+        # If user requested stop, avoid overwriting files; preserve existing when possible
+        if is_stop_requested():
+            if len(csv_lines) <= 1 and os.path.exists(on_disk_path):
+                print("🛑 Stop requested with no new entries — preserving existing glossary.csv")
+                return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
+            print("🛑 Stop requested — skipping final glossary write (chunked mode)")
             return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
 
         # Copy glossary extension file if configured
@@ -1482,6 +1546,10 @@ def _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honor
     that save_glossary() can use as a crash-safe backup.
     """
     if not chunk_lines:
+        return
+
+    # Respect stop flag to avoid writing partial files after cancellation
+    if is_stop_requested():
         return
     
     # Incremental output directory
