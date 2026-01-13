@@ -458,9 +458,38 @@ class QAScannerMixin:
             quick_sample_spinbox.setMinimum(-1)  # -1 = use full text (no downsampling)
             quick_sample_spinbox.setMaximum(20000)
             quick_sample_spinbox.setSingleStep(500)
-            quick_sample_spinbox.setValue(int(qa_settings.get('quick_scan_sample_size', 1000) or 1000))
+            qs_initial = qa_settings.get('quick_scan_sample_size', 1000)
+            try:
+                qs_initial = int(qs_initial)
+            except Exception:
+                qs_initial = 1000
+            quick_sample_spinbox.setValue(qs_initial)
             quick_sample_spinbox.setMinimumWidth(110)
             quick_sample_spinbox.wheelEvent = lambda event: event.ignore()
+            # Auto-save whenever the value changes or editing finishes
+            def _save_quick_sample(val):
+                try:
+                    val = int(val)
+                    qa_settings['quick_scan_sample_size'] = val
+                    if hasattr(self, 'config'):
+                        self.config.setdefault('qa_scanner_settings', {})
+                        self.config['qa_scanner_settings']['quick_scan_sample_size'] = val
+                    if hasattr(self, 'save_config'):
+                        self.save_config(show_message=False)
+                except Exception:
+                    pass
+            try:
+                quick_sample_spinbox.valueChanged.disconnect()
+            except Exception:
+                pass
+            quick_sample_spinbox.valueChanged.connect(_save_quick_sample)
+            try:
+                quick_sample_spinbox.editingFinished.disconnect()
+            except Exception:
+                pass
+            quick_sample_spinbox.editingFinished.connect(lambda: _save_quick_sample(quick_sample_spinbox.value()))
+            # Persist current value immediately to ensure config key exists
+            _save_quick_sample(qs_initial)
             
             # Title with subtitle
             title_label = QLabel("Select Detection Mode")
