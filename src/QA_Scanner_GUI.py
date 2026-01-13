@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButt
                                QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, 
                                QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
                                QRadioButton, QButtonGroup, QGroupBox, QComboBox,
-                               QFileDialog, QMessageBox, QSizePolicy, QGraphicsDropShadowEffect)
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QUrl, QSize
-from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices, QColor, QPainter, QImage
+                               QFileDialog, QMessageBox, QSizePolicy)
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QUrl
+from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices
 import threading
 import traceback
 
@@ -169,88 +169,6 @@ def normalize_name_for_comparison(name):
 class QAScannerMixin:
     """Mixin class containing QA Scanner methods for TranslatorGUI"""
     
-    def _find_halgakos_icon_path(self):
-        """Return the first existing Halgakos.ico path from common locations."""
-        candidates = [
-            os.path.join(getattr(self, "base_dir", os.getcwd()), "Halgakos.ico"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico"),
-            os.path.join(os.getcwd(), "Halgakos.ico"),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Halgakos.ico"),
-            os.path.join(getattr(sys, "_MEIPASS", os.getcwd()), "Halgakos.ico"),
-        ]
-        return next((p for p in candidates if os.path.isfile(p)), None)
-
-    def _tint_pixmap(self, pixmap: QPixmap, color: QColor, opacity: float, dpr: float) -> QPixmap:
-        """Apply a translucent tint to the pixmap while preserving alpha and HiDPI ratio."""
-        if pixmap.isNull():
-            return pixmap
-        img = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
-        painter = QPainter(img)
-        painter.setCompositionMode(QPainter.CompositionMode_SourceAtop)
-        tint = QColor(color)
-        tint.setAlphaF(opacity)
-        painter.fillRect(img.rect(), tint)
-        painter.end()
-        tinted = QPixmap.fromImage(img)
-        try:
-            tinted.setDevicePixelRatio(dpr)
-        except Exception:
-            pass
-        return tinted
-
-    def _build_effect_icon_label(self, effect: str, logical_size: int = 56) -> QLabel:
-        """
-        Create a HiDPI-friendly QLabel with Halgakos.ico plus themed glow.
-        effect: 'lightning', 'fire', or 'robotic'
-        """
-        label = QLabel()
-        label.setStyleSheet("background-color: transparent; border: none;")
-        ico_path = self._find_halgakos_icon_path()
-        if not ico_path:
-            label.setText("⚠")
-            label.setAlignment(Qt.AlignCenter)
-            return label
-
-        try:
-            dpr = float(getattr(self, "devicePixelRatioF", lambda: 1.0)())
-        except Exception:
-            dpr = 1.0
-        dpr = max(1.0, dpr)
-
-        target_device_px = int(logical_size * dpr)
-        icon = QIcon(ico_path)
-        pm = icon.pixmap(QSize(target_device_px, target_device_px))
-        if pm.isNull():
-            pm = QPixmap(ico_path)
-        if pm.isNull():
-            label.setText("⚠")
-            label.setAlignment(Qt.AlignCenter)
-            return label
-
-        pm = pm.scaled(target_device_px, target_device_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        try:
-            pm.setDevicePixelRatio(dpr)
-        except Exception:
-            pass
-
-        styles = {
-            "lightning": {"tint": QColor(0, 200, 255), "glow": QColor(0, 180, 255), "blur": 22, "alpha": 0.35},
-            "fire": {"tint": QColor(255, 130, 20), "glow": QColor(255, 90, 0), "blur": 24, "alpha": 0.38},
-            "robotic": {"tint": QColor(130, 235, 255), "glow": QColor(110, 220, 255), "blur": 20, "alpha": 0.32},
-        }
-        style = styles.get(effect, styles["lightning"])
-
-        pm = self._tint_pixmap(pm, style["tint"], style["alpha"], dpr)
-        label.setPixmap(pm)
-        label.setFixedSize(logical_size, logical_size)
-        label.setAlignment(Qt.AlignCenter)
-
-        glow = QGraphicsDropShadowEffect(label)
-        glow.setBlurRadius(style["blur"] * dpr)
-        glow.setOffset(0, 0)
-        glow.setColor(style["glow"])
-        label.setGraphicsEffect(glow)
-        return label
     def _create_styled_checkbox(self, text):
         """Create a checkbox with all checkmarks disabled"""
         from PySide6.QtWidgets import QCheckBox
@@ -678,18 +596,71 @@ class QAScannerMixin:
                 icon_container_layout.setContentsMargins(0, 0, 0, 0)
                 icon_container_layout.setAlignment(Qt.AlignCenter)
                 
-                target_logical = 56  # logical size before HiDPI scaling
+                # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others (HiDPI, multi-path, sharp)
                 if mi["value"] == "ai-hunter":
-                    icon_label = self._build_effect_icon_label("robotic", target_logical)
-                    icon_container_layout.addWidget(icon_label)
-                elif mi["value"] == "aggressive":
-                    icon_label = self._build_effect_icon_label("fire", target_logical)
-                    icon_container_layout.addWidget(icon_label)
-                elif mi["value"] == "quick-scan":
-                    icon_label = self._build_effect_icon_label("lightning", target_logical)
-                    icon_container_layout.addWidget(icon_label)
+                    icon_label = None
+                    try:
+                        import sys
+                        candidates = [
+                            os.path.join(getattr(self, "base_dir", os.getcwd()), "Halgakos.ico"),
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico"),
+                            os.path.join(os.getcwd(), "Halgakos.ico"),
+                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Halgakos.ico"),
+                            os.path.join(getattr(sys, "_MEIPASS", os.getcwd()), "Halgakos.ico"),
+                        ]
+                        ico_path = next((p for p in candidates if os.path.isfile(p)), None)
+                        if ico_path:
+                            icon = QIcon(ico_path)
+                            icon_label = QLabel()
+                            icon_label.setStyleSheet("background-color: transparent; border: none;")
+                            # Use device pixel ratio to avoid blur
+                            try:
+                                dpr = self.devicePixelRatioF()
+                            except Exception:
+                                dpr = 1.0
+                            target_logical = 56  # requested logical size of label
+                            dev_px = int(target_logical * max(1.0, dpr))
+                            # Prefer largest available size to reduce scaling blur
+                            avail = icon.availableSizes()
+                            if avail:
+                                best = max(avail, key=lambda s: s.width() * s.height())
+                                pm = icon.pixmap(best * int(max(1.0, dpr)))
+                            else:
+                                pm = icon.pixmap(QSize(dev_px, dev_px))
+                            if pm.isNull():
+                                pm = QPixmap(ico_path)
+                            if not pm.isNull():
+                                try:
+                                    pm.setDevicePixelRatio(dpr)
+                                except Exception:
+                                    pass
+                                # Fit into logical target size
+                                fitted = pm.scaled(
+                                    int(target_logical * dpr),
+                                    int(target_logical * dpr),
+                                    Qt.KeepAspectRatio,
+                                    Qt.SmoothTransformation,
+                                )
+                                try:
+                                    fitted.setDevicePixelRatio(dpr)
+                                except Exception:
+                                    pass
+                                icon_label.setPixmap(fitted)
+                                icon_label.setFixedSize(target_logical, target_logical)
+                                icon_label.setAlignment(Qt.AlignCenter)
+                                icon_container_layout.addWidget(icon_label)
+                            else:
+                                icon_label = None
+                    except Exception:
+                        icon_label = None
+                    if icon_label is None:
+                        emoji_label = QLabel(mi["emoji"])
+                        emoji_label.setFont(QFont("Arial", 38))
+                        emoji_label.setAlignment(Qt.AlignCenter)
+                        emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
+                        icon_container_layout.addWidget(emoji_label)
                 else:
-                    # Keep emoji for custom/other cards
+                    # Use emoji for other cards
                     emoji_label = QLabel(mi["emoji"])
                     emoji_label.setFont(QFont("Arial", 38))
                     emoji_label.setAlignment(Qt.AlignCenter)

@@ -4713,6 +4713,11 @@ def _create_processing_options_section(self, parent):
     enhanced_opts_v.setContentsMargins(20, 5, 0, 0)
     
     preserve_cb = self._create_styled_checkbox("Preserve Markdown Structure")
+    preserve_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Keeps markdown-style elements (headers, bold, lists) when using html2text so the model retains formatting cues."
+        "</p></qt>"
+    )
     try:
         preserve_cb.setChecked(bool(self.enhanced_preserve_structure_var))
     except Exception:
@@ -4733,6 +4738,12 @@ def _create_processing_options_section(self, parent):
     
     # Single line break option
     single_break_cb = self._create_styled_checkbox("Enable Single Line Break")
+    single_break_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Use single newlines instead of double when converting with html2text. "
+        "Helps reduce blank-line spacing."
+        "</p></qt>"
+    )
     try:
         single_break_cb.setChecked(bool(self.enhanced_single_line_break_var))
     except Exception:
@@ -4748,13 +4759,19 @@ def _create_processing_options_section(self, parent):
     single_break_cb.setContentsMargins(0, 2, 0, 0)
     enhanced_opts_v.addWidget(single_break_cb)
     
-    single_break_desc = QLabel("Use single newlines instead of double (may prevent setext header issues)")
+    single_break_desc = QLabel("Use single newlines instead of double (helps reduce blank-line spacing)")
     single_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
     single_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(single_break_desc)
 
     # Escape snob option
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
+    escape_snob_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When on, html2text escapes Markdown specials like () [] * _. "
+        "Leave enabled to avoid accidental formatting; disable for plainer text output."
+        "</p></qt>"
+    )
     try:
         escape_snob_cb.setChecked(bool(self.html2text_escape_snob_var))
     except Exception:
