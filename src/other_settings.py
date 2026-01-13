@@ -1528,7 +1528,7 @@ def _create_response_handling_section(self, parent):
 
     # Streaming toggle
     if not hasattr(self, 'enable_streaming_var'):
-        self.enable_streaming_var = bool(self.config.get('enable_streaming', str(os.environ.get('ENABLE_STREAMING', '1')) == '1'))
+        self.enable_streaming_var = bool(self.config.get('enable_streaming', str(os.environ.get('ENABLE_STREAMING', '0')) == '1'))
     self.enable_streaming_checkbox = self._create_styled_checkbox("Enable streaming responses (OpenAI-compatible)")
     self.enable_streaming_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>Streams tokens as they are generated.\n Reduces time to first byte but requires stable connections; if the stream drops mid-response you may see truncated text.</p></qt>")
     try:

@@ -2234,7 +2234,7 @@ Recent translations to summarize:
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
-            ('enable_streaming_var', 'enable_streaming', True),
+            ('enable_streaming_var', 'enable_streaming', False),
             # Preserve streaming logs during batch mode; must be initialized here so save_config
             # keeps the user's choice even if the Other Settings dialog is never opened.
             ('allow_batch_stream_logs_var', 'allow_batch_stream_logs', False),
@@ -11411,7 +11411,7 @@ Important rules:
 
                 # Thinking toggles
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
-                ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', True) else '0'),
+                ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', False) else '0'),
                 
