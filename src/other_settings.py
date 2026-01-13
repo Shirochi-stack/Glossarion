@@ -4777,8 +4777,8 @@ def _create_processing_options_section(self, parent):
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
     escape_snob_cb.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "When on, html2text escapes Markdown specials like () [] * _. "
-        "Leave enabled to avoid accidental formatting; disable for plainer text output."
+        "When on, html2text escapes Markdown specials like (), [], * "
+        "Enable to avoid accidental formatting; disable for plainer text output."
         "</p></qt>"
     )
     try:
