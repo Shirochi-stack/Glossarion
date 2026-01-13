@@ -4406,8 +4406,8 @@ class BatchTranslationProcessor:
                 future_to_chunk = {}
                 
                 for idx, chunk_data in enumerate(chunks):
-                    # Sleep BEFORE submitting (except first chunk)
-                    if idx > 0 and thread_delay > 0:
+                    # Sleep BEFORE submitting (apply to all chunks when multiple chunks exist)
+                    if thread_delay > 0 and total_chunks > 1:
                         chunk_num = chunk_data[1]  # Extract chunk number for logging
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
                         
@@ -9815,8 +9815,8 @@ def main(log_callback=None, stop_callback=None):
             translated_chunks = []
             
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
-                # Apply thread delay before processing chunk (except first chunk)
-                if chunk_idx_enumerate > 0 and total_chunks > 1:
+                # Apply thread delay before processing chunk (including first, when multiple chunks)
+                if total_chunks > 1:
                     thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                     if thread_delay > 0:
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
