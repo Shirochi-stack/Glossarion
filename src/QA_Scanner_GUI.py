@@ -740,7 +740,7 @@ class QAScannerMixin:
             qs_label.setStyleSheet("color: #f0f0f0;")
             qs_layout.addWidget(qs_label)
             qs_layout.addWidget(quick_sample_spinbox)
-            hint = QLabel("Used only for duplicate detection; -1 = all text, 0 = disable check, higher = more accurate")
+            hint = QLabel("Used only for duplicate detection; -1 = all text, 0 = disable check")
             hint.setStyleSheet("color: #9ca3af;")
             hint.setFont(QFont("Arial", 9))
             qs_layout.addWidget(hint)
