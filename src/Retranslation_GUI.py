@@ -3737,6 +3737,14 @@ class RetranslationMixin:
             cached_dialog = self._image_retranslation_dialog_cache[folder_key]
             if cached_dialog:
                 # Reuse existing dialog - just show it
+                try:
+                    # Click stored refresh button or call stored refresh func on reuse
+                    if hasattr(cached_dialog, '_refresh_button') and cached_dialog._refresh_button:
+                        QTimer.singleShot(0, cached_dialog._refresh_button.click)
+                    elif hasattr(cached_dialog, '_refresh_func'):
+                        QTimer.singleShot(0, cached_dialog._refresh_func)
+                except Exception:
+                    pass
                 cached_dialog.show()
                 cached_dialog.raise_()
                 cached_dialog.activateWindow()
@@ -4325,6 +4333,8 @@ class RetranslationMixin:
         
         btn_refresh.clicked.connect(animated_refresh)
         button_layout.addWidget(btn_refresh, 1, 1, 1, 1)
+        # Store for reuse-trigger
+        dialog._refresh_button = btn_refresh
         
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
