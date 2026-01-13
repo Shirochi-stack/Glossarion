@@ -1071,8 +1071,9 @@ class RetranslationMixin:
             # Create standalone PySide6 dialog
             dialog = QDialog()
             dialog.setWindowTitle("Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation")
-            # Make it stay on top so it doesn't hide behind main GUI
-            dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+            # Keep above the translator window but allow interaction with it
+            dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            dialog.setWindowModality(Qt.NonModal)
             # Use 38% width, 36% height for 1920x1080
             width, height = self._get_dialog_size(0.38, 0.36)
             dialog.resize(width, height)
@@ -3254,6 +3255,8 @@ class RetranslationMixin:
             # Create main dialog
             dialog = QDialog(self)
             dialog.setWindowTitle("Force Retranslation - Multiple Files")
+            dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            dialog.setWindowModality(Qt.NonModal)
             # Store the list of EPUBs in the dialog for cross-tab state updates
             dialog._epub_files_in_dialog = epub_files + text_files
             # Increased height from 18% to 25% for better visibility
@@ -3877,6 +3880,8 @@ class RetranslationMixin:
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Force Retranslation - Images")
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dialog.setWindowModality(Qt.NonModal)
         # Decreased width to 18%, increased height to 25% for better vertical space
         width, height = self._get_dialog_size(0.18, 0.25)
         dialog.resize(width, height)
