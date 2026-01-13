@@ -1530,7 +1530,12 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'enable_streaming_var'):
         self.enable_streaming_var = bool(self.config.get('enable_streaming', str(os.environ.get('ENABLE_STREAMING', '0')) == '1'))
     self.enable_streaming_checkbox = self._create_styled_checkbox("Enable streaming responses (OpenAI-compatible)")
-    self.enable_streaming_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>Streams tokens as they are generated.\n Reduces time to first byte but requires stable connections; if the stream drops mid-response you may see truncated text.</p></qt>")
+    self.enable_streaming_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Streams tokens as they are generated to reduce time-to-first-byte. "
+        "Some official providers (e.g., Google Gemini) may truncate streams without raising an error—disable streaming if you see incomplete outputs."
+        "</p></qt>"
+    )
     try:
         self.enable_streaming_checkbox.setChecked(bool(self.enable_streaming_var))
     except Exception:
@@ -1590,6 +1595,10 @@ def _create_response_handling_section(self, parent):
     QTimer.singleShot(0, lambda: _on_streaming_toggle(self.enable_streaming_checkbox.isChecked()))
 
     section_v.addWidget(self.enable_streaming_checkbox)
+    streaming_warn = QLabel("⚠️ Enabling this may result in silent truncation")
+    streaming_warn.setStyleSheet("color: #f59e0b; font-size: 9pt;")
+    streaming_warn.setContentsMargins(20, 0, 0, 4)
+    section_v.addWidget(streaming_warn)
     section_v.addWidget(self.allow_batch_stream_logs_checkbox)
 
     # Separator
