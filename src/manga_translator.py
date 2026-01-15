@@ -1620,7 +1620,9 @@ class MangaTranslator:
                 
                 # Thinking settings (most important for speed)
                 thinking_enabled = config.get('enable_gemini_thinking', True)
-                thinking_budget = config.get('gemini_thinking_budget', -1)
+                # Use unified config keys (saved by GUI)
+                thinking_budget = config.get('thinking_budget', config.get('gemini_thinking_budget', -1))
+                thinking_level = config.get('thinking_level', config.get('gemini_thinking_level', 'high'))
                 
                 # CRITICAL FIX: If thinking is disabled, force budget to 0 regardless of config value
                 if not thinking_enabled:
@@ -1629,6 +1631,7 @@ class MangaTranslator:
                 os.environ['ENABLE_GEMINI_THINKING'] = '1' if thinking_enabled else '0'
                 os.environ['GEMINI_THINKING_BUDGET'] = str(thinking_budget)
                 os.environ['THINKING_BUDGET'] = str(thinking_budget)  # Also set for unified_api_client
+                os.environ['GEMINI_THINKING_LEVEL'] = str(thinking_level)
                 
                 # Retry settings
                 retry_truncated = config.get('retry_truncated', False)
