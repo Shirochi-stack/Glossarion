@@ -9344,14 +9344,20 @@ class MangaTranslator:
                                 # CRITICAL: Verify this model still matches current GUI selection before adding to pool
                                 # This prevents race condition where user switches models while preload is running
                                 # Read directly from UI instance if available (more reliable than manga_settings)
-                                current_method = local_method  # Use the method we're actually preloading
+                                # Prefer LIVE dropdown value from MangaIntegration (manga_translator tab)
+                                current_method = local_method  # Default to the method we're preloading
                                 if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
                                     try:
-                                        current_method = self.main_gui.manga_translator.local_model_type_value
+                                        mg = self.main_gui.manga_translator
+                                        # Prefer combo text if available (most live)
+                                        if hasattr(mg, 'local_model_combo'):
+                                            current_method = mg.local_model_combo.currentText()
+                                        else:
+                                            current_method = mg.local_model_type_value
                                     except Exception:
-                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 else:
-                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 
                                 current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
                                 if current_model_path:
@@ -9426,14 +9432,19 @@ class MangaTranslator:
         # This MUST happen BEFORE checking desired count to ensure stale models are removed
         with MangaTranslator._inpaint_pool_lock:
             # Get currently selected settings from GUI - read directly from UI if available
-            current_method = local_method  # Use the method we're actually preloading
+            # Prefer LIVE dropdown value from MangaIntegration (manga_translator tab)
+            current_method = local_method  # Default to the method we're preloading
             if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
                 try:
-                    current_method = self.main_gui.manga_translator.local_model_type_value
+                    mg = self.main_gui.manga_translator
+                    if hasattr(mg, 'local_model_combo'):
+                        current_method = mg.local_model_combo.currentText()
+                    else:
+                        current_method = mg.local_model_type_value
                 except Exception:
-                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
             else:
-                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
             
             current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
             if current_model_path:
@@ -9546,11 +9557,15 @@ class MangaTranslator:
                             # This prevents race condition where user switches models while preload is running
                             # Read directly from UI instance if available (more reliable than manga_settings)
                             try:
-                                current_method = local_method  # Use the method we're actually preloading
-                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_tab'):
+                                # Prefer LIVE dropdown value from MangaIntegration (manga_translator tab)
+                                current_method = local_method  # Default to the method we're preloading
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
                                     try:
-                                        # Read from manga_tab (MangaTranslationTab instance), not manga_translator
-                                        current_method = self.main_gui.manga_tab.local_model_type_value
+                                        mg = self.main_gui.manga_translator
+                                        if hasattr(mg, 'local_model_combo'):
+                                            current_method = mg.local_model_combo.currentText()
+                                        else:
+                                            current_method = mg.local_model_type_value
                                     except Exception:
                                         current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 else:
