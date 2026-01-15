@@ -12310,6 +12310,14 @@ class MangaTranslationTab(QObject):
             except ImportError:
                 pass
             
+            # Hard cancel: close active HTTP sessions to abort in-flight requests
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+            except Exception:
+                pass
+            
             # Update progress to show stopped status
             self._update_progress(
                 self.completed_files,

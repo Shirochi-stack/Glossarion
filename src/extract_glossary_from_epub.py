@@ -491,6 +491,16 @@ def set_stop_flag(value):
                 unified_api_client.UnifiedClient._global_cancelled = False
         except:
             pass
+    else:
+        # Propagate stop to UnifiedClient (for streaming cancellation)
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            elif hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+        except Exception:
+            pass
 
 def is_stop_requested():
     """Check if stop was requested"""
@@ -2678,7 +2688,8 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         
     except UnifiedClientError as e:
         # Check if this is a user stop (not an actual error)
-        if "stopped by user" in str(e).lower():
+        err_lower = str(e).lower()
+        if "stopped by user" in err_lower or "cancelled" in err_lower or "operation cancelled" in err_lower:
             print(f"🛑 Glossary extraction stopped by user")
             # Re-raise to propagate the stop signal up the call stack
             raise
@@ -3310,42 +3321,30 @@ def main(log_callback=None, stop_callback=None):
             
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {}
-                
-                # Submit work units
-                for unit in current_batch_units:
-                    if check_stop():
-                        stopped_early = True
-                        break
-                    
+
+                # Collect batch results for history update (same as TransateKRtoEN)
+                batch_history_map = {}  # Will store (idx, user_prompt, resp, raw_obj) for each successful chapter
+
+                def _submit_unit(unit):
                     if is_merged_mode:
-                        # Submit merged group
                         future = executor.submit(
                             process_merged_group_api_call,
                             unit, build_prompt, client, temp, mtoks, check_stop, chunk_timeout
                         )
-                        futures[future] = unit
                     else:
-                        # Submit single chapter
                         idx, chap = unit[0]
-                        
-                        # Get system and user prompts
                         system_prompt, user_prompt = build_prompt(chap)
-                        
-                        # Build messages
                         if not contextual_enabled:
                             msgs = [
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_prompt}
                             ]
                         else:
-                            # Microsecond lock to prevent race conditions when reading history
                             time.sleep(0.000001)
                             with _history_lock:
                                 msgs = [{"role": "system", "content": system_prompt}] \
                                      + trim_context_history(history, ctx_limit, rolling_window) \
                                      + [{"role": "user", "content": user_prompt}]
-                        
-                        # Submit to thread pool (with optional splitting)
                         future = executor.submit(
                             process_single_chapter_with_split,
                             idx,
@@ -3364,27 +3363,12 @@ def main(log_callback=None, stop_callback=None):
                             check_stop,
                             chunk_timeout
                         )
-                        futures[future] = unit
-                    
+                    futures[future] = unit
                     # Small yield to keep GUI responsive
                     time.sleep(0.001)
-                
-                # Collect batch results for history update (same as TransateKRtoEN)
-                batch_history_map = {}  # Will store (idx, user_prompt, resp, raw_obj) for each successful chapter
-                
-                # Process results AS THEY COMPLETE, not all at once
-                for future in as_completed(futures):
-                    if check_stop():
-                        print("🛑 Stop detected - cancelling all pending operations...")
-                        stopped_early = True
-                        cancelled = cancel_all_futures(list(futures.keys()))
-                        if cancelled > 0:
-                            print(f"✅ Cancelled {cancelled} pending API calls")
-                        executor.shutdown(wait=False)
-                        break
-                    
-                    unit = futures[future]
-                    
+
+                def _handle_future_result(future, unit):
+                    nonlocal batch_entry_count, stopped_early
                     try:
                         if is_merged_mode:
                             # Handle merged group result
@@ -3408,7 +3392,7 @@ def main(log_callback=None, stop_callback=None):
                                 if error:
                                     print(f"[Chapter {idx+1}] Error: {error}")
                                     completed.append(idx)
-                                    continue
+                                    return
                                 
                                 # Process entries
                                 if data and len(data) > 0:
@@ -3445,7 +3429,7 @@ def main(log_callback=None, stop_callback=None):
                             if error:
                                 print(f"[Chapter {idx+1}] Error: {error}")
                                 completed.append(idx)
-                                continue
+                                return
                             
                             # Process entries as each chapter completes
                             if data and len(data) > 0:
@@ -3496,6 +3480,70 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"Error processing chapter {idx+1}: {e}")
                             if idx not in completed:
                                 completed.append(idx)
+
+                if aggressive_mode:
+                    # Aggressive mode: keep pool full, auto-refill as futures complete
+                    active_futures = {}
+                    next_unit_idx = 0
+
+                    def _submit_next():
+                        nonlocal next_unit_idx
+                        if next_unit_idx >= len(current_batch_units):
+                            return False
+                        unit = current_batch_units[next_unit_idx]
+                        next_unit_idx += 1
+                        _submit_unit(unit)
+                        # Move last submitted future into active_futures
+                        last_future = list(futures.keys())[-1]
+                        active_futures[last_future] = futures[last_future]
+                        return True
+
+                    # Prime the executor
+                    while len(active_futures) < batch_size and _submit_next():
+                        pass
+
+                    while active_futures:
+                        for future in as_completed(list(active_futures.keys())):
+                            if check_stop():
+                                print("🛑 Stop detected - cancelling all pending operations...")
+                                stopped_early = True
+                                cancelled = cancel_all_futures(list(active_futures.keys()))
+                                if cancelled > 0:
+                                    print(f"✅ Cancelled {cancelled} pending API calls")
+                                executor.shutdown(wait=False)
+                                active_futures.clear()
+                                break
+
+                            unit = active_futures.pop(future)
+                            _handle_future_result(future, unit)
+                            if stopped_early:
+                                break
+                            # Refill pool
+                            if _submit_next():
+                                pass
+                        if stopped_early:
+                            break
+                else:
+                    # Submit all units in this batch
+                    for unit in current_batch_units:
+                        if check_stop():
+                            stopped_early = True
+                            break
+                        _submit_unit(unit)
+
+                    # Process results AS THEY COMPLETE, not all at once
+                    for future in as_completed(futures):
+                        if check_stop():
+                            print("🛑 Stop detected - cancelling all pending operations...")
+                            stopped_early = True
+                            cancelled = cancel_all_futures(list(futures.keys()))
+                            if cancelled > 0:
+                                print(f"✅ Cancelled {cancelled} pending API calls")
+                            executor.shutdown(wait=False)
+                            break
+
+                        unit = futures[future]
+                        _handle_future_result(future, unit)
             
             # After all futures in this batch complete, append history entries in order
             # This matches TransateKRtoEN batch mode behavior

@@ -1051,6 +1051,10 @@ class UnifiedClient:
     _model_token_limits = {}  # model_name -> max_tokens
     _model_limits_lock = threading.Lock()
     
+    # Track all HTTP sessions so we can close them on cancellation
+    _all_sessions = set()
+    _all_sessions_lock = threading.Lock()
+    
     # Your existing MODEL_PROVIDERS and other class variables
     MODEL_PROVIDERS = {
         'vertex/': 'vertex_model_garden',
@@ -1266,6 +1270,24 @@ class UnifiedClient:
         """Set global cancellation flag for all client instances"""
         with cls._global_cancel_lock:
             cls._global_cancelled = cancelled
+
+    @classmethod
+    def hard_cancel_all(cls):
+        """Force-cancel all in-flight requests by closing HTTP sessions."""
+        try:
+            cls.set_global_cancellation(True)
+        except Exception:
+            pass
+        try:
+            with cls._all_sessions_lock:
+                sessions = list(cls._all_sessions)
+            for s in sessions:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     @classmethod
     def is_globally_cancelled(cls) -> bool:
@@ -6829,6 +6851,17 @@ class UnifiedClient:
         print("🛑 Operation cancelled (timeout or user stop)")
         # Set global cancellation to affect all instances
         self.set_global_cancellation(True)
+        # Try to close any active HTTP sessions to abort in-flight requests
+        try:
+            with self._all_sessions_lock:
+                sessions = list(self._all_sessions)
+            for s in sessions:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Suppress httpx logging when cancelled
         self._suppress_http_logs()
 
@@ -7874,6 +7907,11 @@ class UnifiedClient:
             session.mount("http://", adapter)
             session.mount("https://", adapter)
             tls.session_map[base_url] = session
+            try:
+                with self._all_sessions_lock:
+                    self._all_sessions.add(session)
+            except Exception:
+                pass
         return session
 
     def _http_request_with_retries(self, method: str, url: str, headers: dict = None, json: dict = None,
@@ -8705,6 +8743,24 @@ class UnifiedClient:
         # Instance-level flag
         if getattr(self, '_cancelled', False):
             return True
+
+        # Glossary stop flag (if glossary extraction is running)
+        try:
+            from extract_glossary_from_epub import is_stop_requested as glossary_stop_requested
+            if glossary_stop_requested():
+                self._cancelled = True
+                return True
+        except Exception:
+            pass
+
+        # Shared stop file for glossary subprocesses
+        try:
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+            if stop_file and os.path.exists(stop_file):
+                self._cancelled = True
+                return True
+        except Exception:
+            pass
 
         try:
             # Import the stop check function from the main translation module
@@ -11924,10 +11980,17 @@ class UnifiedClient:
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         # Suppress cancellation errors when stop is requested
                         error_str = str(e).lower()
+                        is_cancelled = False
+                        try:
+                            if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled":
+                                is_cancelled = True
+                        except Exception:
+                            pass
                         if ("cancelled" in error_str or "operation cancelled" in error_str):
-                            if self._is_stop_requested() if hasattr(self, '_is_stop_requested') else False:
-                                # Silently raise without printing when user stopped
-                                raise UnifiedClientError(f"{provider} SDK error: {e}")
+                            is_cancelled = True
+                        if is_cancelled:
+                            # Preserve original cancellation without wrapping
+                            raise
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
@@ -13858,3 +13921,10 @@ def is_stop_requested() -> bool:
         return global_stop_flag or UnifiedClient.is_globally_cancelled()
     except Exception:
         return global_stop_flag
+
+def hard_cancel_all():
+    """Force-cancel all in-flight requests and close sessions."""
+    try:
+        UnifiedClient.hard_cancel_all()
+    except Exception:
+        pass

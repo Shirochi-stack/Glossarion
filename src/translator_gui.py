@@ -9203,6 +9203,9 @@ Important rules:
             # Set the _cancelled flag on the UnifiedClient class itself
             if hasattr(unified_api_client, 'UnifiedClient'):
                 unified_api_client.UnifiedClient._global_cancelled = True
+            # Hard cancel: close active HTTP sessions to abort in-flight requests
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                unified_api_client.hard_cancel_all()
                 
         except Exception as e:
             print(f"Error setting stop flags: {e}")
@@ -9286,6 +9289,19 @@ Important rules:
             if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
                 extract_glossary_from_epub.set_stop_flag(True)
         except:
+            pass
+        
+        # Also propagate stop to unified_api_client for streaming cancellation
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+            # Hard cancel: close active HTTP sessions to abort in-flight requests
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                unified_api_client.hard_cancel_all()
+        except Exception:
             pass
 
         # Touch stop file for GlossaryManager subprocesses
