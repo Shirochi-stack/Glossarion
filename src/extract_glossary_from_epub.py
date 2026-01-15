@@ -1678,6 +1678,8 @@ def skip_duplicate_entries(glossary):
     # PASS 1: Raw name deduplication
     print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
     pass1_results = _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz)
+    pass1_removed = original_count - len(pass1_results)
+    print(f"[Dedup] ✅ PASS 1 complete: {pass1_removed} duplicates removed ({len(pass1_results)} remaining)")
     
     # PASS 2: Translated name deduplication (if enabled)
     if dedupe_translations:
