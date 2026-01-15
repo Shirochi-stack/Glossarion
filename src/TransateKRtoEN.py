@@ -11228,4 +11228,5 @@ def main(log_callback=None, stop_callback=None):
     print("TRANSLATION_COMPLETE_SIGNAL")
 
 if __name__ == "__main__":
-    main()
+    from shutdown_utils import run_cli_main
+    run_cli_main(main)

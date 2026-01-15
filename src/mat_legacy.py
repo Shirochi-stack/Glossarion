@@ -315,6 +315,10 @@ def convert_network_pickle(source, dest, force_fp16):
 #----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    convert_network_pickle() # pylint: disable=no-value-for-parameter
+    from shutdown_utils import run_cli_main
+    def _main():
+        convert_network_pickle() # pylint: disable=no-value-for-parameter
+        return 0
+    run_cli_main(_main)
 
 #----------------------------------------------------------------------------

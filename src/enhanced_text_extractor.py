@@ -653,4 +653,8 @@ def test_cjk_preservation():
 
 
 if __name__ == "__main__":
-    test_cjk_preservation()
+    from shutdown_utils import run_cli_main
+    def _main():
+        test_cjk_preservation()
+        return 0
+    run_cli_main(_main)

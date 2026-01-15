@@ -373,23 +373,28 @@ def is_cpp_backend_available() -> bool:
 
 
 if __name__ == "__main__":
-    # Test the backend
-    print("Testing ONNX C++ Backend")
-    print("-" * 50)
-    
-    try:
-        backend = ONNXCppBackend()
-        version = backend.get_version()
-        print(f"✓ ONNX Runtime version: {version}")
-        print("✓ C++ backend loaded successfully")
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Test the backend
+        print("Testing ONNX C++ Backend")
+        print("-" * 50)
         
-        # Test with dummy data
-        print("\nTesting inference with dummy data...")
-        if backend.load_model("test.onnx", use_gpu=False):
-            image = np.random.rand(512, 512, 3).astype(np.float32)
-            mask = np.random.rand(512, 512).astype(np.float32)
-            result = backend.infer(image, mask)
-            print(f"✓ Inference successful, output shape: {result.shape}")
-        
-    except Exception as e:
-        print(f"✗ Error: {e}")
+        try:
+            backend = ONNXCppBackend()
+            version = backend.get_version()
+            print(f"✓ ONNX Runtime version: {version}")
+            print("✓ C++ backend loaded successfully")
+            
+            # Test with dummy data
+            print("\nTesting inference with dummy data...")
+            if backend.load_model("test.onnx", use_gpu=False):
+                image = np.random.rand(512, 512, 3).astype(np.float32)
+                mask = np.random.rand(512, 512).astype(np.float32)
+                result = backend.infer(image, mask)
+                print(f"✓ Inference successful, output shape: {result.shape}")
+            
+        except Exception as e:
+            print(f"✗ Error: {e}")
+            return 1
+        return 0
+    run_cli_main(_main)

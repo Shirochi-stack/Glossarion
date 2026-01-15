@@ -637,23 +637,27 @@ def test_json_env_vars():
             print(f"   Value preview: {value[:100]}...")
 
 if __name__ == "__main__":
-    print("🚀 Environment Variable Debugging Tool")
-    print("This tool helps debug Glossarion environment variable issues")
-    
-    # Check current status
-    success = print_env_var_status()
-    
-    # Test JSON variables
-    test_json_env_vars()
-    
-    if not success:
-        print(f"\n💡 TIP: Add these methods to your TranslatorGUI class:")
-        print("  • self.initialize_environment_variables() - Call on startup")
-        print("  • self.debug_environment_variables() - Call for debugging")
+    from shutdown_utils import run_cli_main
+    def _main():
+        print("🚀 Environment Variable Debugging Tool")
+        print("This tool helps debug Glossarion environment variable issues")
         
-    print("\n" + "=" * 60)
-    print("🎯 To use the new debugging features in your app:")
-    print("   1. self.initialize_environment_variables()  # On startup")
-    print("   2. self.debug_environment_variables()       # For debugging")  
-    print("   3. Enhanced save_glossary_settings() now has full debugging")
-    print("   4. Enhanced save_config() now has full debugging")
+        # Check current status
+        success = print_env_var_status()
+        
+        # Test JSON variables
+        test_json_env_vars()
+        
+        if not success:
+            print(f"\n💡 TIP: Add these methods to your TranslatorGUI class:")
+            print("  • self.initialize_environment_variables() - Call on startup")
+            print("  • self.debug_environment_variables() - Call for debugging")
+            
+        print("\n" + "=" * 60)
+        print("🎯 To use the new debugging features in your app:")
+        print("   1. self.initialize_environment_variables()  # On startup")
+        print("   2. self.debug_environment_variables()       # For debugging")  
+        print("   3. Enhanced save_glossary_settings() now has full debugging")
+        print("   4. Enhanced save_config() now has full debugging")
+        return 0 if success else 1
+    run_cli_main(_main)

@@ -2177,74 +2177,78 @@ def download_rtdetr_model(cache_dir: str = "models") -> bool:
 
 # Example usage and testing
 if __name__ == "__main__":
-    import sys
-    
-    # Create detector
-    detector = BubbleDetector()
-    
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "download":
-            # Download model from Hugging Face
-            model_path = download_model_from_huggingface()
-            if model_path:
-                print(f"YOLOv8 model downloaded to: {model_path}")
-            
-            # Also download RT-DETR
-            if download_rtdetr_model():
-                print("RT-DETR model downloaded")
+    from shutdown_utils import run_cli_main
+    def _main():
+        import sys
         
-        elif sys.argv[1] == "detect" and len(sys.argv) > 3:
-            # Detect bubbles in an image
-            model_path = sys.argv[2]
-            image_path = sys.argv[3]
+        # Create detector
+        detector = BubbleDetector()
+        
+        if len(sys.argv) > 1:
+            if sys.argv[1] == "download":
+                # Download model from Hugging Face
+                model_path = download_model_from_huggingface()
+                if model_path:
+                    print(f"YOLOv8 model downloaded to: {model_path}")
+                
+                # Also download RT-DETR
+                if download_rtdetr_model():
+                    print("RT-DETR model downloaded")
             
-            # Load appropriate model
-            if 'rtdetr' in model_path.lower():
+            elif sys.argv[1] == "detect" and len(sys.argv) > 3:
+                # Detect bubbles in an image
+                model_path = sys.argv[2]
+                image_path = sys.argv[3]
+                
+                # Load appropriate model
+                if 'rtdetr' in model_path.lower():
+                    if detector.load_rtdetr_model():
+                        # Use RT-DETR
+                        results = detector.detect_with_rtdetr(image_path)
+                        print(f"RT-DETR Detection:")
+                        print(f"  Empty bubbles: {len(results['bubbles'])}")
+                        print(f"  Text bubbles: {len(results['text_bubbles'])}")
+                        print(f"  Free text: {len(results['text_free'])}")
+                else:
+                    if detector.load_model(model_path):
+                        bubbles = detector.detect_bubbles(image_path, confidence=0.5)
+                        print(f"YOLOv8 detected {len(bubbles)} bubbles:")
+                        for i, (x, y, w, h) in enumerate(bubbles):
+                            print(f"  Bubble {i+1}: position=({x},{y}) size=({w}x{h})")
+                
+                # Optionally visualize
+                if len(sys.argv) > 4:
+                    output_path = sys.argv[4]
+                    detector.visualize_detections(image_path, output_path=output_path, 
+                                                 use_rtdetr='rtdetr' in model_path.lower())
+            
+            elif sys.argv[1] == "test-both" and len(sys.argv) > 2:
+                # Test both models
+                image_path = sys.argv[2]
+                
+                # Load YOLOv8
+                yolo_path = "models/comic-speech-bubble-detector-yolov8m.pt"
+                if os.path.exists(yolo_path):
+                    detector.load_model(yolo_path)
+                    yolo_bubbles = detector.detect_bubbles(image_path, use_rtdetr=False)
+                    print(f"YOLOv8: {len(yolo_bubbles)} bubbles")
+                
+                # Load RT-DETR
                 if detector.load_rtdetr_model():
-                    # Use RT-DETR
-                    results = detector.detect_with_rtdetr(image_path)
-                    print(f"RT-DETR Detection:")
-                    print(f"  Empty bubbles: {len(results['bubbles'])}")
-                    print(f"  Text bubbles: {len(results['text_bubbles'])}")
-                    print(f"  Free text: {len(results['text_free'])}")
+                    rtdetr_bubbles = detector.detect_bubbles(image_path, use_rtdetr=True)
+                    print(f"RT-DETR: {len(rtdetr_bubbles)} bubbles")
+            
             else:
-                if detector.load_model(model_path):
-                    bubbles = detector.detect_bubbles(image_path, confidence=0.5)
-                    print(f"YOLOv8 detected {len(bubbles)} bubbles:")
-                    for i, (x, y, w, h) in enumerate(bubbles):
-                        print(f"  Bubble {i+1}: position=({x},{y}) size=({w}x{h})")
-            
-            # Optionally visualize
-            if len(sys.argv) > 4:
-                output_path = sys.argv[4]
-                detector.visualize_detections(image_path, output_path=output_path, 
-                                             use_rtdetr='rtdetr' in model_path.lower())
-        
-        elif sys.argv[1] == "test-both" and len(sys.argv) > 2:
-            # Test both models
-            image_path = sys.argv[2]
-            
-            # Load YOLOv8
-            yolo_path = "models/comic-speech-bubble-detector-yolov8m.pt"
-            if os.path.exists(yolo_path):
-                detector.load_model(yolo_path)
-                yolo_bubbles = detector.detect_bubbles(image_path, use_rtdetr=False)
-                print(f"YOLOv8: {len(yolo_bubbles)} bubbles")
-            
-            # Load RT-DETR
-            if detector.load_rtdetr_model():
-                rtdetr_bubbles = detector.detect_bubbles(image_path, use_rtdetr=True)
-                print(f"RT-DETR: {len(rtdetr_bubbles)} bubbles")
+                print("Usage:")
+                print("  python bubble_detector.py download")
+                print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
+                print("  python bubble_detector.py test-both <image_path>")
         
         else:
+            print("Bubble Detector Module (YOLOv8 + RT-DETR)")
             print("Usage:")
             print("  python bubble_detector.py download")
             print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
             print("  python bubble_detector.py test-both <image_path>")
-    
-    else:
-        print("Bubble Detector Module (YOLOv8 + RT-DETR)")
-        print("Usage:")
-        print("  python bubble_detector.py download")
-        print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
-        print("  python bubble_detector.py test-both <image_path>")
+        return 0
+    run_cli_main(_main)

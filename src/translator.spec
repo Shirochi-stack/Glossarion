@@ -119,6 +119,7 @@ app_files = [
     ('direct_imports.py', '.'),
     ('api_key_encryption.py', '.'), 
     ('http_logger.py', '.'),
+    ('shutdown_utils.py', '.'),
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -224,6 +225,7 @@ app_modules = [
     'update_manager',
     'api_key_encryption',
 	'http_logger',
+	'shutdown_utils',
 	'async_api_processor',
 	'metadata_batch_translator',
 	'translate_headers_standalone',

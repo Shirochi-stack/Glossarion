@@ -1619,14 +1619,15 @@ Text to analyze:
             
             # Use immediate hard exit to prevent lingering background processes (especially for .exe)
             # This is safer than relying on Python shutdown which waits for non-daemon threads
-            import os
-            import signal
             try:
-                # Force-kill self
-                os.kill(os.getpid(), signal.SIGTERM)
+                from shutdown_utils import force_shutdown
+                force_shutdown(0)
             except Exception:
-                pass
-            os._exit(0)
+                try:
+                    import os
+                    os._exit(0)
+                except Exception:
+                    pass
             
         except Exception as e:
             print(f"[CLOSE] Error during close: {e}")
@@ -11965,8 +11966,12 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exception(exc_type, exc_value, exc_traceback)
         print("[GLOBAL_EXCEPTION] Forcing exit due to unhandled exception")
-        import os
-        os._exit(1)  # Exit with code 1 for exceptions
+        try:
+            from shutdown_utils import force_shutdown
+            force_shutdown(1)  # Exit with code 1 for exceptions
+        except Exception:
+            import os
+            os._exit(1)  # Exit with code 1 for exceptions
     
     sys.excepthook = global_exception_handler
     
@@ -12234,8 +12239,12 @@ if __name__ == "__main__":
         def signal_handler(signum, frame):
             """Handle system signals gracefully"""
             print(f"[SIGNAL] Received signal {signum}, forcing exit")
-            import os
-            os._exit(0)
+            try:
+                from shutdown_utils import force_shutdown
+                force_shutdown(0)
+            except Exception:
+                import os
+                os._exit(0)
         
         # Register signal handlers (Windows-safe)
         try:
@@ -12274,14 +12283,22 @@ if __name__ == "__main__":
         print(f"[MAIN] Main function completed with exit code {exit_code}, calling sys.exit({exit_code})...")
         
         # Force hard exit to prevent lingering background threads
-        import os
-        import signal
         try:
-            # Kill current process explicitly
-            os.kill(os.getpid(), signal.SIGTERM)
+            from shutdown_utils import force_shutdown
+            cleanup_fns = []
+            try:
+                if 'main_window' in locals() and main_window:
+                    cleanup_fns.append(main_window.stop_all_operations)
+            except Exception:
+                pass
+            force_shutdown(exit_code, cleanup_fns=cleanup_fns)
         except Exception:
-            pass
-        os._exit(exit_code)
+            try:
+                import os
+                os._exit(exit_code)
+            except Exception:
+                import sys
+                sys.exit(exit_code)
         
     except Exception as e:
         print(f"❌ Failed to start application: {e}")
@@ -12293,8 +12310,12 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         print("[MAIN] Exception occurred, exiting with code 1...")
-        import sys
-        sys.exit(1)
+        try:
+            from shutdown_utils import force_shutdown
+            force_shutdown(1)
+        except Exception:
+            import sys
+            sys.exit(1)
     
     finally:
         if splash_manager and not getattr(splash_manager, '_already_closed', False):

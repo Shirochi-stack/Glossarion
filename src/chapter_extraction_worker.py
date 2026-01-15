@@ -181,10 +181,14 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure freeze support for Windows frozen exe
-    try:
-        import multiprocessing
-        multiprocessing.freeze_support()
-    except Exception:
-        pass
-    main()
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Ensure freeze support for Windows frozen exe
+        try:
+            import multiprocessing
+            multiprocessing.freeze_support()
+        except Exception:
+            pass
+        main()
+        return 0
+    run_cli_main(_main)

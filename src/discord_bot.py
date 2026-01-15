@@ -2851,4 +2851,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from shutdown_utils import run_cli_main
+    run_cli_main(main)

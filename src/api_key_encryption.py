@@ -230,15 +230,20 @@ def migrate_config_file(config_file='config.json'):
 
 
 if __name__ == "__main__":
-    # Simple migration script
-    import sys
-    
-    config_file = 'config.json'
-    if len(sys.argv) > 1:
-        config_file = sys.argv[1]
-    
-    if os.path.exists(config_file):
-        print(f"Encrypting API keys in {config_file}...")
-        migrate_config_file(config_file)
-    else:
-        print(f"Config file not found: {config_file}")
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Simple migration script
+        import sys
+        
+        config_file = 'config.json'
+        if len(sys.argv) > 1:
+            config_file = sys.argv[1]
+        
+        if os.path.exists(config_file):
+            print(f"Encrypting API keys in {config_file}...")
+            ok = migrate_config_file(config_file)
+            return 0 if ok else 1
+        else:
+            print(f"Config file not found: {config_file}")
+            return 1
+    run_cli_main(_main)

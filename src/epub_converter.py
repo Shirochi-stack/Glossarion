@@ -4085,14 +4085,18 @@ fallback_compile_epub = compile_epub
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python epub_converter.py <directory_path>")
-        sys.exit(1)
-    
-    directory_path = sys.argv[1]
-    
-    try:
-        compile_epub(directory_path)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    from shutdown_utils import run_cli_main
+    def _main():
+        if len(sys.argv) < 2:
+            print("Usage: python epub_converter.py <directory_path>")
+            return 1
+        
+        directory_path = sys.argv[1]
+        
+        try:
+            compile_epub(directory_path)
+        except Exception as e:
+            print(f"Error: {e}")
+            return 1
+        return 0
+    run_cli_main(_main)

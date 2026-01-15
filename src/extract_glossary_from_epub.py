@@ -4389,4 +4389,5 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             print(f"[Warning] Failed to save progress: {e}")
 
 if __name__=='__main__':
-    main()
+    from shutdown_utils import run_cli_main
+    run_cli_main(main)

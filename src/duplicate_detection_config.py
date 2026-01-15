@@ -167,39 +167,43 @@ def get_algorithm_display_info():
 
 
 if __name__ == "__main__":
-    # Test the configuration
-    import os
-    
-    print("Testing duplicate detection configuration...\n")
-    
-    # Test all modes
-    modes = ['auto', 'strict', 'balanced', 'aggressive', 'basic']
-    
-    for mode in modes:
-        os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = mode
-        os.environ['GLOSSARY_FUZZY_THRESHOLD'] = '0.90'
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Test the configuration
+        import os
         
-        config = get_duplicate_detection_config()
-        print(f"{mode.upper()}:")
-        print(f"  Description: {config['description']}")
-        print(f"  Algorithms: {', '.join(config['algorithms'])}")
-        print(f"  Threshold: {config['threshold']:.2f}")
-        print()
-    
-    # Test similarity calculation
-    print("\nTesting similarity calculations (AUTO mode):")
-    os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = 'auto'
-    
-    test_pairs = [
-        ("Kim Sang-hyun", "Kim Sanghyun"),
-        ("Park Ji-sung", "Ji-sung Park"),
-        ("김상현", "김상현님"),
-        ("Catherine", "Katherine"),
-    ]
-    
-    for name1, name2 in test_pairs:
-        score = calculate_similarity_with_config(name1, name2)
-        status = "✓ MATCH" if score >= 0.90 else "✗ DIFFERENT"
-        print(f"{status} '{name1}' vs '{name2}': {score:.3f}")
-    
-    print(f"\nAvailable algorithms: {', '.join(get_algorithm_display_info())}")
+        print("Testing duplicate detection configuration...\n")
+        
+        # Test all modes
+        modes = ['auto', 'strict', 'balanced', 'aggressive', 'basic']
+        
+        for mode in modes:
+            os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = mode
+            os.environ['GLOSSARY_FUZZY_THRESHOLD'] = '0.90'
+            
+            config = get_duplicate_detection_config()
+            print(f"{mode.upper()}:")
+            print(f"  Description: {config['description']}")
+            print(f"  Algorithms: {', '.join(config['algorithms'])}")
+            print(f"  Threshold: {config['threshold']:.2f}")
+            print()
+        
+        # Test similarity calculation
+        print("\nTesting similarity calculations (AUTO mode):")
+        os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = 'auto'
+        
+        test_pairs = [
+            ("Kim Sang-hyun", "Kim Sanghyun"),
+            ("Park Ji-sung", "Ji-sung Park"),
+            ("김상현", "김상현님"),
+            ("Catherine", "Katherine"),
+        ]
+        
+        for name1, name2 in test_pairs:
+            score = calculate_similarity_with_config(name1, name2)
+            status = "✓ MATCH" if score >= 0.90 else "✗ DIFFERENT"
+            print(f"{status} '{name1}' vs '{name2}': {score:.3f}")
+        
+        print(f"\nAvailable algorithms: {', '.join(get_algorithm_display_info())}")
+        return 0
+    run_cli_main(_main)

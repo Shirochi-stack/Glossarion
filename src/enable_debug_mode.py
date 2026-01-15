@@ -119,51 +119,55 @@ def check_debug_status():
         print(f"❌ Error checking debug status: {e}")
 
 if __name__ == "__main__":
-    print("🚀 Glossarion Debug Mode Manager")
-    print("=" * 40)
-    
-    if len(sys.argv) > 1:
-        action = sys.argv[1].lower()
+    from shutdown_utils import run_cli_main
+    def _main():
+        print("🚀 Glossarion Debug Mode Manager")
+        print("=" * 40)
         
-        if action in ['enable', 'on', 'true']:
-            enable_debug_mode()
-        elif action in ['disable', 'off', 'false']:
-            disable_debug_mode()
-        elif action in ['status', 'check']:
-            check_debug_status()
-        else:
-            print(f"❌ Unknown action: {action}")
-            print("Valid actions: enable, disable, status")
-    else:
-        # Interactive mode
-        print("Choose an action:")
-        print("1. Enable debug mode")
-        print("2. Disable debug mode") 
-        print("3. Check current status")
-        print("4. Exit")
-        
-        try:
-            choice = input("\nEnter your choice (1-4): ").strip()
+        if len(sys.argv) > 1:
+            action = sys.argv[1].lower()
             
-            if choice == '1':
+            if action in ['enable', 'on', 'true']:
                 enable_debug_mode()
-            elif choice == '2':
+            elif action in ['disable', 'off', 'false']:
                 disable_debug_mode()
-            elif choice == '3':
+            elif action in ['status', 'check']:
                 check_debug_status()
-            elif choice == '4':
-                print("👋 Goodbye!")
             else:
-                print("❌ Invalid choice")
+                print(f"❌ Unknown action: {action}")
+                print("Valid actions: enable, disable, status")
+        else:
+            # Interactive mode
+            print("Choose an action:")
+            print("1. Enable debug mode")
+            print("2. Disable debug mode") 
+            print("3. Check current status")
+            print("4. Exit")
+            
+            try:
+                choice = input("\nEnter your choice (1-4): ").strip()
                 
-        except KeyboardInterrupt:
-            print("\n👋 Goodbye!")
-        except Exception as e:
-            print(f"❌ Error: {e}")
-    
-    print("\n" + "=" * 40)
-    print("💡 Usage:")
-    print("  python enable_debug_mode.py enable   # Enable debug mode")
-    print("  python enable_debug_mode.py disable  # Disable debug mode")
-    print("  python enable_debug_mode.py status   # Check status")
-    print("  python enable_debug_mode.py          # Interactive mode")
+                if choice == '1':
+                    enable_debug_mode()
+                elif choice == '2':
+                    disable_debug_mode()
+                elif choice == '3':
+                    check_debug_status()
+                elif choice == '4':
+                    print("👋 Goodbye!")
+                else:
+                    print("❌ Invalid choice")
+                    
+            except KeyboardInterrupt:
+                print("\n👋 Goodbye!")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+        
+        print("\n" + "=" * 40)
+        print("💡 Usage:")
+        print("  python enable_debug_mode.py enable   # Enable debug mode")
+        print("  python enable_debug_mode.py disable  # Disable debug mode")
+        print("  python enable_debug_mode.py status   # Check status")
+        print("  python enable_debug_mode.py          # Interactive mode")
+        return 0
+    run_cli_main(_main)

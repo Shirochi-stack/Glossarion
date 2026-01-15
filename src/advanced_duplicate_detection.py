@@ -194,21 +194,25 @@ def get_available_algorithms():
 
 
 if __name__ == "__main__":
-    # Test the similarity scoring
-    print("Available algorithms:")
-    for algo in get_available_algorithms():
-        print(f"  ✓ {algo}")
-    
-    print("\nTest cases:")
-    test_pairs = [
-        ("김상현", "김상현님"),
-        ("Kim Sang-hyun", "Kim Sanghyun"),
-        ("김상현", "김상혁"),
-        ("Park Ji-sung", "Ji-sung Park"),
-        ("田中太郎", "田中太郎さん"),
-    ]
-    
-    for name1, name2 in test_pairs:
-        score = get_similarity_score(name1, name2)
-        status = "✓ MATCH" if score >= 0.90 else "✗ DIFFERENT"
-        print(f"{status} '{name1}' vs '{name2}': {score:.3f}")
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Test the similarity scoring
+        print("Available algorithms:")
+        for algo in get_available_algorithms():
+            print(f"  ✓ {algo}")
+        
+        print("\nTest cases:")
+        test_pairs = [
+            ("김상현", "김상현님"),
+            ("Kim Sang-hyun", "Kim Sanghyun"),
+            ("김상현", "김상혁"),
+            ("Park Ji-sung", "Ji-sung Park"),
+            ("田中太郎", "田中太郎さん"),
+        ]
+        
+        for name1, name2 in test_pairs:
+            score = get_similarity_score(name1, name2)
+            status = "✓ MATCH" if score >= 0.90 else "✗ DIFFERENT"
+            print(f"{status} '{name1}' vs '{name2}': {score:.3f}")
+        return 0
+    run_cli_main(_main)

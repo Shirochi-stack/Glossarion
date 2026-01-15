@@ -369,19 +369,23 @@ def translate_text(text: str, source_lang: str = "auto", target_lang: str = "en"
     return result.get('translatedText', text)
 
 if __name__ == "__main__":
-    # Test the translator
-    translator = GoogleFreeTranslateNew("auto", "en")
-    
-    test_texts = [
-        "こんにちは、世界！",  # Japanese
-        "안녕하세요 세계!",      # Korean  
-        "你好世界！",           # Chinese
-        "Hola mundo"           # Spanish
-    ]
-    
-    for test_text in test_texts:
-        result = translator.translate(test_text)
-        print(f"Original: {test_text}")
-        print(f"Translated: {result['translatedText']}")
-        print(f"Detected language: {result['detectedSourceLanguage']}")
-        print("-" * 50)
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Test the translator
+        translator = GoogleFreeTranslateNew("auto", "en")
+        
+        test_texts = [
+            "こんにちは、世界！",  # Japanese
+            "안녕하세요 세계!",      # Korean  
+            "你好世界！",           # Chinese
+            "Hola mundo"           # Spanish
+        ]
+        
+        for test_text in test_texts:
+            result = translator.translate(test_text)
+            print(f"Original: {test_text}")
+            print(f"Translated: {result['translatedText']}")
+            print(f"Detected language: {result['detectedSourceLanguage']}")
+            print("-" * 50)
+        return 0
+    run_cli_main(_main)

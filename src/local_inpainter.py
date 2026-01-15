@@ -3795,31 +3795,35 @@ class _LocalInpainterWorker(mp.Process):
                     pass
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "download_jit":
-            # Download JIT models
-            inpainter = LocalInpainter()
-            for method in ['lama', 'anime', 'lama_official']:
-                print(f"\nDownloading {method}...")
-                path = inpainter.download_jit_model(method)
-                if path:
-                    print(f"  ✅ Downloaded to: {path}")
+    from shutdown_utils import run_cli_main
+    def _main():
+        import sys
         
-        elif len(sys.argv) > 2:
-            # Test with model
-            inpainter = LocalInpainter()
-            inpainter.load_model('lama', sys.argv[1])
-            print("Model loaded - check logs for details")
-    
-    else:
-        print("\nLocal Inpainter - Compatible Version")
-        print("=====================================")
-        print("\nSupports both:")
-        print("  - JIT models (.pt) - RECOMMENDED")
-        print("  - Checkpoint files (.ckpt) - With warnings")
-        print("\nTo download JIT models:")
-        print("  python local_inpainter.py download_jit")
-        print("\nTo test:")
-        print("  python local_inpainter.py <model_path>")
+        if len(sys.argv) > 1:
+            if sys.argv[1] == "download_jit":
+                # Download JIT models
+                inpainter = LocalInpainter()
+                for method in ['lama', 'anime', 'lama_official']:
+                    print(f"\nDownloading {method}...")
+                    path = inpainter.download_jit_model(method)
+                    if path:
+                        print(f"  ✅ Downloaded to: {path}")
+            
+            elif len(sys.argv) > 2:
+                # Test with model
+                inpainter = LocalInpainter()
+                inpainter.load_model('lama', sys.argv[1])
+                print("Model loaded - check logs for details")
+        
+        else:
+            print("\nLocal Inpainter - Compatible Version")
+            print("=====================================")
+            print("\nSupports both:")
+            print("  - JIT models (.pt) - RECOMMENDED")
+            print("  - Checkpoint files (.ckpt) - With warnings")
+            print("\nTo download JIT models:")
+            print("  python local_inpainter.py download_jit")
+            print("\nTo test:")
+            print("  python local_inpainter.py <model_path>")
+        return 0
+    run_cli_main(_main)

@@ -145,8 +145,12 @@ def diagnose_epub_directory(directory="."):
     print(f"{'='*60}\n")
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1:
-        diagnose_epub_directory(sys.argv[1])
-    else:
-        diagnose_epub_directory(".")
+    from shutdown_utils import run_cli_main
+    def _main():
+        import sys
+        if len(sys.argv) > 1:
+            diagnose_epub_directory(sys.argv[1])
+        else:
+            diagnose_epub_directory(".")
+        return 0
+    run_cli_main(_main)
