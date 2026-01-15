@@ -2961,51 +2961,95 @@ class MangaTranslator:
         model_path = ocr_settings.get('bubble_model_path', '')
         confidence = ocr_settings.get('bubble_confidence', 0.3)
         
-        # OPTIMIZATION: Get detector from pool (may already be loaded)
-        bd = self._get_thread_bubble_detector()
+        max_attempts = 2
+        retry_delay = 0.5
+        start_time = time.time()
         
-        # OPTIMIZATION: Check if detector is already loaded from pool before calling load
-        # This avoids redundant load checks inside the detector itself
-        if detector_type == 'rtdetr_onnx' or 'RTEDR_onnx' in str(detector_type):
-            # Check if RT-DETR ONNX is already loaded (from pool or previous load)
-            already_loaded = getattr(bd, 'rtdetr_onnx_loaded', False)
-            if not already_loaded:
-                # Load RT-DETR ONNX model
-                if not bd.load_rtdetr_onnx_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
-                    return None
-            # Model is loaded (either from pool or just loaded), run detection
-            return bd.detect_with_rtdetr_onnx(
-                image_path=image_path,
-                confidence=ocr_settings.get('rtdetr_confidence', confidence),
-                return_all_bubbles=False
-            )
-        elif detector_type == 'rtdetr' or 'RT-DETR' in str(detector_type):
-            # Check if RT-DETR PyTorch is already loaded
-            already_loaded = getattr(bd, 'rtdetr_loaded', False)
-            if not already_loaded:
-                # Load RT-DETR (PyTorch) model
-                if not bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
-                    return None
-            # Model is loaded, run detection
-            return bd.detect_with_rtdetr(
-                image_path=image_path,
-                confidence=ocr_settings.get('rtdetr_confidence', confidence),
-                return_all_bubbles=False
-            )
-        elif detector_type == 'custom':
-            # Custom model - try to determine type from path
-            custom_path = ocr_settings.get('custom_model_path', model_path)
-            if 'rtdetr' in custom_path.lower():
-                # Custom RT-DETR model
-                if bd.load_rtdetr_model(model_id=custom_path):
-                    return bd.detect_with_rtdetr(
+        for attempt in range(1, max_attempts + 1):
+            # OPTIMIZATION: Get detector from pool (may already be loaded)
+            bd = self._get_thread_bubble_detector()
+            if bd is None:
+                elapsed = time.time() - start_time
+                if attempt < max_attempts:
+                    self._log(f"⚠️ Bubble detector checkout failed (attempt {attempt}/{max_attempts}, elapsed {elapsed:.1f}s) — retrying in {retry_delay}s", "warning")
+                    time.sleep(retry_delay)
+                    continue
+                self._log(f"❌ Bubble detector checkout failed after {max_attempts} attempts ({elapsed:.1f}s)", "error")
+                return None
+            
+            try:
+                # OPTIMIZATION: Check if detector is already loaded from pool before calling load
+                # This avoids redundant load checks inside the detector itself
+                if detector_type == 'rtdetr_onnx' or 'RTEDR_onnx' in str(detector_type):
+                    # Check if RT-DETR ONNX is already loaded (from pool or previous load)
+                    already_loaded = getattr(bd, 'rtdetr_onnx_loaded', False)
+                    if not already_loaded:
+                        # Load RT-DETR ONNX model
+                        self._log(f"📥 Loading RT-DETR ONNX model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_rtdetr_onnx_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                            raise RuntimeError("load_rtdetr_onnx_model returned False")
+                    # Model is loaded (either from pool or just loaded), run detection
+                    return bd.detect_with_rtdetr_onnx(
                         image_path=image_path,
-                        confidence=confidence,
+                        confidence=ocr_settings.get('rtdetr_confidence', confidence),
                         return_all_bubbles=False
                     )
-            else:
-                # Assume YOLO format for other custom models
-                if custom_path and bd.load_model(custom_path):
+                elif detector_type == 'rtdetr' or 'RT-DETR' in str(detector_type):
+                    # Check if RT-DETR PyTorch is already loaded
+                    already_loaded = getattr(bd, 'rtdetr_loaded', False)
+                    if not already_loaded:
+                        # Load RT-DETR (PyTorch) model
+                        self._log(f"📥 Loading RT-DETR model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                            raise RuntimeError("load_rtdetr_model returned False")
+                    # Model is loaded, run detection
+                    return bd.detect_with_rtdetr(
+                        image_path=image_path,
+                        confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                        return_all_bubbles=False
+                    )
+                elif detector_type == 'custom':
+                    # Custom model - try to determine type from path
+                    custom_path = ocr_settings.get('custom_model_path', model_path)
+                    if not custom_path:
+                        self._log("⚠️ Custom bubble model path not set; cannot load", "warning")
+                        return None
+                    if 'rtdetr' in custom_path.lower():
+                        # Custom RT-DETR model
+                        self._log(f"📥 Loading custom RT-DETR model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_rtdetr_model(model_id=custom_path):
+                            raise RuntimeError("custom load_rtdetr_model returned False")
+                        return bd.detect_with_rtdetr(
+                            image_path=image_path,
+                            confidence=confidence,
+                            return_all_bubbles=False
+                        )
+                    else:
+                        # Assume YOLO format for other custom models
+                        self._log(f"📥 Loading custom YOLO model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_model(custom_path):
+                            raise RuntimeError("custom load_model returned False")
+                        detections = bd.detect_bubbles(
+                            image_path,
+                            confidence=confidence
+                        )
+                        return {
+                            'text_bubbles': detections if detections else [],
+                            'text_free': [],
+                            'bubbles': []
+                        }
+                else:
+                    # Standard YOLO model
+                    # Check if YOLO is already loaded
+                    already_loaded = getattr(bd, 'model_loaded', False) and getattr(bd, 'model', None) is not None
+                    if not already_loaded:
+                        if not model_path:
+                            self._log("⚠️ Bubble model path not set for YOLO; cannot load", "warning")
+                            return None
+                        self._log(f"📥 Loading YOLO model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_model(model_path):
+                            raise RuntimeError("load_model returned False")
+                    # Model is loaded, run detection
                     detections = bd.detect_bubbles(
                         image_path,
                         confidence=confidence
@@ -3015,23 +3059,15 @@ class MangaTranslator:
                         'text_free': [],
                         'bubbles': []
                     }
-        else:
-            # Standard YOLO model
-            # Check if YOLO is already loaded
-            already_loaded = getattr(bd, 'model_loaded', False) and getattr(bd, 'model', None) is not None
-            if not already_loaded:
-                if not (model_path and bd.load_model(model_path)):
-                    return None
-            # Model is loaded, run detection
-            detections = bd.detect_bubbles(
-                image_path,
-                confidence=confidence
-            )
-            return {
-                'text_bubbles': detections if detections else [],
-                'text_free': [],
-                'bubbles': []
-            }
+            except Exception as e:
+                elapsed = time.time() - start_time
+                if attempt < max_attempts:
+                    self._log(f"⚠️ Bubble detector load/detect failed (attempt {attempt}/{max_attempts}, elapsed {elapsed:.1f}s): {e}", "warning")
+                    self._log(f"🔄 Retrying bubble detector in {retry_delay}s...", "info")
+                    time.sleep(retry_delay)
+                    continue
+                self._log(f"❌ Bubble detector failed after {max_attempts} attempts ({elapsed:.1f}s): {e}", "error")
+                return None
         return None
             
     def _ensure_google_client(self):
@@ -13204,6 +13240,7 @@ class MangaTranslator:
             max_wait_time = 60  # Maximum 60 seconds
             poll_interval = 0.5  # Check every 0.5 seconds
             elapsed = 0
+            wait_logged = False
             
             # Try to check out a preloaded spare for the current detector settings
             while elapsed < max_wait_time:
@@ -13215,6 +13252,17 @@ class MangaTranslator:
                     
                     with MangaTranslator._detector_pool_lock:
                         rec = MangaTranslator._detector_pool.get(key)
+                        if elapsed == 0:
+                            # Show all keys in pool for comparison
+                            all_keys = list(MangaTranslator._detector_pool.keys())
+                            self._log(f"📊 Detector pool has {len(all_keys)} key(s) total", "info")
+                            for pk in all_keys:
+                                self._log(f"   Pool key: {pk}", "info")
+                            self._log(f"📊 Lookup for key {key}: found={rec is not None}", "info")
+                            if rec:
+                                self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
+                            else:
+                                self._log("⚠️ DETECTOR KEY MISMATCH - requested key not in pool!", "warning")
                         if rec and isinstance(rec, dict):
                             spares = rec.get('spares') or []
                             # Initialize checked_out list if it doesn't exist
@@ -13242,13 +13290,14 @@ class MangaTranslator:
                     pass
                 
                 # No instance available yet - wait and retry
-                if elapsed == 0:
-                    self._log("⏳ All bubble detector instances in use - waiting for one to become available...", "info")
+                if elapsed == 0 and not wait_logged:
+                    self._log(f"⏳ All bubble detector instances in use - waiting up to {max_wait_time}s (poll {poll_interval}s)...", "info")
+                    wait_logged = True
                 time.sleep(poll_interval)
                 elapsed += poll_interval
             
             # Timeout - no instance became available
-            self._log(f"⚠️ Timeout waiting for bubble detector after {max_wait_time}s", "warning")
+            self._log(f"⚠️ Timeout waiting for bubble detector after {elapsed:.1f}s (max {max_wait_time}s)", "warning")
             self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
             return None
         return self._thread_local.bubble_detector
@@ -13320,70 +13369,89 @@ class MangaTranslator:
         max_wait_time = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
         
         poll_interval = 0.5  # Check every 0.5 seconds
-        elapsed = 0
+        total_attempts = 2
         
-        while elapsed < max_wait_time:
-            # Check stop flag during wait
-            if self._check_stop():
-                self._log("⏹️ Translation stopped while waiting for inpainter", "warning")
-                return None
-            
-            try:
-                with MangaTranslator._inpaint_pool_lock:
-                    rec = MangaTranslator._inpaint_pool.get(key)
-                    if elapsed == 0:
-                        # Show all keys in pool for comparison
-                        all_keys = list(MangaTranslator._inpaint_pool.keys())
-                        self._log(f"📊 Pool has {len(all_keys)} key(s) total", "info")
-                        for pk in all_keys:
-                            self._log(f"   Pool key: {pk}", "info")
-                        self._log(f"📊 Lookup for key {key}: found={rec is not None}", "info")
-                        if rec:
-                            self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
-                        else:
-                            self._log(f"⚠️ KEY MISMATCH - requested key not in pool!", "warning")
-                    if rec and isinstance(rec, dict):
-                        spares = rec.get('spares') or []
-                        # Initialize checked_out list if it doesn't exist
-                        if 'checked_out' not in rec:
-                            rec['checked_out'] = []
-                        checked_out = rec['checked_out']
-                        
-                        # Look for an available spare (not already checked out)
-                        if spares:
-                            # Debug first attempt only
-                            if elapsed == 0:
-                                for idx, spare in enumerate(spares):
-                                    is_checked_out = spare in checked_out
-                                    is_none = spare is None
-                                    has_model_loaded = getattr(spare, 'model_loaded', False)
-                                    self._log(f"🔍 Inpainter spare[{idx}]: checked_out={is_checked_out}, is_none={is_none}, model_loaded={has_model_loaded}", "info")
+        def _checkout_with_poll(max_wait: int, attempt_idx: int):
+            elapsed = 0.0
+            wait_logged = False
+            while elapsed < max_wait:
+                # Check stop flag during wait
+                if self._check_stop():
+                    self._log("⏹️ Translation stopped while waiting for inpainter", "warning")
+                    return None
+                
+                try:
+                    with MangaTranslator._inpaint_pool_lock:
+                        rec = MangaTranslator._inpaint_pool.get(key)
+                        if elapsed == 0:
+                            # Show all keys in pool for comparison
+                            all_keys = list(MangaTranslator._inpaint_pool.keys())
+                            self._log(f"📊 Pool has {len(all_keys)} key(s) total", "info")
+                            for pk in all_keys:
+                                self._log(f"   Pool key: {pk}", "info")
+                            self._log(f"📊 Lookup for key {key}: found={rec is not None}", "info")
+                            if rec:
+                                self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
+                            else:
+                                self._log(f"⚠️ KEY MISMATCH - requested key not in pool!", "warning")
+                        if rec and isinstance(rec, dict):
+                            spares = rec.get('spares') or []
+                            # Initialize checked_out list if it doesn't exist
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
+                            checked_out = rec['checked_out']
                             
-                            for spare in spares:
-                                if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
-                                    # Mark as checked out (don't remove from spares!)
-                                    checked_out.append(spare)
-                                    tl.local_inpainters[key] = spare
-                                    # Store reference for later return
-                                    self._checked_out_inpainter = spare
-                                    self._inpainter_pool_key = key
-                                    available = len(spares) - len(checked_out)
-                                    if elapsed > 0:
-                                        self._log(f"🎨 Checked out inpainter after {elapsed:.1f}s wait ({len(checked_out)}/{len(spares)} in use)", "info")
-                                    else:
-                                        self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
-                                    return tl.local_inpainters[key]
-            except Exception:
-                pass
+                            # Look for an available spare (not already checked out)
+                            if spares:
+                                # Debug first attempt only
+                                if elapsed == 0:
+                                    for idx, spare in enumerate(spares):
+                                        is_checked_out = spare in checked_out
+                                        is_none = spare is None
+                                        has_model_loaded = getattr(spare, 'model_loaded', False)
+                                        self._log(f"🔍 Inpainter spare[{idx}]: checked_out={is_checked_out}, is_none={is_none}, model_loaded={has_model_loaded}", "info")
+                                
+                                for spare in spares:
+                                    if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                        # Mark as checked out (don't remove from spares!)
+                                        checked_out.append(spare)
+                                        tl.local_inpainters[key] = spare
+                                        # Store reference for later return
+                                        self._checked_out_inpainter = spare
+                                        self._inpainter_pool_key = key
+                                        available = len(spares) - len(checked_out)
+                                        if elapsed > 0:
+                                            self._log(f"🎨 Checked out inpainter after {elapsed:.1f}s wait (attempt {attempt_idx}/{total_attempts}, {len(checked_out)}/{len(spares)} in use)", "info")
+                                        else:
+                                            self._log(f"🎨 Using preloaded local inpainting instance (attempt {attempt_idx}/{total_attempts}, {len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                        return tl.local_inpainters[key]
+                except Exception as e:
+                    if elapsed == 0:
+                        self._log(f"⚠️ Inpainter checkout error on attempt {attempt_idx}/{total_attempts}: {e}", "warning")
+                
+                # No instance available yet - wait and retry
+                if elapsed == 0 and not wait_logged:
+                    retry_flag = "on" if retry_timeout_enabled else "off"
+                    self._log(f"⏳ All inpainter instances in use - waiting up to {max_wait}s (attempt {attempt_idx}/{total_attempts}, poll {poll_interval}s, retry_timeout {retry_flag})...", "info")
+                    wait_logged = True
+                time.sleep(poll_interval)
+                elapsed += poll_interval
             
-            # No instance available yet - wait and retry
-            if elapsed == 0:
-                self._log("⏳ All inpainter instances in use - waiting for one to become available...", "info")
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            # Timeout - no instance became available
+            self._log(f"⚠️ Timeout waiting for inpainter after {max_wait}s (attempt {attempt_idx}/{total_attempts})", "warning")
+            return None
         
-        # Timeout - no instance became available
-        self._log(f"⚠️ Timeout waiting for inpainter after {max_wait_time}s", "warning")
+        inp = _checkout_with_poll(max_wait_time, 1)
+        if inp is not None:
+            return inp
+        if self._check_stop():
+            return None
+        if total_attempts > 1:
+            self._log(f"🔁 Retrying inpainter checkout for another {max_wait_time}s (attempt 2/{total_attempts}, total {max_wait_time * total_attempts}s)", "info")
+            inp = _checkout_with_poll(max_wait_time, 2)
+            if inp is not None:
+                return inp
+        
         self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
         return None
     
