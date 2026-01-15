@@ -9231,6 +9231,18 @@ class MangaTranslator:
         except Exception:
             self._log("❌ Local inpainter module not available for preloading", "error")
             return 0
+
+        # Prefer LIVE dropdown selection over stale inputs
+        try:
+            live_method = self._get_live_local_inpaint_method()
+            if live_method:
+                local_method = live_method
+                # Refresh model_path to match live method
+                if hasattr(self, 'main_gui'):
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') or \
+                                 self.main_gui.config.get(f'{local_method}_model_path', '')
+        except Exception:
+            pass
         
         # Normalize model path to match _get_or_init_shared_local_inpainter
         if model_path:
@@ -9418,6 +9430,18 @@ class MangaTranslator:
         except Exception:
             self._log("❌ Local inpainter module not available for preloading", "error")
             return 0
+        
+        # Prefer LIVE dropdown selection over stale inputs
+        try:
+            live_method = self._get_live_local_inpaint_method()
+            if live_method:
+                local_method = live_method
+                # Refresh model_path to match live method
+                if hasattr(self, 'main_gui'):
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') or \
+                                 self.main_gui.config.get(f'{local_method}_model_path', '')
+        except Exception:
+            pass
         
         # CRITICAL: Normalize model path to match _get_or_init_shared_local_inpainter and sequential preload
         if model_path:
@@ -10131,8 +10155,11 @@ class MangaTranslator:
             pass
         
         # Default to local inpainting
-        local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+        local_method = self._get_live_local_inpaint_method()
         model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+        if not model_path:
+            # Fallback to non-prefixed key (older format)
+            model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
         
         # Get iterations setting (from auto_iterations logic or config)
         iterations = getattr(self, '_current_inpainter_iterations', 1)
@@ -13119,6 +13146,38 @@ class MangaTranslator:
                 return font_path
         
         return None  # Will use default font
+
+    def _get_live_local_inpaint_method(self) -> str:
+        """Return the live local inpaint method from MangaIntegration dropdown if available."""
+        # Prefer the live MangaIntegration GUI (dropdown)
+        try:
+            mg = getattr(self, 'main_gui', None) and getattr(self.main_gui, 'manga_translator', None)
+            if mg is not None:
+                try:
+                    if hasattr(mg, 'local_model_combo'):
+                        val = mg.local_model_combo.currentText()
+                        if val:
+                            return val
+                    if hasattr(mg, 'local_model_type_value'):
+                        val = mg.local_model_type_value
+                        if val:
+                            return val
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Fall back to top-level config (more up-to-date than nested inpainting)
+        try:
+            val = self.main_gui.config.get('manga_local_inpaint_model', '')
+            if val:
+                return val
+        except Exception:
+            pass
+        # Final fallback to nested settings (stale-safe default)
+        try:
+            return (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime_onnx')
+        except Exception:
+            return 'anime_onnx'
     
     def _get_thread_bubble_detector(self):
         """Get or initialize bubble detector using pool system.
@@ -13197,6 +13256,22 @@ class MangaTranslator:
         """
         import os
         import time
+        
+        # Always prefer the LIVE dropdown selection over stale inputs
+        try:
+            live_method = self._get_live_local_inpaint_method()
+            if live_method and live_method != local_method:
+                self._log(f"🔄 Overriding inpainter method from {local_method} to live selection {live_method}", "info")
+                local_method = live_method
+                # Refresh model_path to match the live method
+                try:
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else model_path
+                    if not model_path:
+                        model_path = self.main_gui.config.get(f'{local_method}_model_path', '') if hasattr(self, 'main_gui') else model_path
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
         # Log raw inputs for .exe debugging
         self._log(f"🔍 Inpainter checkout - raw inputs: method={local_method}, path={model_path}", "info")
@@ -13628,8 +13703,7 @@ class MangaTranslator:
                 return False, None
         except Exception:
             pass
-        inpaint_cfg = self.manga_settings.get('inpainting', {}) if hasattr(self, 'manga_settings') else {}
-        local_method = inpaint_cfg.get('local_method', 'anime')
+        local_method = self._get_live_local_inpaint_method()
         try:
             model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
         except Exception:
