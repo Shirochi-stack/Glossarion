@@ -2952,12 +2952,14 @@ def main(log_callback=None, stop_callback=None):
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
     batch_size = int(os.getenv("BATCH_SIZE", "5"))
-    batching_mode = os.getenv("BATCHING_MODE", "direct")
+    batching_mode = (os.getenv("BATCHING_MODE", "direct") or "direct").strip().lower()
     batch_group_size = int(os.getenv("BATCH_GROUP_SIZE", "3"))
 
     # Backward compatibility for CONSERVATIVE_BATCHING
     if os.getenv("CONSERVATIVE_BATCHING", "0") == "1":
         batching_mode = "conservative"
+    if batching_mode not in ("direct", "conservative", "aggressive"):
+        batching_mode = "direct"
 
     print(f"[DEBUG] BATCH_TRANSLATION = {os.getenv('BATCH_TRANSLATION')} (enabled: {batch_enabled})")
     print(f"[DEBUG] BATCH_SIZE = {batch_size}")
@@ -2968,6 +2970,8 @@ def main(log_callback=None, stop_callback=None):
         print(f"🚀 Glossary batch mode enabled with size: {batch_size} (Mode: {batching_mode.capitalize()})")
         if batching_mode == 'conservative':
             print(f"   Conservative group size: {batch_group_size}")
+        elif batching_mode == 'aggressive':
+            print(f"   Aggressive mode: keeps {batch_size} parallel calls and auto-refills")
         print(f"📑 Note: Glossary extraction uses a simplified batching process for API calls.")
     
     #API call delay
@@ -3234,7 +3238,13 @@ def main(log_callback=None, stop_callback=None):
             units_to_process = [[ch] for ch in chapters_to_process]  # Each chapter as single-item group
             is_merged_mode = False
         
-        total_batches = (len(units_to_process) + batch_size - 1) // batch_size
+        aggressive_mode = batching_mode == 'aggressive'
+        if batching_mode == 'conservative':
+            effective_batch_group_size = max(1, batch_size * max(1, batch_group_size))
+        else:
+            effective_batch_group_size = max(1, batch_size)
+
+        total_batches = 1 if aggressive_mode else (len(units_to_process) + effective_batch_group_size - 1) // effective_batch_group_size
         
         for batch_num in range(total_batches):
             # Check for stop at the beginning of each batch
@@ -3265,9 +3275,12 @@ def main(log_callback=None, stop_callback=None):
                 return
             
             # Get current batch of units
-            batch_start = batch_num * batch_size
-            batch_end = min(batch_start + batch_size, len(units_to_process))
-            current_batch_units = units_to_process[batch_start:batch_end]
+            if aggressive_mode:
+                current_batch_units = units_to_process
+            else:
+                batch_start = batch_num * effective_batch_group_size
+                batch_end = min(batch_start + effective_batch_group_size, len(units_to_process))
+                current_batch_units = units_to_process[batch_start:batch_end]
             
             # Count total chapters in this batch
             chapters_in_batch = sum(len(unit) for unit in current_batch_units)
