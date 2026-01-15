@@ -2808,6 +2808,15 @@ def main(log_callback=None, stop_callback=None):
 
     config = load_config(args.config)
 
+    # Ensure truncation retry settings use the correct Other Settings keys
+    # (only set if not already provided by the environment)
+    if os.getenv("RETRY_TRUNCATED") is None:
+        os.environ["RETRY_TRUNCATED"] = "1" if config.get("retry_truncated", True) else "0"
+    if os.getenv("TRUNCATION_RETRY_ATTEMPTS") is None:
+        os.environ["TRUNCATION_RETRY_ATTEMPTS"] = str(config.get("truncation_retry_attempts", 1))
+    if os.getenv("MAX_RETRY_TOKENS") is None:
+        os.environ["MAX_RETRY_TOKENS"] = str(config.get("max_retry_tokens", -1))
+
     # Use Gemini thinking settings exactly as saved in Other Settings / config
     enable_thinking = bool(config.get("enable_gemini_thinking", False))
     model_name = (os.getenv("MODEL") or config.get("model", "") or "").lower()
