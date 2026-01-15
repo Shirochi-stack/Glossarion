@@ -971,8 +971,24 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             return []
             
         book = epub.read_epub(epub_path)
-        # Replace the problematic line with media type checking
-        items = [item for item in book.get_items() if is_html_document(item)]
+        # Prefer spine order to match content.opf reading order
+        try:
+            spine_ids = [sid for (sid, _linear) in (book.spine or [])]
+        except Exception:
+            spine_ids = []
+        spine_items = []
+        if spine_ids:
+            for sid in spine_ids:
+                try:
+                    it = book.get_item_with_id(sid)
+                except Exception:
+                    it = None
+                if it and is_html_document(it):
+                    spine_items.append(it)
+            items = spine_items
+        else:
+            # Fallback to manifest order
+            items = [item for item in book.get_items() if is_html_document(item)]
     except Exception as e:
         print(f"[Warning] Manifest load failed, falling back to raw EPUB scan: {e}")
         try:
@@ -3165,27 +3181,43 @@ def main(log_callback=None, stop_callback=None):
         
         # Create merge groups if request merging is enabled
         if use_request_merging:
+            # Use the same proximity logic as translation to avoid merging distant chapters
+            try:
+                from TransateKRtoEN import RequestMerger
+            except Exception:
+                RequestMerger = None
             if chapter_split_enabled:
                 # Budget-aware auto-adjust (only when chapter splitting toggle is ON)
                 merge_groups = []
-                run = chapters_to_process  # already ordered
-                i = 0
-                while i < len(run):
-                    group = [run[i]]
-                    i += 1
+                run_groups = []
+                if RequestMerger:
+                    run_groups = RequestMerger.create_merge_groups(
+                        chapters_to_process,
+                        max(1, len(chapters_to_process)),
+                    )
+                else:
+                    run_groups = [chapters_to_process]
 
-                    while i < len(run) and len(group) < request_merge_count:
-                        candidate = run[i]
-                        merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
-                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                for run in run_groups:
+                    if not run:
+                        continue
+                    i = 0
+                    while i < len(run):
+                        group = [run[i]]
+                        i += 1
 
-                        if merged_tokens <= available_tokens:
-                            group.append(candidate)
-                            i += 1
-                        else:
-                            break
+                        while i < len(run) and len(group) < request_merge_count:
+                            candidate = run[i]
+                            merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
+                            merged_tokens = chapter_splitter.count_tokens(merged_preview)
 
-                    merge_groups.append(group)
+                            if merged_tokens <= available_tokens:
+                                group.append(candidate)
+                                i += 1
+                            else:
+                                break
+
+                        merge_groups.append(group)
 
                 print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters (budget-aware)")
                 units_to_process = merge_groups
@@ -3224,7 +3256,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary)
+                    save_progress(completed, glossary, merged_indices)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -3571,7 +3603,7 @@ def main(log_callback=None, stop_callback=None):
                             x.get('raw_name', '').lower()
                         ))
                         
-                        save_progress(completed, glossary)
+                        save_progress(completed, glossary, merged_indices)
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -3583,14 +3615,15 @@ def main(log_callback=None, stop_callback=None):
         # SEQUENTIAL MODE: Original behavior
         
         # Request merging preprocessing
-        merge_groups = {}  # Maps parent_idx -> list of child indices
+        merge_groups = {}  # Maps parent_idx -> list of (idx, chap) tuples
+        merged_children = set()  # Children merged into a parent for this run only
         
         if request_merging_enabled and request_merge_count > 1:
             # Collect chapters that need processing (not completed, not merged)
             chapters_needing_processing = []
             for idx, chap in enumerate(chapters):
                 # Skip if already completed or merged
-                if idx in completed or idx in merged_indices:
+                if idx in completed:
                     continue
                 
                 # Apply chapter range filter
@@ -3603,32 +3636,47 @@ def main(log_callback=None, stop_callback=None):
             
             if chapter_split_enabled:
                 # Budget-aware grouping (auto-adjust to fit available_tokens)
-                run = chapters_needing_processing
-                i = 0
-                while i < len(run):
-                    group = [run[i]]
-                    i += 1
-                    
-                    while i < len(run) and len(group) < request_merge_count:
-                        candidate = run[i]
-                        merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
-                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                try:
+                    from TransateKRtoEN import RequestMerger
+                except Exception:
+                    RequestMerger = None
+
+                run_groups = []
+                if RequestMerger:
+                    run_groups = RequestMerger.create_merge_groups(
+                        chapters_needing_processing,
+                        max(1, len(chapters_needing_processing)),
+                    )
+                else:
+                    run_groups = [chapters_needing_processing]
+
+                for run in run_groups:
+                    if not run:
+                        continue
+                    i = 0
+                    while i < len(run):
+                        group = [run[i]]
+                        i += 1
                         
-                        if merged_tokens <= available_tokens:
-                            group.append(candidate)
-                            i += 1
-                        else:
-                            break
-                    
-                    parent_idx = group[0][0]
-                    merge_groups[parent_idx] = group
-                    
-                    if len(group) > 1:
-                        child_indices = [g[0] for g in group[1:]]
-                        print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (budget-aware)")
-                        for child_idx in child_indices:
-                            if child_idx not in merged_indices:
-                                merged_indices.append(child_idx)
+                        while i < len(run) and len(group) < request_merge_count:
+                            candidate = run[i]
+                            merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
+                            merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                            
+                            if merged_tokens <= available_tokens:
+                                group.append(candidate)
+                                i += 1
+                            else:
+                                break
+                        
+                        parent_idx = group[0][0]
+                        merge_groups[parent_idx] = group
+                        
+                        if len(group) > 1:
+                            child_indices = [g[0] for g in group[1:]]
+                            print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (budget-aware)")
+                            for child_idx in child_indices:
+                                merged_children.add(child_idx)
             else:
                 # Count-based grouping when chapter splitting toggle is OFF
                 for i in range(0, len(chapters_needing_processing), request_merge_count):
@@ -3639,11 +3687,9 @@ def main(log_callback=None, stop_callback=None):
                         child_indices = [g[0] for g in group[1:]]
                         print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (count-based)")
                         for child_idx in child_indices:
-                            if child_idx not in merged_indices:
-                                merged_indices.append(child_idx)
+                            merged_children.add(child_idx)
             
             if merge_groups:
-                save_progress(completed, glossary, merged_indices)
                 if chapter_split_enabled:
                     print(f"   📊 Created {len(merge_groups)} merge groups (budget-aware)")
                 else:
@@ -3655,8 +3701,8 @@ def main(log_callback=None, stop_callback=None):
                 print(f"❌ Glossary extraction stopped at chapter {idx+1}")
                 return
             
-            # Skip if this chapter was merged into another
-            if idx in merged_indices:
+            # Skip if this chapter was merged into another (current run only)
+            if idx in merged_children:
                 print(f"⏭️ Skipping chapter {idx+1} (merged into parent)")
                 continue
             
@@ -4131,6 +4177,8 @@ def main(log_callback=None, stop_callback=None):
                         if g_idx != idx and g_idx not in completed:
                             completed.append(g_idx)
                             print(f"   ✅ Marked chapter {g_idx+1} as completed (merged)")
+                        if g_idx != idx and g_idx not in merged_indices:
+                            merged_indices.append(g_idx)
 
                 # Only add to history if contextual is enabled
                 if contextual_enabled:
@@ -4153,7 +4201,7 @@ def main(log_callback=None, stop_callback=None):
                         except Exception as e:
                             print(f"⚠️ Failed to save history for chapter {idx+1}: {e}")
 
-                save_progress(completed, glossary)
+                save_progress(completed, glossary, merged_indices)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 
