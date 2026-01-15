@@ -3328,12 +3328,8 @@ class UnifiedClient:
                                     # Wait a bit before trying again
                                     wait_time = min(60 + random.uniform(1, 10), 120)  # 60-70 seconds
                                     print(f"🔄 Multi-key mode: Waiting {wait_time:.1f}s for keys to cool down")
-                                    
-                                    wait_start = time.time()
-                                    while time.time() - wait_start < wait_time:
-                                        if self._cancelled:
-                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                        time.sleep(0.5)
+                                    if not self._sleep_with_cancel(wait_time, 0.5):
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                 
                                 # Continue to next attempt with rotated key
                                 continue
@@ -4409,13 +4405,9 @@ class UnifiedClient:
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
                         
                         print(f"🔄 Rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
                         # Wait with cancellation check
-                        wait_start = time.time()
-                        while time.time() - wait_start < wait_time:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
+                        if not self._sleep_with_cancel(wait_time, 0.5):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         
                         # For rate limit errors, continue retrying without counting against max retries
                         # Reset attempt counter to avoid exhausting retries on rate limits
@@ -7781,6 +7773,24 @@ class UnifiedClient:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
 
+    def _sleep_with_cancel(self, duration: float, interval: float = 0.1) -> bool:
+        """Sleep in small increments, aborting if stop/cancel is requested."""
+        try:
+            total = float(duration)
+        except Exception:
+            return True
+        if total <= 0:
+            return True
+        slept = 0.0
+        while slept < total:
+            if self._is_stop_requested() or getattr(self, '_cancelled', False):
+                self._cancelled = True
+                return False
+            step = min(interval, total - slept)
+            time.sleep(step)
+            slept += step
+        return True
+
     def _get_timeouts(self):
         """Return (connect_timeout, read_timeout) from environment, with sane defaults.
         Respects master toggle ENABLE_HTTP_TUNING (defaults to disabled).
@@ -7962,7 +7972,8 @@ class UnifiedClient:
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
                     print(f"{provider} network error (attempt {attempt + 1}): {e}")
-                    time.sleep(api_delay)
+                    if not self._sleep_with_cancel(api_delay, 0.1):
+                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                     continue
                 raise UnifiedClientError(f"{provider} network error: {e}")
 
@@ -8021,24 +8032,16 @@ class UnifiedClient:
                 if indefinite_retry_enabled:
                     # For indefinite retry, don't count against max_retries
                     print(f"{provider} rate limit ({status}), indefinite retry enabled - waiting {wait_time:.1f}s")
-                    waited = 0.0
-                    while waited < wait_time:
-                        if self._cancelled:
-                            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
-                        time.sleep(0.5)
-                        waited += 0.5
+                    if not self._sleep_with_cancel(wait_time, 0.5):
+                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                     # Don't increment attempt counter for rate limits when indefinite retry is enabled
                     attempt = max(0, attempt - 1)
                     continue
                 elif attempt < max_retries - 1:
                     # Standard retry behavior when indefinite retry is disabled
                     print(f"{provider} rate limit ({status}), waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
-                    waited = 0.0
-                    while waited < wait_time:
-                        if self._cancelled:
-                            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
-                        time.sleep(0.5)
-                        waited += 0.5
+                    if not self._sleep_with_cancel(wait_time, 0.5):
+                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                     continue
                 
                 # If we reach here, indefinite retry is disabled and we've exhausted max_retries
@@ -8056,12 +8059,8 @@ class UnifiedClient:
                     base_delay = 5.0
                     sleep_for = min(base_delay * (2 ** attempt) + random.uniform(0, 1), 60.0)
                 print(f"{provider} {status} - retrying in {sleep_for:.1f}s (attempt {attempt + 1}/{max_retries})")
-                waited = 0.0
-                while waited < sleep_for:
-                    if self._cancelled:
-                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
-                    time.sleep(0.5)
-                    waited += 0.5
+                if not self._sleep_with_cancel(sleep_for, 0.5):
+                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                 continue
 
             # Other non-success statuses
@@ -8158,7 +8157,8 @@ class UnifiedClient:
                             
                             # Retry immediately
                             print(f"    ⏱️ Sleeping 1s before retry...")
-                            time.sleep(1)
+                            if not self._sleep_with_cancel(1, 0.1):
+                                raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                             print(f"    🚀 Retrying request with adjusted token limit...")
                             continue
                         else:
@@ -8168,7 +8168,8 @@ class UnifiedClient:
                 else:
                     # Normal error logging for non-token-limit errors
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
-                time.sleep(api_delay)
+                if not self._sleep_with_cancel(api_delay, 0.1):
+                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                 continue
             raise UnifiedClientError(f"{provider} API error: {status} - {_sanitize_for_log(resp.text, 300)}", http_status=status)
 
@@ -9382,7 +9383,8 @@ class UnifiedClient:
                         # Single key mode - wait and retry
                         wait_time = api_delay * 10
                         print(f"Rate limit hit, waiting {wait_time}s before retry")
-                        time.sleep(wait_time)
+                        if not self._sleep_with_cancel(wait_time, 0.1):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         continue
                 
                 # If we identified a fix, retry immediately
@@ -10510,7 +10512,8 @@ class UnifiedClient:
                     supports_thinking = False
                     if attempt < attempts - 1:
                         attempt += 1
-                        time.sleep(1)  # Short delay before retry
+                        if not self._sleep_with_cancel(1, 0.1):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         continue
                 
                 # Check if aspect ratio/image output is not supported for this model
@@ -10520,7 +10523,8 @@ class UnifiedClient:
                     enable_image_output = False
                     if attempt < attempts - 1:
                         attempt += 1
-                        time.sleep(1)  # Short delay before retry
+                        if not self._sleep_with_cancel(1, 0.1):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         continue
                 
                 # For other errors, we might want to retry
@@ -10528,7 +10532,8 @@ class UnifiedClient:
                     attempt += 1
                     wait_time = min(2 ** attempt, 10)  # Exponential backoff with max 10s
                     print(f"⏳ Retrying Gemini in {wait_time}s...")
-                    time.sleep(wait_time)
+                    if not self._sleep_with_cancel(wait_time, 0.1):
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     continue
                 else:
                     # Final attempt failed, re-raise
