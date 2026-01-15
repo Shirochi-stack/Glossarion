@@ -3284,7 +3284,8 @@ def main(log_callback=None, stop_callback=None):
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
                     # Log the final size after deduplication
-                    print(f"✅ Saved {len(glossary)} entries (after {removed if 'removed' in locals() else 0} duplicates removed) before exit")
+                    removed = max(0, original_size - len(glossary))
+                    print(f"✅ Saved {len(glossary)} entries (after {removed} duplicates removed) before exit")
                 return
             
             # Get current batch of units
@@ -3618,6 +3619,7 @@ def main(log_callback=None, stop_callback=None):
             if stopped_early:
                 if glossary:
                     print(f"\n🔀 Deduplicating {len(glossary)} entries before exit...")
+                    original_size = len(glossary)
                     glossary[:] = skip_duplicate_entries(glossary)
                     
                     custom_types = get_custom_entry_types()
@@ -3653,6 +3655,7 @@ def main(log_callback=None, stop_callback=None):
                     # Apply deduplication before stopping
                     if glossary:
                         print("🔀 Applying deduplication and sorting before exit...")
+                        original_size = len(glossary)
                         glossary[:] = skip_duplicate_entries(glossary)
                         
                         # Sort glossary
@@ -3671,7 +3674,8 @@ def main(log_callback=None, stop_callback=None):
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
                         # Log the final size after deduplication
-                        print(f"✅ Saved {len(glossary)} entries (after {removed if 'removed' in locals() else 0} duplicates removed) before exit")
+                        removed = max(0, original_size - len(glossary))
+                        print(f"✅ Saved {len(glossary)} entries (after {removed} duplicates removed) before exit")
                     return
     
     else:
