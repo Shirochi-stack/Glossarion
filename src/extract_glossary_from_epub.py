@@ -1323,6 +1323,17 @@ def parse_api_response(response_text: str) -> List[Dict]:
     # CSV-like format parsing
     lines = response_text.strip().split('\n')
     header_fields = None
+    def _is_basic_latin(s: str) -> bool:
+        try:
+            for ch in (s or ""):
+                if ch.isspace():
+                    continue
+                # Treat any non-ASCII letter/mark as non-Latin
+                if ord(ch) > 127 and ch.isalpha():
+                    return False
+            return True
+        except Exception:
+            return False
 
     for line in lines:
         try:
@@ -1351,8 +1362,10 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     print(f"[Warning] Filtered invalid entry with empty brackets: {line}")
                     continue
                 if raw_check.lower() == trans_check.lower() and len(raw_check) > 3:
-                    print(f"[Warning] Filtered untranslated entry (raw==translated): {line}")
-                    continue
+                    # Keep Latin-only entries even if raw==translated (names/terms in Latin script)
+                    if not (_is_basic_latin(raw_check) and _is_basic_latin(trans_check)):
+                        print(f"[Warning] Filtered untranslated entry (raw==translated): {line}")
+                        continue
             # -------------------------
 
             # If we saw a header, map every column by name to keep all AI-returned data
@@ -2125,7 +2138,8 @@ def _skip_translated_name_duplicates(glossary):
             deduplicated.append(entry)
             seen_translations[translated_lower] = (raw_name, entry, len(deduplicated) - 1)
     
-    print(f"[Dedup] ✅ PASS 2 complete: {skipped_count} duplicates removed ({replaced_count} replaced with more complete entries, {len(deduplicated)} remaining)")
+    replaced_msg = f" ({replaced_count} replaced with more complete entries, {len(deduplicated)} remaining)" if replaced_count > 0 else f" ({len(deduplicated)} remaining)"
+    print(f"[Dedup] ✅ PASS 2 complete: {skipped_count} duplicates removed{replaced_msg}")
     return deduplicated
 
 
