@@ -3318,8 +3318,8 @@ def main(log_callback=None, stop_callback=None):
             batch_entry_count = 0
             stopped_early = False
             
-            # Determine number of workers - for merged mode, use the number of merge groups
-            num_workers = len(current_batch_units) if is_merged_mode else min(len(current_batch_units), batch_size)
+            # Determine number of workers - always cap to batch_size to respect concurrency limit
+            num_workers = min(len(current_batch_units), batch_size)
             
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {}
