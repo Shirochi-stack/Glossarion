@@ -2974,11 +2974,13 @@ def main(log_callback=None, stop_callback=None):
 
     print(f"[DEBUG] BATCH_TRANSLATION = {os.getenv('BATCH_TRANSLATION')} (enabled: {batch_enabled})")
     print(f"[DEBUG] BATCH_SIZE = {batch_size}")
-    print(f"[DEBUG] BATCHING_MODE = {batching_mode}")
+    log_batching_mode = "no batching" if batching_mode == "aggressive" else batching_mode
+    print(f"[DEBUG] BATCHING_MODE = {log_batching_mode}")
     print(f"[DEBUG] BATCH_GROUP_SIZE = {batch_group_size}")
 
     if batch_enabled:
-        print(f"🚀 Glossary batch mode enabled with size: {batch_size} (Mode: {batching_mode.capitalize()})")
+        display_mode = "No Batching" if batching_mode == "aggressive" else batching_mode.capitalize()
+        print(f"🚀 Glossary batch mode enabled with size: {batch_size} (Mode: {display_mode})")
         if batching_mode == 'conservative':
             print(f"   Conservative group size: {batch_group_size}")
         elif batching_mode == 'aggressive':
