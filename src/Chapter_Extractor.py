@@ -1624,8 +1624,13 @@ def _detect_content_language( text_sample):
     else:
         return 'unknown'
 
+# Global flag to track if language has been printed
+_language_printed = False
+
 def _print_extraction_summary( chapters, detected_language, extraction_mode, h1_count, h2_count, file_size_groups):
     """Print extraction summary"""
+    global _language_printed
+    
     print(f"\n📊 Chapter Extraction Summary ({extraction_mode.capitalize()} Mode):")
     print(f"   • Total chapters extracted: {len(chapters)}")
     
@@ -1634,7 +1639,11 @@ def _print_extraction_summary( chapters, detected_language, extraction_mode, h1_
     last_num = chapters[-1]['num']
     
     print(f"   • Chapter range: {first_num} to {last_num}")
-    print(f"   • Detected language: {detected_language}")
+    
+    # Only print detected language once per session
+    if not _language_printed and detected_language and detected_language != 'unknown':
+        print(f"   🌐 Detected language: {detected_language}")
+        _language_printed = True
     
     if extraction_mode == "smart":
         print(f"   • Primary header type: {'<h2>' if h2_count > h1_count else '<h1>'}")
@@ -2171,12 +2180,10 @@ def _process_single_html_file(
         
         # Use enhanced extractor if available and allowed
         if use_enhanced:
-            print(f"🚀 Using enhanced extraction for: {os.path.basename(file_path)}")
             clean_content, _, chapter_title = enhanced_extractor.extract_chapter_content(
                 html_content, enhanced_filtering
             )
             enhanced_extraction_used = True
-            print(f"✅ Enhanced extraction complete: {len(clean_content)} chars")
             
             content_html = clean_content
             content_text = clean_content

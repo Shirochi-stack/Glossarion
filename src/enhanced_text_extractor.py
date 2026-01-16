@@ -445,9 +445,8 @@ class EnhancedTextExtractor:
             # Pre-process HTML to decode all entities
             html_content = self._decode_entities(html_content)
             
-            # Detect language early
+            # Detect language early (don't log - already logged in extraction summary)
             self.detected_language = self._detect_content_language(html_content)
-            print(f"🌐 Detected language: {self.detected_language}")
             
             # Parse with BeautifulSoup
             parser = 'html.parser'
