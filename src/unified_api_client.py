@@ -1072,6 +1072,10 @@ class UnifiedClient:
     _all_sessions = set()
     _all_sessions_lock = threading.Lock()
     
+    # Track all active streaming responses so we can close them on cancellation
+    _active_streams = set()
+    _active_streams_lock = threading.Lock()
+    
     # Your existing MODEL_PROVIDERS and other class variables
     MODEL_PROVIDERS = {
         'vertex/': 'vertex_model_garden',
@@ -1290,11 +1294,24 @@ class UnifiedClient:
 
     @classmethod
     def hard_cancel_all(cls):
-        """Force-cancel all in-flight requests by closing HTTP sessions."""
+        """Force-cancel all in-flight requests by closing HTTP sessions and streaming responses."""
         try:
             cls.set_global_cancellation(True)
         except Exception:
             pass
+        # Close all active streaming responses
+        try:
+            with cls._active_streams_lock:
+                streams = list(cls._active_streams)
+            for stream in streams:
+                try:
+                    if hasattr(stream, 'close'):
+                        stream.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Close all HTTP sessions
         try:
             with cls._all_sessions_lock:
                 sessions = list(cls._all_sessions)
@@ -3049,6 +3066,21 @@ class UnifiedClient:
         thread_name = threading.current_thread().name
         logger.info(f"[{thread_name}] Cleaning up UnifiedClient resources")
         
+        # Close any active streaming responses
+        try:
+            with self._active_streams_lock:
+                streams = list(self._active_streams)
+            for stream in streams:
+                try:
+                    if hasattr(stream, 'close'):
+                        stream.close()
+                except Exception:
+                    pass
+            with self._active_streams_lock:
+                self._active_streams.clear()
+        except Exception:
+            pass
+        
         # Release thread key assignment if in multi-key mode
         if self._multi_key_mode and self._api_key_pool:
             thread_id = threading.current_thread().ident
@@ -3064,6 +3096,43 @@ class UnifiedClient:
             self._thread_local.request_count = 0
         
         logger.info(f"[{thread_name}] Cleanup complete")
+    
+    def __del__(self):
+        """Destructor to ensure all resources are cleaned up when the client is garbage collected"""
+        try:
+            # Set cleanup flag to suppress noise
+            self._in_cleanup = True
+            
+            # Close all active streaming responses
+            try:
+                with self._active_streams_lock:
+                    streams = list(self._active_streams)
+                for stream in streams:
+                    try:
+                        if hasattr(stream, 'close'):
+                            stream.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            # Close HTTP clients
+            try:
+                if hasattr(self, 'openai_client') and self.openai_client:
+                    if hasattr(self.openai_client, 'close'):
+                        self.openai_client.close()
+            except Exception:
+                pass
+            
+            try:
+                if hasattr(self, 'gemini_client') and self.gemini_client:
+                    if hasattr(self.gemini_client, 'close'):
+                        self.gemini_client.close()
+            except Exception:
+                pass
+        except Exception:
+            # Never let destructor raise exceptions
+            pass
     
     def _get_safe_filename(self, base_filename: str, content_hash: str = None) -> str:
         """Generate a safe, unique filename"""
@@ -6868,6 +6937,18 @@ class UnifiedClient:
         print("🛑 Operation cancelled (timeout or user stop)")
         # Set global cancellation to affect all instances
         self.set_global_cancellation(True)
+        # Close all active streaming responses first
+        try:
+            with self._active_streams_lock:
+                streams = list(self._active_streams)
+            for stream in streams:
+                try:
+                    if hasattr(stream, 'close'):
+                        stream.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Try to close any active HTTP sessions to abort in-flight requests
         try:
             with self._all_sessions_lock:
@@ -11448,6 +11529,10 @@ class UnifiedClient:
                         if use_streaming:
                             print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})")
                         resp = client.chat.completions.create(**call_kwargs)
+                        # Register streaming response for proper cleanup
+                        if use_streaming:
+                            with self._active_streams_lock:
+                                self._active_streams.add(resp)
                         dur = _t.time() - start_ts
                         if use_streaming:
                             print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
@@ -11522,6 +11607,9 @@ class UnifiedClient:
                                 try:
                                     if hasattr(resp, "close"):
                                         resp.close()
+                                    # Remove from active streams
+                                    with self._active_streams_lock:
+                                        self._active_streams.discard(resp)
                                 except Exception:
                                     pass
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -11657,6 +11745,16 @@ class UnifiedClient:
                         if log_stream and not self._is_stop_requested():
                             print()  # final newline
                         content = "".join(text_parts)
+                        
+                        # Clean up streaming response after completion
+                        try:
+                            if hasattr(resp, 'close'):
+                                resp.close()
+                            with self._active_streams_lock:
+                                self._active_streams.discard(resp)
+                        except Exception:
+                            pass
+                        
                         return UnifiedResponse(
                             content=content,
                             finish_reason=finish_reason,

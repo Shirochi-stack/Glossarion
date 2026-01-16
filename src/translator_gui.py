@@ -9327,12 +9327,48 @@ Important rules:
             # Set the _cancelled flag on the UnifiedClient class itself
             if hasattr(unified_api_client, 'UnifiedClient'):
                 unified_api_client.UnifiedClient._global_cancelled = True
-            # Hard cancel: close active HTTP sessions to abort in-flight requests
+        # Hard cancel: close active HTTP sessions to abort in-flight requests
             if hasattr(unified_api_client, 'hard_cancel_all'):
                 unified_api_client.hard_cancel_all()
                 
         except Exception as e:
             print(f"Error setting stop flags: {e}")
+        
+        # Terminate any background processes (like stuck streaming instances)
+        try:
+            import psutil
+            current_process = psutil.Process(os.getpid())
+            children = current_process.children(recursive=True)
+            
+            # Filter out important GUI processes we should keep
+            processes_to_terminate = []
+            for child in children:
+                try:
+                    # Get process name to avoid killing important processes
+                    name = child.name().lower()
+                    # Only terminate Python/script processes, not system processes
+                    if 'python' in name or 'glossarion' in name:
+                        processes_to_terminate.append(child)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            if processes_to_terminate:
+                self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
+                for proc in processes_to_terminate:
+                    try:
+                        proc.terminate()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                # Wait for processes to terminate, then force kill if needed
+                gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+                for proc in alive:
+                    try:
+                        proc.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+        except Exception as e:
+            print(f"Error terminating child processes: {e}")
         
         # Set stop flag in epub_converter module
         try:
@@ -9435,6 +9471,42 @@ Important rules:
                 unified_api_client.hard_cancel_all()
         except Exception:
             pass
+        
+        # Terminate any background processes (like stuck streaming instances)
+        try:
+            import psutil
+            current_process = psutil.Process(os.getpid())
+            children = current_process.children(recursive=True)
+            
+            # Filter out important GUI processes we should keep
+            processes_to_terminate = []
+            for child in children:
+                try:
+                    # Get process name to avoid killing important processes
+                    name = child.name().lower()
+                    # Only terminate Python/script processes, not system processes
+                    if 'python' in name or 'glossarion' in name:
+                        processes_to_terminate.append(child)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            if processes_to_terminate:
+                self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
+                for proc in processes_to_terminate:
+                    try:
+                        proc.terminate()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                # Wait for processes to terminate, then force kill if needed
+                gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+                for proc in alive:
+                    try:
+                        proc.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+        except Exception as e:
+            print(f"Error terminating child processes: {e}")
 
         # Touch stop file for GlossaryManager subprocesses
         try:
@@ -9509,6 +9581,12 @@ Important rules:
             try:
                 if getattr(self, 'executor', None):
                     self.executor.shutdown(wait=False)
+            except Exception:
+                pass
+            
+            # Terminate all child processes before closing
+            try:
+                _kill_child_process_tree(timeout=1.5)
             except Exception:
                 pass
             
