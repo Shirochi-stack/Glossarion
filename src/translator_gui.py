@@ -5753,6 +5753,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         return
                     self.append_log("✅ Modules loaded")
                 
+                # ALWAYS set EXTRACTION_WORKERS from config for EPUB compilation
+                # This ensures parallel image processing works correctly
+                if hasattr(self, 'config') and 'extraction_workers' in self.config:
+                    max_workers = self.config.get('extraction_workers', 2)
+                else:
+                    max_workers = 2  # Default to 2 workers
+                
+                os.environ['EXTRACTION_WORKERS'] = str(max_workers)
+                self.append_log(f"⚡ Using {max_workers} workers for parallel processing")
+                
                 # Check for large EPUBs and set optimization parameters
                 epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
                 
@@ -5766,16 +5776,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             
                             if file_count > 50:
                                 self.append_log(f"📚 Large EPUB detected: {file_count} chapters")
-                                
-                                # Get user-configured worker count
-                                if hasattr(self, 'config') and 'extraction_workers' in self.config:
-                                    max_workers = self.config.get('extraction_workers', 2)
-                                else:
-                                    # Fallback to environment variable or default
-                                    max_workers = int(os.environ.get('EXTRACTION_WORKERS', '2'))
-                                
-                                # Set extraction parameters
-                                os.environ['EXTRACTION_WORKERS'] = str(max_workers)
                                 os.environ['EXTRACTION_PROGRESS_CALLBACK'] = 'enabled'
                                 
                                 # Set progress interval based on file count
@@ -5853,9 +5853,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 import traceback
                 self.append_log(traceback.format_exc())
             finally:
-                # Clean up environment variables
+                # Clean up environment variables EXCEPT EXTRACTION_WORKERS
+                # (EXTRACTION_WORKERS is needed for EPUB compilation which happens inside translation_main)
                 env_vars = [
-                    'EXTRACTION_WORKERS', 'EXTRACTION_BATCH_SIZE',
+                    'EXTRACTION_BATCH_SIZE',
                     'EXTRACTION_PROGRESS_CALLBACK', 'EXTRACTION_PROGRESS_INTERVAL',
                     'FAST_EXTRACTION', 'PARALLEL_PARSE'
                 ]
@@ -7512,6 +7513,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
             'GLOSSARY_MAX_OUTPUT_TOKENS': str(current_max_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
             'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', self.trans_temp.text())),
+            
+            # CRITICAL: Parallel processing settings for EPUB compilation
+            'EXTRACTION_WORKERS': str(self.config.get('extraction_workers', 2)),
        }
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
         
@@ -8816,6 +8820,9 @@ Important rules:
             self.append_log("📦 Starting EPUB Converter...")
             
             # Set environment variables for EPUB converter
+            workers_value = str(self.config.get('extraction_workers', 2))
+            os.environ['EXTRACTION_WORKERS'] = workers_value
+            self.append_log(f"[DEBUG EPUB CONVERTER] Set EXTRACTION_WORKERS={workers_value}")
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var else "0"
             os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0"
             os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_cover_html_var', False) else "0"
@@ -9586,9 +9593,6 @@ Important rules:
                            scrollbar.setValue(scrollbar.maximum())
                            # Use single delayed timer instead of 8 timers to prevent handle exhaustion
                            QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
-                   # Force immediate update of the widget
-                   self.log_text.update()
-                   self.log_text.repaint()
                except Exception:
                    pass
            except Exception as e:
