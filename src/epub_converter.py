@@ -2126,7 +2126,10 @@ class EPUBCompiler:
                         # For successes: log at intervals for large EPUBs, or always for small ones
                         elif not use_reduced_logging or completed == 1 or completed % log_interval == 0 or completed == total_chapters:
                             current_percent = (completed * 100) // total_chapters
-                            self.log(f"  [{completed}/{total_chapters}] ✅ Processed chapters ({current_percent}%)")
+                            bar_length = 20
+                            filled = int(bar_length * current_percent / 100)
+                            bar = '█' * filled + '░' * (bar_length - filled)
+                            self.log(f"  [{bar}] {completed}/{total_chapters} ({current_percent}%)")
                             
                 except Exception as e:
                     completed += 1
@@ -2187,7 +2190,10 @@ class EPUBCompiler:
                         self.log(f"  ✅ Added auxiliary page (spine only): '{base_name}'")
                     elif not use_reduced_logging or idx == 1 or idx % log_interval == 0 or idx == total_to_add:
                         current_percent = (idx * 100) // total_to_add
-                        self.log(f"  ✅ Added {idx}/{total_to_add} chapters to structure ({current_percent}%)")
+                        bar_length = 20
+                        filled = int(bar_length * current_percent / 100)
+                        bar = '█' * filled + '░' * (bar_length - filled)
+                        self.log(f"  [{bar}] {idx}/{total_to_add} ({current_percent}%)")
                     
                 except Exception as e:
                     self.log(f"  ❌ Failed to add chapter {chapter_data['num']} to book: {e}")
@@ -3604,7 +3610,10 @@ img {
                                 should_log = (completed % log_interval == 0 or completed == 1 or completed == len(image_files))
                                 # Also log when percentage changes for better feedback
                                 if should_log or (current_percent != last_logged_percent and current_percent % 5 == 0):
-                                    self.log(f"  [{completed}/{len(image_files)}] ({current_percent}%) ✅ Processing images...")
+                                    bar_length = 20
+                                    filled = int(bar_length * current_percent / 100)
+                                    bar = '█' * filled + '░' * (bar_length - filled)
+                                    self.log(f"  [{bar}] {completed}/{len(image_files)} ({current_percent}%)")
                                     last_logged_percent = current_percent
                             else:
                                 # For small sets: log every image
@@ -3717,7 +3726,10 @@ img {
                             should_log = (completed % log_interval == 0 or completed == 1 or completed == len(images_to_add))
                             # Also log when percentage changes for better feedback
                             if should_log or (current_percent != last_logged_percent and current_percent % 5 == 0):
-                                self.log(f"  [{completed}/{len(images_to_add)}] ({current_percent}%) ✅ Reading images...")
+                                bar_length = 20
+                                filled = int(bar_length * current_percent / 100)
+                                bar = '█' * filled + '░' * (bar_length - filled)
+                                self.log(f"  [{bar}] {completed}/{len(images_to_add)} ({current_percent}%)")
                                 last_logged_percent = current_percent
                         else:
                             # For small sets: log every image
@@ -3750,7 +3762,10 @@ img {
                 if use_reduced_logging:
                     if idx % log_interval == 0 or idx == 1 or idx == len(image_data_list):
                         percent = (idx * 100) // len(image_data_list)
-                        self.log(f"  [{idx}/{len(image_data_list)}] ({percent}%) ✅ Adding to EPUB...")
+                        bar_length = 20
+                        filled = int(bar_length * percent / 100)
+                        bar = '█' * filled + '░' * (bar_length - filled)
+                        self.log(f"  [{bar}] {idx}/{len(image_data_list)} ({percent}%)")
                 else:
                     self.log(f"  ✅ Added: {img_data['original']}")
             except Exception as e:
