@@ -379,8 +379,11 @@ class TitleExtractor:
                     sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
                     best_title, best_confidence, best_source = sorted_candidates[0]
                     
-                    # Log what we found for debugging
-                    log(f"[DEBUG] Best title candidate: '{best_title}' (confidence: {best_confidence:.2f}, source: {best_source})")
+                    # Log what we found for debugging (only if debug mode is enabled)
+                    import os
+                    debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+                    if debug_mode_enabled:
+                        log(f"[DEBUG] Best title candidate: '{best_title}' (confidence: {best_confidence:.2f}, source: {best_source})")
                     
                     return best_title, best_confidence
             
@@ -1894,13 +1897,22 @@ class EPUBCompiler:
                         idx, info = result
                         chapter_info[idx] = info
                         
-                        # Log progress
+                        # Log progress - only show issues (low confidence) unless debug mode is on
                         title, confidence, filename = info
-                        indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
-                        self.log(f"  [{completed}/{len(sorted_files)}] {indicator} Chapter {idx}: '{title}' (confidence: {confidence:.2f})")
+                        debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+                        
+                        # Always log low confidence (issues) or errors
+                        if confidence <= 0.4:
+                            indicator = "🔴"
+                            self.log(f"  [{completed}/{len(sorted_files)}] {indicator} Chapter {idx}: '{title}' (confidence: {confidence:.2f})")
+                        elif debug_mode_enabled:
+                            # In debug mode, log all chapters
+                            indicator = "✅" if confidence > 0.7 else "🟡"
+                            self.log(f"  [{completed}/{len(sorted_files)}] {indicator} Chapter {idx}: '{title}' (confidence: {confidence:.2f})")
                     else:  # Error
                         idx, info, error = result
                         chapter_info[idx] = info
+                        # Always log errors
                         self.log(f"❌ [{completed}/{len(sorted_files)}] Error processing chapter {idx}: {error}")
                         
                 except Exception as e:
@@ -2413,7 +2425,11 @@ class EPUBCompiler:
         
         if opf_order:
             self.log("✅ Using authoritative chapter order from OPF/EPUB")
-            self.log(f"[DEBUG] OPF entries (first 5): {list(opf_order.items())[:5]}")
+            
+            # Check if debug mode is enabled
+            debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+            if debug_mode_enabled:
+                self.log(f"[DEBUG] OPF entries (first 5): {list(opf_order.items())[:5]}")
             
             # Create mapping based on core filename (strip response_ and strip ALL extensions)
             ordered_files = []
@@ -2440,11 +2456,13 @@ class EPUBCompiler:
                     opf_core = strip_all_ext(opf_file)
                     if core_name == opf_core:
                         ordered_files.append((chapter_order, output_file))
-                        self.log(f"  Mapped: {output_file} -> {opf_name} (order: {chapter_order})")
+                        if debug_mode_enabled:
+                            self.log(f"  Mapped: {output_file} -> {opf_name} (order: {chapter_order})")
                         matched = True
                         break
                 if not matched:
                     unmapped_files.append(output_file)
+                    # Always log unmapped files (these are warnings)
                     self.log(f"  ⚠️ Could not map: {output_file} (core: {core_name})")
             
             if ordered_files:
@@ -4081,17 +4099,18 @@ img {
                 cover_item = first_item
                 spine = spine[1:]  # Remove cover from spine temporarily
         
-        # DEBUG: Log what we have before sorting
-        self.log("\n[DEBUG] Before sorting TOC:")
-        self.log("Spine order:")
-        for idx, item in enumerate(spine):
-            if hasattr(item, 'file_name') and hasattr(item, 'title'):
-                self.log(f"  Spine[{idx}]: {item.file_name} -> {item.title}")
-        
-        #self.log("\nTOC order (before sorting):")
-        for idx, item in enumerate(toc):
-            if hasattr(item, 'file_name') and hasattr(item, 'title'):
-                self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
+        # DEBUG: Log what we have before sorting (only if debug mode is enabled)
+        debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+        if debug_mode_enabled:
+            self.log("\n[DEBUG] Before sorting TOC:")
+            self.log("Spine order:")
+            for idx, item in enumerate(spine):
+                if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                    self.log(f"  Spine[{idx}]: {item.file_name} -> {item.title}")
+            
+            for idx, item in enumerate(toc):
+                if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                    self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
         
         # CRITICAL FIX: Sort TOC to match spine order
         # Create a mapping of file_name to spine position
@@ -4123,11 +4142,12 @@ img {
         # Add any unsorted items at the end (like gallery)
         final_toc.extend(unsorted_items)
         
-        # DEBUG: Log after sorting
-        self.log("\nTOC order (after sorting to match spine):")
-        for idx, item in enumerate(final_toc):
-            if hasattr(item, 'file_name') and hasattr(item, 'title'):
-                self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
+        # DEBUG: Log after sorting (only if debug mode is enabled)
+        if debug_mode_enabled:
+            self.log("\nTOC order (after sorting to match spine):")
+            for idx, item in enumerate(final_toc):
+                if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                    self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
         
         # Set the sorted TOC
         book.toc = final_toc

@@ -11522,11 +11522,14 @@ Important rules:
             os.environ['DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE'] = '1' if debug_mode else '0'
             # Also reflect debug mode for the client
             os.environ['SHOW_DEBUG_BUTTONS'] = '1' if debug_mode else '0'
+            # Set DEBUG_MODE for general debug logging (used by epub_converter, etc.)
+            os.environ['DEBUG_MODE'] = '1' if debug_mode else '0'
             # Ensure capture itself is enabled
             os.environ['DEBUG_SAVE_REQUEST_PAYLOADS'] = '1'
             if debug_mode:
                 self.append_log("🔍 [INIT] Verbose payload logging enabled (DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE=1)")
                 self.append_log("🔍 [INIT] Definitive payload capture enabled (DEBUG_SAVE_REQUEST_PAYLOADS=1)")
+                self.append_log("🔍 [INIT] Debug mode enabled (DEBUG_MODE=1)")
         except Exception:
             pass
         
@@ -11665,6 +11668,11 @@ Important rules:
                 import json as _json
             except Exception:
                 _json = json
+            
+            # Calculate resolved_max_retry_tokens
+            current_max_tokens = getattr(self, 'max_output_tokens', 65536)
+            resolved_max_retry_tokens = self._resolve_max_retry_tokens(current_max_tokens) if hasattr(self, '_resolve_max_retry_tokens') else current_max_tokens
+            
             extra_env_mappings = [
                 # Rolling summary
                 ('USE_ROLLING_SUMMARY', '1' if getattr(self, 'rolling_summary_var', False) else '0'),

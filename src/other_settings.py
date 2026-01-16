@@ -8341,6 +8341,9 @@ def _create_debug_controls_section(self, parent_frame):
                     self.config = {}
                 self.config['show_debug_buttons'] = new_debug_state
                 
+                # Set environment variable for debug mode
+                os.environ['DEBUG_MODE'] = '1' if new_debug_state else '0'
+                
                 # Save config
                 self.save_config(show_message=False)
                 
