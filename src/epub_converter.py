@@ -1450,8 +1450,8 @@ class EPUBCompiler:
                         import traceback
                         self.log(traceback.format_exc())
                         # Continue with compilation even if translation fails
-            elif not standalone_success and not use_fallback:
-                # Standalone failed but fallback is disabled
+            elif not standalone_success and not use_fallback and hasattr(self, 'batch_translate_headers') and self.batch_translate_headers:
+                # Standalone failed but fallback is disabled (only warn if batch translation is enabled)
                 self.log("⚠️ Standalone header translation failed and sorted fallback is disabled")
                 self.log("   Enable 'Use Sorted Fallback' in Other Settings if needed")
             else:
