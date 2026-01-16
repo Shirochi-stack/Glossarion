@@ -762,6 +762,14 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
             # No hardcoded special file patterns
             html_files.append(name)
     
+    # Print final 100% progress update before finishing
+    if total_files > 100:
+        if progress_callback:
+            progress_callback(f"Scanning files: {total_files}/{total_files}")
+        else:
+            # Show 100% completion
+            ProgressBar.update(total_files, total_files, prefix="📂 Scanning files")
+    
     # Finish progress bar if we were using it
     if total_files > 100 and not progress_callback:
         ProgressBar.finish()

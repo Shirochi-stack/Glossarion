@@ -4976,8 +4976,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Create buttons
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
-            # Special handling for Extract Glossary - don't set text yet, we'll add it with icon
-            if lbl == "Extract Glossary":
+            # Special handling for Extract Glossary and EPUB Converter - don't set text yet, we'll add it with icon
+            if lbl in ["Extract Glossary", "EPUB Converter"]:
                 btn = QPushButton()
             else:
                 btn = QPushButton(lbl)
@@ -4987,7 +4987,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.save_config_button = btn
                 btn.clicked.connect(self._on_save_config_clicked)
                 btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Save all settings to config.json.</p></qt>")
-            elif lbl != "Extract Glossary":  # Don't connect yet for Extract Glossary
+            elif lbl not in ["Extract Glossary", "EPUB Converter"]:  # Don't connect yet for these buttons
                 btn.clicked.connect(cmd)
             
             btn.setMinimumHeight(40)  # Increased button height for all toolbar buttons
@@ -5092,7 +5092,95 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     }}
                 """)
             elif lbl == "EPUB Converter":
+                # Create EPUB Converter button with mini icon (like Extract Glossary)
+                epub_btn_widget = QWidget()
+                epub_btn_layout = QHBoxLayout(epub_btn_widget)
+                epub_btn_layout.setContentsMargins(0, 0, 0, 0)
+                epub_btn_layout.setSpacing(3)  # Minimal spacing between icon and text
+                epub_btn_layout.setAlignment(Qt.AlignCenter)  # Center the contents
+                
+                # Mini icon for EPUB button
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+                
+                # Reuse RotatableLabel class
+                class RotatableLabel(QLabel):
+                    def __init__(self, parent=None):
+                        super().__init__(parent)
+                        self._rotation = 0
+                        self._original_pixmap = None
+                    
+                    def set_rotation(self, angle):
+                        self._rotation = angle
+                        if self._original_pixmap:
+                            transform = QTransform()
+                            transform.rotate(angle)
+                            rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                            self.setPixmap(rotated)
+                    
+                    def get_rotation(self):
+                        return self._rotation
+                    
+                    rotation = Property(float, get_rotation, set_rotation)
+                    
+                    def set_original_pixmap(self, pixmap):
+                        self._original_pixmap = pixmap
+                        self.setPixmap(pixmap)
+                
+                self.epub_button_icon = RotatableLabel()
+                self.epub_button_icon.setStyleSheet("background-color: transparent;")
+                if os.path.exists(icon_path):
+                    from PySide6.QtGui import QIcon, QPixmap
+                    from PySide6.QtCore import QSize
+                    icon = QIcon(icon_path)
+                    try:
+                        dpr = self.devicePixelRatioF()
+                    except Exception:
+                        dpr = 1.0
+                    logical_px = 16
+                    dev_px = int(logical_px * max(1.0, dpr))
+                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                    if pm.isNull():
+                        raw = QPixmap(icon_path)
+                        img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        pm = QPixmap.fromImage(img)
+                    try:
+                        pm.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    self.epub_button_icon.set_original_pixmap(pm)
+                self.epub_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
+                self.epub_button_icon.setAlignment(Qt.AlignCenter)
+                
+                # Smooth spinner (cached frames)
+                self.epub_spinner = self._create_spinner(self.epub_button_icon)
+                
+                # Button text label
+                self.epub_text_label = QLabel("EPUB Converter")  # Store as instance variable
+                self.epub_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
+                self.epub_text_label.setAlignment(Qt.AlignCenter)
+                
+                epub_btn_layout.addWidget(self.epub_button_icon)
+                epub_btn_layout.addWidget(self.epub_text_label)
+                btn.setLayout(epub_btn_layout)
+                
+                # Now connect the command after layout is set
+                btn.clicked.connect(cmd)
+                
                 self.epub_button = btn
+                # Add disabled state styling for EPUB Converter button
+                btn.setMinimumWidth(150)  # Wider button
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {color};
+                        color: white;
+                        padding: 6px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #555555;
+                        color: #888888;
+                    }}
+                """)
             elif lbl == "Async Processing (50% Off)":
                 self.async_button = btn
             elif lbl == "Progress Manager":
@@ -9108,17 +9196,31 @@ Important rules:
                pass
            
            if epub_running:
-               self.epub_button.setText("Stop EPUB")
-               self.epub_button.setStyleSheet("background-color: #dc3545; color: white; padding: 6px;")  # red
+               # Update text label instead of button text
+               if hasattr(self, 'epub_text_label'):
+                   self.epub_text_label.setText("Stop EPUB")
+               self.epub_button.setStyleSheet("""
+                   QPushButton {
+                       background-color: #dc3545;
+                       color: white;
+                       padding: 6px;
+                   }
+               """)
                self.epub_button.clicked.connect(self.stop_epub_converter)
                self.epub_button.setEnabled(True)
+               # Start spinner for EPUB icon
+               if getattr(self, 'epub_spinner', None):
+                   self.epub_spinner.start()
            else:
-               self.epub_button.setText("EPUB Converter")
+               # Update text label instead of button text
+               if hasattr(self, 'epub_text_label'):
+                   self.epub_text_label.setText("EPUB Converter")
                self.epub_button.setStyleSheet("""
                    QPushButton {
                        background-color: #17a2b8;
                        color: white;
                        padding: 6px;
+                       font-weight: bold;
                    }
                    QPushButton:disabled {
                        background-color: #555555;
@@ -9127,6 +9229,9 @@ Important rules:
                """)
                self.epub_button.clicked.connect(self.epub_converter)
                self.epub_button.setEnabled(bool(fallback_compile_epub and not any_process_running))
+               # Stop spinner
+               if getattr(self, 'epub_spinner', None):
+                   self.epub_spinner.stop()
        
        # QA button
        if hasattr(self, 'qa_button'):

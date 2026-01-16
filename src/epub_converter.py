@@ -3738,6 +3738,11 @@ img {
         log_interval = max(1, len(image_data_list) // 20) if use_reduced_logging else 1
         
         for idx, img_data in enumerate(image_data_list, 1):
+            # Check stop flag
+            if self.is_stopped():
+                self.log(f"🛑 Image addition stopped by user ({added}/{len(image_data_list)} images added)")
+                break
+            
             try:
                 book.add_item(epub.EpubItem(
                     uid=img_data['safe'],
@@ -3756,7 +3761,10 @@ img {
             except Exception as e:
                 self.log(f"  ❌ Failed to add {img_data['original']} to EPUB: {e}")
         
-        self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
+        if self.is_stopped():
+            self.log(f"⚠️ Image addition incomplete: {added}/{len(images_to_add)} images were added before stopping")
+        else:
+            self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
     
     def _create_cover_page(self, book: epub.EpubBook, cover_file: str, 
                           processed_images: Dict[str, str], css_items: List[epub.EpubItem],
@@ -4213,8 +4221,13 @@ img {
             base_name = os.path.basename(self.output_dir)
             out_path = os.path.join(self.output_dir, f"{base_name}.epub")
         
+        # Check stop flag before starting the write operation
+        if self.is_stopped():
+            self.log("🛑 EPUB write cancelled - stop requested before write started")
+            return
+        
         self.log(f"\n[DEBUG] Writing EPUB to: {out_path}")
-        self.log("⌛ Writing EPUB file... (this may take a while for large files)")
+        self.log("⏳ Writing EPUB file... (this may take a while for large files)")
         
         # Track elapsed time with periodic updates
         start_time = time.time()
@@ -4225,8 +4238,13 @@ img {
             while not write_completed.is_set():
                 if write_completed.wait(5):  # Wait 5 seconds or until completed
                     break
-                elapsed = time.time() - start_time
-                self.log(f"⌛ Still writing... ({elapsed:.0f}s elapsed)")
+                # Check stop flag during write
+                if self.is_stopped():
+                    elapsed = time.time() - start_time
+                    self.log(f"⏳ Still writing... ({elapsed:.0f}s elapsed) - Stop requested, will finish current write operation")
+                else:
+                    elapsed = time.time() - start_time
+                    self.log(f"⏳ Still writing... ({elapsed:.0f}s elapsed)")
         
         # Start progress logger thread
         logger_thread = threading.Thread(target=progress_logger, daemon=True)
@@ -4239,8 +4257,14 @@ img {
             write_completed.set()  # Signal completion
             logger_thread.join(timeout=1)  # Wait for logger to finish
             
-            elapsed = time.time() - start_time
-            self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
+            # Check if stop was requested during write
+            if self.is_stopped():
+                elapsed = time.time() - start_time
+                self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s) - Write completed before stop")
+                self.log("🛑 Note: Stop was requested but write operation finished normally")
+            else:
+                elapsed = time.time() - start_time
+                self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
             
         except Exception as e:
             self.log(f"[ERROR] Write failed: {e}")
