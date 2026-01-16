@@ -1195,7 +1195,9 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         # Enhanced mode summary
         if extraction_mode == "enhanced":
             enhanced_count = sum(1 for c in chapters if c.get('enhanced_extraction', False))
-            print(f"   🚀 Enhanced extraction used: {enhanced_count}/{len(chapters)} chapters")
+            total_chars = sum(len(c.get('body', '')) for c in chapters if c.get('enhanced_extraction', False))
+            avg_chars = total_chars // enhanced_count if enhanced_count > 0 else 0
+            print(f"   🚀 Enhanced extraction: {enhanced_count}/{len(chapters)} chapters, {total_chars:,} total chars (avg: {avg_chars:,})")
         
         # Check for gaps
         chapter_nums = [c["num"] for c in chapters]
