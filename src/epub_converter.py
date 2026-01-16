@@ -1115,21 +1115,8 @@ class EPUBCompiler:
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
         self.metadata_path = os.path.join(self.output_dir, "metadata.json")
         self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
-        
-        # Get worker count from environment with explicit debug logging
-        workers_env = os.environ.get("EXTRACTION_WORKERS", "NOT_SET")
-        if workers_env == "NOT_SET":
-            self.max_workers = 4
-            self.log(f"⚠️ EXTRACTION_WORKERS not set, using default: {self.max_workers}")
-        else:
-            try:
-                self.max_workers = int(workers_env)
-                self.log(f"✅ EXTRACTION_WORKERS from env: {self.max_workers}")
-            except ValueError:
-                self.max_workers = 4
-                self.log(f"⚠️ Invalid EXTRACTION_WORKERS value '{workers_env}', using default: {self.max_workers}")
-        
-        self.log(f"[INFO] EPUBCompiler initialized with {self.max_workers} workers for parallel processing")
+        self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
+        self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
         
         # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
         self.auxiliary_html_files: set[str] = set()
@@ -3528,7 +3515,6 @@ img {
             # Get list of files to process
             image_files = sorted(os.listdir(self.images_dir))
             self.log(f"🖼️ Processing {len(image_files)} potential images with {self.max_workers} workers")
-            self.log(f"[DEBUG] _process_images() using ThreadPoolExecutor with max_workers={self.max_workers}")
             
             def process_single_image(img):
                 """Worker function to process a single image"""
@@ -3671,7 +3657,6 @@ img {
             return
         
         self.log(f"📚 Adding {len(images_to_add)} images to EPUB with {self.max_workers} workers")
-        self.log(f"[DEBUG] _add_images_to_book() using ThreadPoolExecutor with max_workers={self.max_workers}")
         
         def read_image_file(image_data):
             """Worker function to read image file"""

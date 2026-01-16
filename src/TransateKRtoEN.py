@@ -2088,24 +2088,6 @@ class ProgressManager:
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, chapter_obj=None):
         """Check if a chapter needs translation"""
-        def _norm(fname: str):
-            """
-            Normalize a filename for comparison:
-            - drop leading response_ prefix
-            - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
-            - lowercase for case-insensitive matching on Windows
-            """
-            if not fname:
-                return ""
-            base = os.path.basename(fname)
-            if base.startswith("response_"):
-                base = base[len("response_"):]
-            # Strip all extensions, not just the last one
-            while True:
-                base, ext = os.path.splitext(base)
-                if not ext:
-                    break
-            return base.lower()
         # If caller passed 0/None, recompute from filename/spine to avoid collapsing to chapter 0
         if (actual_num is None or actual_num <= 0) and chapter_obj:
             try:
@@ -2172,6 +2154,24 @@ class ProgressManager:
             output_path = os.path.join(output_dir, output_filename)
 
             # If a differently-keyed entry already tracks this file, reuse it instead of auto-discovering
+            def _norm(fname: str):
+                """
+                Normalize a filename for comparison:
+                - drop leading response_ prefix
+                - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
+                - lowercase for case-insensitive matching on Windows
+                """
+                if not fname:
+                    return ""
+                base = os.path.basename(fname)
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                # Strip all extensions, not just the last one
+                while True:
+                    base, ext = os.path.splitext(base)
+                    if not ext:
+                        break
+                return base.lower()
 
             expected_norm = _norm(output_filename)
             for k, info in self.prog.get("chapters", {}).items():
