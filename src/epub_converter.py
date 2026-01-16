@@ -511,14 +511,9 @@ class XHTMLConverter:
             import html
             import re
             
-            # Add debug at the very start
-            log(f"[DEBUG] Processing chapter: {title}")
-            log(f"[DEBUG] Input HTML length: {len(html_content)}")
-            
             # Unescape HTML entities but PRESERVE &lt; and &gt; so fake angle brackets in narrative
             # text don't become real tags (which breaks parsing across paragraphs like the sample).
             if any(ent in html_content for ent in ['&amp;', '&quot;', '&#', '&lt;', '&gt;']):
-                log(f"[DEBUG] Unescaping HTML entities (preserving &lt; and &gt;)")
                 # Temporarily protect &lt; and &gt; (both cases) from unescaping
                 placeholder_lt = '\ue000'
                 placeholder_gt = '\ue001'
@@ -531,20 +526,17 @@ class XHTMLConverter:
             
             # Strip out ANY existing DOCTYPE, XML declaration, or html wrapper
             # We only want the body content
-            log(f"[DEBUG] Extracting body content")
             
             # Try to extract just body content
             body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
             if body_match:
                 html_content = body_match.group(1)
-                log(f"[DEBUG] Extracted body content")
             else:
                 # No body tags, strip any DOCTYPE/html tags if present
                 html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content)
                 html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
                 html_content = re.sub(r'</?html[^>]*>', '', html_content)
                 html_content = re.sub(r'<head[^>]*>.*?</head>', '', html_content, flags=re.DOTALL)
-                log(f"[DEBUG] Stripped wrapper tags")
             
             # Now process the content normally
             # Fix broken attributes with ="" pattern
@@ -2090,6 +2082,11 @@ class EPUBCompiler:
         # Process in parallel
         processed_chapters = []
         completed = 0
+        total_chapters = len(chapter_data)
+        
+        # Use reduced logging for large EPUBs
+        use_reduced_logging = total_chapters > 50
+        log_interval = max(1, total_chapters // 20) if use_reduced_logging else 1
         
         self.log(f"\n[DEBUG] Starting parallel processing...")
         
@@ -2111,23 +2108,18 @@ class EPUBCompiler:
                         processed_chapters.append(result)
                         completed += 1
                         
-                        # Extra logging for problem chapters
-                        if 49 <= result['num'] <= 56:
-                            if result['success']:
-                                self.log(f"  [{completed}/{len(chapter_data)}] ✅ PROBLEM CHAPTER PROCESSED: {result['num']} - {result['title']}")
-                            else:
-                                self.log(f"  [{completed}/{len(chapter_data)}] ❌ PROBLEM CHAPTER FAILED: {result['num']} - {result['filename']}")
-                                self.log(f"     Error: {result['error']}")
-                        else:
-                            if result['success']:
-                                self.log(f"  [{completed}/{len(chapter_data)}] ✅ Processed: {result['title']}")
-                            else:
-                                self.log(f"  [{completed}/{len(chapter_data)}] ❌ Failed: {result['filename']} - {result['error']}")
+                        # Always log failures
+                        if not result['success']:
+                            self.log(f"  [{completed}/{total_chapters}] ❌ Failed: {result['filename']} - {result['error']}")
+                        # For successes: log at intervals for large EPUBs, or always for small ones
+                        elif not use_reduced_logging or completed == 1 or completed % log_interval == 0 or completed == total_chapters:
+                            current_percent = (completed * 100) // total_chapters
+                            self.log(f"  [{completed}/{total_chapters}] ✅ Processed chapters ({current_percent}%)")
                             
                 except Exception as e:
                     completed += 1
                     chapter_num = futures[future]
-                    self.log(f"  [{completed}/{len(chapter_data)}] ❌ Exception processing chapter {chapter_num}: {e}")
+                    self.log(f"  [{completed}/{total_chapters}] ❌ Exception processing chapter {chapter_num}: {e}")
                     import traceback
                     self.log(f"[ERROR] Traceback:\n{traceback.format_exc()}")
         
@@ -2144,11 +2136,13 @@ class EPUBCompiler:
         
         # Add chapters to book in order (this must be sequential)
         self.log("\n📦 Adding chapters to EPUB structure...")
-        for chapter_data in processed_chapters:
-            # Debug for problem chapters
-            if 49 <= chapter_data['num'] <= 56:
-                self.log(f"[DEBUG] Adding problem chapter {chapter_data['num']} to EPUB...")
-            
+        
+        # Use reduced logging for large EPUBs
+        total_to_add = len(processed_chapters)
+        use_reduced_logging = total_to_add > 50
+        log_interval = max(1, total_to_add // 20) if use_reduced_logging else 1
+        
+        for idx, chapter_data in enumerate(processed_chapters, 1):
             if chapter_data['success']:
                 try:
                     # Create EPUB chapter
@@ -2176,13 +2170,12 @@ class EPUBCompiler:
                         toc.append(chapter)
                     chapters_added += 1
                     
-                    if 49 <= chapter_data['num'] <= 56:
-                        self.log(f"  ✅ ADDED PROBLEM CHAPTER {chapter_data['num']}: '{chapter_data['title']}'")
-                    else:
-                        if base_name in getattr(self, 'auxiliary_html_files', set()):
-                            self.log(f"  ✅ Added auxiliary page (spine only): '{base_name}'")
-                        else:
-                            self.log(f"  ✅ Added chapter {chapter_data['num']}: '{chapter_data['title']}'")
+                    # Log auxiliary files always, or at intervals for regular chapters
+                    if base_name in getattr(self, 'auxiliary_html_files', set()):
+                        self.log(f"  ✅ Added auxiliary page (spine only): '{base_name}'")
+                    elif not use_reduced_logging or idx == 1 or idx % log_interval == 0 or idx == total_to_add:
+                        current_percent = (idx * 100) // total_to_add
+                        self.log(f"  ✅ Added {idx}/{total_to_add} chapters to structure ({current_percent}%)")
                     
                 except Exception as e:
                     self.log(f"  ❌ Failed to add chapter {chapter_data['num']} to book: {e}")
@@ -3938,12 +3931,9 @@ img {
                 except Exception:
                     pass
             
-            # Log summary only
-            if total_images > 0:
-                if missing_images:
-                    self.log(f"[WARNING] Chapter images: {found_images}/{total_images} found. Missing: {missing_images[:5]}{'...' if len(missing_images) > 5 else ''}")
-                else:
-                    self.log(f"[DEBUG] Chapter images: {found_images}/{total_images} found (all present)")
+            # Log summary only if there are issues
+            if total_images > 0 and missing_images:
+                self.log(f"[WARNING] Chapter images: {found_images}/{total_images} found. Missing: {missing_images[:5]}{'...' if len(missing_images) > 5 else ''}")
             
             if changed:
                 # Return the modified content
