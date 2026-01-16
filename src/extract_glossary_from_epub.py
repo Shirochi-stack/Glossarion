@@ -3653,7 +3653,8 @@ def main(log_callback=None, stop_callback=None):
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
                     # Log the final size after deduplication
-                    print(f"✅ Saved {len(glossary)} entries (after {removed if 'removed' in locals() else 0} duplicates removed) before exit")
+                    removed = max(0, original_size - len(glossary))
+                    print(f"✅ Saved {len(glossary)} entries (after {removed} duplicates removed) before exit")
                 return
             
             # Handle context history
