@@ -2309,26 +2309,45 @@ class EPUBCompiler:
                     skip_list = ['nav', 'toc', 'contents', 'cover']
                     self.log("  📝 Special files mode DISABLED - excluding navigation files")
                 
-                for itemref in spine.findall('opf:itemref', ns):
+                # Count total items first to decide on logging
+                itemrefs = spine.findall('opf:itemref', ns)
+                total_items = len(itemrefs)
+                use_reduced_logging = total_items > 50
+                log_interval = max(1, total_items // 20) if use_reduced_logging else 1
+                
+                for idx, itemref in enumerate(itemrefs):
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
                         filename = manifest[idref]
                         
                         # CRITICAL: Files with numbers are always regular chapters, regardless of keywords!
                         name_without_ext = os.path.splitext(filename)[0].lower()
-                        has_numbers = bool(re.search(r'\d', name_without_ext))
+                        has_numbers = bool(re.search(r'\\d', name_without_ext))
                         
                         # If file has numbers, it's a chapter - include it
                         if has_numbers:
                             filename_to_order[filename] = chapter_num
-                            self.log(f"  Chapter {chapter_num}: {filename} (numbered)")
+                            # Only log periodically for large EPUBs
+                            if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
+                                if use_reduced_logging:
+                                    percent = (idx * 100) // total_items
+                                    self.log(f"  [{idx}/{total_items}] ({percent}%) Processing chapters...")
+                                else:
+                                    self.log(f"  Chapter {chapter_num}: {filename} (numbered)")
                             chapter_num += 1
                         # Otherwise, check skip list for special files
                         elif not skip_list or not any(skip in filename.lower() for skip in skip_list):
                             filename_to_order[filename] = chapter_num
-                            self.log(f"  Chapter {chapter_num}: {filename}")
+                            # Only log periodically for large EPUBs
+                            if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
+                                if use_reduced_logging:
+                                    percent = (idx * 100) // total_items
+                                    self.log(f"  [{idx}/{total_items}] ({percent}%) Processing chapters...")
+                                else:
+                                    self.log(f"  Chapter {chapter_num}: {filename}")
                             chapter_num += 1
                         else:
+                            # Always log skipped files (these are rare)
                             self.log(f"  Skipping special file (no numbers): {filename}")
             
             return filename_to_order
@@ -3704,7 +3723,10 @@ img {
         # Add images to book sequentially (required by ebooklib)
         self.log("\n📦 Adding images to EPUB structure...")
         added = 0
-        for img_data in image_data_list:
+        use_reduced_logging = len(image_data_list) > 50
+        log_interval = max(1, len(image_data_list) // 20) if use_reduced_logging else 1
+        
+        for idx, img_data in enumerate(image_data_list, 1):
             try:
                 book.add_item(epub.EpubItem(
                     uid=img_data['safe'],
@@ -3713,7 +3735,13 @@ img {
                     content=img_data['content']
                 ))
                 added += 1
-                self.log(f"  ✅ Added: {img_data['original']}")
+                # Only log periodically for large sets
+                if use_reduced_logging:
+                    if idx % log_interval == 0 or idx == 1 or idx == len(image_data_list):
+                        percent = (idx * 100) // len(image_data_list)
+                        self.log(f"  [{idx}/{len(image_data_list)}] ({percent}%) ✅ Adding to EPUB...")
+                else:
+                    self.log(f"  ✅ Added: {img_data['original']}")
             except Exception as e:
                 self.log(f"  ❌ Failed to add {img_data['original']} to EPUB: {e}")
         
@@ -3799,8 +3827,10 @@ img {
             soup = BeautifulSoup(xhtml_content, 'lxml')
             changed = False
             
-            # Debug: Log what images we're looking for
-            self.log(f"[DEBUG] Processing chapter images. Available images: {list(processed_images.keys())}")
+            # Track statistics for summary
+            total_images = 0
+            found_images = 0
+            missing_images = []
             
             # 1) Handle <img> tags that reference files
             for img in soup.find_all('img'):
@@ -3809,13 +3839,12 @@ img {
                     self.log(f"[WARNING] Image tag with no src attribute found")
                     continue
                 
+                total_images += 1
+                
                 # Get the base filename - handle various path formats
                 # Remove query parameters first
                 clean_src = src.split('?')[0]
                 basename = os.path.basename(clean_src)
-                
-                # Debug: Log what we're looking for
-                self.log(f"[DEBUG] Looking for image: {basename} (from src: {src})")
                 
                 # Look up the safe name
                 if basename in processed_images:
@@ -3823,9 +3852,9 @@ img {
                     new_src = f"images/{safe_name}"
                     
                     if src != new_src:
-                        self.log(f"[DEBUG] Updating image src: {src} -> {new_src}")
                         img['src'] = new_src
                         changed = True
+                    found_images += 1
                 else:
                     # Try without extension variations
                     name_without_ext = os.path.splitext(basename)[0]
@@ -3833,14 +3862,14 @@ img {
                     for original_name, safe_name in processed_images.items():
                         if os.path.splitext(original_name)[0] == name_without_ext:
                             new_src = f"images/{safe_name}"
-                            self.log(f"[DEBUG] Found image by name match: {src} -> {new_src}")
                             img['src'] = new_src
                             changed = True
                             found = True
+                            found_images += 1
                             break
                     
                     if not found:
-                        self.log(f"[WARNING] Image not found in processed_images: {basename}")
+                        missing_images.append(basename)
                         # Still update the path to use images/ prefix if it doesn't have it
                         if not src.startswith('images/'):
                             img['src'] = f"images/{basename}"
@@ -3908,6 +3937,13 @@ img {
                             self.log(f"[WARNING] Failed to rasterize inline SVG: {e}")
                 except Exception:
                     pass
+            
+            # Log summary only
+            if total_images > 0:
+                if missing_images:
+                    self.log(f"[WARNING] Chapter images: {found_images}/{total_images} found. Missing: {missing_images[:5]}{'...' if len(missing_images) > 5 else ''}")
+                else:
+                    self.log(f"[DEBUG] Chapter images: {found_images}/{total_images} found (all present)")
             
             if changed:
                 # Return the modified content
@@ -4155,6 +4191,9 @@ img {
 
     def _write_epub(self, book: epub.EpubBook, metadata: dict):
         """Write EPUB file with automatic format selection"""
+        import time
+        import threading
+        
         # Determine output filename
         book_title = book.title
         if book_title and book_title != os.path.basename(self.output_dir):
@@ -4165,12 +4204,33 @@ img {
             out_path = os.path.join(self.output_dir, f"{base_name}.epub")
         
         self.log(f"\n[DEBUG] Writing EPUB to: {out_path}")
+        self.log("⌛ Writing EPUB file... (this may take a while for large files)")
+        
+        # Track elapsed time with periodic updates
+        start_time = time.time()
+        write_completed = threading.Event()
+        
+        def progress_logger():
+            """Log progress every 5 seconds during write"""
+            while not write_completed.is_set():
+                if write_completed.wait(5):  # Wait 5 seconds or until completed
+                    break
+                elapsed = time.time() - start_time
+                self.log(f"⌛ Still writing... ({elapsed:.0f}s elapsed)")
+        
+        # Start progress logger thread
+        logger_thread = threading.Thread(target=progress_logger, daemon=True)
+        logger_thread.start()
         
         # Always write as EPUB3
         try:
             opts = {'epub3': True}
             epub.write_epub(out_path, book, opts)
-            self.log("[SUCCESS] Written as EPUB 3.3")
+            write_completed.set()  # Signal completion
+            logger_thread.join(timeout=1)  # Wait for logger to finish
+            
+            elapsed = time.time() - start_time
+            self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
             
         except Exception as e:
             self.log(f"[ERROR] Write failed: {e}")
