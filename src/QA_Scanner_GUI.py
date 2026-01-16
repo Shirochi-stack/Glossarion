@@ -2384,7 +2384,7 @@ class QAScannerMixin:
         disable_wheel_event(excess_threshold_spinbox)
         excess_threshold_layout.addWidget(excess_threshold_spinbox)
         
-        excess_threshold_hint = QLabel("(0 = flag any excess, 49 = flag if 50% more than source)")
+        excess_threshold_hint = QLabel("(0 = flag all excess, 49 = flag if half excess, 100 = only flag if doubled)")
         excess_threshold_hint.setFont(QFont('Arial', 9))
         excess_threshold_hint.setStyleSheet("color: gray;")
         excess_threshold_layout.addWidget(excess_threshold_hint)
