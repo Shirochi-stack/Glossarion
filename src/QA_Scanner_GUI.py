@@ -319,6 +319,7 @@ class QAScannerMixin:
             'check_translation_artifacts': False,
             'check_punctuation_mismatch': False,
             'punctuation_loss_threshold': 49,
+            'flag_excess_punctuation': False,
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,
@@ -2353,6 +2354,28 @@ class QAScannerMixin:
         check_punctuation_checkbox.toggled.connect(toggle_punctuation_threshold)
         toggle_punctuation_threshold(check_punctuation_checkbox.isChecked())  # Set initial state
         
+        # Excess punctuation checkbox (indented under the punctuation checker)
+        excess_punct_widget = QWidget()
+        excess_punct_layout = QHBoxLayout(excess_punct_widget)
+        excess_punct_layout.setContentsMargins(20, 0, 0, 10)
+        
+        excess_punct_checkbox = self._create_styled_checkbox("Flag excess punctuation (more ? or ! than source)")
+        excess_punct_checkbox.setChecked(qa_settings.get('flag_excess_punctuation', False))
+        excess_punct_layout.addWidget(excess_punct_checkbox)
+        excess_punct_layout.addStretch()
+        detection_layout.addWidget(excess_punct_widget)
+        
+        # Enable/disable excess punctuation checkbox based on main checkbox
+        def toggle_excess_punct(checked):
+            excess_punct_checkbox.setEnabled(checked)
+            if checked:
+                excess_punct_checkbox.setStyleSheet("color: white;")
+            else:
+                excess_punct_checkbox.setStyleSheet("color: #606060;")
+        
+        check_punctuation_checkbox.toggled.connect(toggle_excess_punct)
+        toggle_excess_punct(check_punctuation_checkbox.isChecked())  # Set initial state
+        
         check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
         check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
         detection_layout.addWidget(check_glossary_checkbox)
@@ -3131,6 +3154,7 @@ class QAScannerMixin:
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                     'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                     'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
+                    'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                     'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),

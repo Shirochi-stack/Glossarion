@@ -1345,6 +1345,8 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         original_punctuation_info: Dict from extract_epub_punctuation_info()
         threshold: Ratio threshold for flagging mismatches (0.5 = flag if 50% or more punctuation lost)
         qa_settings: Optional dict with 'punctuation_loss_threshold' (0-100, default 50)
+                     and 'flag_excess_punctuation' (bool, default False) to flag when translation
+                     has MORE punctuation than source
     
     Returns:
         tuple: (has_mismatch, details)
@@ -1352,6 +1354,10 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
     # Get threshold from settings if provided (convert from percentage to ratio)
     if qa_settings and 'punctuation_loss_threshold' in qa_settings:
         threshold = qa_settings['punctuation_loss_threshold'] / 100.0
+    
+    # Get excess punctuation flag from settings (default False for backwards compatibility)
+    flag_excess = qa_settings.get('flag_excess_punctuation', False) if qa_settings else False
+    
     try:
         # If no original punctuation info for this chapter, skip check
         if chapter_num not in original_punctuation_info:
@@ -1361,8 +1367,8 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         orig_question_count = orig_info['question_marks']
         orig_exclamation_count = orig_info['exclamation_marks']
         
-        # If no punctuation in original, nothing to check
-        if orig_question_count == 0 and orig_exclamation_count == 0:
+        # If no punctuation in original and we're not checking for excess, nothing to check
+        if orig_question_count == 0 and orig_exclamation_count == 0 and not flag_excess:
             return False, []
         
         # Count punctuation in translated text
@@ -1372,7 +1378,7 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         details = []
         has_mismatch = False
         
-        # Check question marks
+        # Check question marks - loss detection
         if orig_question_count > 0:
             loss_ratio = 1.0 - (trans_question_count / orig_question_count)
             if loss_ratio > threshold:
@@ -1386,7 +1392,22 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
                     'description': f'Lost {int(loss_ratio*100)}% of question marks ({trans_question_count}/{orig_question_count})'
                 })
         
-        # Check exclamation marks
+        # Check question marks - excess detection (if enabled)
+        if flag_excess and trans_question_count > orig_question_count:
+            excess_count = trans_question_count - orig_question_count
+            excess_ratio = excess_count / max(1, orig_question_count)  # Avoid division by zero
+            has_mismatch = True
+            details.append({
+                'type': 'excess_question_marks',
+                'severity': 'medium',
+                'original_count': orig_question_count,
+                'translated_count': trans_question_count,
+                'excess_count': excess_count,
+                'excess_ratio': excess_ratio,
+                'description': f'Excess question marks: {excess_count} more than source ({trans_question_count}/{orig_question_count})'
+            })
+        
+        # Check exclamation marks - loss detection
         if orig_exclamation_count > 0:
             loss_ratio = 1.0 - (trans_exclamation_count / orig_exclamation_count)
             if loss_ratio > threshold:
@@ -1399,6 +1420,21 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
                     'loss_ratio': loss_ratio,
                     'description': f'Lost {int(loss_ratio*100)}% of exclamation marks ({trans_exclamation_count}/{orig_exclamation_count})'
                 })
+        
+        # Check exclamation marks - excess detection (if enabled)
+        if flag_excess and trans_exclamation_count > orig_exclamation_count:
+            excess_count = trans_exclamation_count - orig_exclamation_count
+            excess_ratio = excess_count / max(1, orig_exclamation_count)  # Avoid division by zero
+            has_mismatch = True
+            details.append({
+                'type': 'excess_exclamation_marks',
+                'severity': 'medium',
+                'original_count': orig_exclamation_count,
+                'translated_count': trans_exclamation_count,
+                'excess_count': excess_count,
+                'excess_ratio': excess_ratio,
+                'description': f'Excess exclamation marks: {excess_count} more than source ({trans_exclamation_count}/{orig_exclamation_count})'
+            })
         
         return has_mismatch, details
         
@@ -5323,8 +5359,23 @@ def process_html_file_batch(args):
         # Check for punctuation mismatches (if enabled)
         check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
         if check_punctuation and original_punctuation_info:
-            # Extract text for punctuation comparison
-            punct_text = raw_text
+            # Extract VISIBLE text for punctuation comparison (matching source extraction logic)
+            # Strip non-visible tags like <head>, <title>, <script>, <style> if content has HTML
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                # Check if content looks like HTML (has any non-visible tags we care about)
+                content_lower = file_content.lower()
+                if any(tag in content_lower for tag in ['<head', '<title', '<script', '<style', '<meta', '<link']):
+                    soup = BeautifulSoup(file_content, 'html.parser')
+                    # Remove non-visible tags before extracting text (same as source extraction)
+                    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                        tag.decompose()
+                    punct_text = soup.get_text()
+                else:
+                    punct_text = raw_text
+            except Exception:
+                punct_text = raw_text  # Fallback to raw_text if parsing fails
             
             # Match logic similar to image checking
             search_filename = filename.lower()
@@ -5386,8 +5437,14 @@ def process_html_file_batch(args):
                     
                     orig_count = punct_issue.get('original_count', 0)
                     trans_count = punct_issue.get('translated_count', 0)
-                    loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
-                    issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
+                    
+                    # Handle both loss and excess cases
+                    if 'excess' in punct_issue['type']:
+                        excess_count = punct_issue.get('excess_count', 0)
+                        issues.append(f"{punct_symbol}_punctuation_+{excess_count}_excess_({trans_count}/{orig_count})")
+                    else:
+                        loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
+                        issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
                     
         # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
