@@ -49,6 +49,19 @@ def configure_utf8_output():
 # Global configuration
 configure_utf8_output()
 _global_log_callback = None
+_stop_flag = False
+
+
+def set_stop_flag(value: bool):
+    """Set the stop flag for EPUB converter"""
+    global _stop_flag
+    _stop_flag = value
+
+
+def is_stop_requested() -> bool:
+    """Check if stop has been requested"""
+    global _stop_flag
+    return _stop_flag
 
 
 def set_global_log_callback(callback: Optional[Callable]):
@@ -1097,9 +1110,10 @@ class FileUtils:
 class EPUBCompiler:
     """Main EPUB compilation class"""
     
-    def __init__(self, base_dir: str, log_callback: Optional[Callable] = None):
+    def __init__(self, base_dir: str, log_callback: Optional[Callable] = None, stop_callback: Optional[Callable] = None):
         self.base_dir = os.path.abspath(base_dir)
         self.log_callback = log_callback
+        self.stop_callback = stop_callback
         self.output_dir = self.base_dir
         self.images_dir = os.path.join(self.output_dir, "images")
         self.css_dir = os.path.join(self.output_dir, "css")
@@ -1146,6 +1160,15 @@ class EPUBCompiler:
             self.log_callback(message)
         else:
             print(message)
+    
+    def is_stopped(self) -> bool:
+        """Check if stop has been requested"""
+        # Check both the global flag and the callback
+        if is_stop_requested():
+            return True
+        if self.stop_callback and self.stop_callback():
+            return True
+        return False
             
     def compile(self):
         """Main compilation method"""
@@ -1165,8 +1188,18 @@ class EPUBCompiler:
             if not self._preflight_check():
                 return
             
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
             # Analyze chapters FIRST to get the structure
             chapter_titles_info = self._analyze_chapters()
+            
+            # Check stop flag after chapter analysis
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
             
             # Debug: Check if batch translation is enabled
             self.log(f"[DEBUG] Batch translation enabled: {getattr(self, 'batch_translate_headers', False)}")
@@ -1437,6 +1470,11 @@ class EPUBCompiler:
             if not html_files:
                 raise Exception("No translated chapters found to compile into EPUB")
             
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
             # Load metadata
             metadata = self._load_metadata()
 
@@ -1482,6 +1520,11 @@ class EPUBCompiler:
             except Exception as e:
                 self.log(f"[WARNING] Failed to determine EPUB language from OUTPUT_LANGUAGE: {e}")
             
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
             # Create EPUB book
             book = self._create_book(metadata)
             
@@ -1492,20 +1535,45 @@ class EPUBCompiler:
             # Add CSS
             css_items = self._add_css_files(book)
             
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
             # Add fonts
             self._add_fonts(book)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
             
             # Process images and cover
             processed_images, cover_file = self._process_images()
             
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
             # Add images to book
             self._add_images_to_book(book, processed_images, cover_file)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
             
             # Add cover page if exists
             if cover_file:
                 cover_page = self._create_cover_page(book, cover_file, processed_images, css_items, metadata)
                 if cover_page:
                     spine.insert(0, cover_page)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
             
             # Process chapters with updated titles
             chapters_added = self._process_chapters(
@@ -1515,6 +1583,11 @@ class EPUBCompiler:
             
             if chapters_added == 0:
                 raise Exception("No chapters could be added to the EPUB")
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
             
             # Add optional gallery (unless disabled)
             disable_gallery = os.environ.get('DISABLE_EPUB_GALLERY', '0') == '1'
@@ -1530,8 +1603,18 @@ class EPUBCompiler:
                 else:
                     self.log("📷 No images found for gallery")
             
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
             # Finalize book
             self._finalize_book(book, spine, toc, cover_file)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
             
             # Write EPUB
             self._write_epub(book, metadata)
@@ -1806,6 +1889,11 @@ class EPUBCompiler:
             # Collect results as they complete
             completed = 0
             for future in as_completed(futures):
+                # Check stop flag
+                if self.is_stopped():
+                    self.log("🛑 Chapter analysis stopped by user")
+                    break
+                
                 try:
                     result = future.result()
                     completed += 1
@@ -2012,6 +2100,11 @@ class EPUBCompiler:
             }
             
             for future in as_completed(futures):
+                # Check stop flag
+                if self.is_stopped():
+                    self.log("🛑 Chapter processing stopped by user")
+                    break
+                
                 try:
                     result = future.result()
                     if result:
@@ -3456,6 +3549,11 @@ img {
                 
                 completed = 0
                 for future in as_completed(futures):
+                    # Check stop flag
+                    if self.is_stopped():
+                        self.log("🛑 Image processing stopped by user")
+                        break
+                    
                     try:
                         result = future.result()
                         completed += 1
@@ -3545,6 +3643,11 @@ img {
             
             completed = 0
             for future in as_completed(futures):
+                # Check stop flag
+                if self.is_stopped():
+                    self.log("🛑 Image reading stopped by user")
+                    break
+                
                 try:
                     result = future.result()
                     completed += 1

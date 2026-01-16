@@ -8804,6 +8804,14 @@ Important rules:
     def run_epub_converter_direct(self):
         """Run EPUB converter directly without blocking GUI"""
         try:
+            # Reset stop flag at the start
+            try:
+                import epub_converter
+                if hasattr(epub_converter, 'set_stop_flag'):
+                    epub_converter.set_stop_flag(False)
+            except Exception:
+                pass
+            
             folder = self.epub_folder
             self.append_log("📦 Starting EPUB Converter...")
             
@@ -9328,8 +9336,17 @@ Important rules:
             self.epub_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
         
         self.stop_requested = True
+        
+        # Set stop flag in epub_converter module
+        try:
+            import epub_converter
+            if hasattr(epub_converter, 'set_stop_flag'):
+                epub_converter.set_stop_flag(True)
+        except Exception:
+            pass
+        
         self.append_log("❌ EPUB converter stop requested.")
-        self.append_log("⏳ Please wait... stopping after current operation completes.")
+        self.append_log("⌛ Please wait... stopping after current operation completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
     def stop_qa_scan(self):
