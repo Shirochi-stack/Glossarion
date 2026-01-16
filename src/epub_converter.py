@@ -3548,6 +3548,12 @@ img {
                 futures = [executor.submit(process_single_image, img) for img in image_files]
                 
                 completed = 0
+                # Only log periodically for large image sets to avoid GUI lag
+                use_reduced_logging = len(image_files) > 50
+                # Log at 5% intervals for large sets (20 updates total)
+                log_interval = max(1, len(image_files) // 20) if use_reduced_logging else 1
+                last_logged_percent = -1
+                
                 for future in as_completed(futures):
                     # Check stop flag
                     if self.is_stopped():
@@ -3561,12 +3567,26 @@ img {
                         if result:
                             original, safe, ctype = result
                             processed_images[original] = safe
-                            self.log(f"  [{completed}/{len(image_files)}] ✅ Processed: {original} -> {safe}")
+                            # Log based on image count
+                            if use_reduced_logging:
+                                # For large sets: log at percentage milestones or interval
+                                current_percent = (completed * 100) // len(image_files)
+                                should_log = (completed % log_interval == 0 or completed == 1 or completed == len(image_files))
+                                # Also log when percentage changes for better feedback
+                                if should_log or (current_percent != last_logged_percent and current_percent % 5 == 0):
+                                    self.log(f"  [{completed}/{len(image_files)}] ({current_percent}%) ✅ Processing images...")
+                                    last_logged_percent = current_percent
+                            else:
+                                # For small sets: log every image
+                                self.log(f"  [{completed}/{len(image_files)}] ✅ Processed: {original} -> {safe}")
                         else:
-                            self.log(f"  [{completed}/{len(image_files)}] ⏭️ Skipped non-image file")
+                            # Log skipped files based on image count
+                            if not use_reduced_logging or completed % log_interval == 0:
+                                self.log(f"  [{completed}/{len(image_files)}] ⏭️ Skipped non-image file")
                             
                     except Exception as e:
                         completed += 1
+                        # Always log errors
                         self.log(f"  [{completed}/{len(image_files)}] ❌ Failed to process image: {e}")
             
             # Find cover (sequential - quick operation)
@@ -3642,6 +3662,12 @@ img {
             futures = [executor.submit(read_image_file, img_data) for img_data in images_to_add]
             
             completed = 0
+            # Only log periodically for large image sets to avoid GUI lag
+            use_reduced_logging = len(images_to_add) > 50
+            # Log at 5% intervals for large sets (20 updates total)
+            log_interval = max(1, len(images_to_add) // 20) if use_reduced_logging else 1
+            last_logged_percent = -1
+            
             for future in as_completed(futures):
                 # Check stop flag
                 if self.is_stopped():
@@ -3654,12 +3680,25 @@ img {
                     
                     if result['success']:
                         image_data_list.append(result)
-                        self.log(f"  [{completed}/{len(images_to_add)}] ✅ Read: {result['original']}")
+                        # Log based on image count
+                        if use_reduced_logging:
+                            # For large sets: log at percentage milestones or interval
+                            current_percent = (completed * 100) // len(images_to_add)
+                            should_log = (completed % log_interval == 0 or completed == 1 or completed == len(images_to_add))
+                            # Also log when percentage changes for better feedback
+                            if should_log or (current_percent != last_logged_percent and current_percent % 5 == 0):
+                                self.log(f"  [{completed}/{len(images_to_add)}] ({current_percent}%) ✅ Reading images...")
+                                last_logged_percent = current_percent
+                        else:
+                            # For small sets: log every image
+                            self.log(f"  [{completed}/{len(images_to_add)}] ✅ Read: {result['original']}")
                     else:
+                        # Always log failures
                         self.log(f"  [{completed}/{len(images_to_add)}] ❌ Failed: {result['original']} - {result['error']}")
                         
                 except Exception as e:
                     completed += 1
+                    # Always log exceptions
                     self.log(f"  [{completed}/{len(images_to_add)}] ❌ Exception reading image: {e}")
         
         # Add images to book sequentially (required by ebooklib)
