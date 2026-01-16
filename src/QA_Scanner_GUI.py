@@ -320,6 +320,7 @@ class QAScannerMixin:
             'check_punctuation_mismatch': False,
             'punctuation_loss_threshold': 49,
             'flag_excess_punctuation': False,
+            'excess_punctuation_threshold': 49,
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,
@@ -2357,7 +2358,7 @@ class QAScannerMixin:
         # Excess punctuation checkbox (indented under the punctuation checker)
         excess_punct_widget = QWidget()
         excess_punct_layout = QHBoxLayout(excess_punct_widget)
-        excess_punct_layout.setContentsMargins(20, 0, 0, 10)
+        excess_punct_layout.setContentsMargins(20, 0, 0, 0)
         
         excess_punct_checkbox = self._create_styled_checkbox("Flag excess punctuation (more ? or ! than source)")
         excess_punct_checkbox.setChecked(qa_settings.get('flag_excess_punctuation', False))
@@ -2365,15 +2366,59 @@ class QAScannerMixin:
         excess_punct_layout.addStretch()
         detection_layout.addWidget(excess_punct_widget)
         
-        # Enable/disable excess punctuation checkbox based on main checkbox
-        def toggle_excess_punct(checked):
-            excess_punct_checkbox.setEnabled(checked)
-            if checked:
+        # Excess punctuation threshold setting (indented under the excess checkbox)
+        excess_threshold_widget = QWidget()
+        excess_threshold_layout = QHBoxLayout(excess_threshold_widget)
+        excess_threshold_layout.setContentsMargins(40, 0, 0, 10)
+        
+        excess_threshold_label = QLabel("Flag if excess >")
+        excess_threshold_label.setFont(QFont('Arial', 10))
+        excess_threshold_layout.addWidget(excess_threshold_label)
+        
+        excess_threshold_spinbox = QSpinBox()
+        excess_threshold_spinbox.setMinimum(0)
+        excess_threshold_spinbox.setMaximum(500)
+        excess_threshold_spinbox.setValue(qa_settings.get('excess_punctuation_threshold', 49))
+        excess_threshold_spinbox.setSuffix("%")
+        excess_threshold_spinbox.setMinimumWidth(80)
+        disable_wheel_event(excess_threshold_spinbox)
+        excess_threshold_layout.addWidget(excess_threshold_spinbox)
+        
+        excess_threshold_hint = QLabel("(0 = flag any excess, 49 = flag if 50% more than source)")
+        excess_threshold_hint.setFont(QFont('Arial', 9))
+        excess_threshold_hint.setStyleSheet("color: gray;")
+        excess_threshold_layout.addWidget(excess_threshold_hint)
+        excess_threshold_layout.addStretch()
+        detection_layout.addWidget(excess_threshold_widget)
+        
+        # Enable/disable excess punctuation controls based on main and excess checkboxes
+        def toggle_excess_punct(main_checked):
+            excess_enabled = main_checked
+            excess_punct_checkbox.setEnabled(excess_enabled)
+            # Threshold only enabled if both main and excess checkboxes are checked
+            threshold_enabled = main_checked and excess_punct_checkbox.isChecked()
+            excess_threshold_label.setEnabled(threshold_enabled)
+            excess_threshold_spinbox.setEnabled(threshold_enabled)
+            excess_threshold_hint.setEnabled(threshold_enabled)
+            if excess_enabled:
                 excess_punct_checkbox.setStyleSheet("color: white;")
             else:
                 excess_punct_checkbox.setStyleSheet("color: #606060;")
+            if threshold_enabled:
+                excess_threshold_label.setStyleSheet("color: white;")
+                excess_threshold_spinbox.setStyleSheet("color: white;")
+                excess_threshold_hint.setStyleSheet("color: gray;")
+            else:
+                excess_threshold_label.setStyleSheet("color: #606060;")
+                excess_threshold_spinbox.setStyleSheet("color: #909090;")
+                excess_threshold_hint.setStyleSheet("color: #404040;")
+        
+        def toggle_excess_threshold(excess_checked):
+            # Re-evaluate based on current state
+            toggle_excess_punct(check_punctuation_checkbox.isChecked())
         
         check_punctuation_checkbox.toggled.connect(toggle_excess_punct)
+        excess_punct_checkbox.toggled.connect(toggle_excess_threshold)
         toggle_excess_punct(check_punctuation_checkbox.isChecked())  # Set initial state
         
         check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
@@ -3155,6 +3200,7 @@ class QAScannerMixin:
                     'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                     'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                     'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
+                    'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                     'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),
@@ -3457,6 +3503,8 @@ class QAScannerMixin:
                 check_artifacts_checkbox.setChecked(False)
                 check_punctuation_checkbox.setChecked(False)
                 punct_threshold_spinbox.setValue(49)
+                excess_punct_checkbox.setChecked(False)
+                excess_threshold_spinbox.setValue(49)
 
                 # Reset auto multipliers checkbox to default (enabled)
                 auto_multipliers_checkbox.setChecked(True)

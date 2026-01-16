@@ -1355,8 +1355,10 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
     if qa_settings and 'punctuation_loss_threshold' in qa_settings:
         threshold = qa_settings['punctuation_loss_threshold'] / 100.0
     
-    # Get excess punctuation flag from settings (default False for backwards compatibility)
+    # Get excess punctuation flag and threshold from settings
     flag_excess = qa_settings.get('flag_excess_punctuation', False) if qa_settings else False
+    # Excess threshold: only flag if excess exceeds this percentage (default 49% so 50%+ triggers)
+    excess_threshold = (qa_settings.get('excess_punctuation_threshold', 49) / 100.0) if qa_settings else 0.49
     
     try:
         # If no original punctuation info for this chapter, skip check
@@ -1392,20 +1394,21 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
                     'description': f'Lost {int(loss_ratio*100)}% of question marks ({trans_question_count}/{orig_question_count})'
                 })
         
-        # Check question marks - excess detection (if enabled)
+        # Check question marks - excess detection (if enabled and exceeds threshold)
         if flag_excess and trans_question_count > orig_question_count:
             excess_count = trans_question_count - orig_question_count
             excess_ratio = excess_count / max(1, orig_question_count)  # Avoid division by zero
-            has_mismatch = True
-            details.append({
-                'type': 'excess_question_marks',
-                'severity': 'medium',
-                'original_count': orig_question_count,
-                'translated_count': trans_question_count,
-                'excess_count': excess_count,
-                'excess_ratio': excess_ratio,
-                'description': f'Excess question marks: {excess_count} more than source ({trans_question_count}/{orig_question_count})'
-            })
+            if excess_ratio > excess_threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'excess_question_marks',
+                    'severity': 'medium',
+                    'original_count': orig_question_count,
+                    'translated_count': trans_question_count,
+                    'excess_count': excess_count,
+                    'excess_ratio': excess_ratio,
+                    'description': f'Excess question marks: +{int(excess_ratio*100)}% ({trans_question_count}/{orig_question_count})'
+                })
         
         # Check exclamation marks - loss detection
         if orig_exclamation_count > 0:
@@ -1421,20 +1424,21 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
                     'description': f'Lost {int(loss_ratio*100)}% of exclamation marks ({trans_exclamation_count}/{orig_exclamation_count})'
                 })
         
-        # Check exclamation marks - excess detection (if enabled)
+        # Check exclamation marks - excess detection (if enabled and exceeds threshold)
         if flag_excess and trans_exclamation_count > orig_exclamation_count:
             excess_count = trans_exclamation_count - orig_exclamation_count
             excess_ratio = excess_count / max(1, orig_exclamation_count)  # Avoid division by zero
-            has_mismatch = True
-            details.append({
-                'type': 'excess_exclamation_marks',
-                'severity': 'medium',
-                'original_count': orig_exclamation_count,
-                'translated_count': trans_exclamation_count,
-                'excess_count': excess_count,
-                'excess_ratio': excess_ratio,
-                'description': f'Excess exclamation marks: {excess_count} more than source ({trans_exclamation_count}/{orig_exclamation_count})'
-            })
+            if excess_ratio > excess_threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'excess_exclamation_marks',
+                    'severity': 'medium',
+                    'original_count': orig_exclamation_count,
+                    'translated_count': trans_exclamation_count,
+                    'excess_count': excess_count,
+                    'excess_ratio': excess_ratio,
+                    'description': f'Excess exclamation marks: +{int(excess_ratio*100)}% ({trans_exclamation_count}/{orig_exclamation_count})'
+                })
         
         return has_mismatch, details
         
