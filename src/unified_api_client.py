@@ -605,6 +605,23 @@ class UnifiedClient:
         except Exception:
             return 2.0
 
+    def _looks_like_google_api_key(self, key: str) -> bool:
+        """Heuristic check for Google API keys (Gemini AI Studio).
+
+        Google API keys typically start with 'AIza' and are long. This avoids
+        misrouting non-Google keys to the native Gemini endpoint.
+        """
+        try:
+            if key is None:
+                return False
+            s = str(key).strip()
+            # Standard Google API key prefix
+            if s.startswith("AIzaSy") and len(s) >= 30:
+                return True
+            return False
+        except Exception:
+            return False
+
     def _sanitize_html_for_log(self, text: str, max_length: int = 200) -> str:
         """Send HTML content directly to CMD console, bypassing GUI logger"""
         if not text:
@@ -9630,6 +9647,17 @@ class UnifiedClient:
         # Check if we should use OpenAI-compatible endpoint
         use_openai_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+
+        # Fallback: if key doesn't look like a Google API key and a custom OpenAI
+        # endpoint is configured, route Gemini through the custom endpoint.
+        if (not use_openai_endpoint or not gemini_endpoint):
+            custom_enabled = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+            custom_base_url = os.getenv("OPENAI_CUSTOM_BASE_URL", os.getenv("OPENAI_API_BASE", ""))
+            if custom_enabled and custom_base_url and not self._looks_like_google_api_key(self.api_key):
+                use_openai_endpoint = True
+                gemini_endpoint = custom_base_url
+                if not self._is_stop_requested():
+                    print("🔁 Gemini: API key does not look like a Google API key; using OPENAI_CUSTOM_BASE_URL fallback")
         
         # Import types at the top
         from google.genai import types
