@@ -953,6 +953,11 @@ class MangaTranslationTab(QObject):
     
     def _is_stop_requested(self) -> bool:
         """Check if stop has been requested using multiple sources"""
+        # During graceful stop, don't consider it "stopped" for log suppression
+        # We want to keep showing logs until the API call actually completes
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        
         # Check global cancellation first
         if self.is_globally_cancelled():
             return True
@@ -983,6 +988,14 @@ class MangaTranslationTab(QObject):
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient.set_global_cancellation(False)
+        except ImportError:
+            pass
+        
+        # CRITICAL: Reset module-level global_stop_flag in unified_api_client
+        # This is separate from class-level cancellation and must be reset
+        try:
+            from unified_api_client import set_stop_flag
+            set_stop_flag(False)
         except ImportError:
             pass
     
@@ -12456,18 +12469,18 @@ class MangaTranslationTab(QObject):
             # Log message depends on stop mode
             if graceful_stop:
                 self._log("\n⏳ Graceful stop — waiting for in-flight API calls to complete...", "info")
+                # For graceful stop: DON'T schedule UI reset here
+                # The UI will be reset when the API call actually completes
+                # via the GRACEFUL_STOP_COMPLETED check in the worker loop
             else:
                 self._log("\n⏹️ Translation stopped by user", "warning")
-            
-            # Schedule UI reset after a longer delay to keep "Stopping..." visible
-            # The finally block in _run_translation_worker will also call _reset_ui_state,
-            # but this fallback ensures UI doesn't get stuck in stopping state
-            try:
-                from PySide6.QtCore import QTimer
-                # Wait 2 seconds for cleanup to allow "Stopping..." to be visible longer
-                QTimer.singleShot(2000, self._reset_ui_state)
-            except Exception:
-                pass
+                # Schedule UI reset after a delay for immediate stop only
+                try:
+                    from PySide6.QtCore import QTimer
+                    # Wait 2 seconds for cleanup to allow "Stopping..." to be visible
+                    QTimer.singleShot(2000, self._reset_ui_state)
+                except Exception:
+                    pass
     
     def _reset_ui_state(self):
         """Reset UI to ready state - with widget existence checks (PySide6)"""
