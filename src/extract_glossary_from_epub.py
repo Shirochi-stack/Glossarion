@@ -2184,10 +2184,17 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             # Get system and user prompts
             system_prompt, user_prompt = build_prompt(chap)
 
+            # Build optional assistant prefill message if configured
+            assistant_prefill_msgs = []
+            assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+            if assistant_prompt_env:
+                assistant_prefill_msgs = [{"role": "assistant", "content": assistant_prompt_env}]
+
             # Build messages correctly with system and user prompts
             if not contextual_enabled:
                 msgs = [
                     {"role": "system", "content": system_prompt},
+                ] + assistant_prefill_msgs + [
                     {"role": "user", "content": user_prompt}
                 ]
             else:
@@ -2197,6 +2204,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                     msgs = (
                         [{"role": "system", "content": system_prompt}]
                         + trim_context_history(history, ctx_limit, rolling_window)
+                        + assistant_prefill_msgs
                         + [{"role": "user", "content": user_prompt}]
                     )
 
@@ -2483,9 +2491,17 @@ def process_single_chapter_with_split(idx: int,
     if not (chapter_split_enabled and chapter_tokens > available_tokens):
         # No split needed; build messages as usual
         system_prompt, user_prompt = build_prompt_fn(chap)
+        
+        # Build optional assistant prefill message if configured
+        assistant_prefill_msgs = []
+        assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+        if assistant_prompt_env:
+            assistant_prefill_msgs = [{"role": "assistant", "content": assistant_prompt_env}]
+        
         if not contextual_enabled:
             msgs = [
                 {"role": "system", "content": system_prompt},
+            ] + assistant_prefill_msgs + [
                 {"role": "user", "content": user_prompt}
             ]
         else:
@@ -2494,6 +2510,7 @@ def process_single_chapter_with_split(idx: int,
                 msgs = (
                     [{"role": "system", "content": system_prompt}]
                     + trim_context_history(history, ctx_limit, rolling_window)
+                    + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
         return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
@@ -2515,9 +2532,17 @@ def process_single_chapter_with_split(idx: int,
         chunk_text = soup.get_text(strip=True)
 
         system_prompt, user_prompt = build_prompt_fn(chunk_text)
+        
+        # Build optional assistant prefill message if configured
+        assistant_prefill_msgs = []
+        assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+        if assistant_prompt_env:
+            assistant_prefill_msgs = [{"role": "assistant", "content": assistant_prompt_env}]
+        
         if not contextual_enabled:
             msgs = [
                 {"role": "system", "content": system_prompt},
+            ] + assistant_prefill_msgs + [
                 {"role": "user", "content": user_prompt}
             ]
         else:
@@ -2526,6 +2551,7 @@ def process_single_chapter_with_split(idx: int,
                 msgs = (
                     [{"role": "system", "content": system_prompt}]
                     + trim_context_history(history, ctx_limit, rolling_window)
+                    + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
 
@@ -2566,11 +2592,17 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     Returns:
         Dict with keys: 'results' (list of per-chapter results), 'merged_indices' (list of child indices)
     """
+    # Build optional assistant prefill message if configured
+    assistant_prefill_msgs = []
+    assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+    if assistant_prompt_env:
+        assistant_prefill_msgs = [{"role": "assistant", "content": assistant_prompt_env}]
+
     if len(merge_group) == 1:
         # Single chapter, use normal processing
         idx, chap = merge_group[0]
         system_prompt, user_prompt = msgs_builder_fn(chap)
-        msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        msgs = [{"role": "system", "content": system_prompt}] + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
         result = process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
         return {'results': [result], 'merged_indices': []}
     
@@ -2591,7 +2623,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     
     # Build messages for merged content
     system_prompt, user_prompt = msgs_builder_fn(merged_content)
-    msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    msgs = [{"role": "system", "content": system_prompt}] + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
     msgs = _sanitize_messages_for_api(msgs, merged_content)
     
     # Thread-safe payload directory
@@ -3353,9 +3385,17 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         idx, chap = unit[0]
                         system_prompt, user_prompt = build_prompt(chap)
+                        
+                        # Build optional assistant prefill message if configured
+                        assistant_prefill_msgs = []
+                        assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+                        if assistant_prompt_env:
+                            assistant_prefill_msgs = [{"role": "assistant", "content": assistant_prompt_env}]
+                        
                         if not contextual_enabled:
                             msgs = [
                                 {"role": "system", "content": system_prompt},
+                            ] + assistant_prefill_msgs + [
                                 {"role": "user", "content": user_prompt}
                             ]
                         else:
@@ -3363,6 +3403,7 @@ def main(log_callback=None, stop_callback=None):
                             with _history_lock:
                                 msgs = [{"role": "system", "content": system_prompt}] \
                                      + trim_context_history(history, ctx_limit, rolling_window) \
+                                     + assistant_prefill_msgs \
                                      + [{"role": "user", "content": user_prompt}]
                         future = executor.submit(
                             process_single_chapter_with_split,
@@ -3834,10 +3875,17 @@ def main(log_callback=None, stop_callback=None):
                 # Get system and user prompts from build_prompt
                 system_prompt, user_prompt = build_prompt(chapter_content)
                 
+                # Build optional assistant prefill message if configured
+                assistant_prefill_msgs = []
+                assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+                if assistant_prompt_env:
+                    assistant_prefill_msgs = [{"role": "assistant", "content": assistant_prompt_env}]
+                
                 if not contextual_enabled:
                     # No context at all
                     msgs = [
                         {"role": "system", "content": system_prompt},
+                    ] + assistant_prefill_msgs + [
                         {"role": "user", "content": user_prompt}
                     ]
                 else:
@@ -3856,12 +3904,14 @@ def main(log_callback=None, stop_callback=None):
                         # Build: system + history + current user prompt
                         msgs = [{"role": "system", "content": system_prompt}] \
                              + context_msgs \
+                             + assistant_prefill_msgs \
                              + [{"role": "user", "content": user_prompt}]
                     else:
                         # For other models, context_msgs is memory blocks (assistant messages)
                         # Build: system + memory + current user prompt  
                         msgs = [{"role": "system", "content": system_prompt}] \
                              + context_msgs \
+                             + assistant_prefill_msgs \
                              + [{"role": "user", "content": user_prompt}]
                 
                 # Compute total and assistant/memory tokens for this chapter
@@ -3931,11 +3981,18 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Get system and user prompts for chunk
                         chunk_system_prompt, chunk_user_prompt = build_prompt(chunk_text)
+                        
+                        # Build optional assistant prefill message if configured
+                        chunk_assistant_prefill_msgs = []
+                        chunk_assistant_prompt_env = os.getenv('ASSISTANT_PROMPT', '').strip()
+                        if chunk_assistant_prompt_env:
+                            chunk_assistant_prefill_msgs = [{"role": "assistant", "content": chunk_assistant_prompt_env}]
 
                         # Build chunk messages
                         if not contextual_enabled:
                             chunk_msgs = [
                                 {"role": "system", "content": chunk_system_prompt},
+                            ] + chunk_assistant_prefill_msgs + [
                                 {"role": "user", "content": chunk_user_prompt}
                             ]
                         else:
@@ -3954,12 +4011,14 @@ def main(log_callback=None, stop_callback=None):
                                 # Build: system + history + current user prompt
                                 chunk_msgs = [{"role": "system", "content": chunk_system_prompt}] \
                                            + context_msgs \
+                                           + chunk_assistant_prefill_msgs \
                                            + [{"role": "user", "content": chunk_user_prompt}]
                             else:
                                 # For other models, context_msgs is memory blocks (assistant messages)
                                 # Build: system + memory + current user prompt
                                 chunk_msgs = [{"role": "system", "content": chunk_system_prompt}] \
                                            + context_msgs \
+                                           + chunk_assistant_prefill_msgs \
                                            + [{"role": "user", "content": chunk_user_prompt}]
 
                         # Build messages following the translation pattern for _raw_content_object handling

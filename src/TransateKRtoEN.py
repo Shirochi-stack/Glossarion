@@ -10091,8 +10091,13 @@ def main(log_callback=None, stop_callback=None):
                         )
                         summary_msgs_list = [{"role": "assistant", "content": summary_content}]
 
+                # Build optional assistant prefill message if configured
+                assistant_prefill_msgs = []
+                if getattr(config, 'ASSISTANT_PROMPT', '') and config.ASSISTANT_PROMPT.strip():
+                    assistant_prefill_msgs = [{"role": "assistant", "content": config.ASSISTANT_PROMPT.strip()}]
+
                 # Build final message list for this chunk
-                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + chunk_prompt_msg + [{"role": "user", "content": user_prompt}]
+                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + chunk_prompt_msg + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
