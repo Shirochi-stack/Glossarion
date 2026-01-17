@@ -11554,7 +11554,7 @@ class UnifiedClient:
                     try:
                         import time as _t
                         start_ts = _t.time()
-                        if use_streaming:
+                        if use_streaming and not self._is_stop_requested():
                             print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})")
                         resp = client.chat.completions.create(**call_kwargs)
                         # Register streaming response for proper cleanup
@@ -11562,10 +11562,12 @@ class UnifiedClient:
                             with self._active_streams_lock:
                                 self._active_streams.add(resp)
                         dur = _t.time() - start_ts
-                        if use_streaming:
-                            print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
-                        else:
-                            print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
+                        # Suppress logs if stop was requested while call was in-flight
+                        if not self._is_stop_requested():
+                            if use_streaming:
+                                print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
+                            else:
+                                print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
                     except Exception as sdk_err:
                         # Special handling for Chutes/vLLM max_completion_tokens limit in non-streaming mode
                         # Error: max_completion_tokens is too large... (streaming mode allows up to X)
@@ -11584,10 +11586,12 @@ class UnifiedClient:
                             try:
                                 import time as _t
                                 start_ts = _t.time()
-                                print(f"🛰️ [{provider}] Retrying with streaming enabled...")
+                                if not self._is_stop_requested():
+                                    print(f"🛰️ [{provider}] Retrying with streaming enabled...")
                                 resp = client.chat.completions.create(**call_kwargs)
                                 dur = _t.time() - start_ts
-                                print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
+                                if not self._is_stop_requested():
+                                    print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
                             except Exception as retry_err:
                                 import traceback
                                 tb = traceback.format_exc()
