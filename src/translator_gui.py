@@ -798,7 +798,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.1.7"
+        __version__ = "7.1.8"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -871,7 +871,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.1.7')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.1.8')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2509,7 +2509,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.1.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.1.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -2761,10 +2761,25 @@ Recent translations to summarize:
         """Show dialog to edit the optional assistant prompt"""
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
         
+        # Store dialog as instance attribute so it persists and can be reused
+        if hasattr(self, '_assistant_prompt_dialog') and self._assistant_prompt_dialog is not None:
+            # If dialog already exists, just bring it to front
+            self._assistant_prompt_dialog.raise_()
+            self._assistant_prompt_dialog.activateWindow()
+            return
+        
         dialog = QDialog(self)
         dialog.setWindowTitle("Assistant Prompt (Optional)")
-        dialog.setMinimumSize(600, 400)
-        dialog.setModal(True)
+        
+        # Size dialog based on screen dimensions (30% width, 40% height)
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog_width = int(screen.width() * 0.30)
+        dialog_height = int(screen.height() * 0.40)
+        dialog.setMinimumSize(int(screen.width() * 0.20), int(screen.height() * 0.25))  # Min 20% x 25%
+        dialog.resize(dialog_width, dialog_height)
+        
+        dialog.setModal(False)  # Non-modal so user can interact with main window
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)  # Keep on top of translator GUI
         
         layout = QVBoxLayout(dialog)
         
@@ -2825,7 +2840,11 @@ Recent translations to summarize:
         
         layout.addLayout(button_layout)
         
-        dialog.exec()
+        # Store reference and clean up when closed
+        self._assistant_prompt_dialog = dialog
+        dialog.finished.connect(lambda: setattr(self, '_assistant_prompt_dialog', None))
+        
+        dialog.show()  # Non-blocking show instead of exec()
 
     def select_google_credentials(self):
         """Select Google Cloud credentials JSON file"""
@@ -12330,7 +12349,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.1.7...")
+    print("🚀 Starting Glossarion v7.1.8...")
     
     # Initialize splash screen
     splash_manager = None
