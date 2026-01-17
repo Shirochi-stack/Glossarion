@@ -3888,43 +3888,63 @@ CRITICAL EXTRACTION RULES:
             """Replace old translated names with new ones across .html files."""
             if not changes:
                 return 0, 0
-            candidate_dirs = []
-            for key in ['html_output_dir', 'html_output_folder', 'output_html_dir', 'html_export_dir']:
-                val = self.config.get(key)
-                if val and os.path.isdir(val):
-                    candidate_dirs.append(val)
-            # Fallback to current working directory if nothing configured
-            if not candidate_dirs:
-                candidate_dirs.append(os.getcwd())
+            
+            # Derive target directory ONLY from the loaded glossary file path
+            # The glossary is typically at <book_output>/glossary.csv or <book_output>/Glossary/glossary.csv
+            glossary_path = self.editor_file_entry.text()
+            if not glossary_path or not os.path.exists(glossary_path):
+                self.append_log("⚠️ Cannot update HTML files: no glossary file loaded.")
+                return 0, 0
+            
+            glossary_dir = os.path.dirname(glossary_path)
+            # If glossary is in a "Glossary" subfolder, go up one level to get book output dir
+            if os.path.basename(glossary_dir).lower() == 'glossary':
+                book_output_dir = os.path.dirname(glossary_dir)
+            else:
+                book_output_dir = glossary_dir
+            
+            if not os.path.isdir(book_output_dir):
+                self.append_log(f"⚠️ Cannot update HTML files: directory not found: {book_output_dir}")
+                return 0, 0
 
             files_updated = 0
             total_replacements = 0
+            
+            # Excluded files: .csv, .json, metadata files (except glossary files)
+            excluded_extensions = {'.csv', '.json'}
+            allowed_names = {'glossary.csv', 'glossary.json'}
+            excluded_names = {'metadata.json', 'metadata.opf', 'metadata.xml', 'content.opf', 'toc.ncx'}
 
-            for base_dir in candidate_dirs:
-                for root, _, files in os.walk(base_dir):
-                    for name in files:
-                        lower_name = name.lower()
-                        if not (lower_name.endswith('.html') or lower_name.endswith('.txt')):
-                            continue
-                        path = os.path.join(root, name)
-                        try:
-                            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                                content = f.read()
-                            new_content = content
-                            for old, new in changes:
-                                if old and new and old in new_content:
-                                    new_content = new_content.replace(old, new)
-                            if new_content != content:
-                                with open(path, 'w', encoding='utf-8') as f:
-                                    f.write(new_content)
-                                files_updated += 1
-                                replaced_here = 0
-                                for old, new in changes:
-                                    replaced_here += content.count(old)
-                                total_replacements += replaced_here
-                                self.append_log(f"Updated file: {path} ({replaced_here} replacements)")
-                        except Exception as e:
-                            self.append_log(f"⚠️ Failed to update {path}: {e}")
+            # Only process files directly in book_output_dir (no subfolders)
+            for name in os.listdir(book_output_dir):
+                path = os.path.join(book_output_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                lower_name = name.lower()
+                # Skip excluded extensions (unless it's an allowed glossary file)
+                if lower_name not in allowed_names:
+                    if any(lower_name.endswith(ext) for ext in excluded_extensions):
+                        continue
+                    if lower_name in excluded_names:
+                        continue
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    new_content = content
+                    for old, new in changes:
+                        if old and new and old in new_content:
+                            new_content = new_content.replace(old, new)
+                    if new_content != content:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(new_content)
+                        files_updated += 1
+                        replaced_here = 0
+                        for old, new in changes:
+                            replaced_here += content.count(old)
+                        total_replacements += replaced_here
+                        self.append_log(f"Updated file: {path} ({replaced_here} replacements)")
+                except Exception as e:
+                    self.append_log(f"⚠️ Failed to update {path}: {e}")
             return files_updated, total_replacements
         
         def save_edited_glossary():
