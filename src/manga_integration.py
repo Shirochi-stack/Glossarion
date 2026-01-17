@@ -12367,6 +12367,13 @@ class MangaTranslationTab(QObject):
                     # Note: restart_workers=False (default) to avoid GUI lag. Stuck workers
                     # will be lazily restarted on next use via _mp_load_model retry logic.
                     MangaTranslator.force_release_all_pool_checkouts()
+                    
+                    # CRITICAL: Trigger UI pool tracker update after releasing checkouts
+                    try:
+                        if hasattr(self, 'update_queue') and self.update_queue:
+                            self.update_queue.put(('update_pool_tracker',))
+                    except Exception:
+                        pass
                 except ImportError:
                     pass
                 

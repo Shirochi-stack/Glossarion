@@ -14464,9 +14464,41 @@ class MangaTranslator:
                         # Check what we got back
                         if isinstance(fut_inpaint_result, concurrent.futures.Future):
                             # It's an early inpainting future, get its result
-                            # Use 5 minute timeout for early inpainting (can take long on first load)
+                            # Use interruptible wait with stop flag checks
                             inpaint_wait_start = time.time()
-                            inpainted = fut_inpaint_result.result(timeout=300)
+                            inpainted = None
+                            max_wait = 300  # 5 minutes total
+                            poll_interval = 2.0  # Check stop flag every 2 seconds
+                            
+                            while inpainted is None:
+                                elapsed = time.time() - inpaint_wait_start
+                                if elapsed >= max_wait:
+                                    self._log(f"⚠️ Early inpainting timed out after {max_wait}s", "warning")
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                                
+                                # Check stop flag during wait
+                                if self._check_stop() or self.is_globally_cancelled():
+                                    self._log("⏹️ Early inpainting interrupted by stop request", "warning")
+                                    # Cancel the future if possible
+                                    try:
+                                        fut_inpaint_result.cancel()
+                                    except Exception:
+                                        pass
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                                
+                                # Try to get result with short timeout
+                                try:
+                                    inpainted = fut_inpaint_result.result(timeout=poll_interval)
+                                except concurrent.futures.TimeoutError:
+                                    # Not done yet, continue waiting
+                                    continue
+                                except Exception as poll_err:
+                                    self._log(f"⚠️ Early inpainting error: {poll_err}", "warning")
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                            
                             inpaint_wait_time = time.time() - inpaint_wait_start
                             
                             # Calculate total inpainting time from when it started early
