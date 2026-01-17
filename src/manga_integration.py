@@ -981,6 +981,9 @@ class MangaTranslationTab(QObject):
         try:
             from manga_translator import MangaTranslator
             MangaTranslator.set_global_cancellation(False)
+            # CRITICAL: Force-release any stale pool checkouts from previous interrupted translations
+            # This ensures inpainters/detectors are available for the new translation
+            MangaTranslator.force_release_all_pool_checkouts()
         except ImportError:
             pass
         
@@ -12359,6 +12362,9 @@ class MangaTranslationTab(QObject):
                 try:
                     from manga_translator import MangaTranslator
                     MangaTranslator.set_global_cancellation(True)
+                    # CRITICAL: Force-release all pool checkouts so resources are available
+                    # for subsequent translations (interrupted translations leave stale checkouts)
+                    MangaTranslator.force_release_all_pool_checkouts()
                 except ImportError:
                     pass
                 

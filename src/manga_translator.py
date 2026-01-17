@@ -685,6 +685,47 @@ class MangaTranslator:
         with cls._global_cancel_lock:
             cls._global_cancelled = False
     
+    @classmethod
+    def force_release_all_pool_checkouts(cls):
+        """Force-clear all checked_out lists in both inpainter and detector pools.
+        
+        This should be called when starting a new translation or after stopping,
+        to ensure any stale checkouts from interrupted translations are cleared.
+        Without this, stopped translations leave inpainters marked as 'checked out'
+        and they become unavailable for subsequent translations.
+        """
+        released_inpainters = 0
+        released_detectors = 0
+        
+        # Clear inpainter pool checkouts
+        try:
+            with cls._inpaint_pool_lock:
+                for key, rec in cls._inpaint_pool.items():
+                    if rec and 'checked_out' in rec:
+                        count = len(rec['checked_out'])
+                        if count > 0:
+                            released_inpainters += count
+                            rec['checked_out'].clear()
+        except Exception:
+            pass
+        
+        # Clear detector pool checkouts
+        try:
+            with cls._detector_pool_lock:
+                for key, rec in cls._detector_pool.items():
+                    if rec and 'checked_out' in rec:
+                        count = len(rec['checked_out'])
+                        if count > 0:
+                            released_detectors += count
+                            rec['checked_out'].clear()
+        except Exception:
+            pass
+        
+        if released_inpainters > 0 or released_detectors > 0:
+            print(f"[POOL] Force-released {released_inpainters} inpainter(s) and {released_detectors} detector(s) from checkout")
+        
+        return released_inpainters, released_detectors
+    
     def _return_inpainter_to_pool(self):
         """Return a checked-out inpainter instance back to the pool for reuse."""
         if not hasattr(self, '_checked_out_inpainter') or not hasattr(self, '_inpainter_pool_key'):
@@ -14457,10 +14498,25 @@ class MangaTranslator:
                 self._log(f"⚠️ Cleaned image not found at expected path", "warning")
                 cleaned_image_path = None
             
+            # AGGRESSIVE stop check before rendering (ignores graceful stop)
+            # Rendering is fast so we can safely skip it when stop is requested
+            if self.is_globally_cancelled() or (hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set()):
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before rendering", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
             # OPTIMIZATION: Skip verbose logging during rendering
             final_image = self.render_translated_text(inpainted, regions)
+            
+            # Final stop check before saving (aggressive - ignores graceful stop)
+            if self.is_globally_cancelled() or (hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set()):
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before saving", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
             
             # Save output
             try:
