@@ -693,23 +693,62 @@ class MangaTranslator:
         The pool's checked_out lists are managed separately by force_release_all_pool_checkouts().
         """
         # Clear inpainter checkout reference
-        if hasattr(self, '_checked_out_inpainter'):
-            self._checked_out_inpainter = None
-        if hasattr(self, '_inpainter_pool_key'):
-            self._inpainter_pool_key = None
+        self._checked_out_inpainter = None
+        self._inpainter_pool_key = None
         
         # Clear bubble detector checkout reference  
-        if hasattr(self, '_checked_out_bubble_detector'):
-            self._checked_out_bubble_detector = None
-        if hasattr(self, '_bubble_detector_pool_key'):
-            self._bubble_detector_pool_key = None
+        self._checked_out_bubble_detector = None
+        self._bubble_detector_pool_key = None
         
-        # Clear thread-local cache
-        if hasattr(self, '_thread_local'):
-            if hasattr(self._thread_local, 'local_inpainters'):
-                self._thread_local.local_inpainters = {}
-            if hasattr(self._thread_local, 'bubble_detector'):
-                self._thread_local.bubble_detector = None
+        # CRITICAL: Cancel and clear any early inpainting future
+        # This prevents stale futures from blocking new translations
+        try:
+            if hasattr(self, '_inpainting_future') and self._inpainting_future:
+                try:
+                    self._inpainting_future.cancel()
+                except Exception:
+                    pass
+                self._inpainting_future = None
+        except Exception:
+            pass
+        
+        # Also clear inpainting executor
+        try:
+            if hasattr(self, '_inpainting_executor') and self._inpainting_executor:
+                try:
+                    self._inpainting_executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    # Python < 3.9 doesn't have cancel_futures
+                    self._inpainting_executor.shutdown(wait=False)
+                except Exception:
+                    pass
+                self._inpainting_executor = None
+        except Exception:
+            pass
+        
+        # Clear inpainting start time
+        if hasattr(self, '_inpainting_start_time'):
+            self._inpainting_start_time = None
+        
+        # CRITICAL: Reset thread-local entirely to ensure fresh state
+        # This forces re-checkout from pool on next use
+        try:
+            if hasattr(self, '_thread_local'):
+                # Delete the bubble_detector attribute entirely
+                try:
+                    del self._thread_local.bubble_detector
+                except AttributeError:
+                    pass
+                # Clear inpainters dict
+                try:
+                    self._thread_local.local_inpainters = {}
+                except AttributeError:
+                    pass
+        except Exception:
+            pass
+        
+        # Also reset the _thread_local object itself to ensure clean state
+        self._thread_local = None
     
     @classmethod
     def force_release_all_pool_checkouts(cls, restart_workers: bool = False):
@@ -14470,8 +14509,18 @@ class MangaTranslator:
                             max_wait = 300  # 5 minutes total
                             poll_interval = 2.0  # Check stop flag every 2 seconds
                             
+                            self._log(f"⏳ Waiting for early inpainting to complete...", "debug")
+                            wait_log_interval = 10  # Log status every 10 seconds
+                            last_wait_log = 0
+                            
                             while inpainted is None:
                                 elapsed = time.time() - inpaint_wait_start
+                                
+                                # Periodic status log
+                                if elapsed - last_wait_log >= wait_log_interval:
+                                    self._log(f"⏳ Still waiting for early inpainting... ({elapsed:.0f}s elapsed)", "debug")
+                                    last_wait_log = elapsed
+                                
                                 if elapsed >= max_wait:
                                     self._log(f"⚠️ Early inpainting timed out after {max_wait}s", "warning")
                                     inpainted = image.copy()  # Fallback to original
@@ -14494,6 +14543,10 @@ class MangaTranslator:
                                 except concurrent.futures.TimeoutError:
                                     # Not done yet, continue waiting
                                     continue
+                                except concurrent.futures.CancelledError:
+                                    self._log("⏹️ Early inpainting was cancelled", "warning")
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
                                 except Exception as poll_err:
                                     self._log(f"⚠️ Early inpainting error: {poll_err}", "warning")
                                     inpainted = image.copy()  # Fallback to original

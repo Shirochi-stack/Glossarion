@@ -10226,11 +10226,27 @@ class MangaTranslationTab(QObject):
         # Start heartbeat spinner so there's visible activity until logs stream
         self._start_startup_heartbeat()
         
-        # CRITICAL: Wait for any previous worker thread to finish before starting new translation
+        # CRITICAL: Wait for any previous worker thread/future to finish before starting new translation
         # This prevents race conditions where old worker is still checking stop flags
         try:
+            # Check executor-based future first (preferred path)
+            if hasattr(self, 'translation_future') and self.translation_future:
+                try:
+                    if not self.translation_future.done():
+                        self._log("⏳ Canceling previous translation future...", "info")
+                        self.translation_future.cancel()
+                        # Wait briefly for it to actually stop
+                        try:
+                            self.translation_future.result(timeout=3.0)
+                        except Exception:
+                            pass  # Canceled or timed out
+                    self.translation_future = None
+                except Exception as fut_err:
+                    self._log(f"⚠️ Error canceling translation future: {fut_err}", "debug")
+            
+            # Also check thread-based fallback
             if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
-                self._log("⏳ Waiting for previous translation to finish...", "info")
+                self._log("⏳ Waiting for previous translation thread to finish...", "info")
                 self.translation_thread.join(timeout=5.0)  # Wait up to 5 seconds
                 if self.translation_thread.is_alive():
                     self._log("⚠️ Previous translation thread did not stop cleanly", "warning")
@@ -10722,6 +10738,34 @@ class MangaTranslationTab(QObject):
                 needs_new_translator = True
         if needs_new_translator:
             self._log("⚙️ Initializing translator...", "info")
+            
+            # CRITICAL: Clean up old translator's futures/executors before creating new one
+            # This prevents orphaned futures from blocking or interfering
+            if hasattr(self, 'translator') and self.translator:
+                try:
+                    old_translator = self.translator
+                    # Clear early inpainting futures
+                    if hasattr(old_translator, '_inpainting_future') and old_translator._inpainting_future:
+                        try:
+                            old_translator._inpainting_future.cancel()
+                        except Exception:
+                            pass
+                        old_translator._inpainting_future = None
+                    # Shutdown early inpainting executor
+                    if hasattr(old_translator, '_inpainting_executor') and old_translator._inpainting_executor:
+                        try:
+                            old_translator._inpainting_executor.shutdown(wait=False, cancel_futures=True)
+                        except TypeError:
+                            old_translator._inpainting_executor.shutdown(wait=False)
+                        except Exception:
+                            pass
+                        old_translator._inpainting_executor = None
+                    # Clear checkout references
+                    if hasattr(old_translator, '_clear_checkout_references'):
+                        old_translator._clear_checkout_references()
+                    self._log("🧹 Cleaned up previous translator state", "debug")
+                except Exception as cleanup_err:
+                    self._log(f"⚠️ Error cleaning up old translator: {cleanup_err}", "debug")
             
             # CRITICAL: Set batch environment variables BEFORE creating translator
             # This ensures MangaTranslator picks up the batch settings on initialization
