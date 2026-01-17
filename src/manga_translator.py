@@ -9964,9 +9964,59 @@ class MangaTranslator:
                                 self._log(f"⏳ Still waiting for inpainter pool... ({int(elapsed)}s)", "info")
                         time.sleep(poll_interval)
                 
-                # After polling, check final state
+                # After polling, check final state and RETRY loading if needed
                 if inp_shared is None:
-                    self._log(f"⚠️ No inpainter pool found after {poll_timeout}s - will create on demand", "warning")
+                    self._log(f"⚠️ No inpainter pool found after {poll_timeout}s - attempting to preload...", "warning")
+                    
+                    # RETRY LOGIC: Use preload_local_inpainters to properly add to pool
+                    max_load_retries = 3
+                    for load_attempt in range(max_load_retries):
+                        try:
+                            self._log(f"🔄 Inpainter preload attempt {load_attempt + 1}/{max_load_retries}...", "info")
+                            
+                            # Use preload function which properly initializes and adds to pool
+                            preloaded = self.preload_local_inpainters(local_method, model_path, count=1)
+                            
+                            if preloaded > 0:
+                                self._log(f"✅ Preloaded {preloaded} inpainter(s) on attempt {load_attempt + 1}", "info")
+                                # Now try to get from the pool
+                                retry_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                                if retry_inp and getattr(retry_inp, 'model_loaded', False):
+                                    self._log(f"✅ Inpainter checked out from pool successfully", "info")
+                                    inp_shared = retry_inp
+                                    break
+                                elif retry_inp:
+                                    # Inpainter exists but model not loaded - try loading manually
+                                    self._log(f"⏳ Inpainter checked out but model not loaded - trying manual load...", "info")
+                                    if model_path and os.path.exists(model_path):
+                                        try:
+                                            if hasattr(retry_inp, 'load_model_with_retry'):
+                                                loaded = retry_inp.load_model_with_retry(local_method, model_path, force_reload=True)
+                                            else:
+                                                loaded = retry_inp.load_model(local_method, model_path, force_reload=True)
+                                            if loaded and getattr(retry_inp, 'model_loaded', False):
+                                                self._log(f"✅ Model loaded manually on attempt {load_attempt + 1}", "info")
+                                                inp_shared = retry_inp
+                                                break
+                                        except Exception as load_err:
+                                            self._log(f"⚠️ Manual load error: {load_err}", "warning")
+                            else:
+                                self._log(f"⚠️ Preload returned 0 on attempt {load_attempt + 1}", "warning")
+                            
+                            # Wait before retry
+                            if load_attempt < max_load_retries - 1:
+                                self._log(f"⏳ Waiting 2s before retry...", "info")
+                                time.sleep(2)
+                                
+                        except Exception as e:
+                            self._log(f"⚠️ Load attempt {load_attempt + 1} failed: {e}", "warning")
+                            import traceback
+                            self._log(f"   Traceback: {traceback.format_exc()}", "debug")
+                            if load_attempt < max_load_retries - 1:
+                                time.sleep(2)
+                    
+                    if inp_shared is None:
+                        self._log(f"⚠️ All {max_load_retries} preload attempts failed - will create on demand", "warning")
                 
                 # Initialize need_reload flag
                 need_reload = False
@@ -14230,7 +14280,8 @@ class MangaTranslator:
                     
                     return inpainted_local
                 except Exception as ie:
-                    self._log(f"❌ Inpainting task error: {ie}", "error")
+                    self._log(f"❌ Inpainting task error: {type(ie).__name__}: {ie}", "error")
+                    self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
                     return image.copy()
             
             # Gate on advanced setting (default enabled)
@@ -14274,8 +14325,9 @@ class MangaTranslator:
                         # Check what we got back
                         if isinstance(fut_inpaint_result, concurrent.futures.Future):
                             # It's an early inpainting future, get its result
+                            # Use 5 minute timeout for early inpainting (can take long on first load)
                             inpaint_wait_start = time.time()
-                            inpainted = fut_inpaint_result.result(timeout=60)
+                            inpainted = fut_inpaint_result.result(timeout=300)
                             inpaint_wait_time = time.time() - inpaint_wait_start
                             
                             # Calculate total inpainting time from when it started early
@@ -14347,7 +14399,8 @@ class MangaTranslator:
                             self._log(f"⚠️ Unexpected inpainting result type: {type(fut_inpaint_result)}", "warning")
                             inpainted = image.copy()
                     except Exception as e:
-                        self._log(f"⚠️ Inpainting failed: {e}", "warning")
+                        self._log(f"⚠️ Inpainting failed: {type(e).__name__}: {e}", "warning")
+                        self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
                         inpainted = image.copy()
                     finally:
                         # Clean up early inpainting resources
