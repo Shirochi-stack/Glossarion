@@ -197,6 +197,35 @@ class APIKeyPool:
         # Track which keys are currently being used by which threads
         self._keys_in_use = {}  # key_index -> set of thread_ids
         self._usage_lock = threading.Lock()
+        
+        # Stop flag callback - can be set by UnifiedClient to check for stop requests
+        self._stop_check_callback = None
+    
+    def set_stop_check_callback(self, callback):
+        """Set a callback function to check if stop has been requested.
+        The callback should return True if stop is requested, False otherwise.
+        """
+        self._stop_check_callback = callback
+    
+    def _is_stop_requested(self) -> bool:
+        """Check if stop has been requested via callback or global flag."""
+        # Check callback first if set
+        if self._stop_check_callback is not None:
+            try:
+                if self._stop_check_callback():
+                    return True
+            except Exception:
+                pass
+        
+        # Also check the module-level stop flag from unified_api_client if available
+        try:
+            from unified_api_client import is_stop_requested
+            if is_stop_requested():
+                return True
+        except ImportError:
+            pass
+        
+        return False
     
     def load_from_list(self, key_list: List[dict]):
         with self.lock:
@@ -259,6 +288,11 @@ class APIKeyPool:
     def get_key_for_thread(self, force_rotation: bool = False, 
                           rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
         """Get a key for the current thread with proper rotation logic"""
+        # Check for stop request at start
+        if self._is_stop_requested():
+            logger.info("Stop requested during key selection, returning None")
+            return None
+        
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
         
@@ -299,6 +333,11 @@ class APIKeyPool:
             attempts = 0
             
             while attempts < len(self.keys):
+                # Check for stop request in loop
+                if self._is_stop_requested():
+                    logger.info("Stop requested during key rotation loop")
+                    return None
+                
                 # Get current index and immediately increment for next thread
                 key_index = self._rotation_index
                 self._rotation_index = (self._rotation_index + 1) % len(self.keys)

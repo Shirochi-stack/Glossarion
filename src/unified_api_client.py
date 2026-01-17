@@ -1623,7 +1623,9 @@ class UnifiedClient:
             elapsed = 0.0
             check_interval = 0.1
             while elapsed < wait:
-                if self._cancelled:
+                # Use comprehensive stop check
+                if self._is_stop_requested():
+                    self._cancelled = True
                     print(f"🛑 Thread delay cancelled")
                     return
                 
@@ -1663,9 +1665,10 @@ class UnifiedClient:
     
     def _ensure_thread_client(self):
         """Ensure the current thread has a properly initialized client with thread safety"""
-        # Check if cancelled before proceeding
-        if self._cancelled:
-            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        # Check if cancelled before proceeding using comprehensive stop check
+        if self._is_stop_requested():
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
@@ -1827,9 +1830,10 @@ class UnifiedClient:
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
 
-        # Check if cancelled at start
-        if self._cancelled:
-            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        # Check if cancelled at start using comprehensive stop check
+        if self._is_stop_requested():
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
         # Check if thread already has a key
         existing = self._get_thread_key()
@@ -1883,9 +1887,10 @@ class UnifiedClient:
                 wait_time = self._get_shortest_cooldown_time()
                 print(f"[THREAD-{thread_name}] No keys available, waiting {wait_time}s (retry {retry_count + 1}/{max_retries})")
                 
-                # Wait with cancellation check
+                # Wait with cancellation check using comprehensive stop check
                 for i in range(wait_time):
-                    if hasattr(self, '_cancelled') and self._cancelled:
+                    if self._is_stop_requested():
+                        self._cancelled = True
                         raise UnifiedClientError("Operation cancelled while waiting for key", error_type="cancelled")
                     time.sleep(1)
                     if i % 10 == 0 and i > 0:
@@ -1910,9 +1915,10 @@ class UnifiedClient:
         
         thread_name = threading.current_thread().name
         
-        # Stop check
-        if self._cancelled:
-            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        # Stop check using comprehensive method
+        if self._is_stop_requested():
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         
         # Use the APIKeyPool's built-in thread-safe method
         if hasattr(self._api_key_pool, 'get_key_for_thread'):
@@ -3311,8 +3317,9 @@ class UnifiedClient:
 
     def _get_shortest_cooldown_time(self) -> int:
         """Get the shortest cooldown time among all keys"""
-        # Check if cancelled at start
-        if self._cancelled:
+        # Check if cancelled at start using comprehensive stop check
+        if self._is_stop_requested():
+            self._cancelled = True
             return 0  # Return immediately if cancelled
             
         if not self._multi_key_mode or not self.__class__._api_key_pool:
@@ -4125,6 +4132,11 @@ class UnifiedClient:
 
         for attempt in range(internal_retries):
             try:
+                # Check for stop request at start of each retry attempt
+                if self._is_stop_requested():
+                    self._cancelled = True
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
                 # For image requests, prepare messages with embedded image BEFORE validation
                 if image_data:
                     messages = self._prepare_image_messages(messages, image_data)
@@ -4193,10 +4205,9 @@ class UnifiedClient:
                 if isinstance(response, UnifiedResponse):
                     usage = response.usage
                 
-                # Check for cancellation (from timeout or stop button)
-                if self._cancelled:
-                    if not self._is_stop_requested():
-                        logger.info("Operation cancelled (timeout or user stop)")
+                # Check for cancellation (from timeout or stop button) using comprehensive check
+                if self._is_stop_requested():
+                    self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # ====== UNIVERSAL EXTRACTION INTEGRATION ======
@@ -4603,10 +4614,11 @@ class UnifiedClient:
                         
                         print(f"🔄 Server error ({http_status or 'API error'}) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
-                        # Wait with cancellation check
+                        # Wait with cancellation check using comprehensive stop check
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._cancelled:
+                            if self._is_stop_requested():
+                                self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)  # Check every 0.5 seconds
                         print(f"🔄 Server error retry: Backoff completed, initiating retry attempt...")
@@ -4625,7 +4637,8 @@ class UnifiedClient:
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._cancelled:
+                            if self._is_stop_requested():
+                                self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
                         print(f"🔄 Timeout error retry: Backoff completed, initiating retry attempt...")
@@ -4649,7 +4662,8 @@ class UnifiedClient:
                     
                     wait_start = time.time()
                     while time.time() - wait_start < delay:
-                        if self._cancelled:
+                        if self._is_stop_requested():
+                            self._cancelled = True
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         time.sleep(0.5)
                     print(f"🔄 API error retry: Backoff completed, initiating retry attempt...")
@@ -4725,10 +4739,11 @@ class UnifiedClient:
                         
                         print(f"🔄 Unexpected rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
-                        # Wait with cancellation check
+                        # Wait with cancellation check using comprehensive stop check
                         wait_start = time.time()
                         while time.time() - wait_start < wait_time:
-                            if self._cancelled:
+                            if self._is_stop_requested():
+                                self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
                         
@@ -4785,7 +4800,8 @@ class UnifiedClient:
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._cancelled:
+                            if self._is_stop_requested():
+                                self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
                         continue  # Retry the attempt
@@ -4813,7 +4829,8 @@ class UnifiedClient:
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._cancelled:
+                            if self._is_stop_requested():
+                                self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
                         continue  # Retry the attempt
@@ -4844,13 +4861,14 @@ class UnifiedClient:
                     
                     wait_start = time.time()
                     while time.time() - wait_start < delay:
-                        if self._cancelled:
+                        if self._is_stop_requested():
+                            self._cancelled = True
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         time.sleep(0.5)
                     continue  # Retry the attempt
 
                     
-    def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
+    def _retry_with_main_key(
                             max_completion_tokens=None, context=None,
                             request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
         """
@@ -8031,8 +8049,10 @@ class UnifiedClient:
                 print(f"{provider} HTTP attempt {attempt + 1}/{max_retries}")
             except Exception:
                 pass
-            if self._cancelled:
-                raise UnifiedClientError("Operation cancelled")
+            # Use comprehensive stop check
+            if self._is_stop_requested():
+                self._cancelled = True
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
             # Debug logging for retry loop
             if debug_max_tokens and attempt > 0:
@@ -8415,8 +8435,10 @@ class UnifiedClient:
         api_delay = self._get_send_interval()
         for attempt in range(max_retries):
             try:
-                if self._cancelled:
-                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                # Use comprehensive stop check
+                if self._is_stop_requested():
+                    self._cancelled = True
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 return call()
             except UnifiedClientError:
                 # Already normalized; propagate
@@ -9285,9 +9307,10 @@ class UnifiedClient:
                     if 'max_tokens' in params:
                         params['max_completion_tokens'] = params.pop('max_tokens')
                 
-                # Check for cancellation
-                if self._cancelled:
-                    raise UnifiedClientError("Operation cancelled")
+                # Check for cancellation using comprehensive stop check
+                if self._is_stop_requested():
+                    self._cancelled = True
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # Log the request for debugging
                 logger.debug(f"OpenAI request - Model: {self.model}, Params: {list(params.keys())}")
@@ -9927,8 +9950,10 @@ class UnifiedClient:
         # Main attempt loop - SAME FOR BOTH ENDPOINTS
         while attempt < attempts:
             try:
-                if self._cancelled:
-                    raise UnifiedClientError("Operation cancelled")
+                # Use comprehensive stop check
+                if self._is_stop_requested():
+                    self._cancelled = True
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # Get user-configured anti-duplicate parameters
                 anti_dupe_params = self._get_anti_duplicate_params(temperature)
@@ -10988,8 +11013,10 @@ class UnifiedClient:
         max_polls = 300  # Maximum 5 minutes at 1 second intervals
         
         while poll_count < max_polls:
-            if self._cancelled:
-                raise UnifiedClientError("Operation cancelled")
+            # Use comprehensive stop check
+            if self._is_stop_requested():
+                self._cancelled = True
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
             resp = requests.get(
                 f"https://api.replicate.com/v1/predictions/{prediction_id}",
@@ -11263,8 +11290,10 @@ class UnifiedClient:
             max_tokens_adjusted = False
             for attempt in range(max_retries):
                 try:
-                    if self._cancelled:
-                        raise UnifiedClientError("Operation cancelled")
+                    # Check all stop sources (global flag, class-level, instance-level, etc.)
+                    if self._is_stop_requested():
+                        self._cancelled = True
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     
                     # Fix empty base_url for Groq
                     if provider == 'groq' and (not base_url or base_url.strip() == ''):
@@ -11917,6 +11946,11 @@ class UnifiedClient:
                     )
                     
                 except Exception as e:
+                    # Check for stop request after API call returns
+                    if self._is_stop_requested():
+                        self._cancelled = True
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                    
                     error_str = str(e).lower()
                     
                     # Handle token limit errors (max too high, or provider-enforced valid ranges) - auto-adjust and retry
