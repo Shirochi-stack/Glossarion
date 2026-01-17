@@ -12364,6 +12364,8 @@ class MangaTranslationTab(QObject):
                     MangaTranslator.set_global_cancellation(True)
                     # CRITICAL: Force-release all pool checkouts so resources are available
                     # for subsequent translations (interrupted translations leave stale checkouts)
+                    # Note: restart_workers=False (default) to avoid GUI lag. Stuck workers
+                    # will be lazily restarted on next use via _mp_load_model retry logic.
                     MangaTranslator.force_release_all_pool_checkouts()
                 except ImportError:
                     pass

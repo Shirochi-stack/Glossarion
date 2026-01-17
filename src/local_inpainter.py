@@ -847,6 +847,9 @@ class LocalInpainter:
                             pass
             self._mp_receiver_thread = threading.Thread(target=_receiver, daemon=True)
             self._mp_receiver_thread.start()
+            # CRITICAL: Set _mp_enabled=True AFTER successful worker start
+            # This is needed to re-enable worker mode after _stop_worker() set it to False
+            self._mp_enabled = True
             logger.debug("Started LocalInpainter worker process")
         except Exception as e:
             logger.warning(f"Failed to start worker process; falling back to in-process mode: {e}")
@@ -867,7 +870,23 @@ class LocalInpainter:
                     pass
             if self._mp_worker is not None:
                 try:
+                    # Try graceful shutdown first
                     self._mp_worker.join(timeout=1.0)
+                except Exception:
+                    pass
+                
+                # If worker is still alive, force terminate it
+                try:
+                    if self._mp_worker.is_alive():
+                        logger.warning("Worker process didn't respond to shutdown - force terminating")
+                        self._mp_worker.terminate()
+                        self._mp_worker.join(timeout=2.0)
+                        # Last resort: kill if still alive
+                        if self._mp_worker.is_alive():
+                            try:
+                                self._mp_worker.kill()
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         finally:
@@ -879,6 +898,33 @@ class LocalInpainter:
             self._mp_receiver_thread = None
             self._mp_pending = {}
 
+    def _check_worker_health(self) -> bool:
+        """Check if the worker process is alive and responsive.
+        Returns True if healthy, False if dead/stuck.
+        """
+        if not self._mp_enabled or self._mp_worker is None:
+            return False
+        try:
+            return self._mp_worker.is_alive()
+        except Exception:
+            return False
+    
+    def _ensure_worker_healthy(self) -> bool:
+        """Ensure worker is healthy, restart if dead. Returns True if worker is now healthy."""
+        if self._check_worker_health():
+            return True
+        
+        logger.warning("Worker process is dead - attempting restart")
+        try:
+            self._stop_worker()  # Clean up any zombie state
+            import time
+            time.sleep(0.5)
+            self._start_worker()
+            return self._check_worker_health()
+        except Exception as e:
+            logger.error(f"Failed to restart worker: {e}")
+            return False
+    
     def _mp_call(self, payload: dict, expect_type: str, timeout: float = 60.0) -> dict:
         if not self._mp_enabled or self._mp_task_q is None:
             raise RuntimeError("Worker process not available")
@@ -916,33 +962,70 @@ class LocalInpainter:
         return resp
 
     def _mp_load_model(self, method, model_path, force_reload=False) -> bool:
-        try:
-            # Store model path for worker restart scenarios
-            self._last_model_path = model_path
-            
-            resp = self._mp_call({'type': 'load_model', 'method': method, 'model_path': model_path, 'force_reload': bool(force_reload)}, 'load_model_done', timeout=180.0)
-            ok = bool(resp.get('success'))
-            # Mirror minimal state for compatibility
-            self.model_loaded = ok
-            self.use_onnx = bool(resp.get('use_onnx', False))
-            self.use_onnx_cpp = bool(resp.get('use_onnx_cpp', False))
+        # Store model path for worker restart scenarios
+        self._last_model_path = model_path
+        
+        # Retry logic with worker restart for stuck/dead workers
+        max_retries = 2
+        timeout_values = [180.0, 180.0, 180.0]  # 3 minutes per attempt
+        
+        for attempt in range(max_retries + 1):
             try:
-                self.current_method = resp.get('current_method') or method
-            except Exception:
-                self.current_method = method
-            # Log if worker is using C++ backend
-            if self.use_onnx_cpp:
-                logger.info("✅ Worker process using C++ ONNX backend (2x faster)")
-            return ok
-        except TimeoutError as e:
-            logger.error(f"Worker load_model timeout: {e}")
-            logger.error("💡 Try disabling worker process in settings if this persists")
-            self.model_loaded = False
-            return False
-        except Exception as e:
-            logger.error(f"Worker load_model failed: {e}")
-            self.model_loaded = False
-            return False
+                # Ensure worker is healthy before attempting
+                if attempt > 0 or not self._check_worker_health():
+                    if not self._ensure_worker_healthy():
+                        logger.error(f"Worker health check failed on attempt {attempt + 1}")
+                        if attempt >= max_retries:
+                            self.model_loaded = False
+                            return False
+                        continue
+                
+                timeout = timeout_values[min(attempt, len(timeout_values) - 1)]
+                resp = self._mp_call(
+                    {'type': 'load_model', 'method': method, 'model_path': model_path, 'force_reload': bool(force_reload)},
+                    'load_model_done',
+                    timeout=timeout
+                )
+                ok = bool(resp.get('success'))
+                # Mirror minimal state for compatibility
+                self.model_loaded = ok
+                self.use_onnx = bool(resp.get('use_onnx', False))
+                self.use_onnx_cpp = bool(resp.get('use_onnx_cpp', False))
+                try:
+                    self.current_method = resp.get('current_method') or method
+                except Exception:
+                    self.current_method = method
+                # Log if worker is using C++ backend
+                if self.use_onnx_cpp:
+                    logger.info("✅ Worker process using C++ ONNX backend (2x faster)")
+                if attempt > 0:
+                    logger.info(f"✅ Worker load_model succeeded on retry {attempt}")
+                return ok
+                
+            except TimeoutError as e:
+                logger.error(f"Worker load_model timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt < max_retries:
+                    logger.warning(f"🔄 Restarting worker and retrying load_model...")
+                    try:
+                        self._stop_worker()
+                        import time
+                        time.sleep(1)  # Brief pause
+                        self._start_worker()
+                    except Exception as restart_error:
+                        logger.error(f"Failed to restart worker: {restart_error}")
+                else:
+                    logger.error("💡 Try disabling worker process in settings if this persists")
+                    self.model_loaded = False
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Worker load_model failed (attempt {attempt + 1}): {e}")
+                if attempt >= max_retries:
+                    self.model_loaded = False
+                    return False
+        
+        self.model_loaded = False
+        return False
 
     def _mp_inpaint(self, image, mask, refinement='normal', iterations=None):
         # Respect stop flag

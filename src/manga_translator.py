@@ -686,18 +686,23 @@ class MangaTranslator:
             cls._global_cancelled = False
     
     @classmethod
-    def force_release_all_pool_checkouts(cls):
+    def force_release_all_pool_checkouts(cls, restart_workers: bool = False):
         """Force-clear all checked_out lists in both inpainter and detector pools.
         
         This should be called when starting a new translation or after stopping,
         to ensure any stale checkouts from interrupted translations are cleared.
         Without this, stopped translations leave inpainters marked as 'checked out'
         and they become unavailable for subsequent translations.
+        
+        Args:
+            restart_workers: If True, also restart worker processes for inpainters
+                           to clear any stuck/hung worker state from interrupted translations.
         """
         released_inpainters = 0
         released_detectors = 0
+        restarted_workers = 0
         
-        # Clear inpainter pool checkouts
+        # Clear inpainter pool checkouts and optionally restart workers
         try:
             with cls._inpaint_pool_lock:
                 for key, rec in cls._inpaint_pool.items():
@@ -706,10 +711,48 @@ class MangaTranslator:
                         if count > 0:
                             released_inpainters += count
                             rec['checked_out'].clear()
+                    
+                    # Restart worker processes to clear hung state and reset stop flags
+                    if restart_workers and rec:
+                        spares = rec.get('spares', [])
+                        for inpainter in spares:
+                            if inpainter is None:
+                                continue
+                            try:
+                                # Reset stop flags first
+                                if hasattr(inpainter, '_stopped'):
+                                    inpainter._stopped = False
+                                if hasattr(inpainter, 'stop_flag'):
+                                    # Don't clear stop_flag itself, just reset _stopped state
+                                    pass
+                                
+                                # Check if this inpainter uses worker processes
+                                if hasattr(inpainter, '_mp_enabled') and inpainter._mp_enabled:
+                                    # Capture model info BEFORE stopping (since _stop_worker clears state)
+                                    was_loaded = getattr(inpainter, 'model_loaded', False)
+                                    method = getattr(inpainter, 'current_method', None)
+                                    path = getattr(inpainter, '_last_model_path', None) or getattr(inpainter, 'model_path', None)
+                                    
+                                    # Stop the potentially stuck worker
+                                    if hasattr(inpainter, '_stop_worker'):
+                                        inpainter._stop_worker()
+                                    # Restart with fresh state
+                                    if hasattr(inpainter, '_start_worker'):
+                                        inpainter._start_worker()
+                                        # Reload model in new worker if it was loaded before
+                                        if was_loaded and method and path:
+                                            try:
+                                                inpainter._mp_load_model(method, path, force_reload=True)
+                                                restarted_workers += 1
+                                            except Exception as e:
+                                                print(f"[POOL] Warning: Failed to reload model in restarted worker: {e}")
+                            except Exception as e:
+                                print(f"[POOL] Warning: Failed to restart worker for inpainter: {e}")
         except Exception:
             pass
         
-        # Clear detector pool checkouts
+        # Clear detector pool checkouts and reset detector state
+        reset_detectors = 0
         try:
             with cls._detector_pool_lock:
                 for key, rec in cls._detector_pool.items():
@@ -718,11 +761,33 @@ class MangaTranslator:
                         if count > 0:
                             released_detectors += count
                             rec['checked_out'].clear()
+                    
+                    # Reset detector state (stop flags, etc.)
+                    if restart_workers and rec:
+                        spares = rec.get('spares', [])
+                        for detector in spares:
+                            if detector is None:
+                                continue
+                            try:
+                                # Reset stop flags
+                                if hasattr(detector, 'reset_stop_flags'):
+                                    detector.reset_stop_flags()
+                                if hasattr(detector, '_stopped'):
+                                    detector._stopped = False
+                                
+                                # Reset ONNX session if it exists and might be in bad state
+                                # Note: We don't recreate the session, just mark for potential reload
+                                # The next use will reload if needed
+                                if hasattr(detector, 'rtdetr_onnx_session') and detector.rtdetr_onnx_session is not None:
+                                    # Session exists, mark detector for potential health check
+                                    reset_detectors += 1
+                            except Exception as e:
+                                print(f"[POOL] Warning: Failed to reset detector state: {e}")
         except Exception:
             pass
         
-        if released_inpainters > 0 or released_detectors > 0:
-            print(f"[POOL] Force-released {released_inpainters} inpainter(s) and {released_detectors} detector(s) from checkout")
+        if released_inpainters > 0 or released_detectors > 0 or restarted_workers > 0 or reset_detectors > 0:
+            print(f"[POOL] Force-released {released_inpainters} inpainter(s) and {released_detectors} detector(s) from checkout, restarted {restarted_workers} worker(s), reset {reset_detectors} detector(s)")
         
         return released_inpainters, released_detectors
     
