@@ -14487,7 +14487,7 @@ class MangaTranslator:
                     
                     try:
                         translate_ok = fut_translate.result(timeout=chunk_timeout)
-                        self._log("✅ Translation task completed", "debug")
+                        self._log("✅ Translation task completed", "info")
                     except Exception as e:
                         error_msg = f"Translation failed: {type(e).__name__}: {str(e)}"
                         self._log(f"⚠️ {error_msg}", "warning")
@@ -14509,8 +14509,8 @@ class MangaTranslator:
                             max_wait = 300  # 5 minutes total
                             poll_interval = 2.0  # Check stop flag every 2 seconds
                             
-                            self._log(f"⏳ Waiting for early inpainting to complete...", "debug")
-                            wait_log_interval = 10  # Log status every 10 seconds
+                            self._log(f"⏳ Waiting for early inpainting to complete...", "info")
+                            wait_log_interval = 5  # Log status every 5 seconds
                             last_wait_log = 0
                             
                             while inpainted is None:
@@ -14518,7 +14518,7 @@ class MangaTranslator:
                                 
                                 # Periodic status log
                                 if elapsed - last_wait_log >= wait_log_interval:
-                                    self._log(f"⏳ Still waiting for early inpainting... ({elapsed:.0f}s elapsed)", "debug")
+                                    self._log(f"⏳ Still waiting for early inpainting... ({elapsed:.0f}s elapsed)", "info")
                                     last_wait_log = elapsed
                                 
                                 if elapsed >= max_wait:

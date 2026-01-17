@@ -1037,8 +1037,8 @@ class LocalInpainter:
             return image
         
         # CRITICAL: Retry with exponential backoff for timeouts
-        max_retries = 2
-        timeout_values = [120.0, 240.0, 480.0]  # Progressive timeouts
+        max_retries = 3
+        timeout_values = [10.0, 20.0, 30.0, 60.0]  # Progressive timeouts: faster initial detection
         
         for attempt in range(max_retries + 1):
             try:
