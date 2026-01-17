@@ -5903,6 +5903,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Reset stop flags
         self.stop_requested = False
+        self.graceful_stop_active = False  # Reset graceful stop state
+        os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         if translation_stop_flag:
             translation_stop_flag(False)
         
@@ -7755,6 +7758,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Reset stop flags
         self.stop_requested = False
+        self.graceful_stop_active = False  # Reset graceful stop state
+        os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         if glossary_stop_flag:
             glossary_stop_flag(False)
         
@@ -9432,33 +9438,37 @@ Important rules:
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
+        # Track graceful stop state - when True, stop_callback returns False to allow in-flight calls to complete
+        self.graceful_stop_active = graceful_stop
+        
         self.stop_requested = True
 
-        # Touch stop file for cross-process glossary workers
-        try:
-            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-            if stop_file:
-                with open(stop_file, 'w', encoding='utf-8') as f:
-                    f.write('stop')
-        except Exception:
-            pass
-        
-        # Use the imported translation_stop_flag function from TransateKRtoEN
-        # This was imported during lazy loading as: translation_stop_flag = TransateKRtoEN.set_stop_flag
-        if 'translation_stop_flag' in globals() and translation_stop_flag:
-            translation_stop_flag(True)
-        
-        # Also try to call it directly on the module if imported
-        try:
-            import TransateKRtoEN
-            if hasattr(TransateKRtoEN, 'set_stop_flag'):
-                TransateKRtoEN.set_stop_flag(True)
-        except: 
-            pass
+        # Touch stop file for cross-process glossary workers (only for immediate stop)
+        if not graceful_stop:
+            try:
+                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                if stop_file:
+                    with open(stop_file, 'w', encoding='utf-8') as f:
+                        f.write('stop')
+            except Exception:
+                pass
         
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
         if not graceful_stop:
+            # Use the imported translation_stop_flag function from TransateKRtoEN
+            # This was imported during lazy loading as: translation_stop_flag = TransateKRtoEN.set_stop_flag
+            if 'translation_stop_flag' in globals() and translation_stop_flag:
+                translation_stop_flag(True)
+            
+            # Also try to call it directly on the module if imported
+            try:
+                import TransateKRtoEN
+                if hasattr(TransateKRtoEN, 'set_stop_flag'):
+                    TransateKRtoEN.set_stop_flag(True)
+            except: 
+                pass
+            
             try:
                 import unified_api_client
                 if hasattr(unified_api_client, 'set_stop_flag'):
@@ -9604,19 +9614,20 @@ Important rules:
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
         self.stop_requested = True
-        if glossary_stop_flag:
-            glossary_stop_flag(True)
-        
-        try:
-            import extract_glossary_from_epub
-            if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-                extract_glossary_from_epub.set_stop_flag(True)
-        except:
-            pass
         
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
         if not graceful_stop:
+            if glossary_stop_flag:
+                glossary_stop_flag(True)
+            
+            try:
+                import extract_glossary_from_epub
+                if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                    extract_glossary_from_epub.set_stop_flag(True)
+            except:
+                pass
+            
             # Also propagate stop to unified_api_client for streaming cancellation
             try:
                 import unified_api_client
@@ -9666,14 +9677,14 @@ Important rules:
             except Exception as e:
                 print(f"Error terminating child processes: {e}")
 
-        # Touch stop file for GlossaryManager subprocesses
-        try:
-            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-            if stop_file:
-                with open(stop_file, 'w', encoding='utf-8') as f:
-                    f.write('stop')
-        except Exception:
-            pass
+            # Touch stop file for GlossaryManager subprocesses
+            try:
+                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                if stop_file:
+                    with open(stop_file, 'w', encoding='utf-8') as f:
+                        f.write('stop')
+            except Exception:
+                pass
         
         # Log message depends on stop mode
         if graceful_stop:

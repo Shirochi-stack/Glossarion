@@ -2089,6 +2089,26 @@ class ProgressManager:
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, chapter_obj=None):
         """Check if a chapter needs translation"""
+        # Define _norm helper early so it's available throughout this method
+        def _norm(fname: str):
+            """
+            Normalize a filename for comparison:
+            - drop leading response_ prefix
+            - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
+            - lowercase for case-insensitive matching on Windows
+            """
+            if not fname:
+                return ""
+            base = os.path.basename(fname)
+            if base.startswith("response_"):
+                base = base[len("response_"):]
+            # Strip all extensions, not just the last one
+            while True:
+                base, ext = os.path.splitext(base)
+                if not ext:
+                    break
+            return base.lower()
+        
         # If caller passed 0/None, recompute from filename/spine to avoid collapsing to chapter 0
         if (actual_num is None or actual_num <= 0) and chapter_obj:
             try:
@@ -2155,25 +2175,6 @@ class ProgressManager:
             output_path = os.path.join(output_dir, output_filename)
 
             # If a differently-keyed entry already tracks this file, reuse it instead of auto-discovering
-            def _norm(fname: str):
-                """
-                Normalize a filename for comparison:
-                - drop leading response_ prefix
-                - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
-                - lowercase for case-insensitive matching on Windows
-                """
-                if not fname:
-                    return ""
-                base = os.path.basename(fname)
-                if base.startswith("response_"):
-                    base = base[len("response_"):]
-                # Strip all extensions, not just the last one
-                while True:
-                    base, ext = os.path.splitext(base)
-                    if not ext:
-                        break
-                return base.lower()
-
             expected_norm = _norm(output_filename)
             for k, info in self.prog.get("chapters", {}).items():
                 if _norm(info.get("output_file")) == expected_norm:
@@ -2974,6 +2975,11 @@ class TranslationProcessor:
         
     def check_stop(self):
         """Check if translation should stop"""
+        # During graceful stop, ALWAYS return False to let current chapter complete fully
+        # The main loop will check GRACEFUL_STOP at the START of each new chapter
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        
         if self.stop_callback and self.stop_callback():
             log_stop_once()
             return True
@@ -6159,10 +6165,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     if hasattr(client, 'cancel_current_operation'):
                         client.cancel_current_operation()
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                # If graceful stop was requested, mark that an API call completed
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
                 return api_result
             return result
         except queue.Empty:
-            if stop_check_fn():
+            # During graceful stop, don't cancel the API call - let it complete
+            if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
@@ -9419,6 +9429,11 @@ def main(log_callback=None, stop_callback=None):
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
             
+            # Graceful stop check: if an API call completed during graceful stop, stop now
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                print("✅ Graceful stop: Chapter completed, stopping...")
+                break
+            
             # Skip if this chapter was merged into another
             if idx in merged_children:
                 if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
@@ -10254,8 +10269,9 @@ def main(log_callback=None, stop_callback=None):
                     fractional_second = config.DELAY - full_seconds
                     
                     # Check stop signal every second for full seconds
+                    # During graceful stop, skip these checks to complete all chunks
                     for i in range(full_seconds):
-                        if check_stop():
+                        if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
                             print("❌ Translation stopped during delay")
                             # Mark any in_progress chapter(s) as failed so the UI reflects the stop
                             if merge_info is not None:
@@ -10286,7 +10302,7 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Handle the fractional part if any
                     if fractional_second > 0:
-                        if check_stop():
+                        if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
                             print("❌ Translation stopped during delay")
                             # Mark any in_progress chapter(s) as failed so the UI reflects the stop
                             if merge_info is not None:
@@ -10315,7 +10331,8 @@ def main(log_callback=None, stop_callback=None):
                             return
                         time.sleep(fractional_second)
 
-            if check_stop():
+            # During graceful stop, skip this check to save the completed API response
+            if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
                 print(f"❌ Translation stopped before saving chapter {actual_num}")
                 # Mark any in_progress chapter(s) as failed so the UI reflects the stop
                 if merge_info is not None:

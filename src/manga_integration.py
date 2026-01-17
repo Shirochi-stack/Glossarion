@@ -10227,6 +10227,12 @@ class MangaTranslationTab(QObject):
             self.stop_flag.clear()
         self._reset_global_cancellation()
         
+        # Reset graceful stop mode from any previous translation
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        if hasattr(self, 'main_gui') and self.main_gui:
+            self.main_gui.graceful_stop_active = False
+        
         # Log start directly to GUI
         try:
             if hasattr(self, 'log_text') and self.log_text:
@@ -11453,6 +11459,11 @@ class MangaTranslationTab(QObject):
                 total = self.total_files
                 
                 def process_single(idx, filepath):
+                    # Graceful stop check: if an API call completed during graceful stop, stop now
+                    if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                        self._log("✅ Graceful stop: Image completed, stopping...", "info")
+                        return False
+                    
                     # Check stop flag at the very beginning
                     if self.stop_flag.is_set():
                         return False
@@ -11715,6 +11726,10 @@ class MangaTranslationTab(QObject):
                     futures = []
                     stagger_ms = int(advanced.get('panel_start_stagger_ms', 30))
                     for idx, filepath in enumerate(self.selected_files):
+                        # Graceful stop check: if an API call completed, stop submitting new work
+                        if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                            self._log("✅ Graceful stop: Image completed, stopping...", "info")
+                            break
                         if self.stop_flag.is_set():
                             break
                         futures.append(executor.submit(process_single, idx, filepath))
@@ -11762,6 +11777,10 @@ class MangaTranslationTab(QObject):
             else:
                 # Sequential processing (or panel parallel requested but capped to 1 by global setting)
                 for index, filepath in enumerate(self.selected_files):
+                    # Graceful stop check: if an API call completed, stop now
+                    if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                        self._log("✅ Graceful stop: Image completed, stopping...", "info")
+                        break
                     if self.stop_flag.is_set():
                         self._log("\n⏹️ Translation stopped by user", "warning")
                         break
@@ -12249,11 +12268,21 @@ class MangaTranslationTab(QObject):
             # Set graceful stop mode in environment so API client knows to show logs
             os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
             
+            # Set graceful_stop_active on main GUI so stop_callbacks return False during graceful stop
+            try:
+                if hasattr(self, 'main_gui') and self.main_gui:
+                    self.main_gui.graceful_stop_active = graceful_stop
+            except Exception:
+                pass
+            
             # CRITICAL: Set is_running to False IMMEDIATELY so button works correctly on next click
             self.is_running = False
             
-            # Set local stop flag first for immediate response
-            self.stop_flag.set()
+            # For graceful stop, don't set stop_flag yet - let current image complete
+            # The GRACEFUL_STOP_COMPLETED flag will be set when the API call finishes
+            # For immediate stop, set stop_flag immediately
+            if not graceful_stop:
+                self.stop_flag.set()
             
             # Save current scroll position before updating button
             saved_scroll_pos = None
@@ -12307,19 +12336,19 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Set global cancellation flags for coordinated stopping
-            self.set_global_cancellation(True)
-            
-            # Also propagate to MangaTranslator class
-            try:
-                from manga_translator import MangaTranslator
-                MangaTranslator.set_global_cancellation(True)
-            except ImportError:
-                pass
-            
             # For graceful stop: DON'T abort in-flight API calls, let them finish
             # For immediate stop: abort everything aggressively
             if not graceful_stop:
+                # Set global cancellation flags for coordinated stopping
+                self.set_global_cancellation(True)
+                
+                # Also propagate to MangaTranslator class
+                try:
+                    from manga_translator import MangaTranslator
+                    MangaTranslator.set_global_cancellation(True)
+                except ImportError:
+                    pass
+                
                 # Also propagate to UnifiedClient if available
                 try:
                     from unified_api_client import UnifiedClient

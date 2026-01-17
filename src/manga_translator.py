@@ -1415,6 +1415,11 @@ class MangaTranslator:
 
     def _check_stop(self):
         """Check if stop has been requested using multiple sources"""
+        # During graceful stop, ALWAYS return False to let current image complete fully
+        # The main loop will check GRACEFUL_STOP at the START of each new image
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        
         # Check global cancellation first
         if self.is_globally_cancelled():
             self.cancel_requested = True

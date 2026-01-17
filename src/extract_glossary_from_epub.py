@@ -199,9 +199,13 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     finish_reason = 'stop'
                 
                 # raw_obj was already captured in the API thread and included in result
+                # If graceful stop was requested, mark that an API call completed
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
                 return content, finish_reason or 'stop', raw_obj
         except queue.Empty:
-            if stop_check_fn():
+            # During graceful stop, don't cancel the API call - let it complete
+            if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
                 # More aggressive cancellation
                 print("🛑 Stop requested - cancelling API call immediately...")
                 
@@ -2255,6 +2259,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
         
         # Process results with better cancellation
         for future in as_completed(futures):  # Removed timeout - let futures complete
+            # Normal stop check (during graceful stop, check_stop() returns False)
             if check_stop():
                 print("🛑 Stop detected - cancelling all pending operations...")
                 # Cancel all pending futures immediately
@@ -2315,6 +2320,17 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                     'chap': chap,
                     'error': str(e)
                 })
+            
+            # Graceful stop check AFTER processing: if an API call completed during graceful stop,
+            # we've now saved its result, so we can stop
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                print("✅ Graceful stop: Chapter completed and saved, stopping batch processing...")
+                # Cancel remaining futures
+                cancelled = cancel_all_futures(list(futures.keys()))
+                if cancelled > 0:
+                    print(f"✅ Cancelled {cancelled} pending API calls")
+                executor.shutdown(wait=False)
+                break
     
     # Sort results by chapter index
     results.sort(key=lambda x: x['idx'])
@@ -2789,6 +2805,11 @@ def main(log_callback=None, stop_callback=None):
     
     # Set up stop checking
     def check_stop():
+        # During graceful stop, ALWAYS return False to let current chapter complete fully
+        # The main loop will check GRACEFUL_STOP at the START of each new chapter
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        
         if stop_callback and stop_callback():
             print("❌ Glossary extraction stopped by user request.")
             return True
@@ -3322,6 +3343,31 @@ def main(log_callback=None, stop_callback=None):
         total_batches = 1 if aggressive_mode else (len(units_to_process) + effective_batch_group_size - 1) // effective_batch_group_size
         
         for batch_num in range(total_batches):
+            # Check for graceful stop completion at START of each batch iteration
+            # This allows the previous batch to fully complete (including save) before stopping
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                print(f"\u2705 Graceful stop: Previous batch completed and saved, stopping extraction...")
+                # Apply deduplication before stopping
+                if glossary:
+                    print("\U0001F500 Applying deduplication and sorting before exit...")
+                    glossary[:] = skip_duplicate_entries(glossary)
+                    
+                    custom_types = get_custom_entry_types()
+                    type_order = {'book': -1, 'character': 0, 'term': 1}
+                    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                    for i, t in enumerate(other_types):
+                        type_order[t] = i + 2
+                    glossary.sort(key=lambda x: (
+                        type_order.get(x.get('type', 'term'), 999),
+                        x.get('raw_name', '').lower()
+                    ))
+                    
+                    save_progress(completed, glossary, merged_indices)
+                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    print(f"\u2705 Saved {len(glossary)} entries before graceful exit")
+                return
+            
             # Check for stop at the beginning of each batch
             if check_stop():
                 print(f"❌ Glossary extraction stopped at batch {batch_num+1}")
@@ -3592,6 +3638,18 @@ def main(log_callback=None, stop_callback=None):
                             _handle_future_result(future, unit)
                             if stopped_early:
                                 break
+                            
+                            # Check for graceful stop AFTER processing result
+                            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                                print("\u2705 Graceful stop: Chapter completed and saved, stopping...")
+                                stopped_early = True
+                                cancelled = cancel_all_futures(list(active_futures.keys()))
+                                if cancelled > 0:
+                                    print(f"\u2705 Cancelled {cancelled} pending API calls")
+                                executor.shutdown(wait=False)
+                                active_futures.clear()
+                                break
+                            
                             # Refill pool
                             if _submit_next():
                                 pass
@@ -3618,6 +3676,16 @@ def main(log_callback=None, stop_callback=None):
 
                         unit = futures[future]
                         _handle_future_result(future, unit)
+                        
+                        # Check for graceful stop AFTER processing result
+                        if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                            print("✅ Graceful stop: Chapter completed and saved, stopping...")
+                            stopped_early = True
+                            cancelled = cancel_all_futures(list(futures.keys()))
+                            if cancelled > 0:
+                                print(f"✅ Cancelled {cancelled} pending API calls")
+                            executor.shutdown(wait=False)
+                            break
             
             # After all futures in this batch complete, append history entries in order
             # This matches TransateKRtoEN batch mode behavior
@@ -3835,6 +3903,12 @@ def main(log_callback=None, stop_callback=None):
                     print(f"   📊 Created {len(merge_groups)} merge groups (count-based)")
         
         for idx, chap in enumerate(chapters):
+            # Check for graceful stop completion at START of each chapter iteration
+            # This allows the previous chapter to fully complete (including save) before stopping
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                print(f"✅ Graceful stop: Previous chapter completed and saved, stopping extraction...")
+                return
+            
             # Check for stop at the beginning of each chapter
             if check_stop():
                 print(f"❌ Glossary extraction stopped at chapter {idx+1}")
