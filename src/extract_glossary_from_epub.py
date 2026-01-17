@@ -105,6 +105,17 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
 
     return client
     
+# Log assistant prompt at module initialization if configured
+def _log_assistant_prompt_once():
+    """Log assistant prompt once at the start of extraction if configured"""
+    if not hasattr(_log_assistant_prompt_once, '_logged'):
+        _log_assistant_prompt_once._logged = False
+    if not _log_assistant_prompt_once._logged:
+        assistant_prompt = os.getenv('ASSISTANT_PROMPT', '').strip()
+        if assistant_prompt:
+            print(f"🤖 Assistant Prompt: {assistant_prompt}")
+            _log_assistant_prompt_once._logged = True
+
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
     result_queue = queue.Queue()
@@ -2882,6 +2893,9 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
+    
+    # Log assistant prompt if configured
+    _log_assistant_prompt_once()
 
     # Ensure truncation retry settings use the correct Other Settings keys
     # (only set if not already provided by the environment)

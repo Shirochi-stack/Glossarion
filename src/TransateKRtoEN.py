@@ -8221,6 +8221,12 @@ def main(log_callback=None, stop_callback=None):
     base_msg = [{"role": "system", "content": system}]
     # Preserve the original system prompt to avoid in-place mutations
     original_system_prompt = system
+    
+    # Log assistant prompt if configured
+    assistant_prompt = getattr(config, 'ASSISTANT_PROMPT', '') or ''
+    if assistant_prompt and assistant_prompt.strip():
+        print(f"🤖 Assistant Prompt: {assistant_prompt}")
+    
     last_summary_block_text = None  # Will hold the last rolling summary text for the NEXT chapter only
     last_summary_chapter_num = None  # Chapter number associated with last_summary_block_text
     

@@ -7310,6 +7310,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log(f"📝 System prompt: {prompt_preview}")
                 self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
                 
+                # Log assistant prompt if set
+                if hasattr(self, 'assistant_prompt') and self.assistant_prompt and self.assistant_prompt.strip():
+                    self.append_log(f"🤖 Assistant Prompt: {self.assistant_prompt}")
+                
                 # Check if glossary info is in the system prompt
                 if "glossary" in system_prompt.lower() or "character entry" in system_prompt.lower():
                     self.append_log(f"📚 ✅ Glossary appears to be included in system prompt")
