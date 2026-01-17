@@ -1225,6 +1225,9 @@ Text to analyze:
         # Initialize extraction settings (from Other Settings)
         self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
         
+        # Graceful stop - wait for in-flight API calls to complete instead of aborting them
+        self.graceful_stop_var = self.config.get('graceful_stop', False)
+        
         # Initialize HTTP/Network tuning variables (from Other Settings)
         self.enable_http_tuning_var = self.config.get('enable_http_tuning', False)
         self.connect_timeout_var = str(self.config.get('connect_timeout', 10))
@@ -9410,15 +9413,24 @@ Important rules:
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
         
+        # Check if graceful stop is enabled
+        graceful_stop = getattr(self, 'graceful_stop_var', False)
+        
         # Disable button immediately to prevent multiple clicks
         if hasattr(self, 'run_button'):
             self.run_button.setEnabled(False)
             if hasattr(self, 'run_button_text'):
-                self.run_button_text.setText("Stopping...")
+                if graceful_stop:
+                    self.run_button_text.setText("Finishing...")
+                else:
+                    self.run_button_text.setText("Stopping...")
             self.run_button.setStyleSheet("QPushButton { background-color: #6c757d; border: none; }")
         
         # Set environment variable to suppress multi-key logging
         os.environ['TRANSLATION_CANCELLED'] = '1'
+        
+        # Set graceful stop mode in environment so API client knows to show logs
+        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
         self.stop_requested = True
 
@@ -9444,59 +9456,62 @@ Important rules:
         except: 
             pass
         
-        try:
-            import unified_api_client
-            if hasattr(unified_api_client, 'set_stop_flag'):
-                unified_api_client.set_stop_flag(True)
-            # If there's a global client instance, stop it too
-            if hasattr(unified_api_client, 'global_stop_flag'):
-                unified_api_client.global_stop_flag = True
-            
-            # Set the _cancelled flag on the UnifiedClient class itself
-            if hasattr(unified_api_client, 'UnifiedClient'):
-                unified_api_client.UnifiedClient._global_cancelled = True
-        # Hard cancel: close active HTTP sessions to abort in-flight requests
-            if hasattr(unified_api_client, 'hard_cancel_all'):
-                unified_api_client.hard_cancel_all()
+        # For graceful stop: DON'T abort in-flight API calls, let them finish
+        # For immediate stop: abort everything aggressively
+        if not graceful_stop:
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                # If there's a global client instance, stop it too
+                if hasattr(unified_api_client, 'global_stop_flag'):
+                    unified_api_client.global_stop_flag = True
                 
-        except Exception as e:
-            print(f"Error setting stop flags: {e}")
-        
-        # Terminate any background processes (like stuck streaming instances)
-        try:
-            import psutil
-            current_process = psutil.Process(os.getpid())
-            children = current_process.children(recursive=True)
+                # Set the _cancelled flag on the UnifiedClient class itself
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = True
+                # Hard cancel: close active HTTP sessions to abort in-flight requests
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+                    
+            except Exception as e:
+                print(f"Error setting stop flags: {e}")
             
-            # Filter out important GUI processes we should keep
-            processes_to_terminate = []
-            for child in children:
-                try:
-                    # Get process name to avoid killing important processes
-                    name = child.name().lower()
-                    # Only terminate Python/script processes, not system processes
-                    if 'python' in name or 'glossarion' in name:
-                        processes_to_terminate.append(child)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-            
-            if processes_to_terminate:
-                self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
-                for proc in processes_to_terminate:
-                    try:
-                        proc.terminate()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+            # Terminate any background processes (like stuck streaming instances)
+            try:
+                import psutil
+                current_process = psutil.Process(os.getpid())
+                children = current_process.children(recursive=True)
                 
-                # Wait for processes to terminate, then force kill if needed
-                gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
-                for proc in alive:
+                # Filter out important GUI processes we should keep
+                processes_to_terminate = []
+                for child in children:
                     try:
-                        proc.kill()
+                        # Get process name to avoid killing important processes
+                        name = child.name().lower()
+                        # Only terminate Python/script processes, not system processes
+                        if 'python' in name or 'glossarion' in name:
+                            processes_to_terminate.append(child)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-        except Exception as e:
-            print(f"Error terminating child processes: {e}")
+                        continue
+                
+                if processes_to_terminate:
+                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
+                    for proc in processes_to_terminate:
+                        try:
+                            proc.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    
+                    # Wait for processes to terminate, then force kill if needed
+                    gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+                    for proc in alive:
+                        try:
+                            proc.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+            except Exception as e:
+                print(f"Error terminating child processes: {e}")
         
         # Set stop flag in epub_converter module
         try:
@@ -9512,8 +9527,11 @@ Important rules:
         except:
             pass
         
-        # Single concise stop message
-        self.append_log("🛑 Stop requested — waiting for current operation to finish")
+        # Log message depends on stop mode
+        if graceful_stop:
+            self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+        else:
+            self.append_log("🛑 Stop requested — waiting for current operation to finish")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
         
         if current_file and hasattr(self, 'entry_epub'):
@@ -9568,13 +9586,22 @@ Important rules:
 
     def stop_glossary_extraction(self):
         """Stop glossary extraction specifically"""
+        # Check if graceful stop is enabled
+        graceful_stop = getattr(self, 'graceful_stop_var', False)
+        
         # Disable button immediately to prevent multiple clicks
         if hasattr(self, 'glossary_button'):
             self.glossary_button.setEnabled(False)
             # Update text label instead of button text
             if hasattr(self, 'glossary_text_label'):
-                self.glossary_text_label.setText("Stopping...")
+                if graceful_stop:
+                    self.glossary_text_label.setText("Finishing...")
+                else:
+                    self.glossary_text_label.setText("Stopping...")
             self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        
+        # Set graceful stop mode in environment so API client knows to show logs
+        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
         self.stop_requested = True
         if glossary_stop_flag:
@@ -9587,54 +9614,57 @@ Important rules:
         except:
             pass
         
-        # Also propagate stop to unified_api_client for streaming cancellation
-        try:
-            import unified_api_client
-            if hasattr(unified_api_client, 'set_stop_flag'):
-                unified_api_client.set_stop_flag(True)
-            if hasattr(unified_api_client, 'UnifiedClient'):
-                unified_api_client.UnifiedClient._global_cancelled = True
-            # Hard cancel: close active HTTP sessions to abort in-flight requests
-            if hasattr(unified_api_client, 'hard_cancel_all'):
-                unified_api_client.hard_cancel_all()
-        except Exception:
-            pass
-        
-        # Terminate any background processes (like stuck streaming instances)
-        try:
-            import psutil
-            current_process = psutil.Process(os.getpid())
-            children = current_process.children(recursive=True)
+        # For graceful stop: DON'T abort in-flight API calls, let them finish
+        # For immediate stop: abort everything aggressively
+        if not graceful_stop:
+            # Also propagate stop to unified_api_client for streaming cancellation
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = True
+                # Hard cancel: close active HTTP sessions to abort in-flight requests
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+            except Exception:
+                pass
             
-            # Filter out important GUI processes we should keep
-            processes_to_terminate = []
-            for child in children:
-                try:
-                    # Get process name to avoid killing important processes
-                    name = child.name().lower()
-                    # Only terminate Python/script processes, not system processes
-                    if 'python' in name or 'glossarion' in name:
-                        processes_to_terminate.append(child)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-            
-            if processes_to_terminate:
-                self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
-                for proc in processes_to_terminate:
-                    try:
-                        proc.terminate()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+            # Terminate any background processes (like stuck streaming instances)
+            try:
+                import psutil
+                current_process = psutil.Process(os.getpid())
+                children = current_process.children(recursive=True)
                 
-                # Wait for processes to terminate, then force kill if needed
-                gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
-                for proc in alive:
+                # Filter out important GUI processes we should keep
+                processes_to_terminate = []
+                for child in children:
                     try:
-                        proc.kill()
+                        # Get process name to avoid killing important processes
+                        name = child.name().lower()
+                        # Only terminate Python/script processes, not system processes
+                        if 'python' in name or 'glossarion' in name:
+                            processes_to_terminate.append(child)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-        except Exception as e:
-            print(f"Error terminating child processes: {e}")
+                        continue
+                
+                if processes_to_terminate:
+                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
+                    for proc in processes_to_terminate:
+                        try:
+                            proc.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    
+                    # Wait for processes to terminate, then force kill if needed
+                    gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+                    for proc in alive:
+                        try:
+                            proc.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+            except Exception as e:
+                print(f"Error terminating child processes: {e}")
 
         # Touch stop file for GlossaryManager subprocesses
         try:
@@ -9645,8 +9675,12 @@ Important rules:
         except Exception:
             pass
         
-        self.append_log("❌ Glossary extraction stop requested.")
-        self.append_log("⏳ Please wait... stopping after current API call completes.")
+        # Log message depends on stop mode
+        if graceful_stop:
+            self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+        else:
+            self.append_log("❌ Glossary extraction stop requested.")
+            self.append_log("⏳ Please wait... stopping after current API call completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
 
@@ -11247,6 +11281,9 @@ Important rules:
                 ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
+                
+                # Stop behavior
+                ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 900, lambda v: safe_int(v, 900)),

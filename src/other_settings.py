@@ -2292,6 +2292,29 @@ def _create_response_handling_section(self, parent):
     indefinite_desc.setStyleSheet("color: gray; font-size: 10pt;")
     indefinite_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(indefinite_desc)
+    
+    # Graceful Stop toggle
+    if not hasattr(self, 'graceful_stop_var'):
+        self.graceful_stop_var = self.config.get('graceful_stop', False)
+    
+    self.graceful_stop_checkbox = self._create_styled_checkbox("Graceful Stop (wait for in-flight API calls)")
+    self.graceful_stop_checkbox.setContentsMargins(20, 5, 0, 0)
+    try:
+        self.graceful_stop_checkbox.setChecked(bool(self.graceful_stop_var))
+    except Exception:
+        pass
+    def _on_graceful_stop_toggle(checked):
+        try:
+            self.graceful_stop_var = bool(checked)
+        except Exception:
+            pass
+    self.graceful_stop_checkbox.toggled.connect(_on_graceful_stop_toggle)
+    section_v.addWidget(self.graceful_stop_checkbox)
+    
+    graceful_stop_desc = QLabel("When enabled, pressing Stop will wait for in-flight API calls to complete\ninstead of aborting them. Saves API costs since calls already made will finish.")
+    graceful_stop_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    graceful_stop_desc.setContentsMargins(40, 2, 0, 5)
+    section_v.addWidget(graceful_stop_desc)
 
     # Separator
     sep_retry_1 = QFrame()

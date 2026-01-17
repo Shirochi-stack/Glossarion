@@ -12238,6 +12238,17 @@ class MangaTranslationTab(QObject):
     def _stop_translation(self):
         """Stop the translation process"""
         if self.is_running:
+            # Check if graceful stop is enabled (from main GUI settings)
+            graceful_stop = False
+            try:
+                if hasattr(self, 'main_gui') and self.main_gui:
+                    graceful_stop = getattr(self.main_gui, 'graceful_stop_var', False)
+            except Exception:
+                pass
+            
+            # Set graceful stop mode in environment so API client knows to show logs
+            os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
+            
             # CRITICAL: Set is_running to False IMMEDIATELY so button works correctly on next click
             self.is_running = False
             
@@ -12254,7 +12265,7 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Update button to show "Stopping..." state (gray, disabled) - do this quickly
+            # Update button to show "Stopping..." or "Finishing..." state (gray, disabled)
             try:
                 if hasattr(self, 'start_button') and self.start_button:
                     # Clear focus from button to prevent scroll
@@ -12263,7 +12274,10 @@ class MangaTranslationTab(QObject):
                     self.start_button.setEnabled(False)
                     # Update text label instead of button text
                     if hasattr(self, 'start_button_text'):
-                        self.start_button_text.setText("Stopping...")
+                        if graceful_stop:
+                            self.start_button_text.setText("Finishing...")
+                        else:
+                            self.start_button_text.setText("Stopping...")
                     self.start_button.setStyleSheet(
                         "QPushButton { "
                         "  background-color: #6c757d; "
@@ -12303,56 +12317,59 @@ class MangaTranslationTab(QObject):
             except ImportError:
                 pass
             
-            # Also propagate to UnifiedClient if available
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.set_global_cancellation(True)
-            except ImportError:
-                pass
-            
-            # Hard cancel: close active HTTP sessions to abort in-flight requests
-            try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'hard_cancel_all'):
-                    unified_api_client.hard_cancel_all()
-            except Exception:
-                pass
-            
-            # Terminate any background processes (like stuck streaming instances)
-            try:
-                import psutil
-                current_process = psutil.Process(os.getpid())
-                children = current_process.children(recursive=True)
+            # For graceful stop: DON'T abort in-flight API calls, let them finish
+            # For immediate stop: abort everything aggressively
+            if not graceful_stop:
+                # Also propagate to UnifiedClient if available
+                try:
+                    from unified_api_client import UnifiedClient
+                    UnifiedClient.set_global_cancellation(True)
+                except ImportError:
+                    pass
                 
-                # Filter out important GUI processes we should keep
-                processes_to_terminate = []
-                for child in children:
-                    try:
-                        # Get process name to avoid killing important processes
-                        name = child.name().lower()
-                        # Only terminate Python/script processes, not system processes
-                        if 'python' in name or 'glossarion' in name:
-                            processes_to_terminate.append(child)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
+                # Hard cancel: close active HTTP sessions to abort in-flight requests
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'hard_cancel_all'):
+                        unified_api_client.hard_cancel_all()
+                except Exception:
+                    pass
                 
-                if processes_to_terminate:
-                    self._log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...", "info")
-                    for proc in processes_to_terminate:
-                        try:
-                            proc.terminate()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
+                # Terminate any background processes (like stuck streaming instances)
+                try:
+                    import psutil
+                    current_process = psutil.Process(os.getpid())
+                    children = current_process.children(recursive=True)
                     
-                    # Wait for processes to terminate, then force kill if needed
-                    gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
-                    for proc in alive:
+                    # Filter out important GUI processes we should keep
+                    processes_to_terminate = []
+                    for child in children:
                         try:
-                            proc.kill()
+                            # Get process name to avoid killing important processes
+                            name = child.name().lower()
+                            # Only terminate Python/script processes, not system processes
+                            if 'python' in name or 'glossarion' in name:
+                                processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-            except Exception as e:
-                self._log(f"Warning: Child process termination failed: {e}", "debug")
+                            continue
+                    
+                    if processes_to_terminate:
+                        self._log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...", "info")
+                        for proc in processes_to_terminate:
+                            try:
+                                proc.terminate()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        
+                        # Wait for processes to terminate, then force kill if needed
+                        gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+                        for proc in alive:
+                            try:
+                                proc.kill()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                except Exception as e:
+                    self._log(f"Warning: Child process termination failed: {e}", "debug")
             
             # Update progress to show stopped status
             self._update_progress(
@@ -12407,7 +12424,11 @@ class MangaTranslationTab(QObject):
             except Exception as e:
                 self._log(f"⚠️ Failed to check cleanup settings: {e}", "warning")
             
-            self._log("\n⏹️ Translation stopped by user", "warning")
+            # Log message depends on stop mode
+            if graceful_stop:
+                self._log("\n⏳ Graceful stop — waiting for in-flight API calls to complete...", "info")
+            else:
+                self._log("\n⏹️ Translation stopped by user", "warning")
             
             # Schedule UI reset after a longer delay to keep "Stopping..." visible
             # The finally block in _run_translation_worker will also call _reset_ui_state,

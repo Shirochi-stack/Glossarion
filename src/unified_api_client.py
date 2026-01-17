@@ -11563,7 +11563,9 @@ class UnifiedClient:
                                 self._active_streams.add(resp)
                         dur = _t.time() - start_ts
                         # Suppress logs if stop was requested while call was in-flight
-                        if not self._is_stop_requested():
+                        # BUT show logs if graceful stop is enabled (user wants to see in-flight calls complete)
+                        graceful_stop_mode = os.getenv('GRACEFUL_STOP', '0') == '1'
+                        if graceful_stop_mode or not self._is_stop_requested():
                             if use_streaming:
                                 print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
                             else:
