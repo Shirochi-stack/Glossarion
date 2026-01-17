@@ -5141,7 +5141,6 @@ class UnifiedClient:
                     error_str = str(e).lower()
                     if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
                         print(f"{log_prefix} ❌ Content filter error: {str(e)[:200]}")
-                        print(f"{log_prefix} Traceback:\n{tb}")
                         continue
                     
                     if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:

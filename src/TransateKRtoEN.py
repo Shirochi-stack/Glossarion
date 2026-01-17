@@ -483,6 +483,7 @@ class TranslationConfig:
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
         self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
         self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
+        self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
         # Handle split marker instruction placeholder
@@ -4259,10 +4260,16 @@ class BatchTranslationProcessor:
                             )
                         }]
 
+                # Build optional assistant prefill message if configured
+                assistant_prefill_msgs = []
+                if getattr(self.config, 'ASSISTANT_PROMPT', '') and self.config.ASSISTANT_PROMPT.strip():
+                    assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
+
                 chapter_msgs = (
                     [{"role": "system", "content": chapter_system_prompt}]
                     + rolling_summary_msgs
                     + memory_msgs
+                    + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
 
@@ -4769,7 +4776,12 @@ class BatchTranslationProcessor:
                 except Exception as e:
                     print(f"   ⚠️ Failed to load history for merged group: {e}")
             
-            msgs = [{"role": "system", "content": chapter_system_prompt}] + rolling_summary_msgs + memory_msgs + [
+            # Build optional assistant prefill message if configured
+            assistant_prefill_msgs = []
+            if getattr(self.config, 'ASSISTANT_PROMPT', '') and self.config.ASSISTANT_PROMPT.strip():
+                assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
+
+            msgs = [{"role": "system", "content": chapter_system_prompt}] + rolling_summary_msgs + memory_msgs + assistant_prefill_msgs + [
                 {"role": "user", "content": merged_content}
             ]
 

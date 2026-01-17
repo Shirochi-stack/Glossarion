@@ -798,7 +798,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.1.6"
+        __version__ = "7.1.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -871,7 +871,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.1.6')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.1.7')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2160,6 +2160,9 @@ CRITICAL EXTRACTION RULES:
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
         
+        # Default assistant prompt (empty by default - user can optionally set this to prefill)
+        self.default_assistant_prompt = ""
+        
         self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
 Focus on extracting and preserving:
@@ -2214,6 +2217,8 @@ Recent translations to summarize:
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
+        # Optional assistant prefill prompt (disabled by default)
+        self.assistant_prompt = self.config.get('assistant_prompt', self.default_assistant_prompt)
         
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         self.token_limit_disabled = self.config.get('token_limit_disabled', True)
@@ -2504,7 +2509,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.1.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.1.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -2673,16 +2678,32 @@ Recent translations to summarize:
         self.file_status_label.setStyleSheet("color: #17a2b8; font-size: 9pt;")
         self.frame.addWidget(self.file_status_label, 1, 1, 1, 3, Qt.AlignLeft)
         
+        # Container for Assistant Prompt and GCloud Creds buttons
+        creds_buttons_container = QWidget()
+        creds_buttons_layout = QHBoxLayout(creds_buttons_container)
+        creds_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        creds_buttons_layout.setSpacing(5)
+        
+        # Assistant Prompt button (optional prefill for translation)
+        self.assistant_prompt_button = QPushButton("Asst. Prompt")
+        self.assistant_prompt_button.clicked.connect(self.show_assistant_prompt_dialog)
+        self.assistant_prompt_button.setMinimumWidth(90)
+        # Style based on whether prompt is set
+        self._update_assistant_prompt_button_style()
+        creds_buttons_layout.addWidget(self.assistant_prompt_button)
+        
         # Google Cloud Credentials button
         self.gcloud_button = QPushButton("GCloud Creds")
         self.gcloud_button.clicked.connect(self.select_google_credentials)
-        self.gcloud_button.setMinimumWidth(100)
+        self.gcloud_button.setMinimumWidth(90)
         self.gcloud_button.setEnabled(False)
         # Store both enabled and disabled styles
         self.gcloud_button_enabled_style = "background-color: #007bff; color: white; font-weight: bold;"  # primary blue
         self.gcloud_button_disabled_style = "background-color: #3a3a3a; color: #888888; font-weight: bold;"  # dark gray
         self.gcloud_button.setStyleSheet(self.gcloud_button_disabled_style)
-        self.frame.addWidget(self.gcloud_button, 2, 4)
+        creds_buttons_layout.addWidget(self.gcloud_button)
+        
+        self.frame.addWidget(creds_buttons_container, 2, 4)
         
         # Vertex AI Location text entry
         self.vertex_location_var = self.config.get('vertex_ai_location', 'global')
@@ -2724,6 +2745,87 @@ Recent translations to summarize:
     def _on_vertex_location_changed(self, text):
         """Handle vertex location text changes"""
         self.vertex_location_var = text.strip()
+
+    def _update_assistant_prompt_button_style(self):
+        """Update the assistant prompt button style based on whether a prompt is set"""
+        if hasattr(self, 'assistant_prompt') and self.assistant_prompt and self.assistant_prompt.strip():
+            # Prompt is set - use active style (green)
+            self.assistant_prompt_button.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+            self.assistant_prompt_button.setToolTip(f"Assistant prompt is active ({len(self.assistant_prompt)} chars)")
+        else:
+            # No prompt set - use neutral style
+            self.assistant_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
+            self.assistant_prompt_button.setToolTip("Optional: Set an assistant prefill prompt")
+
+    def show_assistant_prompt_dialog(self):
+        """Show dialog to edit the optional assistant prompt"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Assistant Prompt (Optional)")
+        dialog.setMinimumSize(600, 400)
+        dialog.setModal(True)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Description label
+        desc_label = QLabel(
+            "<b>Optional Assistant Prefill Prompt</b><br><br>"
+            "This prompt is sent as an 'assistant' message before your content. "
+            "It can help prime the model's response style or format.<br><br>"
+            "<i>Leave empty to disable this feature (default).</i>"
+        )
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+        
+        # Text edit for the prompt
+        prompt_edit = QTextEdit()
+        prompt_edit.setPlaceholderText("Enter assistant prefill prompt here... (leave empty to disable)")
+        prompt_edit.setText(self.assistant_prompt if hasattr(self, 'assistant_prompt') else '')
+        layout.addWidget(prompt_edit)
+        
+        # Character count label
+        char_count_label = QLabel(f"Characters: {len(prompt_edit.toPlainText())}")
+        char_count_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
+        prompt_edit.textChanged.connect(lambda: char_count_label.setText(f"Characters: {len(prompt_edit.toPlainText())}"))
+        layout.addWidget(char_count_label)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        
+        # Clear button
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("background-color: #dc3545; color: white;")
+        clear_btn.clicked.connect(lambda: prompt_edit.clear())
+        button_layout.addWidget(clear_btn)
+        
+        button_layout.addStretch()
+        
+        # Cancel button
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        # Save button
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        
+        def save_prompt():
+            self.assistant_prompt = prompt_edit.toPlainText().strip()
+            self._update_assistant_prompt_button_style()
+            self.save_config()
+            if self.assistant_prompt:
+                self.append_log(f"✅ Assistant prompt set ({len(self.assistant_prompt)} characters)")
+            else:
+                self.append_log("ℹ️ Assistant prompt cleared (disabled)")
+            dialog.accept()
+        
+        save_btn.clicked.connect(save_prompt)
+        button_layout.addWidget(save_btn)
+        
+        layout.addLayout(button_layout)
+        
+        dialog.exec()
 
     def select_google_credentials(self):
         """Select Google Cloud credentials JSON file"""
@@ -7385,6 +7487,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPENAI_OR_Gemini_API_KEY': api_key,
             'GEMINI_API_KEY': api_key,
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
+            'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
@@ -11039,6 +11142,7 @@ Important rules:
                 ('book_title_prompt', ['book_title_prompt'], '', str),
                 ('translation_chunk_prompt', ['translation_chunk_prompt'], '', str),
                 ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
+                ('assistant_prompt', ['assistant_prompt'], '', str),  # Optional assistant prefill
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
                 ('groq_base_url', ['groq_base_url_var'], '', str),
@@ -11956,6 +12060,7 @@ Important rules:
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
                 ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),
+                ('ASSISTANT_PROMPT', str(getattr(self, 'assistant_prompt', ''))),  # Optional assistant prefill
 
                 # Safety flags
                 ('DISABLE_GEMINI_SAFETY', str(self.config.get('disable_gemini_safety', False)).lower()),
@@ -12219,7 +12324,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.1.6...")
+    print("🚀 Starting Glossarion v7.1.7...")
     
     # Initialize splash screen
     splash_manager = None
