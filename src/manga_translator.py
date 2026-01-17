@@ -685,6 +685,32 @@ class MangaTranslator:
         with cls._global_cancel_lock:
             cls._global_cancelled = False
     
+    def _clear_checkout_references(self):
+        """Clear stale instance-level checkout references.
+        
+        This should be called at the start of processing to ensure we don't
+        reuse stale references from a previous (possibly interrupted) translation.
+        The pool's checked_out lists are managed separately by force_release_all_pool_checkouts().
+        """
+        # Clear inpainter checkout reference
+        if hasattr(self, '_checked_out_inpainter'):
+            self._checked_out_inpainter = None
+        if hasattr(self, '_inpainter_pool_key'):
+            self._inpainter_pool_key = None
+        
+        # Clear bubble detector checkout reference  
+        if hasattr(self, '_checked_out_bubble_detector'):
+            self._checked_out_bubble_detector = None
+        if hasattr(self, '_bubble_detector_pool_key'):
+            self._bubble_detector_pool_key = None
+        
+        # Clear thread-local cache
+        if hasattr(self, '_thread_local'):
+            if hasattr(self._thread_local, 'local_inpainters'):
+                self._thread_local.local_inpainters = {}
+            if hasattr(self._thread_local, 'bubble_detector'):
+                self._thread_local.bubble_detector = None
+    
     @classmethod
     def force_release_all_pool_checkouts(cls, restart_workers: bool = False):
         """Force-clear all checked_out lists in both inpainter and detector pools.
@@ -14051,6 +14077,13 @@ class MangaTranslator:
         mask_viz = None
         pil_image = None
         heatmap = None
+        
+        # CRITICAL: Clear stale checkout references from any previous (possibly interrupted) translation
+        # This ensures we properly check out fresh instances from the pool
+        try:
+            self._clear_checkout_references()
+        except Exception:
+            pass
 
         # Set batch tracking if provided
         if batch_index is not None and batch_total is not None:
