@@ -7761,6 +7761,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.graceful_stop_active = False  # Reset graceful stop state
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
+        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'  # Reset API active flag
         if glossary_stop_flag:
             glossary_stop_flag(False)
         

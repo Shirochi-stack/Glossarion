@@ -118,6 +118,9 @@ def _log_assistant_prompt_once():
 
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
+    # Mark that an API call is now active (for graceful stop logic)
+    os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
+    
     result_queue = queue.Queue()
 
     # Honor runtime toggle: if RETRY_TIMEOUT is off, disable chunk timeout entirely.
@@ -199,6 +202,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     finish_reason = 'stop'
                 
                 # raw_obj was already captured in the API thread and included in result
+                # Mark API call as no longer active
+                os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
                 # If graceful stop was requested, mark that an API call completed
                 if os.environ.get('GRACEFUL_STOP') == '1':
                     os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
@@ -3351,6 +3356,18 @@ def main(log_callback=None, stop_callback=None):
                 if glossary:
                     print("\U0001F500 Applying deduplication and sorting before exit...")
                     glossary[:] = skip_duplicate_entries(glossary)
+                    save_progress(completed, glossary, merged_indices)
+                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                return
+            
+            # If graceful stop requested but NO API call is active, stop immediately
+            if os.environ.get('GRACEFUL_STOP') == '1' and os.environ.get('GRACEFUL_STOP_API_ACTIVE') != '1':
+                print(f"\u2705 Graceful stop: No API call in progress, stopping immediately...")
+                # Apply deduplication before stopping
+                if glossary:
+                    print("\U0001F500 Applying deduplication and sorting before exit...")
+                    glossary[:] = skip_duplicate_entries(glossary)
                     
                     custom_types = get_custom_entry_types()
                     type_order = {'book': -1, 'character': 0, 'term': 1}
@@ -3907,6 +3924,12 @@ def main(log_callback=None, stop_callback=None):
             # This allows the previous chapter to fully complete (including save) before stopping
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
                 print(f"✅ Graceful stop: Previous chapter completed and saved, stopping extraction...")
+                return
+            
+            # If graceful stop requested but NO API call is active, stop immediately
+            # (nothing to wait for - no in-flight calls to complete)
+            if os.environ.get('GRACEFUL_STOP') == '1' and os.environ.get('GRACEFUL_STOP_API_ACTIVE') != '1':
+                print(f"✅ Graceful stop: No API call in progress, stopping immediately...")
                 return
             
             # Check for stop at the beginning of each chapter
