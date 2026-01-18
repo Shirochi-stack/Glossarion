@@ -863,6 +863,7 @@ class CompactImageViewer(QGraphicsView):
     rectangle_moved = Signal(QRectF)
     image_loading = Signal(str)  # emitted when starting to load
     image_loaded = Signal(str)   # emitted when image successfully loaded
+    viewer_clicked = Signal()    # emitted when viewer is clicked (to sync file selection)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1016,6 +1017,12 @@ class CompactImageViewer(QGraphicsView):
     
     def mousePressEvent(self, event):
         """Handle mouse press for drawing boxes or inpainting"""
+        # Emit viewer_clicked signal to sync file selection when user clicks on viewer
+        try:
+            self.viewer_clicked.emit()
+        except Exception:
+            pass
+        
         # Handle right-clicks on rectangles first to ensure proper context menu routing
         if event.button() == Qt.MouseButton.RightButton:
             item = self.itemAt(event.pos())

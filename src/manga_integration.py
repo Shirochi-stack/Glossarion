@@ -3354,6 +3354,9 @@ class MangaTranslationTab(QObject):
         self.image_preview_widget.translate_text_clicked.connect(lambda: ImageRenderer._on_translate_text_clicked(self))
         self.image_preview_widget.translate_all_clicked.connect(lambda: ImageRenderer._on_translate_all_clicked(self))
         
+        # Connect viewer click signal to sync file list selection with current image
+        self.image_preview_widget.viewer.viewer_clicked.connect(self._sync_file_selection_to_preview)
+        
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
         settings_frame_font = QFont("Arial", 10)
@@ -8916,6 +8919,45 @@ class MangaTranslationTab(QObject):
             self._log(f"📂 Restored {len(valid_files)} images from previous session", "info")
         except Exception as e:
             print(f"[FILE_PERSIST] Error loading files: {e}")
+    
+    def _sync_file_selection_to_preview(self):
+        """Sync file list selection to match the currently displayed image in preview.
+        
+        Called when user clicks on the image viewer to ensure the file list selection
+        matches the displayed image, which triggers proper state restoration.
+        """
+        try:
+            # Get the currently displayed image path from the preview
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            
+            # Normalize for comparison
+            current_normalized = os.path.normcase(os.path.normpath(current_image))
+            
+            # Find this image in selected_files
+            target_row = -1
+            for idx, filepath in enumerate(self.selected_files):
+                if os.path.normcase(os.path.normpath(filepath)) == current_normalized:
+                    target_row = idx
+                    break
+            
+            if target_row < 0:
+                return
+            
+            # Check if already selected
+            current_row = self.file_listbox.currentRow()
+            if current_row == target_row:
+                # Already selected - just trigger state restoration manually
+                print(f"[SYNC_SELECTION] Already at correct row {target_row}, triggering state restoration")
+                ImageRenderer._restore_image_state(self, current_image)
+                return
+            
+            # Select the correct row (will trigger _on_file_selection_changed)
+            print(f"[SYNC_SELECTION] Syncing file list selection to row {target_row} for {os.path.basename(current_image)}")
+            self.file_listbox.setCurrentRow(target_row)
+        except Exception as e:
+            print(f"[SYNC_SELECTION] Error syncing selection: {e}")
     
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""

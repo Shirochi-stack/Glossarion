@@ -951,6 +951,14 @@ def _restore_image_state(self, image_path: str):
         if not hasattr(self, 'image_state_manager'):
             return
         
+        # CRITICAL: Always reset path tracking variables to current image to prevent
+        # "Cannot render: Translation data is for X but you're viewing Y" errors
+        # This must happen BEFORE we check for saved state
+        self._translation_data_image_path = image_path
+        self._translating_image_path = image_path
+        self._current_state_image_path = image_path
+        print(f"[STATE_ISOLATION] Reset path tracking to: {os.path.basename(image_path)}")
+        
         # CRITICAL: Validate and clean stale state BEFORE restoration
         _validate_and_clean_stale_state(self, image_path)
         
