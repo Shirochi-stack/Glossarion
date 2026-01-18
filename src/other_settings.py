@@ -2237,6 +2237,80 @@ def _create_response_handling_section(self, parent):
     sep8.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(sep8)
     
+    # Stop Logic Behavior section
+    stop_logic_title = QLabel("Stop Logic Behavior")
+    stop_logic_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(stop_logic_title)
+    
+    # Graceful Stop toggle
+    if not hasattr(self, 'graceful_stop_var'):
+        self.graceful_stop_var = self.config.get('graceful_stop', False)
+    
+    self.graceful_stop_checkbox = self._create_styled_checkbox("Graceful Stop (wait for in-flight API calls)")
+    self.graceful_stop_checkbox.setContentsMargins(20, 5, 0, 0)
+    try:
+        self.graceful_stop_checkbox.setChecked(bool(self.graceful_stop_var))
+    except Exception:
+        pass
+    def _on_graceful_stop_toggle(checked):
+        try:
+            self.graceful_stop_var = bool(checked)
+        except Exception:
+            pass
+    self.graceful_stop_checkbox.toggled.connect(_on_graceful_stop_toggle)
+    section_v.addWidget(self.graceful_stop_checkbox)
+    
+    graceful_stop_desc = QLabel("When enabled, pressing Stop will wait for in-flight API calls to complete\ninstead of aborting them. Saves API costs since calls already made will finish.")
+    graceful_stop_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    graceful_stop_desc.setContentsMargins(40, 2, 0, 5)
+    section_v.addWidget(graceful_stop_desc)
+    
+    # Wait for Chunks toggle (child of graceful stop)
+    if not hasattr(self, 'wait_for_chunks_var'):
+        self.wait_for_chunks_var = self.config.get('wait_for_chunks', False)
+    
+    self.wait_for_chunks_checkbox = self._create_styled_checkbox("Wait for all chunks to complete")
+    self.wait_for_chunks_checkbox.setContentsMargins(40, 0, 0, 0)
+    try:
+        self.wait_for_chunks_checkbox.setChecked(bool(self.wait_for_chunks_var))
+    except Exception:
+        pass
+    def _on_wait_for_chunks_toggle(checked):
+        try:
+            self.wait_for_chunks_var = bool(checked)
+        except Exception:
+            pass
+    self.wait_for_chunks_checkbox.toggled.connect(_on_wait_for_chunks_toggle)
+    section_v.addWidget(self.wait_for_chunks_checkbox)
+    
+    wait_chunks_desc = QLabel("When enabled, graceful stop will wait for all chunks of a chapter to complete\nbefore stopping. Prevents partial chapter translations.")
+    wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    wait_chunks_desc.setContentsMargins(60, 2, 0, 5)
+    section_v.addWidget(wait_chunks_desc)
+    
+    # Enable/disable based on graceful stop state
+    def _update_wait_for_chunks_state(graceful_checked):
+        self.wait_for_chunks_checkbox.setEnabled(graceful_checked)
+        wait_chunks_desc.setEnabled(graceful_checked)
+        if graceful_checked:
+            self.wait_for_chunks_checkbox.setStyleSheet("none")
+            self.wait_for_chunks_checkbox.setStyleSheet("")
+            self.wait_for_chunks_checkbox.style().unpolish(self.wait_for_chunks_checkbox)
+            self.wait_for_chunks_checkbox.style().polish(self.wait_for_chunks_checkbox)
+            wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        else:
+            self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
+            wait_chunks_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+    
+    self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
+    _update_wait_for_chunks_state(self.graceful_stop_checkbox.isChecked())
+    
+    # Separator before API Request Retries
+    sep_stop_logic = QFrame()
+    sep_stop_logic.setFrameShape(QFrame.HLine)
+    sep_stop_logic.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_stop_logic)
+    
     # Max Retries Configuration
     retries_title = QLabel("API Request Retries")
     retries_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
@@ -2292,73 +2366,6 @@ def _create_response_handling_section(self, parent):
     indefinite_desc.setStyleSheet("color: gray; font-size: 10pt;")
     indefinite_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(indefinite_desc)
-    
-    # Graceful Stop toggle
-    if not hasattr(self, 'graceful_stop_var'):
-        self.graceful_stop_var = self.config.get('graceful_stop', False)
-    
-    self.graceful_stop_checkbox = self._create_styled_checkbox("Graceful Stop (wait for in-flight API calls)")
-    self.graceful_stop_checkbox.setContentsMargins(20, 5, 0, 0)
-    try:
-        self.graceful_stop_checkbox.setChecked(bool(self.graceful_stop_var))
-    except Exception:
-        pass
-    def _on_graceful_stop_toggle(checked):
-        try:
-            self.graceful_stop_var = bool(checked)
-        except Exception:
-            pass
-    self.graceful_stop_checkbox.toggled.connect(_on_graceful_stop_toggle)
-    section_v.addWidget(self.graceful_stop_checkbox)
-    
-    graceful_stop_desc = QLabel("When enabled, pressing Stop will wait for in-flight API calls to complete\ninstead of aborting them. Saves API costs since calls already made will finish.")
-    graceful_stop_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    graceful_stop_desc.setContentsMargins(40, 2, 0, 5)
-    section_v.addWidget(graceful_stop_desc)
-    
-    # Wait for Chunks toggle (child of graceful stop)
-    if not hasattr(self, 'wait_for_chunks_var'):
-        self.wait_for_chunks_var = self.config.get('wait_for_chunks', False)
-    
-    self.wait_for_chunks_checkbox = self._create_styled_checkbox("Wait for all chunks to complete")
-    self.wait_for_chunks_checkbox.setContentsMargins(40, 0, 0, 0)
-    try:
-        self.wait_for_chunks_checkbox.setChecked(bool(self.wait_for_chunks_var))
-    except Exception:
-        pass
-    def _on_wait_for_chunks_toggle(checked):
-        try:
-            self.wait_for_chunks_var = bool(checked)
-        except Exception:
-            pass
-    self.wait_for_chunks_checkbox.toggled.connect(_on_wait_for_chunks_toggle)
-    section_v.addWidget(self.wait_for_chunks_checkbox)
-    
-    wait_chunks_desc = QLabel("When enabled, graceful stop will wait for all chunks of a chapter to complete\nbefore stopping. Prevents partial chapter translations.")
-    wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    wait_chunks_desc.setContentsMargins(60, 2, 0, 5)
-    section_v.addWidget(wait_chunks_desc)
-    
-    # Enable/disable based on graceful stop state
-    def _update_wait_for_chunks_state(graceful_checked):
-        self.wait_for_chunks_checkbox.setEnabled(graceful_checked)
-        wait_chunks_desc.setEnabled(graceful_checked)
-        if graceful_checked:
-            # Reset to default styled checkbox appearance (same as graceful stop)
-            # Use 'none' to force clear previous styles, then set to empty
-            self.wait_for_chunks_checkbox.setStyleSheet("none")
-            self.wait_for_chunks_checkbox.setStyleSheet("")
-            self.wait_for_chunks_checkbox.style().unpolish(self.wait_for_chunks_checkbox)
-            self.wait_for_chunks_checkbox.style().polish(self.wait_for_chunks_checkbox)
-            wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
-        else:
-            self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
-            wait_chunks_desc.setStyleSheet("color: #606060; font-size: 10pt;")
-    
-    self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
-    
-    # Initialize state based on current graceful stop value
-    _update_wait_for_chunks_state(self.graceful_stop_checkbox.isChecked())
 
     # Separator
     sep_retry_1 = QFrame()
