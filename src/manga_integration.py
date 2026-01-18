@@ -938,6 +938,9 @@ class MangaTranslationTab(QObject):
         # Circle mode for selections and pipeline masks (rect by default)
         self._use_circle_shapes = False
         
+        # Load persisted manga image list from previous session
+        QTimer.singleShot(200, self._load_persisted_files)
+        
         # Attach logging bridge so library logs appear in our log area
         self._attach_logging_bridge()
         
@@ -8594,6 +8597,9 @@ class MangaTranslationTab(QObject):
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.set_image_list(self.selected_files)
+        
+        # Persist the file list
+        self._persist_selected_files()
     
     def _add_folder(self):
         """Add all images (and CBZ archives) from a folder"""
@@ -8671,6 +8677,9 @@ class MangaTranslationTab(QObject):
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.set_image_list(self.selected_files)
+        
+        # Persist the file list
+        self._persist_selected_files()
     
     def _remove_selected(self):
         """Remove selected files from the list and clear preview if the current image was removed.
@@ -8706,6 +8715,9 @@ class MangaTranslationTab(QObject):
                 self.image_preview_widget.clear()
                 self.image_preview_widget.set_image_list([])
             self._current_image_path = None
+        
+        # Persist the file list
+        self._persist_selected_files()
     
     def _clear_all(self):
         """Clear all files from the list.
@@ -8724,6 +8736,9 @@ class MangaTranslationTab(QObject):
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.clear()
             self.image_preview_widget.set_image_list([])
+        
+        # Persist the empty file list
+        self._persist_selected_files()
     
     def _toggle_sort(self, sort_type):
         """Toggle between ascending and descending sort for the given type.
@@ -8818,6 +8833,9 @@ class MangaTranslationTab(QObject):
             self._log(f"📋 Sorted {len(self.selected_files)} files {sort_names.get(sort_type, sort_type)} ({direction})", "info")
         else:
             self._log(f"📋 Sorted {len(self.selected_files)} files {sort_names.get(sort_type, sort_type)}", "info")
+        
+        # Persist the new order
+        self._persist_selected_files()
     
     def _on_files_reordered(self, parent, start, end, destination, row):
         """Handle drag-and-drop reordering of files in the listbox.
@@ -8845,8 +8863,59 @@ class MangaTranslationTab(QObject):
                 self.image_preview_widget.set_image_list(self.selected_files)
             
             print(f"[FILE_REORDER] Files reordered via drag-and-drop")
+            
+            # Persist the new order
+            self._persist_selected_files()
         except Exception as e:
             print(f"[FILE_REORDER] Error syncing file order: {e}")
+    
+    def _persist_selected_files(self):
+        """Save the current selected_files list to config for persistence across restarts."""
+        try:
+            if not hasattr(self, 'main_gui') or not self.main_gui:
+                return
+            # Only save files that still exist
+            valid_files = [f for f in self.selected_files if os.path.exists(f)]
+            self.main_gui.config['manga_selected_files'] = valid_files
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+            print(f"[FILE_PERSIST] Saved {len(valid_files)} files to config")
+        except Exception as e:
+            print(f"[FILE_PERSIST] Error saving files: {e}")
+    
+    def _load_persisted_files(self):
+        """Load the persisted selected_files list from config on startup."""
+        try:
+            if not hasattr(self, 'main_gui') or not self.main_gui:
+                return
+            saved_files = self.main_gui.config.get('manga_selected_files', [])
+            if not saved_files:
+                return
+            
+            # Filter to only files that still exist
+            valid_files = [f for f in saved_files if os.path.exists(f)]
+            if not valid_files:
+                return
+            
+            print(f"[FILE_PERSIST] Loading {len(valid_files)} persisted files")
+            
+            # Add files to the list
+            for filepath in valid_files:
+                if filepath not in self.selected_files:
+                    self.selected_files.append(filepath)
+                    self.file_listbox.addItem(os.path.basename(filepath))
+            
+            # Auto-select first image
+            if self.file_listbox.count() > 0:
+                self.file_listbox.setCurrentRow(0)
+            
+            # Update thumbnail preview list
+            if hasattr(self, 'image_preview_widget'):
+                self.image_preview_widget.set_image_list(self.selected_files)
+            
+            self._log(f"📂 Restored {len(valid_files)} images from previous session", "info")
+        except Exception as e:
+            print(f"[FILE_PERSIST] Error loading files: {e}")
     
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""
@@ -8859,7 +8928,20 @@ class MangaTranslationTab(QObject):
             
             selected_items = self.file_listbox.selectedItems()
             
+            # Prevent empty selection - always keep at least one item selected
+            if not selected_items and self.file_listbox.count() > 0:
+                # Re-select the previously selected item or the first item
+                last_row = getattr(self, '_last_selected_row', 0)
+                if last_row >= self.file_listbox.count():
+                    last_row = 0
+                self.file_listbox.blockSignals(True)  # Prevent recursive signal
+                self.file_listbox.setCurrentRow(last_row)
+                self.file_listbox.blockSignals(False)
+                print(f"[FILE_SELECTION] Prevented empty selection, re-selected row {last_row}")
+                return
+            
             if not selected_items:
+                # Only clear if there are truly no files in the list
                 if hasattr(self, 'image_preview_widget'):
                     self.image_preview_widget.clear()
                 # CLEAR STATE ISOLATION FIX: Clear recognition and translation data when no image is selected
@@ -8870,6 +8952,9 @@ class MangaTranslationTab(QObject):
             # Get the first selected item
             first_item = selected_items[0]
             row = self.file_listbox.row(first_item)
+            
+            # Track the selected row for preventing empty selection
+            self._last_selected_row = row
             
             # Get the corresponding file path
             if 0 <= row < len(self.selected_files):
