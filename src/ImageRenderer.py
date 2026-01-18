@@ -10035,10 +10035,12 @@ def _run_translate_all_background(self, image_paths: list):
         self._log(f"❌ Batch translation failed: {str(e)}", "error")
         print(f"[TRANSLATE_ALL] Fatal error: {traceback.format_exc()}")
     finally:
+        print(f"[TRANSLATE_ALL] Finally block executing - sending restore messages")
         # Remove blue pulse overlay
         self.update_queue.put(('remove_processing_overlay', None))
         # Restore button
         self.update_queue.put(('translate_all_button_restore', None))
+        print(f"[TRANSLATE_ALL] Sent translate_all_button_restore to queue")
         # Clear batch mode flag
         try:
             self._batch_mode_active = False
@@ -10047,6 +10049,7 @@ def _run_translate_all_background(self, image_paths: list):
 
 def _restore_translate_all_button(self):
     """Restore the translate all button to its original state"""
+    print(f"[TRANSLATE_ALL] _restore_translate_all_button called")
     try:
         # Re-enable ALL workflow buttons (not just translate all)
         _enable_workflow_buttons(self)
@@ -10055,8 +10058,16 @@ def _restore_translate_all_button(self):
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'thumbnail_list'):
             self.image_preview_widget.thumbnail_list.setEnabled(True)
             print(f"[TRANSLATE_ALL] Re-enabled thumbnail list after batch translation")
-    except Exception:
-        pass
+        
+        # Explicitly reset translate_all_btn text (in case _enable_workflow_buttons missed it)
+        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
+            self.image_preview_widget.translate_all_btn.setText("Translate All")
+            self.image_preview_widget.translate_all_btn.setEnabled(True)
+            print(f"[TRANSLATE_ALL] Explicitly reset translate_all_btn text")
+    except Exception as e:
+        print(f"[TRANSLATE_ALL] Error in _restore_translate_all_button: {e}")
+        import traceback
+        traceback.print_exc()
 
 def _update_preview_to_rendered_images(self):
     """On batch end, show translated result for the CURRENT selection only; do not change lists or selection."""

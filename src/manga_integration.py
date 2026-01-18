@@ -9938,17 +9938,19 @@ class MangaTranslationTab(QObject):
                     _, progress_data = update
                     try:
                         # Don't update progress if stop was clicked (preserve "Stopping..." text)
+                        should_skip = False
                         if hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set():
                             print(f"[PROGRESS] Skipping progress update - stop flag is set")
-                            return
+                            should_skip = True
                         if hasattr(self, '_global_cancellation') and self._global_cancellation:
                             print(f"[PROGRESS] Skipping progress update - global cancellation set")
-                            return
+                            should_skip = True
                         
-                        current = progress_data['current']
-                        total = progress_data['total']
-                        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
-                            self.image_preview_widget.translate_all_btn.setText(f"Translating... ({current}/{total})")
+                        if not should_skip:
+                            current = progress_data['current']
+                            total = progress_data['total']
+                            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
+                                self.image_preview_widget.translate_all_btn.setText(f"Translating... ({current}/{total})")
                     except Exception as e:
                         print(f"Error updating translate all progress: {str(e)}")
                 
@@ -10111,9 +10113,12 @@ class MangaTranslationTab(QObject):
                 
                 elif update[0] == 'translate_all_button_restore':
                     # Restore the translate all button to its normal state
+                    print(f"[QUEUE] Received translate_all_button_restore message")
                     try:
                         ImageRenderer._restore_translate_all_button(self, )
+                        print(f"[QUEUE] translate_all_button_restore completed successfully")
                     except Exception as e:
+                        print(f"[QUEUE] translate_all_button_restore FAILED: {e}")
                         self._log(f"❌ Failed to restore translate all button: {str(e)}", "error")
                 
                 elif update[0] == 'remove_processing_overlay':
