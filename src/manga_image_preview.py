@@ -134,8 +134,28 @@ class MoveableRectItem(QGraphicsRectItem):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
         
+    def _is_processing_blocked(self) -> bool:
+        """Check if interaction should be blocked during batch processing"""
+        try:
+            if hasattr(self, '_viewer') and self._viewer:
+                mi = getattr(self._viewer, 'manga_integration', None)
+                if mi:
+                    if getattr(mi, '_batch_mode_active', False):
+                        return True
+                    overlays = getattr(mi, '_processing_overlays_by_image', None)
+                    if overlays and len(overlays) > 0:
+                        return True
+        except Exception:
+            pass
+        return False
+    
     def mousePressEvent(self, event):
         """Handle mouse press for resize or move operations"""
+        # Block interactions during processing
+        if self._is_processing_blocked():
+            event.accept()
+            return
+        
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 # Store initial state for change detection
@@ -175,6 +195,11 @@ class MoveableRectItem(QGraphicsRectItem):
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for resize operations"""
+        # Block interactions during processing
+        if self._is_processing_blocked():
+            event.accept()
+            return
+        
         if self._is_resizing and self._resize_mode:
             try:
                 current_pos = event.pos()
@@ -409,8 +434,28 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
         
+    def _is_processing_blocked(self) -> bool:
+        """Check if interaction should be blocked during batch processing"""
+        try:
+            if hasattr(self, '_viewer') and self._viewer:
+                mi = getattr(self._viewer, 'manga_integration', None)
+                if mi:
+                    if getattr(mi, '_batch_mode_active', False):
+                        return True
+                    overlays = getattr(mi, '_processing_overlays_by_image', None)
+                    if overlays and len(overlays) > 0:
+                        return True
+        except Exception:
+            pass
+        return False
+    
     def mousePressEvent(self, event):
         """Handle mouse press for resize or move operations"""
+        # Block interactions during processing
+        if self._is_processing_blocked():
+            event.accept()
+            return
+        
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 # Store initial state for change detection
@@ -450,6 +495,11 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for resize operations"""
+        # Block interactions during processing
+        if self._is_processing_blocked():
+            event.accept()
+            return
+        
         if self._is_resizing and self._resize_mode:
             try:
                 current_pos = event.pos()
@@ -697,8 +747,28 @@ class MoveablePathItem(QGraphicsPathItem):
         
         return transform.map(path)
     
+    def _is_processing_blocked(self) -> bool:
+        """Check if interaction should be blocked during batch processing"""
+        try:
+            if hasattr(self, '_viewer') and self._viewer:
+                mi = getattr(self._viewer, 'manga_integration', None)
+                if mi:
+                    if getattr(mi, '_batch_mode_active', False):
+                        return True
+                    overlays = getattr(mi, '_processing_overlays_by_image', None)
+                    if overlays and len(overlays) > 0:
+                        return True
+        except Exception:
+            pass
+        return False
+    
     def mousePressEvent(self, event):
         """Handle mouse press for resize or move operations"""
+        # Block interactions during processing
+        if self._is_processing_blocked():
+            event.accept()
+            return
+        
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 # Store initial state for change detection
@@ -739,6 +809,11 @@ class MoveablePathItem(QGraphicsPathItem):
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for resize operations"""
+        # Block interactions during processing
+        if self._is_processing_blocked():
+            event.accept()
+            return
+        
         if self._is_resizing and self._resize_mode and self._original_path:
             try:
                 current_pos = event.pos()
@@ -918,16 +993,16 @@ class CompactImageViewer(QGraphicsView):
     def _is_processing_blocked(self) -> bool:
         """Check if rectangle interaction should be blocked (batch processing active)"""
         try:
-            # Check via parent widget -> manga_integration
-            parent = self.parent()
-            if parent and hasattr(parent, 'manga_integration'):
-                mi = parent.manga_integration
-                if mi and getattr(mi, '_batch_mode_active', False):
+            # manga_integration is set directly on the viewer
+            mi = getattr(self, 'manga_integration', None)
+            if mi:
+                # Check batch mode flag
+                if getattr(mi, '_batch_mode_active', False):
                     return True
                 # Also check if there are any active processing overlays
-                if mi and hasattr(mi, '_processing_overlays_by_image'):
-                    if mi._processing_overlays_by_image:
-                        return True
+                overlays = getattr(mi, '_processing_overlays_by_image', None)
+                if overlays and len(overlays) > 0:
+                    return True
         except Exception:
             pass
         return False
