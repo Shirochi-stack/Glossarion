@@ -6957,7 +6957,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Debug: Show first 200 chars of system prompt
             if system_prompt:
                 preview = system_prompt[:] if len(system_prompt) > 200 else system_prompt
-                self.append_log(f"   System prompt: {preview}")
+                prompt_type = "User prompt" if os.environ.get('SYSTEM_PROMPT_TO_USER', '0') == '1' else "System prompt"
+                self.append_log(f"   {prompt_type}: {preview}")
             
             # Check stop before making API call
             if self.stop_requested:
@@ -7392,8 +7393,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', lambda m: '\n' + split_instr if split_instr else '', system_prompt)
 
                 prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
-                self.append_log(f"📝 System prompt: {prompt_preview}")
-                self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
+                prompt_type = "User prompt" if os.environ.get('SYSTEM_PROMPT_TO_USER', '0') == '1' else "System prompt"
+                self.append_log(f"📝 {prompt_type}: {prompt_preview}")
+                self.append_log(f"📏 {prompt_type} length: {len(system_prompt)} characters")
                 
                 # Log assistant prompt if set
                 if hasattr(self, 'assistant_prompt') and self.assistant_prompt and self.assistant_prompt.strip():

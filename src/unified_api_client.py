@@ -4028,8 +4028,10 @@ class UnifiedClient:
             if image_data:
                 messages = self._prepare_image_messages(messages, image_data)
             
-            # Check if system prompt should be moved to user message
-            if os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1':
+            # Check if system prompt should be moved to user message (live check on every request)
+            system_to_user = os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1'
+            if system_to_user:
+                print(f"[DEBUG] Merging system prompt into user message (SYSTEM_PROMPT_TO_USER={os.getenv('SYSTEM_PROMPT_TO_USER')})")
                 messages = self._merge_system_into_user(messages)
             
             # Validate request
@@ -4145,8 +4147,10 @@ class UnifiedClient:
                 if image_data:
                     messages = self._prepare_image_messages(messages, image_data)
                 
-                # Check if system prompt should be moved to user message
-                if os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1':
+                # Check if system prompt should be moved to user message (live check on every request)
+                system_to_user = os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1'
+                if system_to_user:
+                    print(f"[DEBUG] Merging system prompt into user message (SYSTEM_PROMPT_TO_USER={os.getenv('SYSTEM_PROMPT_TO_USER')})")
                     messages = self._merge_system_into_user(messages)
                 
                 # Validate request

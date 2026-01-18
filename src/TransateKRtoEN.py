@@ -10121,7 +10121,7 @@ def main(log_callback=None, stop_callback=None):
                         "content": chunk_prompt_template.format(
                             chunk_idx=chunk_idx,
                             total_chunks=total_chunks,
-                            chunk_html=chunk_html
+                            chunk_html=""  # Provide empty string for backward compatibility
                         )
                     }]
                 user_prompt = chunk_html
