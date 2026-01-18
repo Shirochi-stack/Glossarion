@@ -4519,6 +4519,7 @@ class BatchTranslationProcessor:
                 return False, actual_num, None, None, None
 
             # Verify chunks - handle partial completion gracefully
+            is_partial_result = False
             if None in translated_chunks:
                 missing = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is None]
                 completed = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is not None]
@@ -4529,6 +4530,7 @@ class BatchTranslationProcessor:
                     print(f"⚠️ Chapter {actual_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
                     # Filter out None values and continue with partial result
                     translated_chunks = [c for c in translated_chunks if c is not None]
+                    is_partial_result = True
                 else:
                     raise Exception(f"Failed to translate chunks: {missing}")
             
@@ -4637,24 +4639,24 @@ class BatchTranslationProcessor:
                     print(f"    ⚠️ Failed to extract AI features: {e}")
             
             with self.progress_lock:
-                # Check for truncation first
+                # Check for truncation or partial result first
                 if chapter_truncated:
                     chapter_status = "qa_failed"
                     print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Response was truncated")
-                    # Update progress to qa_failed status with TRUNCATED issue
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features, qa_issues_found=["TRUNCATED"])
                     self.save_progress_fn()
-                    # DO NOT increment chapters_completed for qa_failed
-                    # Return False to indicate failure (return 5 values to match successful return)
+                    return False, actual_num, None, None, None
+                elif is_partial_result:
+                    chapter_status = "qa_failed"
+                    print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Partial translation (graceful stop)")
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features, qa_issues_found=["PARTIAL"])
+                    self.save_progress_fn()
                     return False, actual_num, None, None, None
                 else:
                     chapter_status = "completed"
-                    # Update progress to completed status
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
                     self.save_progress_fn()
-                    # Only increment chapters_completed for successful chapters
                     self.chapters_completed += 1
-                    # Note: chunks_completed is already incremented in the loop above
             
             print(f"✅ Chapter {actual_num} completed successfully")
             # Return chapter body and final cleaned translation so the main thread
