@@ -726,9 +726,13 @@ class MangaTranslator:
         except Exception:
             pass
         
-        # Clear inpainting start time
-        if hasattr(self, '_inpainting_start_time'):
-            self._inpainting_start_time = None
+        # Clear inpainting start time - use delattr to fully remove (not just set to None)
+        # This ensures hasattr() returns False, avoiding None arithmetic errors
+        try:
+            if hasattr(self, '_inpainting_start_time'):
+                delattr(self, '_inpainting_start_time')
+        except AttributeError:
+            pass
         
         # CRITICAL: Reset thread-local entirely to ensure fresh state
         # This forces re-checkout from pool on next use
@@ -13506,6 +13510,20 @@ class MangaTranslator:
                                         # Store references for later return
                                         self._checked_out_bubble_detector = spare
                                         self._bubble_detector_pool_key = key
+                                        
+                                        # CRITICAL: Reset stop flags on the checked-out detector
+                                        # This ensures the instance is ready for new work after a previous stop
+                                        try:
+                                            if hasattr(spare, 'reset_stop_flags'):
+                                                spare.reset_stop_flags()
+                                            elif hasattr(spare, '_stopped'):
+                                                spare._stopped = False
+                                            # Also set the new stop flag
+                                            if hasattr(spare, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                                spare.set_stop_flag(self.stop_flag)
+                                        except Exception:
+                                            pass
+                                        
                                         available = len(spares) - len(checked_out)
                                         if elapsed > 0:
                                             self._log(f"🤖 Checked out bubble detector after {elapsed:.1f}s wait ({len(checked_out)}/{len(spares)} in use)", "info")
@@ -13645,6 +13663,20 @@ class MangaTranslator:
                                         # Store reference for later return
                                         self._checked_out_inpainter = spare
                                         self._inpainter_pool_key = key
+                                        
+                                        # CRITICAL: Reset stop flags on the checked-out inpainter
+                                        # This ensures the instance is ready for new work after a previous stop
+                                        try:
+                                            if hasattr(spare, 'reset_stop_flags'):
+                                                spare.reset_stop_flags()
+                                            elif hasattr(spare, '_stopped'):
+                                                spare._stopped = False
+                                            # Also set the new stop flag
+                                            if hasattr(spare, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                                spare.set_stop_flag(self.stop_flag)
+                                        except Exception:
+                                            pass
+                                        
                                         available = len(spares) - len(checked_out)
                                         if elapsed > 0:
                                             self._log(f"🎨 Checked out inpainter after {elapsed:.1f}s wait (attempt {attempt_idx}/{total_attempts}, {len(checked_out)}/{len(spares)} in use)", "info")
@@ -14555,7 +14587,8 @@ class MangaTranslator:
                             inpaint_wait_time = time.time() - inpaint_wait_start
                             
                             # Calculate total inpainting time from when it started early
-                            if hasattr(self, '_inpainting_start_time'):
+                            # Check both existence AND non-None value to avoid TypeError
+                            if hasattr(self, '_inpainting_start_time') and self._inpainting_start_time is not None:
                                 total_inpaint_time = time.time() - self._inpainting_start_time
                                 if inpaint_wait_time < 0.1:
                                     self._log(f"✅ Early inpainting ALREADY COMPLETE! (ran for {total_inpaint_time:.1f}s during OCR/translation)", "info")
