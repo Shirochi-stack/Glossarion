@@ -2234,6 +2234,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                     poll_timeout = 10  # 10 seconds
                     poll_interval = 0.5  # Check every 500ms
                     start_time = time.time()
+                    last_button_update = 0
                     
                     while time.time() - start_time < poll_timeout:
                         inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
@@ -2242,6 +2243,12 @@ def _run_clean_background(self, image_path: str, regions: list):
                         
                         # No inpainter yet - wait and retry
                         elapsed = time.time() - start_time
+                        
+                        # Update button text with elapsed time every second
+                        if elapsed >= 0.5 and int(elapsed) > last_button_update:
+                            self.update_queue.put(('update_clean_button_text', f"Waiting... ({int(elapsed)}s)"))
+                            last_button_update = int(elapsed)
+                        
                         if elapsed >= 2 and int(elapsed) % 5 == 0:  # Log every 5 seconds after first 2s
                             self._log(f"⏳ Waiting for inpainter pool... ({int(elapsed)}s)", "info")
                         time.sleep(poll_interval)
