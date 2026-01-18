@@ -9898,18 +9898,19 @@ class MangaTranslationTab(QObject):
                             switch_to_output = False
                         
                         # During batch mode, only update output preview for the current image
+                        should_skip_preview = False
                         if getattr(self, '_batch_mode_active', False):
                             # Only update when the update is for the current image
                             if not source_path or source_path != getattr(self.image_preview_widget, 'current_image_path', None):
                                 #print(f"[PREVIEW_UPDATE] Batch active — skipping update for non-current image")
-                                return
+                                should_skip_preview = True
                         
                         # Outside batch mode: if a source_path is provided, only update if it matches current image
-                        if source_path and source_path != getattr(self.image_preview_widget, 'current_image_path', None):
+                        if not should_skip_preview and source_path and source_path != getattr(self.image_preview_widget, 'current_image_path', None):
                             #print(f"[PREVIEW_UPDATE] Skipping update for non-current image outside batch mode")
-                            return
+                            should_skip_preview = True
                         
-                        if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
+                        if not should_skip_preview and hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
                             #print(f"[PREVIEW_UPDATE] New translated/cleaned image available: {translated_path}")
                             
                             # Store the translated path for potential use
@@ -10047,6 +10048,7 @@ class MangaTranslationTab(QObject):
                             
                             # Gate: only allow loading into the preview if this path matches the current selection
                             # EXCEPTION: During batch mode, allow any image to be loaded so user can see progress
+                            should_skip_load = False
                             is_batch_mode = getattr(self, '_batch_mode_active', False)
                             if not is_batch_mode:
                                 try:
@@ -10059,55 +10061,57 @@ class MangaTranslationTab(QObject):
                                     if image_path and current_selected and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_selected)):
                                         # Ignore background updates for non-current images
                                         print(f"[LOAD_IMAGE] Skipping non-current image update: {os.path.basename(image_path)}")
-                                        return
+                                        should_skip_load = True
                                     # Also ignore if we're trying to replace a different image than currently loaded
-                                    if image_path and current_loaded and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_loaded)):
+                                    if not should_skip_load and image_path and current_loaded and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_loaded)):
                                         print(f"[LOAD_IMAGE] Skipping update that doesn't match current loaded image")
-                                        return
+                                        should_skip_load = True
                                 except Exception:
-                                    pass
+                                    should_skip_load = False  # Don't skip on error
                             else:
                                 print(f"[LOAD_IMAGE] Batch mode active - bypassing gate for: {os.path.basename(image_path)}")
                             
-                            # Store original path for state restoration
-                            original_image_path = image_path
-                            
-                            # Determine if a translated image exists for the OUTPUT tab
-                            translated_image_path = None
-                            filename = os.path.basename(image_path)
-                            base_name = os.path.splitext(filename)[0]
-                            parent_dir = os.path.dirname(image_path)
-                            isolated_folder = os.path.join(parent_dir, f"{base_name}_translated")
-                            isolated_image = os.path.join(isolated_folder, filename)
-                            
-                            if os.path.exists(isolated_image):
-                                translated_image_path = isolated_image
-                                print(f"[LOAD_IMAGE] Found translated image in isolated folder: {os.path.basename(isolated_image)}")
-                            else:
-                                # Check state manager for rendered image
-                                if hasattr(self, 'image_state_manager'):
-                                    state = self.image_state_manager.get_state(original_image_path)
-                                    if state and 'rendered_image_path' in state and os.path.exists(state['rendered_image_path']):
-                                        translated_image_path = state['rendered_image_path']
-                                        print(f"[LOAD_IMAGE] Found rendered image from state: {os.path.basename(translated_image_path)}")
-                                # Check _rendered_images_map
-                                if translated_image_path is None and hasattr(self, '_rendered_images_map') and original_image_path in self._rendered_images_map:
-                                    mapped_path = self._rendered_images_map[original_image_path]
-                                    if os.path.exists(mapped_path):
-                                        translated_image_path = mapped_path
-                                        print(f"[LOAD_IMAGE] Found rendered image from map: {os.path.basename(mapped_path)}")
-                            
-                            # Load the SOURCE into the source viewer (no batch gating)
-                            self.image_preview_widget.load_image(original_image_path, 
-                                                                preserve_rectangles=preserve_rectangles,
-                                                                preserve_text_overlays=preserve_overlays)
-                            
-                            # Store translated path if available
-                            if translated_image_path:
-                                self.image_preview_widget.current_translated_path = translated_image_path
-                            
-                            # Update current image path for state tracking
-                            self._current_image_path = original_image_path
+                            # Only proceed if not skipping
+                            if not should_skip_load:
+                                # Store original path for state restoration
+                                original_image_path = image_path
+                                
+                                # Determine if a translated image exists for the OUTPUT tab
+                                translated_image_path = None
+                                filename = os.path.basename(image_path)
+                                base_name = os.path.splitext(filename)[0]
+                                parent_dir = os.path.dirname(image_path)
+                                isolated_folder = os.path.join(parent_dir, f"{base_name}_translated")
+                                isolated_image = os.path.join(isolated_folder, filename)
+                                
+                                if os.path.exists(isolated_image):
+                                    translated_image_path = isolated_image
+                                    print(f"[LOAD_IMAGE] Found translated image in isolated folder: {os.path.basename(isolated_image)}")
+                                else:
+                                    # Check state manager for rendered image
+                                    if hasattr(self, 'image_state_manager'):
+                                        state = self.image_state_manager.get_state(original_image_path)
+                                        if state and 'rendered_image_path' in state and os.path.exists(state['rendered_image_path']):
+                                            translated_image_path = state['rendered_image_path']
+                                            print(f"[LOAD_IMAGE] Found rendered image from state: {os.path.basename(translated_image_path)}")
+                                    # Check _rendered_images_map
+                                    if translated_image_path is None and hasattr(self, '_rendered_images_map') and original_image_path in self._rendered_images_map:
+                                        mapped_path = self._rendered_images_map[original_image_path]
+                                        if os.path.exists(mapped_path):
+                                            translated_image_path = mapped_path
+                                            print(f"[LOAD_IMAGE] Found rendered image from map: {os.path.basename(mapped_path)}")
+                                
+                                # Load the SOURCE into the source viewer (no batch gating)
+                                self.image_preview_widget.load_image(original_image_path, 
+                                                                    preserve_rectangles=preserve_rectangles,
+                                                                    preserve_text_overlays=preserve_overlays)
+                                
+                                # Store translated path if available
+                                if translated_image_path:
+                                    self.image_preview_widget.current_translated_path = translated_image_path
+                                
+                                # Update current image path for state tracking
+                                self._current_image_path = original_image_path
                     except Exception as e:
                         print(f"Error loading preview image: {str(e)}")
                 
