@@ -10036,6 +10036,11 @@ def _run_translate_all_background(self, image_paths: list):
                     'preserve_rectangles': False,
                     'preserve_overlays': False
                 }))
+                
+                # Sync file list and thumbnail selection to match current image
+                self.update_queue.put(('sync_file_selection', {
+                    'image_path': image_path
+                }))
                 print(f"[TRANSLATE_ALL] Switched preview to: {os.path.basename(image_path)}")
                 
                 # Wait for UI to process the image load before starting detection

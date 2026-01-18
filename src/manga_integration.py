@@ -10327,6 +10327,29 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         print(f"Error adding processing overlay: {str(e)}")
                 
+                elif update[0] == 'sync_file_selection':
+                    # Sync file list and thumbnail selection to match batch processing
+                    _, data = update
+                    try:
+                        image_path = data.get('image_path') if isinstance(data, dict) else None
+                        if image_path and hasattr(self, 'file_listbox') and hasattr(self, 'selected_files'):
+                            # Find index of this image in selected_files
+                            try:
+                                index = self.selected_files.index(image_path)
+                                # Block signals to prevent triggering _on_file_selection_changed
+                                self.file_listbox.blockSignals(True)
+                                self.file_listbox.setCurrentRow(index)
+                                self.file_listbox.blockSignals(False)
+                                print(f"[BATCH_SYNC] Synced file list selection to row {index}")
+                                
+                                # Also sync thumbnail selection
+                                if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, '_update_thumbnail_selection'):
+                                    self.image_preview_widget._update_thumbnail_selection(image_path)
+                            except ValueError:
+                                print(f"[BATCH_SYNC] Image not found in selected_files: {os.path.basename(image_path)}")
+                    except Exception as e:
+                        print(f"Error syncing file selection: {str(e)}")
+                
                 elif update[0] == 'update_preview_to_rendered':
                     # Update the preview to show all rendered images
                     try:
