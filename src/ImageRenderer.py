@@ -9318,12 +9318,6 @@ def _on_translate_all_clicked(self):
     try:
         # Mark batch mode active (used to suppress preview shuffles)
         self._batch_mode_active = True
-        # Hide any rectangles during batch to prevent shuffle
-        try:
-            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
-                self.image_preview_widget.viewer.clear_rectangles()
-        except Exception:
-            pass
         # Snapshot toggles on UI thread so background can read safely
         try:
             fp = False
