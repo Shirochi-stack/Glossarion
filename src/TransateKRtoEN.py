@@ -10456,6 +10456,15 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()
                 return
 
+            # Check for partial results (graceful stop during multi-chunk processing)
+            is_partial_result = False
+            expected_total = len(chunks) if 'chunks' in dir() else 1
+            if len(translated_chunks) < expected_total and len(translated_chunks) > 0:
+                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                if graceful_stop_active:
+                    print(f"⚠️ Chapter {actual_num}: partial translation ({len(translated_chunks)}/{expected_total} chunks) due to graceful stop")
+                    is_partial_result = True
+
             if len(translated_chunks) > 1:
                 print(f"  📎 Merging {len(translated_chunks)} chunks...")
                 translated_chunks.sort(key=lambda x: x[1])
@@ -10852,6 +10861,10 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "qa_failed"
                     qa_issues = ["TRUNCATED"]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
+                elif is_partial_result:
+                    chapter_status = "qa_failed"
+                    qa_issues = ["PARTIAL"]
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: partial translation (graceful stop)")
                 else:
                     chapter_status = "completed"
 
@@ -10884,6 +10897,10 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "qa_failed"
                     qa_issues = ["TRUNCATED"]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
+                elif is_partial_result:
+                    chapter_status = "qa_failed"
+                    qa_issues = ["PARTIAL"]
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: partial translation (graceful stop)")
                 else:
                     chapter_status = "completed"
 
