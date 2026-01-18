@@ -1710,9 +1710,17 @@ class BatchHeaderTranslator:
             from TransateKRtoEN import ProgressBar
             for future in as_completed(future_to_batch):
                 if self.stop_flag:
-                    print("\nTranslation interrupted by user")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
+                    # Check graceful stop settings (same as main translation)
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                    
+                    if graceful_stop_active and wait_for_chunks:
+                        print("\n⏳ Graceful stop — waiting for current batch(es) to finish...")
+                        # Don't shutdown - let remaining batches complete
+                    else:
+                        print("\n❌ Translation interrupted by user")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
                 
                 batch_num = future_to_batch[future]
                 try:
