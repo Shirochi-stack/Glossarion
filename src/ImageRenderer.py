@@ -4893,19 +4893,41 @@ def _add_processing_overlay(self):
     except Exception as e:
         print(f"[OVERLAY] Error adding processing overlay: {str(e)}")
 
-def _remove_processing_overlay(self, image_path=None):
-    """Remove the processing overlay effect for a specific image or current image"""
+def _remove_processing_overlay(self, image_path=None, clear_all=False):
+    """Remove the processing overlay effect for a specific image, current image, or all images"""
     try:
-        # Get image path if not provided
-        if image_path is None:
-            if hasattr(self, 'image_preview_widget'):
-                image_path = getattr(self.image_preview_widget, 'current_image_path', None)
-        
-        if not image_path:
+        if not hasattr(self, '_processing_overlays_by_image'):
             return
         
-        # Check per-image storage
-        if hasattr(self, '_processing_overlays_by_image') and image_path in self._processing_overlays_by_image:
+        # If clear_all or no image_path specified, remove ALL overlays (for batch end)
+        if clear_all or image_path is None:
+            paths_to_remove = list(self._processing_overlays_by_image.keys())
+            for path in paths_to_remove:
+                try:
+                    overlay_data = self._processing_overlays_by_image[path]
+                    
+                    # Stop animation
+                    try:
+                        overlay_data['animation'].stop()
+                    except Exception:
+                        pass
+                    
+                    # Remove overlay from scene
+                    try:
+                        overlay_data['viewer']._scene.removeItem(overlay_data['overlay'])
+                    except Exception:
+                        pass
+                    
+                    del self._processing_overlays_by_image[path]
+                    print(f"[OVERLAY] Removed processing overlay for {os.path.basename(path)}")
+                except Exception:
+                    pass
+            
+            print(f"[OVERLAY] Cleared all processing overlays ({len(paths_to_remove)} total)")
+            return
+        
+        # Remove overlay for specific image path
+        if image_path in self._processing_overlays_by_image:
             overlay_data = self._processing_overlays_by_image[image_path]
             
             # Stop animation
