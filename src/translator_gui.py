@@ -9438,7 +9438,11 @@ Important rules:
                    }
                """)
                self.epub_button.clicked.connect(self.epub_converter)
-               self.epub_button.setEnabled(bool(fallback_compile_epub and not any_process_running))
+               # Add delay to prevent accidental clicks after double-click stop
+               if fallback_compile_epub and not any_process_running:
+                   QTimer.singleShot(500, lambda: self.epub_button.setEnabled(True) if not (hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()) else None)
+               else:
+                   self.epub_button.setEnabled(False)
                # Stop spinner
                if getattr(self, 'epub_spinner', None):
                    self.epub_spinner.stop()
@@ -9835,11 +9839,51 @@ Important rules:
 
     def stop_epub_converter(self):
         """Stop EPUB converter"""
-        # Disable button immediately to prevent multiple clicks
+        # Check if graceful stop is enabled
+        graceful_stop = getattr(self, 'graceful_stop_var', False)
+        
+        # Double-click detection for force stop during graceful stop
+        # Check if we're already in graceful stop mode by looking at button text
+        already_in_graceful_stop = False
+        if hasattr(self, 'epub_text_label'):
+            button_text = self.epub_text_label.text()
+            already_in_graceful_stop = (button_text == "Finishing...")
+        
+        import time
+        current_time = time.time()
+        if not hasattr(self, '_epub_stop_click_times'):
+            self._epub_stop_click_times = []
+        
+        # Add current click
+        self._epub_stop_click_times.append(current_time)
+        # Remove clicks older than 1 second
+        self._epub_stop_click_times = [t for t in self._epub_stop_click_times if current_time - t < 1.0]
+        
+        # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
+        if len(self._epub_stop_click_times) >= 2 and already_in_graceful_stop:
+            self.append_log("⚡ Double-click detected — forcing immediate stop!")
+            graceful_stop = False  # Override to force immediate stop
+            self._epub_stop_click_times = []  # Reset click counter
+        
+        # During graceful stop, keep button enabled to allow double-click force stop
+        # Otherwise disable it immediately
         if hasattr(self, 'epub_button'):
-            self.epub_button.setEnabled(False)
-            self.epub_button.setText("Stopping...")
+            if graceful_stop:
+                # Graceful stop mode - keep enabled to allow double-click
+                self.epub_button.setEnabled(True)
+            else:
+                # Immediate stop or force stop - disable
+                self.epub_button.setEnabled(False)
+            # Update text label instead of button text
+            if hasattr(self, 'epub_text_label'):
+                if graceful_stop:
+                    self.epub_text_label.setText("Finishing...")
+                else:
+                    self.epub_text_label.setText("Stopping...")
             self.epub_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        
+        # Set graceful stop mode in environment so API client knows to show logs
+        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
         self.stop_requested = True
         
@@ -9851,8 +9895,28 @@ Important rules:
         except Exception:
             pass
         
-        self.append_log("❌ EPUB converter stop requested.")
-        self.append_log("⌛ Please wait... stopping after current operation completes.")
+        # For graceful stop: DON'T abort in-flight API calls, let them finish
+        # For immediate stop: abort everything aggressively
+        if not graceful_stop:
+            # Also propagate stop to unified_api_client for batch header translation cancellation
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = True
+                # Hard cancel: close active HTTP sessions to abort in-flight requests
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+            except Exception:
+                pass
+        
+        # Log message depends on stop mode
+        if graceful_stop:
+            self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+        else:
+            self.append_log("❌ EPUB converter stop requested.")
+            self.append_log("⌛ Please wait... stopping after current operation completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
     def stop_qa_scan(self):
