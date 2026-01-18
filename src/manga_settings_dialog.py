@@ -168,7 +168,8 @@ class MangaSettingsDialog(QDialog):
             'manual_edit': {
                 'translate_prompt': 'output only the {language} translation of this text:',  # Prompt template with {language} placeholder
                 'translate_target_language': 'English',  # Default language
-                'manga_output_token_limit': -1  # -1 or 0 = use main GUI's output token limit
+                'manga_output_token_limit': -1,  # -1 or 0 = use main GUI's output token limit
+                'translate_this_text_tokens': 2048  # Token limit for "Translate This Text" context menu action
             }
         }
         
@@ -2227,40 +2228,31 @@ class MangaSettingsDialog(QDialog):
         lang_help.setWordWrap(True)
         translate_layout.addWidget(lang_help)
         
-        # Output Token Limit for Manga Translation
-        token_limit_label = QLabel("Output Token Limit:")
-        token_limit_label.setToolTip(
-            "Maximum tokens for manga translation responses.\n"
-            "Set to -1 or 0 to use the main GUI's output token limit."
-        )
-        translate_layout.addWidget(token_limit_label)
+        # Translate This Text Token Limit (context menu action)
+        ttt_label = QLabel("Translate This Text Tokens:")
+        ttt_label.setToolTip("Token limit for 'Translate This Text'. Set to -1 to use manga output token limit.")
+        translate_layout.addWidget(ttt_label)
         
-        self.manga_output_token_limit = QSpinBox()
-        self.manga_output_token_limit.setRange(-1, 1000000)
-        self.manga_output_token_limit.setSingleStep(1000)
-        self.manga_output_token_limit.setSpecialValueText("Use Main GUI Limit")
-        self.manga_output_token_limit.setToolTip(
-            "Maximum tokens for manga translation responses.\n"
-            "Set to -1 or 0 to use the main GUI's output token limit.\n"
-            f"Current main GUI limit: {getattr(self.main_gui, 'max_output_tokens', 65536)}"
-        )
-        # Disable mouse wheel scrolling to prevent accidental changes
-        self.manga_output_token_limit.wheelEvent = lambda event: event.ignore()
+        self.translate_this_text_tokens = QSpinBox()
+        self.translate_this_text_tokens.setRange(-1, 1000000)
+        self.translate_this_text_tokens.setSingleStep(256)
+        self.translate_this_text_tokens.setSpecialValueText("Use Manga Output Limit")
+        self.translate_this_text_tokens.setToolTip("Token limit for 'Translate This Text'. Set to -1 to use manga output token limit.")
+        self.translate_this_text_tokens.wheelEvent = lambda event: event.ignore()
         
-        # Load saved value
-        saved_limit = self.settings.get('manual_edit', {}).get('manga_output_token_limit', -1)
-        self.manga_output_token_limit.setValue(saved_limit)
-        translate_layout.addWidget(self.manga_output_token_limit)
+        saved_ttt = self.settings.get('manual_edit', {}).get('translate_this_text_tokens', 2048)
+        self.translate_this_text_tokens.setValue(saved_ttt)
+        translate_layout.addWidget(self.translate_this_text_tokens)
         
-        token_help = QLabel(
-            f"💡 Tip: Set to -1 to use the main GUI's limit ({getattr(self.main_gui, 'max_output_tokens', 65536)} tokens).\n"
-            "Use a specific value to limit manga translation response length."
+        ttt_help = QLabel(
+            "💡 Tip: Token limit for the 'Translate This Text' context menu action.\n"
+            "Set to -1 to use the Manga Output Token Limit instead."
         )
-        token_help_font = QFont('Arial', 8)
-        token_help.setFont(token_help_font)
-        token_help.setStyleSheet("color: gray;")
-        token_help.setWordWrap(True)
-        translate_layout.addWidget(token_help)
+        ttt_help_font = QFont('Arial', 8)
+        ttt_help.setFont(ttt_help_font)
+        ttt_help.setStyleSheet("color: gray;")
+        ttt_help.setWordWrap(True)
+        translate_layout.addWidget(ttt_help)
         
         # Add stretch at end
         content_layout.addStretch()
@@ -5053,6 +5045,8 @@ class MangaSettingsDialog(QDialog):
                 self.settings['manual_edit']['translate_target_language'] = self.manual_translate_language.currentText()
             if hasattr(self, 'manga_output_token_limit'):
                 self.settings['manual_edit']['manga_output_token_limit'] = self.manga_output_token_limit.value()
+            if hasattr(self, 'translate_this_text_tokens'):
+                self.settings['manual_edit']['translate_this_text_tokens'] = self.translate_this_text_tokens.value()
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_selected'):

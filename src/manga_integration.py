@@ -4046,6 +4046,35 @@ class MangaTranslationTab(QObject):
         consolidate_row_layout.addStretch()
         output_settings_layout.addWidget(consolidate_row)
         
+        # Manga Output Token Limit
+        token_limit_row = QWidget()
+        token_limit_row_layout = QHBoxLayout(token_limit_row)
+        token_limit_row_layout.setContentsMargins(0, 5, 0, 0)
+        token_limit_row_layout.setSpacing(10)
+        
+        token_limit_label = QLabel("Output Token Limit:")
+        token_limit_label.setToolTip("Max tokens for manga translations. -1 = use main GUI limit.")
+        token_limit_row_layout.addWidget(token_limit_label)
+        
+        self.manga_output_token_limit_spin = QSpinBox()
+        self.manga_output_token_limit_spin.setRange(-1, 1000000)
+        self.manga_output_token_limit_spin.setSingleStep(1000)
+        self.manga_output_token_limit_spin.setSpecialValueText("Use Main GUI Limit")
+        self.manga_output_token_limit_spin.setToolTip(f"Max tokens for manga translations. -1 = use main GUI limit ({getattr(self.main_gui, 'max_output_tokens', 65536)}).")
+        self.manga_output_token_limit_spin.setMinimumWidth(150)
+        self.manga_output_token_limit_spin.setFocusPolicy(Qt.StrongFocus)  # Only responds to wheel when focused
+        
+        # Load saved value
+        manga_settings = self.main_gui.config.get('manga_settings', {}) or {}
+        manual_edit = manga_settings.get('manual_edit', {}) or {}
+        saved_token_limit = manual_edit.get('manga_output_token_limit', -1)
+        self.manga_output_token_limit_spin.setValue(saved_token_limit)
+        self.manga_output_token_limit_spin.valueChanged.connect(self._on_manga_output_token_limit_change)
+        token_limit_row_layout.addWidget(self.manga_output_token_limit_spin)
+        
+        token_limit_row_layout.addStretch()
+        output_settings_layout.addWidget(token_limit_row)
+        
         visual_layout.addWidget(output_settings_frame)
         
         context_frame_layout.addWidget(visual_frame)
@@ -11798,6 +11827,27 @@ class MangaTranslationTab(QObject):
         self.auto_consolidate_images_value = enabled
         # Persist with the existing save mechanism (consistent with create_cbz_toggle)
         self._save_rendering_settings()
+    
+    def _on_manga_output_token_limit_change(self, value=None):
+        """Handle manga output token limit spinbox change"""
+        try:
+            if value is None and hasattr(self, 'manga_output_token_limit_spin'):
+                value = self.manga_output_token_limit_spin.value()
+            if value is None:
+                return
+            
+            # Save to config
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                if 'manga_settings' not in self.main_gui.config:
+                    self.main_gui.config['manga_settings'] = {}
+                if 'manual_edit' not in self.main_gui.config['manga_settings']:
+                    self.main_gui.config['manga_settings']['manual_edit'] = {}
+                self.main_gui.config['manga_settings']['manual_edit']['manga_output_token_limit'] = value
+                
+                # Persist with the existing save mechanism (consistent with other handlers)
+                self._save_rendering_settings()
+        except Exception as e:
+            self._log(f"Error saving manga output token limit: {e}", "warning")
     
     def _translation_worker(self):
         """Worker thread for translation"""

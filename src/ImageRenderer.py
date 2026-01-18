@@ -7393,13 +7393,34 @@ def _translate_this_text_background(self, message: str, region_index: int):
         # Create unified client with main GUI config
         unified_client = UnifiedClient(model=model, api_key=api_key)
         
+        # Get token limit from manga settings
+        max_tokens = 2048  # default
+        try:
+            manga_settings = self.main_gui.config.get('manga_settings', {}) or {}
+            manual_edit = manga_settings.get('manual_edit', {}) or {}
+            ttt_tokens = int(manual_edit.get('translate_this_text_tokens', 2048))
+            
+            if ttt_tokens <= 0:
+                # Use manga output token limit, or fall back to main GUI limit
+                manga_limit = int(manual_edit.get('manga_output_token_limit', -1))
+                if manga_limit > 0:
+                    max_tokens = manga_limit
+                else:
+                    max_tokens = int(getattr(self.main_gui, 'max_output_tokens', 4000))
+            else:
+                max_tokens = ttt_tokens
+        except Exception:
+            max_tokens = 2048
+        
+        temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', 0.3))
         self._log(f"📤 Sending to API ({model})...", "info")
+        print(f"[TRANSLATE_THIS] Temperature: {temperature}, Max tokens: {max_tokens}")
         
         # Use unified_client.send() method which returns (content, finish_reason)
         translation_result, finish_reason = unified_client.send(
             messages=[{"role": "user", "content": message}],
-            temperature=float(os.environ.get('TRANSLATION_TEMPERATURE', 0.3)),
-            max_tokens=2048
+            temperature=temperature,
+            max_tokens=max_tokens
         )
         
         # Check if we got a valid translation
