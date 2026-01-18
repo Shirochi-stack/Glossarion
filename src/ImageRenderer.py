@@ -9645,11 +9645,12 @@ def _wrap_text_to_width(self, text: str, max_width: int, font) -> str:
     """Stub - redundant"""
     return text
 
-def _disable_workflow_buttons(self, exclude=None):
+def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
     """Disable all workflow buttons to prevent concurrent operations.
     
     Args:
         exclude: Button name to exclude from disabling (e.g., 'translate' keeps translate enabled)
+        show_stop_button: Whether to show the workflow stop button (False for Start Translation which has its own stop)
     """
     try:
         ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
@@ -9675,13 +9676,13 @@ def _disable_workflow_buttons(self, exclude=None):
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
         
-        # Show the stop button when translation operations start
-        if hasattr(ipw, 'stop_translation_btn'):
+        # Show the stop button when workflow operations start (not for Start Translation)
+        if show_stop_button and hasattr(ipw, 'stop_translation_btn'):
             ipw.stop_translation_btn.setVisible(True)
             ipw.stop_translation_btn.setEnabled(True)
             ipw.stop_translation_btn.setText("⏹ Stop")
         
-        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude})")
+        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude}, show_stop={show_stop_button})")
     except Exception as e:
         print(f"[WORKFLOW] Error disabling buttons: {e}")
 

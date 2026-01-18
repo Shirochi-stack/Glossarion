@@ -10311,9 +10311,10 @@ class MangaTranslationTab(QObject):
             return
         
         # Disable ALL workflow buttons to prevent concurrent operations
+        # Note: show_stop_button=False because Start Translation has its own stop mechanism
         try:
             import ImageRenderer
-            ImageRenderer._disable_workflow_buttons(self, exclude=None)
+            ImageRenderer._disable_workflow_buttons(self, exclude=None, show_stop_button=False)
         except Exception as e:
             print(f"[START_TRANSLATION] Error disabling workflow buttons: {e}")
         
