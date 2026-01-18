@@ -836,6 +836,11 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
         self._translated_texts = active_trans
         self._translation_data = translation_data
         
+        # CRITICAL: Update translation data image path to match the current image
+        # This prevents "Cannot render: Translation data is for X but you're viewing Y" errors
+        self._translation_data_image_path = image_path
+        self._translating_image_path = image_path
+        
         print(f"[STATE_ISOLATION] Rehydrated state for {os.path.basename(image_path)}: {len(active_rec)} OCR, {len(active_trans)} translations")
         return (len(active_rec), len(active_trans))
     except Exception as e:
