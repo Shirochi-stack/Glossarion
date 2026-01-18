@@ -4554,7 +4554,24 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         
         # Read parameters from environment variables (now set from GUI)
         temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.3'))
-        max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4000'))
+        
+        # Check for manga-specific output token limit first, fallback to environment/GUI limit
+        default_max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4000'))
+        manga_token_limit = -1
+        try:
+            manga_settings = self.main_gui.config.get('manga_settings', {}) or {}
+            manual_edit = manga_settings.get('manual_edit', {}) or {}
+            manga_token_limit = int(manual_edit.get('manga_output_token_limit', -1))
+        except Exception:
+            manga_token_limit = -1
+        
+        # If manga token limit is > 0, use it; otherwise use default from environment
+        if manga_token_limit > 0:
+            max_tokens = manga_token_limit
+            print(f"[DEBUG] Using manga-specific output token limit: {max_tokens}")
+        else:
+            max_tokens = default_max_tokens
+            print(f"[DEBUG] Using main GUI output token limit: {max_tokens}")
         
         print(f"[DEBUG] Using parameters from environment (set from GUI): temperature={temperature}, max_tokens={max_tokens}")
         print(f"[DEBUG] Processing {len(recognized_texts)} recognized texts for individual translation")

@@ -167,7 +167,8 @@ class MangaSettingsDialog(QDialog):
             'cloud_timeout': 60,
             'manual_edit': {
                 'translate_prompt': 'output only the {language} translation of this text:',  # Prompt template with {language} placeholder
-                'translate_target_language': 'English'  # Default language
+                'translate_target_language': 'English',  # Default language
+                'manga_output_token_limit': -1  # -1 or 0 = use main GUI's output token limit
             }
         }
         
@@ -632,15 +633,6 @@ class MangaSettingsDialog(QDialog):
                 font-family: Arial;
                 font-size: 9pt;
             }
-            QSpinBox, QDoubleSpinBox {
-                background-color: #2d2d2d;
-                color: white;
-                border: 1px solid #555;
-                border-radius: 3px;
-                padding: 3px;
-                font-family: Arial;
-                font-size: 9pt;
-            }
             QComboBox {
                 background-color: #2d2d2d;
                 color: white;
@@ -766,7 +758,7 @@ class MangaSettingsDialog(QDialog):
                 background-color: #1a1a1a;
                 border-color: #3a3a3a;
             }
-            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
+            QLineEdit:disabled, QComboBox:disabled {
                 background-color: #1a1a1a;
                 color: #666666;
                 border: 1px solid #3a3a3a;
@@ -778,9 +770,8 @@ class MangaSettingsDialog(QDialog):
                 background-color: #1e1e1e;
                 border: none;
             }
-            QWidget {
+            QFrame, QGroupBox, QTabWidget::pane {
                 background-color: #1e1e1e;
-                color: white;
             }
         """)
         
@@ -2235,6 +2226,41 @@ class MangaSettingsDialog(QDialog):
         lang_help.setStyleSheet("color: gray;")
         lang_help.setWordWrap(True)
         translate_layout.addWidget(lang_help)
+        
+        # Output Token Limit for Manga Translation
+        token_limit_label = QLabel("Output Token Limit:")
+        token_limit_label.setToolTip(
+            "Maximum tokens for manga translation responses.\n"
+            "Set to -1 or 0 to use the main GUI's output token limit."
+        )
+        translate_layout.addWidget(token_limit_label)
+        
+        self.manga_output_token_limit = QSpinBox()
+        self.manga_output_token_limit.setRange(-1, 1000000)
+        self.manga_output_token_limit.setSingleStep(1000)
+        self.manga_output_token_limit.setSpecialValueText("Use Main GUI Limit")
+        self.manga_output_token_limit.setToolTip(
+            "Maximum tokens for manga translation responses.\n"
+            "Set to -1 or 0 to use the main GUI's output token limit.\n"
+            f"Current main GUI limit: {getattr(self.main_gui, 'max_output_tokens', 65536)}"
+        )
+        # Disable mouse wheel scrolling to prevent accidental changes
+        self.manga_output_token_limit.wheelEvent = lambda event: event.ignore()
+        
+        # Load saved value
+        saved_limit = self.settings.get('manual_edit', {}).get('manga_output_token_limit', -1)
+        self.manga_output_token_limit.setValue(saved_limit)
+        translate_layout.addWidget(self.manga_output_token_limit)
+        
+        token_help = QLabel(
+            f"💡 Tip: Set to -1 to use the main GUI's limit ({getattr(self.main_gui, 'max_output_tokens', 65536)} tokens).\n"
+            "Use a specific value to limit manga translation response length."
+        )
+        token_help_font = QFont('Arial', 8)
+        token_help.setFont(token_help_font)
+        token_help.setStyleSheet("color: gray;")
+        token_help.setWordWrap(True)
+        translate_layout.addWidget(token_help)
         
         # Add stretch at end
         content_layout.addStretch()
@@ -5025,6 +5051,8 @@ class MangaSettingsDialog(QDialog):
                 self.settings['manual_edit']['translate_prompt'] = self.manual_translate_prompt.text()
             if hasattr(self, 'manual_translate_language'):
                 self.settings['manual_edit']['translate_target_language'] = self.manual_translate_language.currentText()
+            if hasattr(self, 'manga_output_token_limit'):
+                self.settings['manual_edit']['manga_output_token_limit'] = self.manga_output_token_limit.value()
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_selected'):

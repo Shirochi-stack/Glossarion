@@ -1370,8 +1370,23 @@ class MangaTranslator:
         except Exception:
             self.temperature = 0.3
         
-        # Max tokens
-        self.max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
+        # Max tokens - check for manga-specific limit first, fallback to main GUI limit
+        default_max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
+        manga_token_limit = -1
+        try:
+            manga_settings = main_gui.config.get('manga_settings', {}) or {}
+            manual_edit = manga_settings.get('manual_edit', {}) or {}
+            manga_token_limit = int(manual_edit.get('manga_output_token_limit', -1))
+        except Exception:
+            manga_token_limit = -1
+        
+        # If manga token limit is <= 0, use main GUI's limit; otherwise use manga-specific limit
+        if manga_token_limit > 0:
+            self.max_tokens = manga_token_limit
+            self._log(f"📊 Using manga-specific output token limit: {self.max_tokens}")
+        else:
+            self.max_tokens = default_max_tokens
+            self._log(f"📊 Using main GUI output token limit: {self.max_tokens}")
         
         # Token limit
         if hasattr(main_gui, 'token_limit_disabled') and main_gui.token_limit_disabled:
