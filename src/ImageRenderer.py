@@ -9882,6 +9882,38 @@ def _restore_translate_button(self):
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'thumbnail_list'):
             self.image_preview_widget.thumbnail_list.setEnabled(True)
             print(f"[TRANSLATE] Re-enabled thumbnail list after translation")
+        
+        # Switch display mode to 'translated' so user sees the result
+        try:
+            ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
+            if ipw:
+                ipw.source_display_mode = 'translated'
+                ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+                
+                # Update the toggle button appearance to match 'translated' state
+                if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                    ipw.cleaned_toggle_btn.setText("✒️")  # Pen for translated output
+                    ipw.cleaned_toggle_btn.setToolTip("Showing translated output (click to cycle)")
+                    ipw.cleaned_toggle_btn.setStyleSheet("""
+                        QToolButton {
+                            background-color: #28a745;
+                            border: 2px solid #34ce57;
+                            font-size: 12pt;
+                            min-width: 32px;
+                            min-height: 32px;
+                            max-width: 36px;
+                            max-height: 36px;
+                            padding: 3px;
+                            border-radius: 3px;
+                            color: white;
+                        }
+                        QToolButton:hover {
+                            background-color: #34ce57;
+                        }
+                    """)
+                print(f"[TRANSLATE] Switched display mode to 'translated'")
+        except Exception as mode_err:
+            print(f"[TRANSLATE] Failed to switch display mode: {mode_err}")
     except Exception:
         pass
 
@@ -10248,6 +10280,38 @@ def _restore_translate_all_button(self):
             self.image_preview_widget.translate_all_btn.setText("Translate All")
             self.image_preview_widget.translate_all_btn.setEnabled(True)
             print(f"[TRANSLATE_ALL] Explicitly reset translate_all_btn text")
+        
+        # Switch display mode to 'translated' so user sees the result
+        try:
+            ipw = self.image_preview_widget
+            if ipw:
+                ipw.source_display_mode = 'translated'
+                ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+                
+                # Update the toggle button appearance to match 'translated' state
+                if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                    ipw.cleaned_toggle_btn.setText("✒️")  # Pen for translated output
+                    ipw.cleaned_toggle_btn.setToolTip("Showing translated output (click to cycle)")
+                    ipw.cleaned_toggle_btn.setStyleSheet("""
+                        QToolButton {
+                            background-color: #28a745;
+                            border: 2px solid #34ce57;
+                            font-size: 12pt;
+                            min-width: 32px;
+                            min-height: 32px;
+                            max-width: 36px;
+                            max-height: 36px;
+                            padding: 3px;
+                            border-radius: 3px;
+                            color: white;
+                        }
+                        QToolButton:hover {
+                            background-color: #34ce57;
+                        }
+                    """)
+                print(f"[TRANSLATE_ALL] Switched display mode to 'translated'")
+        except Exception as mode_err:
+            print(f"[TRANSLATE_ALL] Failed to switch display mode: {mode_err}")
     except Exception as e:
         print(f"[TRANSLATE_ALL] Error in _restore_translate_all_button: {e}")
         import traceback
