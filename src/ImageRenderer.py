@@ -10020,6 +10020,9 @@ def _run_translate_all_background(self, image_paths: list):
                 # This ensures the user sees the image switch before detection boxes appear
                 time.sleep(0.8)
                 
+                # Re-add processing overlay after image switch (overlay gets cleared when scene changes)
+                self.update_queue.put(('add_processing_overlay', None))
+                
                 # ===== CANCELLATION CHECK: After image load =====
                 if _is_translation_cancelled(self):
                     self._log(f"⏹ Translation cancelled after loading image {idx}/{total}", "warning")
@@ -10142,6 +10145,9 @@ def _run_translate_all_background(self, image_paths: list):
                             
                             # Brief pause to show cleaned image
                             time.sleep(0.5)
+                            
+                            # Re-add processing overlay after cleaned image load
+                            self.update_queue.put(('add_processing_overlay', None))
                             # Use cleaned image for translation rendering
                             image_path_for_rendering = cleaned_path
                         else:

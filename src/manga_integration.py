@@ -10314,6 +10314,13 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         print(f"Error removing processing overlay: {str(e)}")
                 
+                elif update[0] == 'add_processing_overlay':
+                    # Add the blue pulse overlay (used to restore after image switch in batch mode)
+                    try:
+                        ImageRenderer._add_processing_overlay(self, )
+                    except Exception as e:
+                        print(f"Error adding processing overlay: {str(e)}")
+                
                 elif update[0] == 'update_preview_to_rendered':
                     # Update the preview to show all rendered images
                     try:
