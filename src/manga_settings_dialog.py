@@ -2195,21 +2195,40 @@ class MangaSettingsDialog(QDialog):
         lang_label = QLabel("Target Language:")
         translate_layout.addWidget(lang_label)
         
-        self.manual_translate_language = QLineEdit()
+        self.manual_translate_language = QComboBox()
+        self.manual_translate_language.setEditable(True)
+        self.manual_translate_language.setToolTip("The language to translate text into. Select from list or type a custom language.")
+        # Disable mouse wheel scrolling to prevent accidental changes
+        self.manual_translate_language.wheelEvent = lambda event: event.ignore()
+        
+        # Add common languages (same list as translator_gui.py)
+        languages = [
+            "English", "Spanish", "French", "German", "Italian", "Portuguese",
+            "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
+            "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
+        ]
+        self.manual_translate_language.addItems(languages)
+        
         # Get target language from main GUI first, fallback to saved settings, then default
         target_lang = 'English'  # default
         if hasattr(self.main_gui, 'config') and 'output_language' in self.main_gui.config:
             target_lang = self.main_gui.config['output_language']
         elif 'manual_edit' in self.settings and 'translate_target_language' in self.settings['manual_edit']:
             target_lang = self.settings['manual_edit']['translate_target_language']
-        self.manual_translate_language.setText(target_lang)
-        self.manual_translate_language.setToolTip("The language to translate text into (e.g., 'English', 'Spanish', 'French')")
+        
+        # Set the value - find in list or set as custom text
+        index = self.manual_translate_language.findText(target_lang)
+        if index >= 0:
+            self.manual_translate_language.setCurrentIndex(index)
+        else:
+            self.manual_translate_language.setCurrentText(target_lang)
+        
         # Connect to sync with main GUI when changed
-        self.manual_translate_language.textChanged.connect(self._on_manual_target_language_changed)
+        self.manual_translate_language.currentTextChanged.connect(self._on_manual_target_language_changed)
         translate_layout.addWidget(self.manual_translate_language)
         
         lang_help = QLabel(
-            "💡 Tip: Enter any language name or code. Common examples: English, Spanish, French, German, Chinese, Japanese, Korean"
+            "💡 Tip: Select a language from the dropdown or type a custom language name."
         )
         lang_help_font = QFont('Arial', 8)
         lang_help.setFont(lang_help_font)
@@ -5005,7 +5024,7 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'manual_translate_prompt'):
                 self.settings['manual_edit']['translate_prompt'] = self.manual_translate_prompt.text()
             if hasattr(self, 'manual_translate_language'):
-                self.settings['manual_edit']['translate_target_language'] = self.manual_translate_language.text()
+                self.settings['manual_edit']['translate_target_language'] = self.manual_translate_language.currentText()
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_selected'):

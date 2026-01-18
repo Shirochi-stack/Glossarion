@@ -4323,10 +4323,15 @@ Recent translations to summarize:
             try:
                 # Check if widget is valid (not deleted)
                 if hasattr(self.manga_settings_dialog, 'manual_translate_language'):
-                    if self.manga_settings_dialog.manual_translate_language.text() != text:
-                        self.manga_settings_dialog.manual_translate_language.blockSignals(True)
-                        self.manga_settings_dialog.manual_translate_language.setText(text)
-                        self.manga_settings_dialog.manual_translate_language.blockSignals(False)
+                    combo = self.manga_settings_dialog.manual_translate_language
+                    if combo.currentText() != text:
+                        combo.blockSignals(True)
+                        index = combo.findText(text)
+                        if index >= 0:
+                            combo.setCurrentIndex(index)
+                        else:
+                            combo.setCurrentText(text)
+                        combo.blockSignals(False)
             except RuntimeError:
                 # Widget might be deleted if dialog was closed
                 pass

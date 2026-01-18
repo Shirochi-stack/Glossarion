@@ -915,6 +915,23 @@ class CompactImageViewer(QGraphicsView):
         # Image loading state
         self._loading = False
     
+    def _is_processing_blocked(self) -> bool:
+        """Check if rectangle interaction should be blocked (batch processing active)"""
+        try:
+            # Check via parent widget -> manga_integration
+            parent = self.parent()
+            if parent and hasattr(parent, 'manga_integration'):
+                mi = parent.manga_integration
+                if mi and getattr(mi, '_batch_mode_active', False):
+                    return True
+                # Also check if there are any active processing overlays
+                if mi and hasattr(mi, '_processing_overlays_by_image'):
+                    if mi._processing_overlays_by_image:
+                        return True
+        except Exception:
+            pass
+        return False
+    
     def resizeEvent(self, event):
         """Refit only if user hasn't manually zoomed."""
         super().resizeEvent(event)
@@ -1023,6 +1040,18 @@ class CompactImageViewer(QGraphicsView):
         except Exception:
             pass
         
+        # Block rectangle interactions when processing is active (batch mode)
+        if self._is_processing_blocked():
+            # Only allow panning during processing - no rectangle creation/selection/modification
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Allow basic panning by passing to default handler
+                super().mousePressEvent(event)
+                return
+            # Block right-click context menus during processing
+            if event.button() == Qt.MouseButton.RightButton:
+                event.accept()
+                return
+        
         # Handle right-clicks on rectangles first to ensure proper context menu routing
         if event.button() == Qt.MouseButton.RightButton:
             item = self.itemAt(event.pos())
@@ -1107,6 +1136,11 @@ class CompactImageViewer(QGraphicsView):
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for drawing boxes or inpainting"""
+        # Block drawing operations during processing
+        if self._is_processing_blocked():
+            super().mouseMoveEvent(event)
+            return
+        
         if self.current_tool in ['box_draw', 'circle_draw'] and self.current_rect:
             scene_pos = self.mapToScene(event.pos())
             rect = QRectF(self.start_point, scene_pos).normalized()
@@ -1135,6 +1169,11 @@ class CompactImageViewer(QGraphicsView):
     
     def mouseReleaseEvent(self, event):
         """Handle mouse release"""
+        # Block drawing operations during processing
+        if self._is_processing_blocked():
+            super().mouseReleaseEvent(event)
+            return
+        
         if self.current_tool in ['box_draw', 'circle_draw'] and self.current_rect:
             if self.current_rect.rect().width() > 10 and self.current_rect.rect().height() > 10:
                 self.rectangles.append(self.current_rect)
@@ -1166,6 +1205,11 @@ class CompactImageViewer(QGraphicsView):
     
     def _select_rectangle(self, rect_item: Optional[MoveableRectItem]):
         """Select a rectangle and update visual feedback"""
+        # Block selection during processing
+        if self._is_processing_blocked():
+            print(f"[SELECTION] Blocked - processing active")
+            return
+        
         print(f"[SELECTION] _select_rectangle called with: {type(rect_item).__name__ if rect_item else 'None'}")
         
         # Deselect previous selection
@@ -1285,6 +1329,11 @@ class CompactImageViewer(QGraphicsView):
     
     def delete_selected_rectangle(self):
         """Delete currently selected rectangle and associated text overlays"""
+        # Block deletion during processing
+        if self._is_processing_blocked():
+            print(f"[DELETE] Blocked - processing active")
+            return
+        
         print(f"[DELETE] delete_selected_rectangle called. selected_rect = {type(self.selected_rect).__name__ if self.selected_rect else 'None'}")
         if self.selected_rect:
             print(f"[DELETE] Attempting to delete selected rectangle")
