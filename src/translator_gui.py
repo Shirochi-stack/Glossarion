@@ -577,20 +577,15 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 self.dpr = 1.0
             # Precompute rotated frames once to avoid runtime stutter
             try:
-                size = QSize(self.target_size[0], self.target_size[1])
                 for i in range(steps):
                     angle = (i * 360) / steps
                     rotated = base_pixmap.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
-                    if size.width() and size.height():
-                        # Keep aspect ratio and respect HiDPI scaling
-                        rotated = rotated.scaled(int(size.width()*self.dpr),
-                                                 int(size.height()*self.dpr),
-                                                 Qt.KeepAspectRatio,
-                                                 Qt.SmoothTransformation)
-                        try:
-                            rotated.setDevicePixelRatio(self.dpr)
-                        except Exception:
-                            pass
+                    # Don't scale rotated frames - they're already sized correctly from _create_spinner
+                    # The rotation naturally expands the bounding box, which is fine since base was scaled to 70%
+                    try:
+                        rotated.setDevicePixelRatio(self.dpr)
+                    except Exception:
+                        pass
                     self.frames.append(rotated)
             except Exception:
                 self.frames = []
@@ -648,7 +643,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 target_w = target_h = max(label.minimumWidth(), label.minimumHeight(), label.maximumWidth(), label.maximumHeight(), 36)
             if target_w <= 0 or target_h <= 0:
                 target_w = target_h = 36
-            base_pm = base_pm.scaled(target_w, target_h,
+            # Scale to 120% of container size for larger icon
+            inner_size = int(min(target_w, target_h) * 1.20)
+            base_pm = base_pm.scaled(inner_size, inner_size,
                                      Qt.KeepAspectRatio,
                                      Qt.SmoothTransformation)
             return TranslatorGUI._CachedSpinner(label, base_pm, interval_ms=interval_ms, steps=steps, parent=self)
