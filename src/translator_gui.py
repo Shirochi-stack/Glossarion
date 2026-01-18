@@ -9258,7 +9258,11 @@ Important rules:
                }
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
-           self.run_button.setEnabled(bool(translation_main and not any_process_running))
+           # Add delay to prevent accidental clicks after triple-click stop
+           if translation_main and not any_process_running:
+               QTimer.singleShot(500, lambda: self.run_button.setEnabled(True) if not (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) else None)
+           else:
+               self.run_button.setEnabled(False)
            # Stop spinning animation gracefully with deceleration
            if hasattr(self, 'icon_spin_animation') and hasattr(self, 'run_button_icon') and hasattr(self, 'icon_stop_animation'):
                if self.icon_spin_animation.state() == QPropertyAnimation.Running:
@@ -9430,9 +9434,38 @@ Important rules:
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
         
-        # Disable button immediately to prevent multiple clicks
+        # Double-click detection for force stop during graceful stop
+        # Check if we're already in graceful stop mode by looking at button text
+        already_in_graceful_stop = False
+        if hasattr(self, 'run_button_text'):
+            button_text = self.run_button_text.text()
+            already_in_graceful_stop = (button_text == "Finishing...")
+        
+        import time
+        current_time = time.time()
+        if not hasattr(self, '_stop_click_times'):
+            self._stop_click_times = []
+        
+        # Add current click
+        self._stop_click_times.append(current_time)
+        # Remove clicks older than 1 second
+        self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
+        
+        # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
+        if len(self._stop_click_times) >= 2 and already_in_graceful_stop:
+            self.append_log("⚡ Double-click detected — forcing immediate stop!")
+            graceful_stop = False  # Override to force immediate stop
+            self._stop_click_times = []  # Reset click counter
+        
+        # During graceful stop, keep button enabled to allow triple-click force stop
+        # Otherwise disable it immediately
         if hasattr(self, 'run_button'):
-            self.run_button.setEnabled(False)
+            if graceful_stop:
+                # Graceful stop mode - keep enabled to allow triple-click
+                self.run_button.setEnabled(True)
+            else:
+                # Immediate stop or force stop - disable
+                self.run_button.setEnabled(False)
             if hasattr(self, 'run_button_text'):
                 if graceful_stop:
                     self.run_button_text.setText("Finishing...")
