@@ -10293,6 +10293,13 @@ class MangaTranslationTab(QObject):
             QMessageBox.warning(self.dialog, "No Files", "Please select manga images to translate.")
             return
         
+        # Disable ALL workflow buttons to prevent concurrent operations
+        try:
+            import ImageRenderer
+            ImageRenderer._disable_workflow_buttons(self, exclude=None)
+        except Exception as e:
+            print(f"[START_TRANSLATION] Error disabling workflow buttons: {e}")
+        
         # FIRST: Refresh from main GUI to ensure we have latest settings
         try:
             if hasattr(self, 'refresh_btn'):
@@ -12747,6 +12754,13 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'file_listbox') and self.file_listbox:
                 if not self.file_listbox.isEnabled():
                     self.file_listbox.setEnabled(True)
+            
+            # Re-enable ALL workflow buttons after translation stops/completes
+            try:
+                import ImageRenderer
+                ImageRenderer._enable_workflow_buttons(self)
+            except Exception as e:
+                print(f"[RESET_UI] Error enabling workflow buttons: {e}")
                 
         except Exception as e:
             # Log the error but don't crash

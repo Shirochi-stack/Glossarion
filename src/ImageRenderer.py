@@ -3487,9 +3487,11 @@ def _on_translate_text_clicked(self):
         # Track which image we're translating for overlay removal
         self._translating_image_path = image_path
         
-        # Disable the translate button
+        # Disable ALL workflow buttons to prevent concurrent operations
+        _disable_workflow_buttons(self, exclude=None)
+        
+        # Update translate button text to show progress
         if hasattr(self.image_preview_widget, 'translate_btn'):
-            self.image_preview_widget.translate_btn.setEnabled(False)
             self.image_preview_widget.translate_btn.setText("Translating...")
         
         # Disable thumbnail list to prevent user from switching images during translation
@@ -9292,6 +9294,69 @@ def _wrap_text_to_width(self, text: str, max_width: int, font) -> str:
     """Stub - redundant"""
     return text
 
+def _disable_workflow_buttons(self, exclude=None):
+    """Disable all workflow buttons to prevent concurrent operations.
+    
+    Args:
+        exclude: Button name to exclude from disabling (e.g., 'translate' keeps translate enabled)
+    """
+    try:
+        ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
+        if not ipw:
+            return
+        
+        buttons = [
+            ('detect_btn', 'Detect Text'),
+            ('clean_btn', 'Clean'),
+            ('recognize_btn', 'Recognize Text'),
+            ('translate_btn', 'Translate'),
+            ('translate_all_btn', 'Translate All'),
+        ]
+        
+        for btn_name, _ in buttons:
+            if exclude and btn_name == exclude:
+                continue
+            if hasattr(ipw, btn_name):
+                btn = getattr(ipw, btn_name)
+                btn.setEnabled(False)
+        
+        # Also disable start_button in manga_integration if it exists
+        if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
+            self.start_button.setEnabled(False)
+        
+        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude})")
+    except Exception as e:
+        print(f"[WORKFLOW] Error disabling buttons: {e}")
+
+def _enable_workflow_buttons(self):
+    """Re-enable all workflow buttons after operation completes."""
+    try:
+        ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
+        if not ipw:
+            return
+        
+        buttons = [
+            ('detect_btn', 'Detect Text'),
+            ('clean_btn', 'Clean'),
+            ('recognize_btn', 'Recognize Text'),
+            ('translate_btn', 'Translate'),
+            ('translate_all_btn', 'Translate All'),
+        ]
+        
+        for btn_name, default_text in buttons:
+            if hasattr(ipw, btn_name):
+                btn = getattr(ipw, btn_name)
+                btn.setEnabled(True)
+                btn.setText(default_text)
+        
+        # Also re-enable start_button in manga_integration if it exists
+        if hasattr(self, 'start_button') and self.start_button:
+            self.start_button.setEnabled(True)
+        
+        print(f"[WORKFLOW] Re-enabled all workflow buttons")
+    except Exception as e:
+        print(f"[WORKFLOW] Error enabling buttons: {e}")
+
 def _restore_translate_button(self):
     """Restore the translate button to its original state"""
     try:
@@ -9306,12 +9371,11 @@ def _restore_translate_button(self):
             except Exception:
                 pass
         
-        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_btn'):
-            self.image_preview_widget.translate_btn.setEnabled(True)
-            self.image_preview_widget.translate_btn.setText("Translate")
+        # Re-enable ALL workflow buttons (not just translate)
+        _enable_workflow_buttons(self)
         
         # Re-enable thumbnail list
-        if hasattr(self.image_preview_widget, 'thumbnail_list'):
+        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'thumbnail_list'):
             self.image_preview_widget.thumbnail_list.setEnabled(True)
             print(f"[TRANSLATE] Re-enabled thumbnail list after translation")
     except Exception:
@@ -9353,9 +9417,11 @@ def _on_translate_all_clicked(self):
         
         self._log(f"📋 Found {total_images} images to translate", "info")
         
-        # Disable translate all button during processing
+        # Disable ALL workflow buttons to prevent concurrent operations
+        _disable_workflow_buttons(self, exclude=None)
+        
+        # Update translate all button text to show progress
         if hasattr(self.image_preview_widget, 'translate_all_btn'):
-            self.image_preview_widget.translate_all_btn.setEnabled(False)
             self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
         
         # Disable thumbnail list to prevent user from switching images during translation
@@ -9608,9 +9674,8 @@ def _run_translate_all_background(self, image_paths: list):
 def _restore_translate_all_button(self):
     """Restore the translate all button to its original state"""
     try:
-        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
-            self.image_preview_widget.translate_all_btn.setEnabled(True)
-            self.image_preview_widget.translate_all_btn.setText("Translate All")
+        # Re-enable ALL workflow buttons (not just translate all)
+        _enable_workflow_buttons(self)
         
         # Re-enable thumbnail list
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'thumbnail_list'):
