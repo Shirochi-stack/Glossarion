@@ -1305,12 +1305,33 @@ def _restore_image_state(self, image_path: str):
             from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
             from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
             
+            # Check for recognized/translated texts to determine rectangle colors
+            recognized_texts = state.get('recognized_texts', [])
+            translated_texts = state.get('translated_texts', [])
+            
             for idx, rect_data in enumerate(state['viewer_rectangles']):
                 shape = rect_data.get('shape', 'rect')
                 rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
-                pen = QPen(QColor(0, 255, 0), 1)
+                
+                # Check if this rectangle has OCR/translation data
+                has_recognized = (idx < len(recognized_texts) and 
+                                 not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')) and
+                                 (isinstance(recognized_texts[idx], str) and recognized_texts[idx].strip() or
+                                  isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('text', '').strip()))
+                has_translation = (idx < len(translated_texts) and 
+                                  not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')) and
+                                  isinstance(translated_texts[idx], dict) and translated_texts[idx].get('translation', '').strip())
+                has_text = has_recognized or has_translation
+                
+                # Use blue for recognized/translated, green for detection-only
+                if has_text:
+                    pen = QPen(QColor(0, 150, 255), 2)
+                    brush = QBrush(QColor(0, 150, 255, 50))
+                else:
+                    pen = QPen(QColor(0, 255, 0), 1)
+                    brush = QBrush(QColor(0, 255, 0, 50))
                 pen.setCosmetic(True)
-                brush = QBrush(QColor(0, 255, 0, 50))
+                
                 if shape == 'ellipse':
                     item = MoveableEllipseItem(rect, pen=pen, brush=brush)
                 elif shape == 'polygon' and rect_data.get('polygon'):
@@ -1324,6 +1345,7 @@ def _restore_image_state(self, image_path: str):
                     item = MoveablePathItem(path, pen=pen, brush=brush)
                 else:
                     item = MoveableRectItem(rect, pen=pen, brush=brush)
+                
                 # Attach viewer reference so moved emits
                 try:
                     item._viewer = viewer
@@ -1331,14 +1353,23 @@ def _restore_image_state(self, image_path: str):
                     pass
                 viewer._scene.addItem(item)
                 viewer.rectangles.append(item)
-                # Attach region index and move-sync handler
+                
+                # Attach region index, is_recognized flag, and handlers
                 try:
                     item.region_index = idx
+                    item.is_recognized = has_text  # CRITICAL: Set is_recognized flag
                     _attach_move_sync_to_rectangle(self, item, idx)
                     # Add context menu to restored rectangles
                     _add_context_menu_to_rectangle(self, item, idx)
                 except Exception:
                     pass
+            
+            # Rehydrate in-memory text state for this path as well
+            try:
+                ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, image_path)
+                print(f"[STATE] Rehydrated {ocr_count} OCR and {trans_count} translation entries (viewer_rectangles branch)")
+            except Exception:
+                pass
             
             print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes")
         
@@ -10352,6 +10383,8 @@ def _process_recognize_results(self, results: dict):
                 if recognized_texts:
                     print(f"[STATE DEBUG] First OCR result: {recognized_texts[0]}")
                 self.image_state_manager.update_state(image_path, {'recognized_texts': recognized_texts})
+                # Immediately flush to disk to ensure OCR state persists across sessions
+                self.image_state_manager.flush()
             except Exception as e:
                 print(f"[STATE DEBUG] Failed to save recognized_texts: {e}")
         
@@ -10410,6 +10443,8 @@ def _process_translate_results(self, results: dict):
         try:
             if hasattr(self, 'image_state_manager') and original_image_path:
                 self.image_state_manager.update_state(original_image_path, {'translated_texts': translated_texts})
+                # Immediately flush to disk to ensure translation state persists across sessions
+                self.image_state_manager.flush()
         except Exception:
             pass
         
