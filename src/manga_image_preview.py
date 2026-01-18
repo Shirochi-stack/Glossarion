@@ -2434,6 +2434,10 @@ class MangaImagePreviewWidget(QWidget):
             # NOTE: We do NOT call hard_cancel_all() here because it would
             # interrupt any ongoing model downloads or loading operations
             
+            # Update Translate All button to show stopping state (if visible)
+            if hasattr(self, 'translate_all_btn'):
+                self.translate_all_btn.setText("Stopping...")
+            
             # Log the stop action
             if hasattr(mi, '_log'):
                 mi._log("⏹ Translation stopped by user", "warning")

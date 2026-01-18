@@ -9937,6 +9937,14 @@ class MangaTranslationTab(QObject):
                     # Update translate all button progress
                     _, progress_data = update
                     try:
+                        # Don't update progress if stop was clicked (preserve "Stopping..." text)
+                        if hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set():
+                            print(f"[PROGRESS] Skipping progress update - stop flag is set")
+                            return
+                        if hasattr(self, '_global_cancellation') and self._global_cancellation:
+                            print(f"[PROGRESS] Skipping progress update - global cancellation set")
+                            return
+                        
                         current = progress_data['current']
                         total = progress_data['total']
                         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
