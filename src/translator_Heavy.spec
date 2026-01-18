@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v7.1.9 - PyInstaller Specification File
+Glossarion v7.2.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -17,7 +17,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'H_Glossarion Heavy v7.1.9'  # CHANGED: Updated version
+APP_NAME = 'H_Glossarion Heavy v7.2.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)

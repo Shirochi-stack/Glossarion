@@ -4227,6 +4227,21 @@ img {
             return
         
         self.log(f"\n[DEBUG] Writing EPUB to: {out_path}")
+        
+        # Test if we can write to the target file BEFORE generating EPUB
+        try:
+            # Try to open the file in write mode to detect if it's locked
+            with open(out_path, 'ab') as test_file:
+                pass  # Just checking if we can open it
+        except PermissionError as e:
+            self.log(f"[ERROR] Cannot write to file - it may be opened in another program")
+            self.log(f"[ERROR] File: {out_path}")
+            self.log(f"[ERROR] Details: {e}")
+            raise Exception(f"File is locked or inaccessible: {out_path}") from e
+        except Exception as e:
+            self.log(f"[ERROR] Cannot access file for writing: {e}")
+            raise
+        
         self.log("⏳ Writing EPUB file... (this may take a while for large files)")
         
         # Track elapsed time with periodic updates
