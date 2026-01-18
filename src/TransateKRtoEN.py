@@ -8972,10 +8972,11 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"⚠️ Batch rolling summary update failed: {e}")
                                 rolling_summary_for_next_batch = ""
                         
-                        # Refill slots aggressively
-                        with batch_submit_lock:
-                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
-                                pass
+                        # Refill slots aggressively (but not if stop requested)
+                        if not check_stop():
+                            with batch_submit_lock:
+                                while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
+                                    pass
             
             else:
                 # direct or conservative: keep legacy batch grouping behaviour
@@ -9918,35 +9919,42 @@ def main(log_callback=None, stop_callback=None):
                 graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                 wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                 
-                if check_stop() and not (graceful_stop_active and wait_for_chunks and total_chunks > 1):
-                    print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
-                    # Mark any in_progress chapter(s) as failed so the UI reflects the stop
-                    if merge_info is not None:
-                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                            g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                            progress_manager.update(
-                                g_idx,
-                                g_actual_num,
-                                g_content_hash,
-                                g_fname,
-                                status="failed",
-                                chapter_obj=g_chapter,
-                            )
-                        progress_manager.save()
+                # Check if stop was requested (use stop_callback directly to avoid premature logging)
+                stop_requested = (stop_callback and stop_callback()) or is_stop_requested()
+                
+                if stop_requested:
+                    if graceful_stop_active and wait_for_chunks and total_chunks > 1:
+                        # Don't stop yet - let chunks complete
+                        print(f"⏳ Graceful stop — waiting for remaining chunks ({chunk_idx}/{total_chunks}) of chapter {actual_num}...")
                     else:
-                        fname = FileUtilities.create_chapter_filename(c, actual_num)
-                        progress_manager.update(
-                            idx,
-                            actual_num,
-                            content_hash,
-                            fname,
-                            status="failed",
-                            chapter_obj=c,
-                        )
-                        progress_manager.save()
-                    return
-                elif check_stop() and graceful_stop_active and wait_for_chunks and total_chunks > 1:
-                    print(f"⏳ Graceful stop — waiting for remaining chunks ({chunk_idx}/{total_chunks}) of chapter {actual_num}...")
+                        # Actually stop
+                        log_stop_once()
+                        print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
+                        # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                        if merge_info is not None:
+                            for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                progress_manager.update(
+                                    g_idx,
+                                    g_actual_num,
+                                    g_content_hash,
+                                    g_fname,
+                                    status="failed",
+                                    chapter_obj=g_chapter,
+                                )
+                            progress_manager.save()
+                        else:
+                            fname = FileUtilities.create_chapter_filename(c, actual_num)
+                            progress_manager.update(
+                                idx,
+                                actual_num,
+                                content_hash,
+                                fname,
+                                status="failed",
+                                chapter_obj=c,
+                            )
+                            progress_manager.save()
+                        return
                 
                 current_chunk_number += 1
                 
@@ -10816,6 +10824,16 @@ def main(log_callback=None, stop_callback=None):
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             progress_manager.save()
+            
+            # After completing this chapter, check if we should stop (wait_for_chunks completed)
+            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+            stop_requested = (stop_callback and stop_callback()) or is_stop_requested()
+            
+            if stop_requested and graceful_stop_active and wait_for_chunks:
+                print(f"\n✅ Chapter {actual_num} completed. Stopping as requested (wait for chunks).")
+                log_stop_once()
+                return
             
             # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
             if config.USE_ROLLING_SUMMARY:
