@@ -10005,7 +10005,8 @@ def main(log_callback=None, stop_callback=None):
                         "role": "assistant",
                         "content": chunk_prompt_template.format(
                             chunk_idx=chunk_idx,
-                            total_chunks=total_chunks
+                            total_chunks=total_chunks,
+                            chunk_html=chunk_html
                         )
                     }]
                 user_prompt = chunk_html
