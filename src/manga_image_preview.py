@@ -1801,12 +1801,11 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
         
-        # Translate All button (experimental) - always create but show/hide
+        # Translate All button - translates all images in the preview list
         self.translate_all_btn = self._create_compact_button("Translate All")
         self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
-        self.translate_all_btn.setToolTip("Translate all images in preview [EXPERIMENTAL]")
+        self.translate_all_btn.setToolTip("Translate all images in the preview list")
         workflow_layout.addWidget(self.translate_all_btn, stretch=1)
-        self.translate_all_btn.setVisible(enable_experimental_tools)
         
         layout.addWidget(self.workflow_frame)
         
@@ -2037,9 +2036,8 @@ class MangaImagePreviewWidget(QWidget):
         if hasattr(self, 'size_label') and self.size_label:
             self.size_label.setVisible(show_editing_tools)
         
-        # Translate All button only requires experimental enabled (not manual editing)
-        if hasattr(self, 'translate_all_btn') and self.translate_all_btn:
-            self.translate_all_btn.setVisible(experimental_enabled and manual_editing_enabled)
+        # Note: Translate All button is no longer experimental - it's always visible
+        # when manual editing is enabled (controlled by workflow_frame visibility)
     
     def _active_viewer(self) -> CompactImageViewer:
         """Return the active viewer (always source viewer now)."""

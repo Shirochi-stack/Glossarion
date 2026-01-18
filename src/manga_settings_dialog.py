@@ -4421,8 +4421,8 @@ class MangaSettingsDialog(QDialog):
         warning_label.setWordWrap(True)
         experimental_layout.addWidget(warning_label)
         
-        # Experimental translate all checkbox
-        self.experimental_translate_all_checkbox = self._create_styled_checkbox("Enable experimental tools (Translate All, Brush, Eraser) [BROKEN]")
+        # Experimental tools checkbox (Brush, Eraser - Translate All is now stable)
+        self.experimental_translate_all_checkbox = self._create_styled_checkbox("Enable experimental editing tools (Brush, Eraser)")
         self.experimental_translate_all_checkbox.setStyleSheet("""
             QCheckBox {
                 color: #ffaa00;
