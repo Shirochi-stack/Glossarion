@@ -9387,7 +9387,11 @@ Important rules:
                    }
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
-               self.glossary_button.setEnabled(bool(glossary_main and not any_process_running))
+               # Add delay to prevent accidental clicks after double-click stop
+               if glossary_main and not any_process_running:
+                   QTimer.singleShot(500, lambda: self.glossary_button.setEnabled(True) if not (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) else None)
+               else:
+                   self.glossary_button.setEnabled(False)
                # Stop spinner
                if getattr(self, 'glossary_spinner', None):
                    self.glossary_spinner.stop()
@@ -9702,9 +9706,38 @@ Important rules:
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
         
-        # Disable button immediately to prevent multiple clicks
+        # Double-click detection for force stop during graceful stop
+        # Check if we're already in graceful stop mode by looking at button text
+        already_in_graceful_stop = False
+        if hasattr(self, 'glossary_text_label'):
+            button_text = self.glossary_text_label.text()
+            already_in_graceful_stop = (button_text == "Finishing...")
+        
+        import time
+        current_time = time.time()
+        if not hasattr(self, '_glossary_stop_click_times'):
+            self._glossary_stop_click_times = []
+        
+        # Add current click
+        self._glossary_stop_click_times.append(current_time)
+        # Remove clicks older than 1 second
+        self._glossary_stop_click_times = [t for t in self._glossary_stop_click_times if current_time - t < 1.0]
+        
+        # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
+        if len(self._glossary_stop_click_times) >= 2 and already_in_graceful_stop:
+            self.append_log("⚡ Double-click detected — forcing immediate stop!")
+            graceful_stop = False  # Override to force immediate stop
+            self._glossary_stop_click_times = []  # Reset click counter
+        
+        # During graceful stop, keep button enabled to allow double-click
+        # Otherwise disable it immediately
         if hasattr(self, 'glossary_button'):
-            self.glossary_button.setEnabled(False)
+            if graceful_stop:
+                # Graceful stop mode - keep enabled to allow double-click
+                self.glossary_button.setEnabled(True)
+            else:
+                # Immediate stop or force stop - disable
+                self.glossary_button.setEnabled(False)
             # Update text label instead of button text
             if hasattr(self, 'glossary_text_label'):
                 if graceful_stop:

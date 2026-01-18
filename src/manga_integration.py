@@ -12625,6 +12625,29 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
+            # Double-click detection for force stop during graceful stop
+            # Check if we're already in graceful stop mode by looking at button text
+            already_in_graceful_stop = False
+            if hasattr(self, 'start_button_text'):
+                button_text = self.start_button_text.text()
+                already_in_graceful_stop = (button_text == "Finishing...")
+            
+            import time
+            current_time = time.time()
+            if not hasattr(self, '_stop_click_times'):
+                self._stop_click_times = []
+            
+            # Add current click
+            self._stop_click_times.append(current_time)
+            # Remove clicks older than 1 second
+            self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
+            
+            # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
+            if len(self._stop_click_times) >= 2 and already_in_graceful_stop:
+                self._log("⚡ Double-click detected — forcing immediate stop!")
+                graceful_stop = False  # Override to force immediate stop
+                self._stop_click_times = []  # Reset click counter
+            
             # Set graceful stop mode in environment so API client knows to show logs
             os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
             
@@ -12635,8 +12658,13 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # CRITICAL: Set is_running to False IMMEDIATELY so button works correctly on next click
-            self.is_running = False
+            # CRITICAL: For graceful stop, keep is_running True so button stays in stop mode
+            # For immediate stop, set is_running to False
+            if not graceful_stop:
+                self.is_running = False
+            else:
+                # Track that we're in graceful stop mode
+                self.in_graceful_stop = True
             
             # For graceful stop, don't set stop_flag yet - let current image complete
             # The GRACEFUL_STOP_COMPLETED flag will be set when the API call finishes
@@ -12654,13 +12682,18 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Update button to show "Stopping..." or "Finishing..." state (gray, disabled)
+            # Update button to show "Stopping..." or "Finishing..." state
             try:
                 if hasattr(self, 'start_button') and self.start_button:
                     # Clear focus from button to prevent scroll
                     self.start_button.clearFocus()
                     
-                    self.start_button.setEnabled(False)
+                    # During graceful stop, keep button enabled to allow double-click
+                    # Otherwise disable it immediately
+                    if graceful_stop:
+                        self.start_button.setEnabled(True)
+                    else:
+                        self.start_button.setEnabled(False)
                     # Update text label instead of button text
                     if hasattr(self, 'start_button_text'):
                         if graceful_stop:
@@ -12856,8 +12889,9 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         try:
-            # Reset running flag
+            # Reset running flag and graceful stop flag
             self.is_running = False
+            self.in_graceful_stop = False
             
             # Reset start button to original Start state (green)
             if hasattr(self, 'start_button') and self.start_button:
@@ -12879,7 +12913,9 @@ class MangaTranslationTab(QObject):
                     "  color: #666666; "
                     "}"
                 )
-                self.start_button.setEnabled(True)
+                # Add delay to prevent accidental clicks after double-click stop
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, lambda: self.start_button.setEnabled(True) if hasattr(self, 'start_button') else None)
                 # Stop spinning animation gracefully immediately (no delay)
                 if hasattr(self, 'start_icon_spin_animation') and hasattr(self, 'start_button_icon') and hasattr(self, 'start_icon_stop_animation'):
                     def stop_spinning():
