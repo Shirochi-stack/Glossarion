@@ -5948,43 +5948,62 @@ def _update_image_preview_with_result(self, result_image, original_path):
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Failed to persist state: {e}")
         
-        # Switch display mode to 'cleaned' and update the preview (same behavior as Clean button)
+        # Check current display mode and handle accordingly
         try:
             ipw = self.image_preview_widget
+            current_mode = getattr(ipw, 'source_display_mode', 'original')
             
-            # Update the source_display_mode to 'cleaned' so user sees the result
-            ipw.source_display_mode = 'cleaned'
-            ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
-            
-            # Update the cleaned toggle button appearance to match 'cleaned' state
-            if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
-                ipw.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
-                ipw.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
-                ipw.cleaned_toggle_btn.setStyleSheet("""
-                    QToolButton {
-                        background-color: #4a7ba7;
-                        border: 2px solid #5a9fd4;
-                        font-size: 12pt;
-                        min-width: 32px;
-                        min-height: 32px;
-                        max-width: 36px;
-                        max-height: 36px;
-                        padding: 3px;
-                        border-radius: 3px;
-                        color: white;
-                    }
-                    QToolButton:hover {
-                        background-color: #5a9fd4;
-                    }
-                """)
-            
-            # Store the cleaned path
-            ipw.current_translated_path = cleaned_path
-            print(f"[UPDATE_PREVIEW] Switched display mode to 'cleaned'")
-            
-            # Reload the image to show the cleaned version while preserving rectangles
-            ipw.load_image(original_path, preserve_rectangles=True, preserve_text_overlays=True)
-            print(f"[UPDATE_PREVIEW] Refreshed preview with cleaned image")
+            if current_mode == 'translated':
+                # User is in 'translated' mode - stay there and trigger save & update overlay
+                # This re-renders the translated output with the newly cleaned area
+                print(f"[UPDATE_PREVIEW] In 'translated' mode - staying and triggering save & update overlay")
+                
+                # Store the cleaned path
+                ipw.current_translated_path = cleaned_path
+                
+                # Reload the image first to pick up the cleaned version as base
+                ipw.load_image(original_path, preserve_rectangles=True, preserve_text_overlays=True)
+                
+                # Trigger save & update overlay to re-render translated output on top of cleaned image
+                try:
+                    save_positions_and_rerender(self)
+                    print(f"[UPDATE_PREVIEW] Triggered save & update overlay for re-render")
+                except Exception as render_err:
+                    print(f"[UPDATE_PREVIEW] Failed to trigger save & update overlay: {render_err}")
+            else:
+                # Switch display mode to 'cleaned' and update the preview
+                ipw.source_display_mode = 'cleaned'
+                ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+                
+                # Update the cleaned toggle button appearance to match 'cleaned' state
+                if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                    ipw.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
+                    ipw.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
+                    ipw.cleaned_toggle_btn.setStyleSheet("""
+                        QToolButton {
+                            background-color: #4a7ba7;
+                            border: 2px solid #5a9fd4;
+                            font-size: 12pt;
+                            min-width: 32px;
+                            min-height: 32px;
+                            max-width: 36px;
+                            max-height: 36px;
+                            padding: 3px;
+                            border-radius: 3px;
+                            color: white;
+                        }
+                        QToolButton:hover {
+                            background-color: #5a9fd4;
+                        }
+                    """)
+                
+                # Store the cleaned path
+                ipw.current_translated_path = cleaned_path
+                print(f"[UPDATE_PREVIEW] Switched display mode to 'cleaned'")
+                
+                # Reload the image to show the cleaned version while preserving rectangles
+                ipw.load_image(original_path, preserve_rectangles=True, preserve_text_overlays=True)
+                print(f"[UPDATE_PREVIEW] Refreshed preview with cleaned image")
                     
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Failed to update preview: {e}")
