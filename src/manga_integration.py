@@ -10629,6 +10629,15 @@ class MangaTranslationTab(QObject):
     def _start_translation_heavy(self):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
         try:
+            # ===== FORCE RETURN: Return any checked-out inpainter before starting =====
+            try:
+                from manga_translator import MangaTranslator
+                released_inp, released_det = MangaTranslator.force_release_all_from_pool()
+                if released_inp > 0 or released_det > 0:
+                    self._log(f"🔄 Released {released_inp} inpainter(s), {released_det} detector(s) from previous operation", "info")
+            except Exception as e:
+                print(f"[TRANSLATION_START] Error force-releasing pool: {e}")
+            
             # Lower priority & restrict affinity for this launcher thread (Windows)
             try:
                 _lower_current_thread_priority_and_affinity('MANGA_RESERVE_CORES')

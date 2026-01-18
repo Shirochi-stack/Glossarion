@@ -2456,6 +2456,34 @@ class MangaImagePreviewWidget(QWidget):
             # finally blocks, which will restore the stop button properly.
             print("[STOP] Waiting for ongoing operations to complete...")
             
+            # CRITICAL: Actually wait for the background thread/future to complete
+            try:
+                import threading
+                import time
+                
+                # Wait for translation_future if it exists
+                if hasattr(mi, 'translation_future') and mi.translation_future:
+                    try:
+                        if not mi.translation_future.done():
+                            print("[STOP] Waiting for translation future to complete...")
+                            # Wait with timeout to avoid hanging indefinitely
+                            mi.translation_future.result(timeout=10.0)
+                            print("[STOP] Translation future completed")
+                    except Exception as e:
+                        print(f"[STOP] Future wait error (expected): {e}")
+                
+                # Wait for translation_thread if it exists
+                if hasattr(mi, 'translation_thread') and mi.translation_thread:
+                    if mi.translation_thread.is_alive():
+                        print("[STOP] Waiting for translation thread to complete...")
+                        mi.translation_thread.join(timeout=10.0)
+                        if mi.translation_thread.is_alive():
+                            print("[STOP] Thread did not complete within timeout")
+                        else:
+                            print("[STOP] Translation thread completed")
+            except Exception as e:
+                print(f"[STOP] Error waiting for operations: {e}")
+            
         except Exception as e:
             print(f"[STOP] Error stopping translation: {e}")
             import traceback

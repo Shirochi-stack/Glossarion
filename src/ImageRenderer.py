@@ -1999,6 +1999,16 @@ def _on_clean_image_clicked(self):
                 pass
 
         self._log(f"🧽 Starting background cleaning: {os.path.basename(image_path)}", "info")
+        
+        # ===== FORCE RETURN: Return any checked-out inpainter BEFORE starting background thread =====
+        try:
+            from manga_translator import MangaTranslator
+            released_inp, released_det = MangaTranslator.force_release_all_from_pool()
+            if released_inp > 0 or released_det > 0:
+                self._log(f"🔄 Released {released_inp} inpainter(s), {released_det} detector(s) from previous operation", "info")
+                print(f"[CLEAN_START] Force-released {released_inp} inpainter(s), {released_det} detector(s)")
+        except Exception as e:
+            print(f"[CLEAN_START] Error force-releasing pool: {e}")
 
         # Run inpainting in background thread
         import threading
@@ -2219,9 +2229,9 @@ def _run_clean_background(self, image_path: str, regions: list):
                     uc = UnifiedClient(model=model, api_key=api_key)
                     temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
                     
-                    # POLL for inpainter with timeout (same as translator initialization)
+                    # POLL for inpainter with timeout
                     inpainter = None
-                    poll_timeout = 30  # 30 seconds
+                    poll_timeout = 10  # 10 seconds
                     poll_interval = 0.5  # Check every 500ms
                     start_time = time.time()
                     
