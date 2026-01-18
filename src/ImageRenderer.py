@@ -2382,7 +2382,7 @@ def _update_preview_after_clean(self, output_path: str):
         self._log(f"❌ Failed to update preview: {str(e)}", "error")
 
 def _restore_clean_button(self):
-    """Restore the clean button to its original state"""
+    """Restore the clean button to its original state and switch display mode to cleaned"""
     try:
         # Remove processing overlay effect for the image that was being processed
         # For clean button, use _original_image_path if available, otherwise current image
@@ -2394,6 +2394,41 @@ def _restore_clean_button(self):
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
             self.image_preview_widget.clean_btn.setEnabled(True)
             self.image_preview_widget.clean_btn.setText("Clean")
+            
+            # Switch display mode to 'cleaned' so user sees the result
+            try:
+                ipw = self.image_preview_widget
+                ipw.source_display_mode = 'cleaned'
+                ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+                
+                # Update the toggle button appearance to match 'cleaned' state
+                if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                    ipw.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
+                    ipw.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
+                    ipw.cleaned_toggle_btn.setStyleSheet("""
+                        QToolButton {
+                            background-color: #4a7ba7;
+                            border: 2px solid #5a9fd4;
+                            font-size: 12pt;
+                            min-width: 32px;
+                            min-height: 32px;
+                            max-width: 36px;
+                            max-height: 36px;
+                            padding: 3px;
+                            border-radius: 3px;
+                            color: white;
+                        }
+                        QToolButton:hover {
+                            background-color: #5a9fd4;
+                        }
+                    """)
+                
+                # Reload the image to show the cleaned version
+                if image_path:
+                    ipw.load_image(image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                print(f"[CLEAN_RESTORE] Switched display mode to 'cleaned'")
+            except Exception as mode_err:
+                print(f"[CLEAN_RESTORE] Failed to switch display mode: {mode_err}")
     except Exception:
         pass
 
