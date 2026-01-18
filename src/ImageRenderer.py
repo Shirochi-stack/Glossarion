@@ -128,6 +128,117 @@ try:
 except ImportError:
     UnifiedClient = None
 
+# MODULE-LEVEL HELPER: Reset all cancellation flags before starting an operation
+def _reset_cancellation_flags(self):
+    """Reset all cancellation flags before starting a new operation.
+    
+    MUST be called at the very start of each background operation to clear
+    any stale flags from previous operations.
+    """
+    try:
+        # Reset stop_flag (threading.Event)
+        if hasattr(self, 'stop_flag') and self.stop_flag:
+            self.stop_flag.clear()
+        
+        # Reset global cancellation on self
+        if hasattr(self, '_global_cancellation'):
+            self._global_cancellation = False
+        
+        # Reset MangaTranslator global cancellation AND its internal flags
+        try:
+            from manga_translator import MangaTranslator
+            MangaTranslator.set_global_cancellation(False)
+            MangaTranslator.reset_global_flags()  # Also call the class reset method
+        except Exception:
+            pass
+        
+        # Reset UnifiedClient global cancellation
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_global_cancellation(False)
+        except Exception:
+            pass
+        
+        # Reset module-level global_stop_flag in unified_api_client
+        try:
+            from unified_api_client import set_stop_flag
+            set_stop_flag(False)
+        except Exception:
+            pass
+        
+        # CRITICAL: Reset OCR manager's _stopped flag
+        # This flag gets latched to True and must be explicitly reset
+        if hasattr(self, 'ocr_manager') and self.ocr_manager:
+            if hasattr(self.ocr_manager, 'reset_stop_flags'):
+                self.ocr_manager.reset_stop_flags()
+            # Also reset individual providers
+            if hasattr(self.ocr_manager, '_providers'):
+                for provider in self.ocr_manager._providers.values():
+                    if hasattr(provider, 'reset_stop_flags'):
+                        provider.reset_stop_flags()
+                    if hasattr(provider, '_stopped'):
+                        provider._stopped = False
+        
+        # Reset translator's OCR manager if available
+        if hasattr(self, 'translator') and self.translator:
+            if hasattr(self.translator, 'ocr_manager') and self.translator.ocr_manager:
+                if hasattr(self.translator.ocr_manager, 'reset_stop_flags'):
+                    self.translator.ocr_manager.reset_stop_flags()
+                if hasattr(self.translator.ocr_manager, '_providers'):
+                    for provider in self.translator.ocr_manager._providers.values():
+                        if hasattr(provider, 'reset_stop_flags'):
+                            provider.reset_stop_flags()
+                        if hasattr(provider, '_stopped'):
+                            provider._stopped = False
+        
+        print("[CANCEL_RESET] All cancellation flags reset")
+    except Exception as e:
+        print(f"[CANCEL_RESET] Error resetting flags: {e}")
+
+# MODULE-LEVEL HELPER: Check if translation is cancelled
+def _is_translation_cancelled(self) -> bool:
+    """Check all stop flags to determine if translation should be cancelled.
+    
+    Returns True if any cancellation flag is explicitly set by stop button.
+    Only checks flags that are SET when stop is clicked - not default states.
+    """
+    try:
+        # Check stop_flag (threading.Event) - explicitly set by stop button
+        if hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set():
+            print("[CANCEL_CHECK] stop_flag is set")
+            return True
+        
+        # NOTE: Do NOT check is_running here - it's False by default and would
+        # cause false positives. Only flags explicitly SET by stop button.
+        
+        # Check global cancellation on self - explicitly set by stop button
+        if getattr(self, '_global_cancellation', False):
+            print("[CANCEL_CHECK] _global_cancellation is True")
+            return True
+        
+        # Check MangaTranslator global cancellation - explicitly set by stop button
+        try:
+            from manga_translator import MangaTranslator
+            if MangaTranslator.is_globally_cancelled():
+                print("[CANCEL_CHECK] MangaTranslator global cancellation is True")
+                return True
+        except Exception:
+            pass
+        
+        # Check UnifiedClient global cancellation - explicitly set by stop button
+        try:
+            from unified_api_client import UnifiedClient
+            if UnifiedClient.is_globally_cancelled():
+                print("[CANCEL_CHECK] UnifiedClient global cancellation is True")
+                return True
+        except Exception:
+            pass
+        
+        return False
+    except Exception as e:
+        print(f"[CANCEL_CHECK] Error checking cancellation: {e}")
+        return False
+
 # MODULE-LEVEL WORKER FUNCTION for parallel save processing (pickleable)
 def _process_save_task_worker(region_index: int, current_image: str, trans_text: str, task: dict) -> dict:
     """Worker function for ProcessPoolExecutor - processes a single save task.
@@ -326,7 +437,18 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
     """Run the actual detection process in background thread"""
     detector = None  # Initialize for cleanup
     temp_translator = None  # Track temporary translator for pool cleanup
+    
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    _reset_cancellation_flags(self)
+    
     try:
+        # ===== CANCELLATION CHECK: At start of detection =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Detection cancelled before starting", "warning")
+            print(f"[DETECT] Cancelled at start")
+            self.update_queue.put(('detect_button_restore', None))
+            return
+        
         import cv2
         from bubble_detector import BubbleDetector
         from manga_translator import MangaTranslator
@@ -390,6 +512,13 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
         image = cv2.imread(image_path)
         if image is None:
             self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
+            self.update_queue.put(('detect_button_restore', None))
+            return
+        
+        # ===== CANCELLATION CHECK: After model loading, before detection =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Detection cancelled after model loading", "warning")
+            print(f"[DETECT] Cancelled after model loading")
             self.update_queue.put(('detect_button_restore', None))
             return
         
@@ -1894,7 +2023,18 @@ def _run_clean_background(self, image_path: str, regions: list):
     mask = None
     inpainter = None  # Track for pool return
     temp_translator = None  # Track temporary translator for pool cleanup
+    
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    _reset_cancellation_flags(self)
+    
     try:
+        # ===== CANCELLATION CHECK: At start of cleaning =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Cleaning cancelled before starting", "warning")
+            print(f"[CLEAN] Cancelled at start")
+            self.update_queue.put(('clean_button_restore', None))
+            return
+        
         import cv2
         import numpy as np
         from local_inpainter import LocalInpainter
@@ -2075,6 +2215,13 @@ def _run_clean_background(self, image_path: str, regions: list):
             # Get custom iteration values from rectangles
             custom_iterations = _get_custom_iterations_for_regions(self, filtered_regions)
             
+            # ===== CANCELLATION CHECK: Before running inpainting =====
+            if _is_translation_cancelled(self):
+                self._log(f"⏹ Cleaning cancelled before inpainting", "warning")
+                print(f"[CLEAN] Cancelled before inpainting")
+                self.update_queue.put(('clean_button_restore', None))
+                return
+            
             if custom_iterations:
                 iterations_str = ', '.join([f"{region}:{iters}" for region, iters in custom_iterations.items()])
                 self._log(f"🧽 Running local inpainting with custom iterations: {iterations_str}", "info")
@@ -2250,6 +2397,11 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
     detector = None  # Initialize for cleanup
     temp_translator = None  # Track temporary translator for pool cleanup
     try:
+        # ===== CANCELLATION CHECK: At start of sync detection =====
+        if _is_translation_cancelled(self):
+            print(f"[DETECT_SYNC] Cancelled at start")
+            return []
+        
         import cv2
         from bubble_detector import BubbleDetector
         from manga_translator import MangaTranslator
@@ -2314,6 +2466,11 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
         image = cv2.imread(image_path)
         if image is None:
             print(f"[DETECT_SYNC] Failed to load image: {os.path.basename(image_path)}")
+            return []
+        
+        # ===== CANCELLATION CHECK: Before running detection =====
+        if _is_translation_cancelled(self):
+            print(f"[DETECT_SYNC] Cancelled before detection")
             return []
         
         # Run bubble detection
@@ -2501,6 +2658,11 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
     """
     temp_translator = None  # Track temporary translator for pool cleanup
     try:
+        # ===== CANCELLATION CHECK: At start of sync inpainting =====
+        if _is_translation_cancelled(self):
+            print(f"[INPAINT_SYNC] Cancelled at start")
+            return None
+        
         import cv2
         import numpy as np
         from local_inpainter import LocalInpainter
@@ -2678,6 +2840,11 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                 print(f"[INPAINT_SYNC] No valid model path for {local_model}")
                 return None
             
+            # ===== CANCELLATION CHECK: Before running inpainting =====
+            if _is_translation_cancelled(self):
+                print(f"[INPAINT_SYNC] Cancelled before inpainting")
+                return None
+            
             # Run inpainting
             print(f"[INPAINT_SYNC] Running local inpainting...")
             cleaned_image = inpainter.inpaint(image, mask)
@@ -2775,6 +2942,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
         list: List of recognized text dicts with 'region_index', 'bbox', 'text', 'confidence'
     """
     try:
+        # ===== CANCELLATION CHECK: At start of OCR =====
+        if _is_translation_cancelled(self):
+            print(f"[OCR_REGIONS] Cancelled at start")
+            return []
+        
         import cv2
         
         # Load image
@@ -3365,7 +3537,17 @@ def _run_recognize_background(self, image_path: str, regions: list, ocr_config: 
         regions: List of region dicts (if provided), or None to trigger detection
         ocr_config: OCR configuration dict
     """
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    _reset_cancellation_flags(self)
+    
     try:
+        # ===== CANCELLATION CHECK: At start of recognition =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Recognition cancelled before starting", "warning")
+            print(f"[RECOGNIZE] Cancelled at start")
+            self.update_queue.put(('recognize_button_restore', None))
+            return
+        
         import cv2
         
         # STEP 0: Check if we need to run detection first
@@ -3389,6 +3571,13 @@ def _run_recognize_background(self, image_path: str, regions: list, ocr_config: 
             print(f"[RECOGNIZE] Detection found {len(regions)} regions")
             self._log(f"✅ Detected {len(regions)} text regions", "success")
             
+            # ===== CANCELLATION CHECK: After detection =====
+            if _is_translation_cancelled(self):
+                self._log(f"⏹ Recognition cancelled after detection", "warning")
+                print(f"[RECOGNIZE] Cancelled after detection")
+                self.update_queue.put(('recognize_button_restore', None))
+                return
+            
             # Send detection results to main thread to draw boxes
             self.update_queue.put(('detect_results', {
                 'image_path': image_path,
@@ -3398,12 +3587,26 @@ def _run_recognize_background(self, image_path: str, regions: list, ocr_config: 
             # Using provided regions from existing rectangles
             print(f"[RECOGNIZE] Using {len(regions)} provided regions from existing rectangles")
         
+        # ===== CANCELLATION CHECK: Before OCR =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Recognition cancelled before OCR", "warning")
+            print(f"[RECOGNIZE] Cancelled before OCR")
+            self.update_queue.put(('recognize_button_restore', None))
+            return
+        
         # Run OCR on regions using the reusable helper method
         self._log(f"🔍 Running OCR on full image and matching to {len(regions)} regions...", "info")
         recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
         
         if not recognized_texts or len(recognized_texts) == 0:
             self._log("⚠️ No text recognized in any regions", "warning")
+            self.update_queue.put(('recognize_button_restore', None))
+            return
+        
+        # ===== CANCELLATION CHECK: After OCR, before sending results =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Recognition cancelled - discarding results", "warning")
+            print(f"[RECOGNIZE] Cancelled after OCR - NOT sending results")
             self.update_queue.put(('recognize_button_restore', None))
             return
         
@@ -3567,6 +3770,9 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
         image_path: Path to the image
         regions: List of region dicts (if provided), or None to trigger detection
     """
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    _reset_cancellation_flags(self)
+    
     print(f"[FULL_PIPELINE] Starting full translation pipeline")
     try:
         import cv2
@@ -3640,6 +3846,9 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
 
 def _run_translate_background(self, recognized_texts: list, image_path: str):
     """Run translation in background thread with concurrent inpainting and translation"""
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    _reset_cancellation_flags(self)
+    
     try:
         import threading
         
@@ -3694,6 +3903,12 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         inpaint_thread.start()
         print(f"[TRANSLATE_CONCURRENT] Started inpainting in parallel thread")
         
+        # ===== CANCELLATION CHECK: Before starting translation =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Translation cancelled before starting", "warning")
+            print(f"[TRANSLATE_CONCURRENT] Cancelled before starting translation")
+            return
+        
         # STEP 1: Translation (runs immediately without waiting for inpainting)
         full_page_context_enabled = False
         if hasattr(self, '_batch_full_page_context_enabled'):
@@ -3714,6 +3929,18 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         
         print(f"[TRANSLATE_CONCURRENT] Translation completed, checking inpainting status...")
         
+        # ===== CANCELLATION CHECK: After translation, before rendering =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Translation cancelled - discarding results", "warning")
+            print(f"[TRANSLATE_CONCURRENT] Cancelled after translation - NOT sending results")
+            return
+        
+        # Check if translation returned empty (cancelled inside translate function)
+        if not translated_texts:
+            self._log(f"⏹ Translation returned no results (likely cancelled)", "warning")
+            print(f"[TRANSLATE_CONCURRENT] No translation results - skipping render")
+            return
+        
         # Wait for inpainting to complete (if not already done) to determine render path
         # This doesn't block the translation API calls - those already happened above
         inpaint_thread.join(timeout=30)  # Wait up to 30 seconds for inpainting
@@ -3723,6 +3950,12 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
             if not inpaint_result['completed']:
                 print(f"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image")
                 self._log(f"⏱️ Inpainting still running, rendering on original image", "info")
+        
+        # ===== CANCELLATION CHECK: Final gate before sending results =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Translation cancelled - NOT rendering results", "warning")
+            print(f"[TRANSLATE_CONCURRENT] Cancelled at final gate - NOT sending translate_results")
+            return
         
         # Send results to main thread with render image path
         render_image_path = cleaned_image_path if cleaned_image_path else image_path
@@ -3868,12 +4101,24 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
             )
             print(f"[DEBUG] Created MangaTranslator instance for full page context")
         
+        # ===== CANCELLATION CHECK: Before calling full page context translation =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Translation cancelled before full page context", "warning")
+            print(f"[TRANSLATE_FULL_PAGE] Cancelled before translate_full_page_context call")
+            return []
+        
         # Use the MangaTranslator's full page context method
         print(f"[DEBUG] Calling translate_full_page_context for {len(regions)} regions")
         self._log(f"🌍 Starting full page context translation...", "info")
         
         translations_dict = self._manga_translator.translate_full_page_context(regions, image_path)
         print(f"[DEBUG] Got translations dict: {list(translations_dict.keys()) if translations_dict else 'None'}")
+        
+        # ===== CANCELLATION CHECK: After getting translation results =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Translation cancelled - discarding full page context results", "warning")
+            print(f"[TRANSLATE_FULL_PAGE] Cancelled after translate_full_page_context - returning empty")
+            return []
         
         # Convert the results back to the expected format
         translated_texts = []
@@ -4136,6 +4381,13 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         print(f"[DEBUG] Using parameters from environment (set from GUI): temperature={temperature}, max_tokens={max_tokens}")
         print(f"[DEBUG] Processing {len(recognized_texts)} recognized texts for individual translation")
         for i, text_data in enumerate(recognized_texts):
+            # ===== CANCELLATION CHECK: At start of each text =====
+            if _is_translation_cancelled(self):
+                self._log(f"⏹ Translation cancelled at text {i+1}/{len(recognized_texts)}", "warning")
+                print(f"[TRANSLATE_INDIVIDUAL] Cancelled at start of text {i+1}")
+                # Return empty list to signal cancellation - no partial results
+                return []
+            
             text = text_data['text']
             print(f"[DEBUG] Translating text {i+1}/{len(recognized_texts)}: '{text[:30]}...'")
             
@@ -4171,6 +4423,12 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                     translated_text = str(response)
                 
                 print(f"[DEBUG] Processed response: '{translated_text[:50]}...'")
+                
+                # ===== CANCELLATION CHECK: After getting response (prevent raw text return) =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled after response - discarding all results", "warning")
+                    print(f"[TRANSLATE_INDIVIDUAL] Cancelled after getting response for text {i+1} - returning empty")
+                    return []
                 
                 translated_texts.append({
                     'original': text_data,
@@ -9458,6 +9716,9 @@ def _on_translate_all_clicked(self):
 
 def _run_translate_all_background(self, image_paths: list):
     """Run translation for all images in background"""
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    _reset_cancellation_flags(self)
+    
     try:
         total = len(image_paths)
         translated_count = 0
@@ -9466,6 +9727,12 @@ def _run_translate_all_background(self, image_paths: list):
         self._log(f"🌍 Starting batch translation: {total} images", "info")
         
         for idx, image_path in enumerate(image_paths, 1):
+            # ===== CANCELLATION CHECK: Start of each image =====
+            if _is_translation_cancelled(self):
+                self._log(f"⏹ Translation cancelled at image {idx}/{total}", "warning")
+                print(f"[TRANSLATE_ALL] Cancelled at start of image {idx}")
+                break
+            
             try:
                 import time
                 
@@ -9476,7 +9743,16 @@ def _run_translate_all_background(self, image_paths: list):
                     'preserve_overlays': False
                 }))
                 print(f"[TRANSLATE_ALL] Switched preview to: {os.path.basename(image_path)}")
-                time.sleep(0.3)  # Brief pause to let UI update
+                
+                # Wait for UI to process the image load before starting detection
+                # This ensures the user sees the image switch before detection boxes appear
+                time.sleep(0.8)
+                
+                # ===== CANCELLATION CHECK: After image load =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled after loading image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled after loading image {idx}")
+                    break
                 
                 # Update progress
                 self._log(f"📄 [{idx}/{total}] Processing: {os.path.basename(image_path)}", "info")
@@ -9505,6 +9781,12 @@ def _run_translate_all_background(self, image_paths: list):
                     failed_count += 1
                     continue
                 
+                # ===== CANCELLATION CHECK: After detection =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled after detection on image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled after detection on image {idx}")
+                    break
+                
                 self._log(f"✅ [{idx}/{total}] Detected {len(regions)} regions", "success")
                 
                 # Send detection results to main thread to draw GREEN boxes
@@ -9523,11 +9805,23 @@ def _run_translate_all_background(self, image_paths: list):
                 time.sleep(0.3)
                 
                 # Step 2: Run OCR
+                # ===== CANCELLATION CHECK: Before OCR =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled before OCR on image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled before OCR on image {idx}")
+                    break
+                
                 recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
                 if not recognized_texts:
                     self._log(f"⚠️ [{idx}/{total}] No text recognized", "warning")
                     failed_count += 1
                     continue
+                
+                # ===== CANCELLATION CHECK: After OCR =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled after OCR on image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled after OCR on image {idx}")
+                    break
                 
                 self._log(f"✅ [{idx}/{total}] Recognized {len(recognized_texts)} text regions", "success")
                 
@@ -9605,6 +9899,12 @@ def _run_translate_all_background(self, image_paths: list):
                         full_page_context_enabled = False
                     print(f"[DEBUG] (Batch) Full page context from config: {full_page_context_enabled}")
                 
+                # ===== CANCELLATION CHECK: Before translation =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled before translating image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled before translation on image {idx}")
+                    break
+                
                 if full_page_context_enabled:
                     print(f"[DEBUG] Using FULL PAGE CONTEXT translation mode (batch)")
                     self._log(f"📄 [{idx}/{total}] Using full page context translation for {len(recognized_texts)} regions", "info")
@@ -9614,12 +9914,24 @@ def _run_translate_all_background(self, image_paths: list):
                     self._log(f"📝 [{idx}/{total}] Using individual translation for {len(recognized_texts)} regions", "info")
                     translated_texts = _translate_individually(self, recognized_texts, image_path)
                 
+                # ===== CANCELLATION CHECK: After translation (critical - prevents raw text from being shown) =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled - discarding results for image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled after translation - NOT sending results for image {idx}")
+                    break
+                
                 if not translated_texts:
                     self._log(f"⚠️ [{idx}/{total}] Translation failed", "warning")
                     failed_count += 1
                     continue
                 
                 self._log(f"✅ [{idx}/{total}] Translated {len(translated_texts)} regions", "success")
+                
+                # ===== CANCELLATION CHECK: Before sending results (final gate) =====
+                if _is_translation_cancelled(self):
+                    self._log(f"⏹ Translation cancelled - NOT rendering results for image {idx}/{total}", "warning")
+                    print(f"[TRANSLATE_ALL] Cancelled - NOT sending translate_results for image {idx}")
+                    break
                 
                 # Send results to main thread for rendering
                 # Use cleaned image if available, otherwise original

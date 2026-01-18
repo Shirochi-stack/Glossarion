@@ -2413,16 +2413,17 @@ class MangaImagePreviewWidget(QWidget):
                 mi.set_global_cancellation(True)
                 print("[STOP] Set global cancellation on manga_integration")
             
-            # Set global cancellation on MangaTranslator
+            # Set global cancellation on MangaTranslator (for API calls only)
+            # NOTE: We do NOT call force_release_all_pool_checkouts() here because
+            # that would interrupt ongoing model loading (inpainter, bubble detector)
             try:
                 from manga_translator import MangaTranslator
                 MangaTranslator.set_global_cancellation(True)
-                MangaTranslator.force_release_all_pool_checkouts()
-                print("[STOP] Set MangaTranslator global cancellation and released pool checkouts")
+                print("[STOP] Set MangaTranslator global cancellation (preserved model loading)")
             except ImportError:
                 pass
             
-            # Set global cancellation on UnifiedClient
+            # Set global cancellation on UnifiedClient (for API calls)
             try:
                 from unified_api_client import UnifiedClient
                 UnifiedClient.set_global_cancellation(True)
@@ -2430,14 +2431,8 @@ class MangaImagePreviewWidget(QWidget):
             except ImportError:
                 pass
             
-            # Hard cancel active HTTP sessions
-            try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'hard_cancel_all'):
-                    unified_api_client.hard_cancel_all()
-                    print("[STOP] Called hard_cancel_all")
-            except Exception:
-                pass
+            # NOTE: We do NOT call hard_cancel_all() here because it would
+            # interrupt any ongoing model downloads or loading operations
             
             # Log the stop action
             if hasattr(mi, '_log'):
