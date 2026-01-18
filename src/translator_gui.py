@@ -5948,6 +5948,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._start_autoscroll_delay(0)
         # Show immediate feedback that translation is starting
         self.append_log("🚀 Initializing translation process...")
+        
+        # Debug: Log stop behavior settings
+        graceful_stop = getattr(self, 'graceful_stop_var', False)
+        wait_for_chunks = getattr(self, 'wait_for_chunks_var', False)
+        print(f"🔧 Stop settings: graceful_stop={graceful_stop}, wait_for_chunks={wait_for_chunks}")
         # Force immediate scroll to bottom so user sees the latest output right away
         try:
             scrollbar = self.log_text.verticalScrollBar()
@@ -9444,6 +9449,9 @@ Important rules:
         # Set wait for chunks mode - only applies when graceful stop is also enabled
         wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
         os.environ['WAIT_FOR_CHUNKS'] = '1' if wait_for_chunks else '0'
+        
+        # Debug: Log the stop settings being applied
+        print(f"🔧 Stop triggered: graceful_stop={graceful_stop}, wait_for_chunks_var={getattr(self, 'wait_for_chunks_var', False)}, WAIT_FOR_CHUNKS={os.environ.get('WAIT_FOR_CHUNKS')}")
         
         # Track graceful stop state - when True, stop_callback returns False to allow in-flight calls to complete
         self.graceful_stop_active = graceful_stop
