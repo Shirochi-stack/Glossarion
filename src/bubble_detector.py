@@ -1906,6 +1906,11 @@ class BubbleDetector:
 
             # Try C++ backend first if available (2x faster)
             if BubbleDetector._rtdetr_onnx_use_cpp and BubbleDetector._rtdetr_onnx_cpp_backend:
+                # Check stop flag before expensive C++ inference
+                if self._check_stop():
+                    self._log("⏹️ RT-DETR detection aborted - stop requested before C++ inference", "warning")
+                    return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+                
                 try:
                     logger.debug("Using C++ ONNX backend for RT-DETR (2x faster)")
                     # Normalize image to [0, 1]
@@ -1937,10 +1942,33 @@ class BubbleDetector:
                 })
             
             # Always use semaphore to limit concurrent RT-DETR calls
+            # Use timeout-based acquire with stop flag checks to avoid indefinite blocking
             acquired = False
+            max_wait_iterations = 60  # Max 60 seconds total wait (60 * 1 second)
+            wait_iter = 0
             try:
-                BubbleDetector._rtdetr_onnx_sema.acquire()
-                acquired = True
+                # Non-blocking acquire with stop flag checks
+                while not acquired and wait_iter < max_wait_iterations:
+                    # Check stop flag before each wait iteration
+                    if self._check_stop():
+                        self._log("⏹️ RT-DETR detection aborted - stop requested during semaphore wait", "warning")
+                        return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+                    
+                    # Try to acquire with 1 second timeout
+                    acquired = BubbleDetector._rtdetr_onnx_sema.acquire(timeout=1.0)
+                    if not acquired:
+                        wait_iter += 1
+                        if wait_iter % 5 == 0:  # Log every 5 seconds
+                            self._log(f"⌛ Waiting for RT-DETR semaphore ({wait_iter}s)...", "debug")
+                
+                if not acquired:
+                    self._log("⚠️ RT-DETR semaphore timeout - skipping detection", "warning")
+                    return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+                
+                # Check stop flag one more time after acquiring semaphore (critical for fast abort)
+                if self._check_stop():
+                    self._log("⏹️ RT-DETR detection aborted - stop requested after semaphore acquired", "warning")
+                    return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
                 
                 # Special DML error handling
                 if 'DmlExecutionProvider' in providers:

@@ -940,22 +940,48 @@ class LocalInpainter:
         self._mp_pending[call_id] = local_q
         # Send task
         self._mp_task_q.put(payload)
-        # Wait for response
+        
+        # Wait for response with periodic stop flag checks
+        # Use 1-second polling intervals to allow fast abort on stop
+        poll_interval = 1.0
+        total_timeout = max(0.1, float(timeout))
+        elapsed = 0.0
+        resp = None
+        
         try:
-            resp = local_q.get(timeout=max(0.1, float(timeout)))
-        except Empty:
-            # Timeout - cleanup and raise
-            try:
-                del self._mp_pending[call_id]
-            except Exception:
-                pass
-            raise TimeoutError(f"Timeout waiting for {expect_type} from worker")
+            while elapsed < total_timeout:
+                # Check stop flag to allow quick abort
+                if self._check_stop():
+                    logger.warning(f"⏹️ Worker call aborted - stop requested during wait for {expect_type}")
+                    try:
+                        del self._mp_pending[call_id]
+                    except Exception:
+                        pass
+                    raise InterruptedError(f"Stop requested while waiting for {expect_type}")
+                
+                # Try to get response with short timeout
+                try:
+                    remaining = min(poll_interval, total_timeout - elapsed)
+                    resp = local_q.get(timeout=max(0.1, remaining))
+                    break  # Got response
+                except Empty:
+                    elapsed += poll_interval
+                    continue
+            
+            if resp is None:
+                # Timeout - cleanup and raise
+                try:
+                    del self._mp_pending[call_id]
+                except Exception:
+                    pass
+                raise TimeoutError(f"Timeout waiting for {expect_type} from worker")
         finally:
             # Best-effort cleanup of pending map
             try:
                 self._mp_pending.pop(call_id, None)
             except Exception:
                 pass
+        
         # Validate
         if not isinstance(resp, dict) or resp.get('type') != expect_type:
             raise RuntimeError(f"Unexpected response from worker: {resp}")
@@ -965,11 +991,23 @@ class LocalInpainter:
         # Store model path for worker restart scenarios
         self._last_model_path = model_path
         
+        # Check stop flag before starting model load
+        if self._check_stop():
+            self._log("⏹️ Model load aborted - stop requested", "warning")
+            self.model_loaded = False
+            return False
+        
         # Retry logic with worker restart for stuck/dead workers
         max_retries = 2
         timeout_values = [180.0, 180.0, 180.0]  # 3 minutes per attempt
         
         for attempt in range(max_retries + 1):
+            # Check stop flag at start of each retry
+            if self._check_stop():
+                self._log("⏹️ Model load aborted during retry - stop requested", "warning")
+                self.model_loaded = False
+                return False
+            
             try:
                 # Ensure worker is healthy before attempting
                 if attempt > 0 or not self._check_worker_health():
@@ -1002,14 +1040,30 @@ class LocalInpainter:
                     logger.info(f"✅ Worker load_model succeeded on retry {attempt}")
                 return ok
                 
+            except InterruptedError as e:
+                # Stop was requested during worker call - abort immediately without retry
+                self._log(f"⏹️ Model load aborted: {e}", "warning")
+                self.model_loaded = False
+                return False
+                
             except TimeoutError as e:
                 logger.error(f"Worker load_model timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                # Check stop flag before retry
+                if self._check_stop():
+                    self._log("⏹️ Model load aborted on timeout - stop requested", "warning")
+                    self.model_loaded = False
+                    return False
                 if attempt < max_retries:
                     logger.warning(f"🔄 Restarting worker and retrying load_model...")
                     try:
                         self._stop_worker()
                         import time
                         time.sleep(1)  # Brief pause
+                        # Check stop after pause
+                        if self._check_stop():
+                            self._log("⏹️ Model load aborted - stop requested during restart", "warning")
+                            self.model_loaded = False
+                            return False
                         self._start_worker()
                     except Exception as restart_error:
                         logger.error(f"Failed to restart worker: {restart_error}")
@@ -1021,6 +1075,11 @@ class LocalInpainter:
             except Exception as e:
                 logger.error(f"Worker load_model failed (attempt {attempt + 1}): {e}")
                 if attempt >= max_retries:
+                    self.model_loaded = False
+                    return False
+                # Check stop before retry
+                if self._check_stop():
+                    self._log("⏹️ Model load aborted on exception - stop requested", "warning")
                     self.model_loaded = False
                     return False
         
@@ -1041,6 +1100,12 @@ class LocalInpainter:
         timeout_values = [10.0, 20.0, 30.0, 60.0]  # Progressive timeouts: faster initial detection
         
         for attempt in range(max_retries + 1):
+            # CRITICAL: Check stop flag at start of each retry iteration
+            # This ensures we abort quickly when user clicks stop during retries
+            if self._check_stop():
+                self._log("⏹️ Inpainting aborted during retry - stop requested", "warning")
+                return image
+            
             try:
                 timeout = timeout_values[min(attempt, len(timeout_values) - 1)]
                 resp = self._mp_call(
@@ -1056,11 +1121,24 @@ class LocalInpainter:
                     error_msg = resp.get('error', 'Unknown error')
                     logger.error(f"Worker inpaint failed: {error_msg}")
                     if attempt < max_retries:
+                        # Check stop before retry
+                        if self._check_stop():
+                            self._log("⏹️ Inpainting aborted - stop requested", "warning")
+                            return image
                         logger.warning(f"🔄 Retrying inpaint (attempt {attempt + 1}/{max_retries})...")
                         continue
                     return image
+            except InterruptedError as e:
+                # Stop was requested during worker call - abort immediately without retry
+                self._log(f"⏹️ Inpainting aborted: {e}", "warning")
+                return image
+                
             except TimeoutError as e:
                 logger.error(f"❌ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                # CRITICAL: Check stop flag before attempting retry/restart
+                if self._check_stop():
+                    self._log("⏹️ Inpainting aborted on timeout - stop requested", "warning")
+                    return image
                 if attempt < max_retries:
                     logger.warning(f"🔄 Restarting worker and retrying...")
                     # CRITICAL: Restart the worker process on timeout
@@ -1068,6 +1146,10 @@ class LocalInpainter:
                         self._stop_worker()
                         import time
                         time.sleep(1)  # Brief pause
+                        # Check stop again before starting new worker
+                        if self._check_stop():
+                            self._log("⏹️ Inpainting aborted - stop requested during restart", "warning")
+                            return image
                         self._start_worker()
                         # Reload the model in the new worker
                         if hasattr(self, 'current_method') and self.current_method:
@@ -1085,6 +1167,10 @@ class LocalInpainter:
             except Exception as e:
                 logger.error(f"Worker inpaint exception (attempt {attempt + 1}): {e}")
                 if attempt < max_retries:
+                    # Check stop before retry
+                    if self._check_stop():
+                        self._log("⏹️ Inpainting aborted on exception - stop requested", "warning")
+                        return image
                     continue
                 return image
         
