@@ -2315,6 +2315,46 @@ def _create_response_handling_section(self, parent):
     graceful_stop_desc.setStyleSheet("color: gray; font-size: 10pt;")
     graceful_stop_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(graceful_stop_desc)
+    
+    # Wait for Chunks toggle (child of graceful stop)
+    if not hasattr(self, 'wait_for_chunks_var'):
+        self.wait_for_chunks_var = self.config.get('wait_for_chunks', False)
+    
+    self.wait_for_chunks_checkbox = self._create_styled_checkbox("Wait for all chunks to complete")
+    self.wait_for_chunks_checkbox.setContentsMargins(40, 0, 0, 0)
+    try:
+        self.wait_for_chunks_checkbox.setChecked(bool(self.wait_for_chunks_var))
+    except Exception:
+        pass
+    def _on_wait_for_chunks_toggle(checked):
+        try:
+            self.wait_for_chunks_var = bool(checked)
+        except Exception:
+            pass
+    self.wait_for_chunks_checkbox.toggled.connect(_on_wait_for_chunks_toggle)
+    section_v.addWidget(self.wait_for_chunks_checkbox)
+    
+    wait_chunks_desc = QLabel("When enabled, graceful stop will wait for all chunks of a chapter to complete\nbefore stopping. Prevents partial chapter translations.")
+    wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    wait_chunks_desc.setContentsMargins(60, 2, 0, 5)
+    section_v.addWidget(wait_chunks_desc)
+    
+    # Enable/disable based on graceful stop state
+    def _update_wait_for_chunks_state(graceful_checked):
+        self.wait_for_chunks_checkbox.setEnabled(graceful_checked)
+        wait_chunks_desc.setEnabled(graceful_checked)
+        if graceful_checked:
+            # Reset to default styled checkbox appearance (same as graceful stop)
+            self.wait_for_chunks_checkbox.setStyleSheet("")
+            wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        else:
+            self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; } QCheckBox::indicator { background-color: #404040; border: 1px solid #505050; } QCheckBox::indicator:checked { background-color: #505050; }")
+            wait_chunks_desc.setStyleSheet("color: #505050; font-size: 10pt;")
+    
+    self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
+    
+    # Initialize state based on current graceful stop value
+    _update_wait_for_chunks_state(self.graceful_stop_checkbox.isChecked())
 
     # Separator
     sep_retry_1 = QFrame()

@@ -9439,6 +9439,10 @@ Important rules:
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
+        # Set wait for chunks mode - only applies when graceful stop is also enabled
+        wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
+        os.environ['WAIT_FOR_CHUNKS'] = '1' if wait_for_chunks else '0'
+        
         # Track graceful stop state - when True, stop_callback returns False to allow in-flight calls to complete
         self.graceful_stop_active = graceful_stop
         
@@ -11296,6 +11300,7 @@ Important rules:
                 
                 # Stop behavior
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
+                ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 900, lambda v: safe_int(v, 900)),

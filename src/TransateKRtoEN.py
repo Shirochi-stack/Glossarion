@@ -9898,7 +9898,12 @@ def main(log_callback=None, stop_callback=None):
                     # Force retranslation of qa_failed chapters
                     print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
-                if check_stop():
+                # Check stop - but if graceful stop + wait_for_chunks is enabled, skip this check
+                # to allow all chunks of the current chapter to complete
+                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                
+                if check_stop() and not (graceful_stop_active and wait_for_chunks and total_chunks > 1):
                     print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
                     # Mark any in_progress chapter(s) as failed so the UI reflects the stop
                     if merge_info is not None:
@@ -9925,6 +9930,8 @@ def main(log_callback=None, stop_callback=None):
                         )
                         progress_manager.save()
                     return
+                elif check_stop() and graceful_stop_active and wait_for_chunks and total_chunks > 1:
+                    print(f"⏳ Graceful stop — waiting for remaining chunks ({chunk_idx}/{total_chunks}) of chapter {actual_num}...")
                 
                 current_chunk_number += 1
                 
