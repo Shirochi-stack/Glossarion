@@ -1649,10 +1649,8 @@ def _process_detect_results(self, results: dict):
                 pass
         
         # STATE ISOLATION: Only draw if this image is currently displayed in the source viewer
-        # Suppress drawing while batch is active
-        if getattr(self, '_batch_mode_active', False):
-            print(f"[DETECT_RESULTS] Batch active — suppressing rectangle draw for {os.path.basename(image_path)}")
-            return
+        # NOTE: We no longer suppress drawing during batch mode - users want to see rectangles
+        # being drawn during translation for visual feedback
         
         # Check if detection is for current image (normalize paths for comparison)
         current_img = getattr(self.image_preview_widget, 'current_image_path', None) if hasattr(self, 'image_preview_widget') else None
@@ -9749,10 +9747,9 @@ def _process_recognize_results(self, results: dict):
             except Exception as e:
                 print(f"[STATE DEBUG] Failed to save recognized_texts: {e}")
         
-        # Suppress UI overlays while batch is active
-        if getattr(self, '_batch_mode_active', False):
-            print(f"[RECOG_RESULTS] Batch active — suppressing recognition UI updates")
-            return
+        # NOTE: We no longer suppress UI updates during batch mode - users want to see
+        # rectangles turn blue during recognition for visual feedback
+        
         # Only update UI and working memory if this is the current image
         if not hasattr(self, 'image_preview_widget') or image_path != getattr(self.image_preview_widget, 'current_image_path', None):
             print(f"[RECOG_RESULTS] Skipping UI update; not current image: {os.path.basename(image_path) if image_path else 'unknown'}")

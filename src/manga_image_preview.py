@@ -2638,9 +2638,9 @@ class MangaImagePreviewWidget(QWidget):
         else:
             new_index = 0  # Default to first if current not found
         
-        # Load the new image
+        # Sync with file list selection in manga_integration (this will trigger proper state restoration)
         new_path = self.image_paths[new_index]
-        self.load_image(new_path)
+        self._sync_file_list_selection(new_index, new_path)
     
     def _navigate_to_next_image(self):
         """Navigate to the next image in the thumbnail list"""
@@ -2663,9 +2663,31 @@ class MangaImagePreviewWidget(QWidget):
         else:
             new_index = 0  # Default to first if current not found
         
-        # Load the new image
+        # Sync with file list selection in manga_integration (this will trigger proper state restoration)
         new_path = self.image_paths[new_index]
-        self.load_image(new_path)
+        self._sync_file_list_selection(new_index, new_path)
+    
+    def _sync_file_list_selection(self, index: int, image_path: str):
+        """Sync file list selection with the preview navigation.
+        
+        This ensures arrow key navigation in the preview properly selects the
+        corresponding item in the file list, which triggers state restoration.
+        """
+        try:
+            if hasattr(self, 'manga_integration') and self.manga_integration:
+                mi = self.manga_integration
+                if hasattr(mi, 'file_listbox') and mi.file_listbox:
+                    # Set the selection in the file list (this triggers _on_file_selection_changed)
+                    mi.file_listbox.setCurrentRow(index)
+                    print(f"[NAV] Synced file list selection to row {index}: {os.path.basename(image_path)}")
+                    return
+            
+            # Fallback: just load the image directly if manga_integration not available
+            self.load_image(image_path)
+        except Exception as e:
+            print(f"[NAV] Error syncing file list: {e}")
+            # Fallback to direct load
+            self.load_image(image_path)
     
     @Slot(str)
     def _on_image_loading_started(self, image_path: str):
