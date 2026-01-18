@@ -9532,8 +9532,10 @@ Important rules:
                     self.run_button_text.setText("Stopping...")
             self.run_button.setStyleSheet("QPushButton { background-color: #6c757d; border: none; }")
         
-        # Set environment variable to suppress multi-key logging
-        os.environ['TRANSLATION_CANCELLED'] = '1'
+        # Set environment variable to suppress multi-key logging (only for immediate stop)
+        # During graceful stop, we want to see all the logs
+        if not graceful_stop:
+            os.environ['TRANSLATION_CANCELLED'] = '1'
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
