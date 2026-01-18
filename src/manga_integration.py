@@ -4062,7 +4062,7 @@ class MangaTranslationTab(QObject):
         self.manga_output_token_limit_spin.setSpecialValueText("Use Main GUI Limit")
         self.manga_output_token_limit_spin.setToolTip(f"Max tokens for manga translations. -1 = use main GUI limit ({getattr(self.main_gui, 'max_output_tokens', 65536)}).")
         self.manga_output_token_limit_spin.setMinimumWidth(150)
-        self.manga_output_token_limit_spin.setFocusPolicy(Qt.StrongFocus)  # Only responds to wheel when focused
+        self.manga_output_token_limit_spin.wheelEvent = lambda event: event.ignore()
         
         # Load saved value
         manga_settings = self.main_gui.config.get('manga_settings', {}) or {}
