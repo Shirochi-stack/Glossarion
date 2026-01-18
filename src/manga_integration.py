@@ -10321,6 +10321,45 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         self._log(f"❌ Failed to update preview to rendered images: {str(e)}", "error")
                 
+                elif update[0] == 'switch_to_translated_mode':
+                    # Switch display mode to 'translated' and refresh preview
+                    _, data = update
+                    try:
+                        image_path = data.get('image_path') if isinstance(data, dict) else None
+                        ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
+                        if ipw:
+                            ipw.source_display_mode = 'translated'
+                            ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+                            
+                            # Update the toggle button appearance to match 'translated' state
+                            if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                                ipw.cleaned_toggle_btn.setText("✒️")  # Pen for translated output
+                                ipw.cleaned_toggle_btn.setToolTip("Showing translated output (click to cycle)")
+                                ipw.cleaned_toggle_btn.setStyleSheet("""
+                                    QToolButton {
+                                        background-color: #28a745;
+                                        border: 2px solid #34ce57;
+                                        font-size: 12pt;
+                                        min-width: 32px;
+                                        min-height: 32px;
+                                        max-width: 36px;
+                                        max-height: 36px;
+                                        padding: 3px;
+                                        border-radius: 3px;
+                                        color: white;
+                                    }
+                                    QToolButton:hover {
+                                        background-color: #34ce57;
+                                    }
+                                """)
+                            
+                            # Refresh preview to show translated output
+                            if image_path:
+                                ipw.load_image(image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                            print(f"[DISPLAY_MODE] Switched to 'translated' mode")
+                    except Exception as e:
+                        print(f"[DISPLAY_MODE] Error switching mode: {e}")
+                
                 elif update[0] == 'set_translated_folder':
                     # Set translated folder for preview mode and download button
                     _, folder_path = update

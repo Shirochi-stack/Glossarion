@@ -9911,6 +9911,12 @@ def _restore_translate_button(self):
                             background-color: #34ce57;
                         }
                     """)
+                
+                # Refresh preview to show translated output
+                current_image = getattr(ipw, 'current_image_path', None)
+                if current_image:
+                    ipw.load_image(current_image, preserve_rectangles=True, preserve_text_overlays=True)
+                
                 print(f"[TRANSLATE] Switched display mode to 'translated'")
         except Exception as mode_err:
             print(f"[TRANSLATE] Failed to switch display mode: {mode_err}")
@@ -10217,13 +10223,11 @@ def _run_translate_all_background(self, image_paths: list):
                 # Wait for rendering to complete
                 time.sleep(1.0)
                 
-                # Refresh preview to show the rendered result for this image
-                self.update_queue.put(('load_preview_image', {
-                    'path': image_path,
-                    'preserve_rectangles': True,
-                    'preserve_overlays': True
+                # Switch to translated display mode and refresh preview to show the result
+                self.update_queue.put(('switch_to_translated_mode', {
+                    'image_path': image_path
                 }))
-                print(f"[TRANSLATE_ALL] Refreshed preview to show rendered result: {os.path.basename(image_path)}")
+                print(f"[TRANSLATE_ALL] Switched to translated mode for: {os.path.basename(image_path)}")
                 
                 # Give user time to see the final result before moving to next image
                 time.sleep(1.0)
@@ -10309,6 +10313,12 @@ def _restore_translate_all_button(self):
                             background-color: #34ce57;
                         }
                     """)
+                
+                # Refresh preview to show translated output
+                current_image = getattr(ipw, 'current_image_path', None)
+                if current_image:
+                    ipw.load_image(current_image, preserve_rectangles=True, preserve_text_overlays=True)
+                
                 print(f"[TRANSLATE_ALL] Switched display mode to 'translated'")
         except Exception as mode_err:
             print(f"[TRANSLATE_ALL] Failed to switch display mode: {mode_err}")
