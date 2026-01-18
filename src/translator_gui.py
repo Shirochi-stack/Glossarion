@@ -6221,13 +6221,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             
-            # Clear any stop flags from previous run
-            if 'TRANSLATION_CANCELLED' in os.environ:
-                del os.environ['TRANSLATION_CANCELLED']
-            if 'GRACEFUL_STOP' in os.environ:
-                del os.environ['GRACEFUL_STOP']
-            self.graceful_stop_active = False
-            
             # Check stop at the very beginning
             if self.stop_requested:
                 return False
@@ -7828,6 +7821,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Reset stop flags
         self.stop_requested = False
         self.graceful_stop_active = False  # Reset graceful stop state
+        self._last_glossary_stop_click = 0  # Reset double-click detection
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'  # Reset API active flag
@@ -9539,10 +9533,8 @@ Important rules:
                     self.run_button_text.setText("Stopping...")
             self.run_button.setStyleSheet("QPushButton { background-color: #6c757d; border: none; }")
         
-        # Set environment variable to suppress multi-key logging (only for immediate stop)
-        # During graceful stop, we want to see all the logs
-        if not graceful_stop:
-            os.environ['TRANSLATION_CANCELLED'] = '1'
+        # Set environment variable to suppress multi-key logging
+        os.environ['TRANSLATION_CANCELLED'] = '1'
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -9716,7 +9708,6 @@ Important rules:
         graceful_stop = getattr(self, 'graceful_stop_var', False)
         
         # Double-click detection for force stop during graceful stop
-        # Check if we're already in graceful stop mode by looking at button text
         already_in_graceful_stop = False
         if hasattr(self, 'glossary_text_label'):
             button_text = self.glossary_text_label.text()
@@ -9724,39 +9715,32 @@ Important rules:
         
         import time
         current_time = time.time()
-        if not hasattr(self, '_glossary_stop_click_times'):
-            self._glossary_stop_click_times = []
+        last_click_time = getattr(self, '_last_glossary_stop_click', 0)
+        time_since_last_click = current_time - last_click_time
+        self._last_glossary_stop_click = current_time
         
-        # Add current click
-        self._glossary_stop_click_times.append(current_time)
-        # Remove clicks older than 1 second
-        self._glossary_stop_click_times = [t for t in self._glossary_stop_click_times if current_time - t < 1.0]
+        # If already in graceful stop and double-clicked within 1 second, force immediate stop
+        if already_in_graceful_stop and time_since_last_click < 1.0:
+            self.append_log("⚡ Double-click detected - forcing immediate stop!")
+            graceful_stop = False
         
-        # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
-        if len(self._glossary_stop_click_times) >= 2 and already_in_graceful_stop:
-            self.append_log("⚡ Double-click detected — forcing immediate stop!")
-            graceful_stop = False  # Override to force immediate stop
-            self._glossary_stop_click_times = []  # Reset click counter
-        
-        # During graceful stop, keep button enabled to allow double-click
-        # Otherwise disable it immediately
-        if hasattr(self, 'glossary_button'):
-            if graceful_stop:
-                # Graceful stop mode - keep enabled to allow double-click
-                self.glossary_button.setEnabled(True)
-            else:
-                # Immediate stop or force stop - disable
-                self.glossary_button.setEnabled(False)
-            # Update text label instead of button text
-            if hasattr(self, 'glossary_text_label'):
-                if graceful_stop:
-                    self.glossary_text_label.setText("Finishing...")
-                else:
-                    self.glossary_text_label.setText("Stopping...")
-            self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
-        
-        # Set graceful stop mode in environment so API client knows to show logs
+        # Set graceful stop mode in environment ONCE based on final decision
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
+        
+        # During graceful stop, keep button enabled to allow double-click force stop
+        if graceful_stop and not already_in_graceful_stop:
+            # First click for graceful stop - keep button enabled
+            if hasattr(self, 'glossary_text_label'):
+                self.glossary_text_label.setText("Finishing...")
+            if hasattr(self, 'glossary_button'):
+                self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        else:
+            # Immediate stop or force stop - disable button
+            if hasattr(self, 'glossary_button'):
+                self.glossary_button.setEnabled(False)
+                if hasattr(self, 'glossary_text_label'):
+                    self.glossary_text_label.setText("Stopping...")
+                self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
         
         self.stop_requested = True
         
