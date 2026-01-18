@@ -7040,7 +7040,11 @@ def main(log_callback=None, stop_callback=None):
     
     def check_stop():
         if stop_callback and stop_callback():
-            log_stop_once()
+            # Don't log stop message if wait_for_chunks is active - let translation continue
+            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+            if not (graceful_stop_active and wait_for_chunks):
+                log_stop_once()
             return True
         return is_stop_requested()
     
