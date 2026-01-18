@@ -7057,12 +7057,12 @@ def main(log_callback=None, stop_callback=None):
         set_output_redirect(log_callback)
     
     def check_stop():
+        # During graceful stop, return False to allow ongoing processing (e.g., refilling slots in aggressive mode)
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        
         if stop_callback and stop_callback():
-            # Don't log stop message if wait_for_chunks is active - let translation continue
-            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-            if not (graceful_stop_active and wait_for_chunks):
-                log_stop_once()
+            log_stop_once()
             return True
         return is_stop_requested()
     
