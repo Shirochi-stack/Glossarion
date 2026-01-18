@@ -9896,15 +9896,6 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         self._log(f"❌ Failed to restore clean button: {str(e)}", "error")
                 
-                elif update[0] == 'update_clean_button_text':
-                    # Update clean button text with waiting status
-                    _, text = update
-                    try:
-                        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
-                            self.image_preview_widget.clean_btn.setText(text)
-                    except Exception as e:
-                        print(f"[CLEAN_BUTTON] Failed to update button text: {e}")
-                
                 elif update[0] == 'single_clean_complete':
                     # Handle single rectangle clean completion
                     _, data = update
@@ -10638,15 +10629,6 @@ class MangaTranslationTab(QObject):
     def _start_translation_heavy(self):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
         try:
-            # ===== FORCE RETURN: Return any checked-out inpainter before starting =====
-            try:
-                from manga_translator import MangaTranslator
-                released_inp, released_det = MangaTranslator.force_release_all_from_pool()
-                if released_inp > 0 or released_det > 0:
-                    self._log(f"🔄 Released {released_inp} inpainter(s), {released_det} detector(s) from previous operation", "info")
-            except Exception as e:
-                print(f"[TRANSLATION_START] Error force-releasing pool: {e}")
-            
             # Lower priority & restrict affinity for this launcher thread (Windows)
             try:
                 _lower_current_thread_priority_and_affinity('MANGA_RESERVE_CORES')

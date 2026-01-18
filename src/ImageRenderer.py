@@ -1999,16 +1999,6 @@ def _on_clean_image_clicked(self):
                 pass
 
         self._log(f"🧽 Starting background cleaning: {os.path.basename(image_path)}", "info")
-        
-        # ===== FORCE RETURN: Return any checked-out inpainter BEFORE starting background thread =====
-        try:
-            from manga_translator import MangaTranslator
-            released_inp, released_det = MangaTranslator.force_release_all_from_pool()
-            if released_inp > 0 or released_det > 0:
-                self._log(f"🔄 Released {released_inp} inpainter(s), {released_det} detector(s) from previous operation", "info")
-                print(f"[CLEAN_START] Force-released {released_inp} inpainter(s), {released_det} detector(s)")
-        except Exception as e:
-            print(f"[CLEAN_START] Error force-releasing pool: {e}")
 
         # Run inpainting in background thread
         import threading
@@ -2229,12 +2219,11 @@ def _run_clean_background(self, image_path: str, regions: list):
                     uc = UnifiedClient(model=model, api_key=api_key)
                     temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
                     
-                    # POLL for inpainter with timeout
+                    # POLL for inpainter with timeout (same as translator initialization)
                     inpainter = None
-                    poll_timeout = 10  # 10 seconds
+                    poll_timeout = 30  # 30 seconds
                     poll_interval = 0.5  # Check every 500ms
                     start_time = time.time()
-                    last_button_update = 0
                     
                     while time.time() - start_time < poll_timeout:
                         inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
@@ -2243,12 +2232,6 @@ def _run_clean_background(self, image_path: str, regions: list):
                         
                         # No inpainter yet - wait and retry
                         elapsed = time.time() - start_time
-                        
-                        # Update button text with elapsed time every second
-                        if elapsed >= 0.5 and int(elapsed) > last_button_update:
-                            self.update_queue.put(('update_clean_button_text', f"Waiting... ({int(elapsed)}s)"))
-                            last_button_update = int(elapsed)
-                        
                         if elapsed >= 2 and int(elapsed) % 5 == 0:  # Log every 5 seconds after first 2s
                             self._log(f"⏳ Waiting for inpainter pool... ({int(elapsed)}s)", "info")
                         time.sleep(poll_interval)
@@ -3322,9 +3305,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                     # Convert full image to bytes
                     _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
                     image_bytes = encoded.tobytes()
-                    # Call Azure OCR on full image with timeout handling and retries
+                    # Call Azure OCR on full image with retry logic
                     import concurrent.futures
                     max_retries = 3
+                    result = None
+                    
                     for attempt in range(max_retries):
                         try:
                             start_time = time.time()
@@ -3336,28 +3321,31 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                                 )
                                 result = future.result(timeout=30.0)
                                 elapsed = time.time() - start_time
-                                print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
+                                
                                 if attempt > 0:
+                                    print(f"[OCR_REGIONS] ✅ Azure OCR succeeded on retry {attempt} ({elapsed:.2f}s)")
                                     self._log(f"✅ Azure OCR succeeded on retry {attempt}", "info")
+                                else:
+                                    print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
                                 break
+                                
                         except (concurrent.futures.TimeoutError, Exception) as e:
+                            elapsed = time.time() - start_time
                             error_msg = str(e)
-                            is_timeout = "timeout" in error_msg.lower() or "timed out" in error_msg.lower()
+                            
                             if attempt < max_retries - 1:
                                 wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                                if is_timeout:
-                                    print(f"[OCR_REGIONS] Azure OCR timed out (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
-                                else:
-                                    print(f"[OCR_REGIONS] Azure OCR error (attempt {attempt + 1}/{max_retries}): {error_msg}, retrying in {wait_time}s...")
+                                print(f"[OCR_REGIONS] Azure OCR attempt {attempt + 1} failed after {elapsed:.1f}s: {error_msg}")
+                                print(f"[OCR_REGIONS] Retrying in {wait_time}s...")
+                                self._log(f"⚠️ Azure OCR timeout, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})", "warning")
                                 time.sleep(wait_time)
                             else:
-                                if is_timeout:
-                                    print(f"[OCR_REGIONS] Azure OCR timed out after {max_retries} attempts")
-                                    self._log(f"❌ Azure OCR timed out after {max_retries} retries", "error")
-                                else:
-                                    print(f"[OCR_REGIONS] Azure OCR failed after {max_retries} attempts: {error_msg}")
-                                    self._log(f"❌ Azure OCR failed after {max_retries} retries: {error_msg}", "error")
+                                print(f"[OCR_REGIONS] Azure OCR failed after {max_retries} attempts")
+                                self._log(f"❌ Azure OCR failed after {max_retries} attempts", "error")
                                 return []
+                    
+                    if not result:
+                        return []
                     # Extract all text lines from full image OCR
                     if result.read and result.read.blocks:
                         for line in result.read.blocks[0].lines:
@@ -3861,8 +3849,6 @@ def _on_translate_text_clicked(self):
             import threading
             thread = threading.Thread(target=_run_translate_background, args=(self, self._recognized_texts.copy(), image_path),
                                     daemon=True)
-            # Store thread reference for stop button to wait on
-            self.translation_thread = thread
             thread.start()
         else:
             # Need to run detection/recognition first, then translate
@@ -3871,8 +3857,6 @@ def _on_translate_text_clicked(self):
             import threading
             thread = threading.Thread(target=_run_full_translate_pipeline, args=(self, image_path, regions_for_recognition),
                                     daemon=True)
-            # Store thread reference for stop button to wait on
-            self.translation_thread = thread
             thread.start()
         
     except Exception as e:
@@ -9836,12 +9820,10 @@ def _on_translate_all_clicked(self):
         # Add blue pulse processing overlay
         _add_processing_overlay(self, )
         
-        # Run in background thread and store reference so stop button can wait for it
+        # Run in background thread
         import threading
         thread = threading.Thread(target=_run_translate_all_background, args=(self, image_paths),
                                 daemon=True)
-        # Store thread reference for stop button to wait on
-        self.translation_thread = thread
         thread.start()
         
     except Exception as e:

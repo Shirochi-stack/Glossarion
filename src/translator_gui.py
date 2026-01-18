@@ -7821,7 +7821,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Reset stop flags
         self.stop_requested = False
         self.graceful_stop_active = False  # Reset graceful stop state
-        self._last_glossary_stop_click = 0  # Reset double-click detection
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'  # Reset API active flag
@@ -9388,11 +9387,7 @@ Important rules:
                    }
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
-               # Add delay to prevent accidental clicks after double-click stop
-               if glossary_main and not any_process_running:
-                   QTimer.singleShot(500, lambda: self.glossary_button.setEnabled(True) if not (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) else None)
-               else:
-                   self.glossary_button.setEnabled(False)
+               self.glossary_button.setEnabled(bool(glossary_main and not any_process_running))
                # Stop spinner
                if getattr(self, 'glossary_spinner', None):
                    self.glossary_spinner.stop()
@@ -9707,40 +9702,19 @@ Important rules:
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
         
-        # Double-click detection for force stop during graceful stop
-        already_in_graceful_stop = False
-        if hasattr(self, 'glossary_text_label'):
-            button_text = self.glossary_text_label.text()
-            already_in_graceful_stop = (button_text == "Finishing...")
-        
-        import time
-        current_time = time.time()
-        last_click_time = getattr(self, '_last_glossary_stop_click', 0)
-        time_since_last_click = current_time - last_click_time
-        self._last_glossary_stop_click = current_time
-        
-        # If already in graceful stop and double-clicked within 1 second, force immediate stop
-        if already_in_graceful_stop and time_since_last_click < 1.0:
-            self.append_log("⚡ Double-click detected - forcing immediate stop!")
-            graceful_stop = False
-        
-        # Set graceful stop mode in environment ONCE based on final decision
-        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
-        
-        # During graceful stop, keep button enabled to allow double-click force stop
-        if graceful_stop and not already_in_graceful_stop:
-            # First click for graceful stop - keep button enabled
+        # Disable button immediately to prevent multiple clicks
+        if hasattr(self, 'glossary_button'):
+            self.glossary_button.setEnabled(False)
+            # Update text label instead of button text
             if hasattr(self, 'glossary_text_label'):
-                self.glossary_text_label.setText("Finishing...")
-            if hasattr(self, 'glossary_button'):
-                self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
-        else:
-            # Immediate stop or force stop - disable button
-            if hasattr(self, 'glossary_button'):
-                self.glossary_button.setEnabled(False)
-                if hasattr(self, 'glossary_text_label'):
+                if graceful_stop:
+                    self.glossary_text_label.setText("Finishing...")
+                else:
                     self.glossary_text_label.setText("Stopping...")
-                self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+            self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        
+        # Set graceful stop mode in environment so API client knows to show logs
+        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         
         self.stop_requested = True
         
