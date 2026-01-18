@@ -6221,6 +6221,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             
+            # Clear any stop flags from previous run
+            if 'TRANSLATION_CANCELLED' in os.environ:
+                del os.environ['TRANSLATION_CANCELLED']
+            if 'GRACEFUL_STOP' in os.environ:
+                del os.environ['GRACEFUL_STOP']
+            self.graceful_stop_active = False
+            
             # Check stop at the very beginning
             if self.stop_requested:
                 return False
