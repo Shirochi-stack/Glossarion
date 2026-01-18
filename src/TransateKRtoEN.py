@@ -10927,10 +10927,16 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             progress_manager.save()
             
-            # After completing this chapter, check if we should stop (wait_for_chunks completed)
+            # After completing this chapter, check if we should stop
             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
             stop_requested = (stop_callback and stop_callback()) or is_stop_requested()
+            
+            # Stop after saving if: partial result OR graceful stop + wait_for_chunks completed
+            if is_partial_result:
+                print(f"\n✅ Partial chapter {actual_num} saved. Stopping as requested (graceful stop).")
+                log_stop_once()
+                return
             
             if stop_requested and graceful_stop_active and wait_for_chunks:
                 print(f"\n✅ Chapter {actual_num} completed. Stopping as requested (wait for chunks).")
