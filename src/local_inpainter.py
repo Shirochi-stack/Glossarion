@@ -1099,6 +1099,9 @@ class LocalInpainter:
         max_retries = 3
         timeout_values = [10.0, 20.0, 30.0, 60.0]  # Progressive timeouts: faster initial detection
         
+        import time
+        retry_start_time = time.time()
+        
         for attempt in range(max_retries + 1):
             # CRITICAL: Check stop flag at start of each retry iteration
             # This ensures we abort quickly when user clicks stop during retries
@@ -1115,7 +1118,8 @@ class LocalInpainter:
                 )
                 if resp.get('success') and resp.get('result') is not None:
                     if attempt > 0:
-                        logger.info(f"✅ Worker inpaint succeeded on retry {attempt}")
+                        elapsed = time.time() - retry_start_time
+                        logger.info(f"✅ Worker inpaint succeeded on retry {attempt} (elapsed: {elapsed:.1f}s)")
                     return resp['result']
                 else:
                     error_msg = resp.get('error', 'Unknown error')
