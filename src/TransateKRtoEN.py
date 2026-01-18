@@ -9874,10 +9874,14 @@ def main(log_callback=None, stop_callback=None):
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
                         
                         # Interruptible sleep - check stop flag every 0.1s
+                        # But respect WAIT_FOR_CHUNKS setting during graceful stop
+                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                        
                         elapsed = 0
                         check_interval = 0.1
                         while elapsed < thread_delay:
-                            if check_stop():
+                            if check_stop() and not (graceful_stop_active and wait_for_chunks):
                                 print(f"🛑 Chunk delay interrupted")
                                 return
                             sleep_chunk = min(check_interval, thread_delay - elapsed)
