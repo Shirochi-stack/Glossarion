@@ -5575,12 +5575,14 @@ def _handle_clean_this_rectangle(self, region_index: int, rect_item):
                 # Return inpainter to pool after use
                 try:
                     from manga_translator import MangaTranslator
-                    released = MangaTranslator.force_release_all_from_pool()
-                    if released[0] > 0:
-                        print(f"[CLEAN_RECT_THREAD] Returned {released[0]} inpainter(s) to pool")
+                    released_inp, released_det = MangaTranslator.force_release_all_pool_checkouts()
+                    if released_inp > 0:
+                        print(f"[CLEAN_RECT_THREAD] Returned {released_inp} inpainter(s) to pool")
                         self.update_queue.put(('update_pool_tracker', None))
                 except Exception as e:
                     print(f"[CLEAN_RECT_THREAD] Error returning inpainter to pool: {e}")
+                    import traceback
+                    print(f"[CLEAN_RECT_THREAD] Pool return traceback: {traceback.format_exc()}")
                 
                 if result is None:
                     self.update_queue.put(('single_clean_error', {
