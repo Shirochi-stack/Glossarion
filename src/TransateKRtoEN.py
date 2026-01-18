@@ -4425,10 +4425,14 @@ class BatchTranslationProcessor:
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
                         
                         # Interruptible sleep - check stop flag every 0.1s
+                        # But respect WAIT_FOR_CHUNKS setting during graceful stop
+                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                        
                         elapsed = 0
                         check_interval = 0.1
                         while elapsed < thread_delay:
-                            if local_stop_cb():
+                            if local_stop_cb() and not (graceful_stop_active and wait_for_chunks):
                                 print(f"🛑 Chunk submission delay interrupted")
                                 raise Exception("Translation stopped by user during chunk submission delay")
                             sleep_chunk = min(check_interval, thread_delay - elapsed)
@@ -4440,12 +4444,19 @@ class BatchTranslationProcessor:
                     future_to_chunk[future] = chunk_data[1]  # Store chunk index
                 
                 # Collect results as they complete
+                # Check if we should wait for all chunks during graceful stop
+                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                
                 completed_chunks = 0
                 for future in as_completed(future_to_chunk):
-                    if local_stop_cb():
+                    # Skip stop check if graceful stop + wait_for_chunks is enabled
+                    if local_stop_cb() and not (graceful_stop_active and wait_for_chunks and total_chunks > 1):
                         print("❌ Translation stopped during chunk processing")
                         chunk_executor.shutdown(wait=False, cancel_futures=True)
                         raise Exception("Translation stopped by user")
+                    elif local_stop_cb() and graceful_stop_active and wait_for_chunks and total_chunks > 1:
+                        print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {actual_num}...")
                     
                     try:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
