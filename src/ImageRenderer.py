@@ -9633,13 +9633,15 @@ def _update_preview_to_rendered_images(self):
             return
         current_source = self.selected_files[current_row]
         
-        # If a rendered image exists for the currently selected source, load it into the output tab
+        # If a rendered image exists for the currently selected source, store the path and refresh preview
         rendered_path = self._rendered_images_map.get(current_source)
         if rendered_path and os.path.exists(rendered_path):
             if hasattr(self, 'image_preview_widget'):
-                self.image_preview_widget.output_viewer.load_image(rendered_path)
+                # Store the translated path
                 self.image_preview_widget.current_translated_path = rendered_path
-                print(f"[UPDATE_PREVIEW] Updated output tab for current image: {os.path.basename(rendered_path)}")
+                # Refresh the preview to show the rendered result
+                self.image_preview_widget.load_image(current_source, preserve_rectangles=True, preserve_text_overlays=True)
+                print(f"[UPDATE_PREVIEW] Updated preview for current image: {os.path.basename(rendered_path)}")
         else:
             print("[UPDATE_PREVIEW] No rendered image for current selection")
     

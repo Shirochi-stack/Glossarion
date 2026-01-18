@@ -9896,6 +9896,7 @@ class MangaTranslationTab(QObject):
                     # Load an image in the preview
                     _, data = update
                     try:
+                        import os
                         if hasattr(self, 'image_preview_widget'):
                             # Handle both string (image_path) and dict (with options)
                             if isinstance(data, dict):
@@ -9964,9 +9965,8 @@ class MangaTranslationTab(QObject):
                                                                 preserve_rectangles=preserve_rectangles,
                                                                 preserve_text_overlays=preserve_overlays)
                             
-                            # If we have a translated image, load it into the OUTPUT viewer
+                            # Store translated path if available
                             if translated_image_path:
-                                self.image_preview_widget.output_viewer.load_image(translated_image_path)
                                 self.image_preview_widget.current_translated_path = translated_image_path
                             
                             # Update current image path for state tracking
