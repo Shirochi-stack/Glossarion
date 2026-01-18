@@ -2466,8 +2466,8 @@ class MangaImagePreviewWidget(QWidget):
                     try:
                         if not mi.translation_future.done():
                             print("[STOP] Waiting for translation future to complete...")
-                            # Wait with timeout to avoid hanging indefinitely
-                            mi.translation_future.result(timeout=10.0)
+                            # Wait indefinitely for the future to complete
+                            mi.translation_future.result()
                             print("[STOP] Translation future completed")
                     except Exception as e:
                         print(f"[STOP] Future wait error (expected): {e}")
@@ -2476,11 +2476,9 @@ class MangaImagePreviewWidget(QWidget):
                 if hasattr(mi, 'translation_thread') and mi.translation_thread:
                     if mi.translation_thread.is_alive():
                         print("[STOP] Waiting for translation thread to complete...")
-                        mi.translation_thread.join(timeout=10.0)
-                        if mi.translation_thread.is_alive():
-                            print("[STOP] Thread did not complete within timeout")
-                        else:
-                            print("[STOP] Translation thread completed")
+                        # Wait indefinitely for the thread to complete
+                        mi.translation_thread.join()
+                        print("[STOP] Translation thread completed")
             except Exception as e:
                 print(f"[STOP] Error waiting for operations: {e}")
             

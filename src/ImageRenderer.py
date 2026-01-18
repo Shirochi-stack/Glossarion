@@ -3315,23 +3315,42 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                     # Convert full image to bytes
                     _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
                     image_bytes = encoded.tobytes()
-                    # Call Azure OCR on full image with timeout handling
-                    start_time = time.time()
+                    # Call Azure OCR on full image with timeout handling and retries
                     import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(
-                            vision_client.analyze,
-                            image_data=image_bytes,
-                            visual_features=[VisualFeatures.READ]
-                        )
+                    max_retries = 3
+                    for attempt in range(max_retries):
                         try:
-                            result = future.result(timeout=30.0)
-                            elapsed = time.time() - start_time
-                            print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
-                        except concurrent.futures.TimeoutError:
-                            print(f"[OCR_REGIONS] Azure OCR timed out after 30 seconds")
-                            self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
-                            return []
+                            start_time = time.time()
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(
+                                    vision_client.analyze,
+                                    image_data=image_bytes,
+                                    visual_features=[VisualFeatures.READ]
+                                )
+                                result = future.result(timeout=30.0)
+                                elapsed = time.time() - start_time
+                                print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
+                                if attempt > 0:
+                                    self._log(f"✅ Azure OCR succeeded on retry {attempt}", "info")
+                                break
+                        except (concurrent.futures.TimeoutError, Exception) as e:
+                            error_msg = str(e)
+                            is_timeout = "timeout" in error_msg.lower() or "timed out" in error_msg.lower()
+                            if attempt < max_retries - 1:
+                                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                                if is_timeout:
+                                    print(f"[OCR_REGIONS] Azure OCR timed out (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                                else:
+                                    print(f"[OCR_REGIONS] Azure OCR error (attempt {attempt + 1}/{max_retries}): {error_msg}, retrying in {wait_time}s...")
+                                time.sleep(wait_time)
+                            else:
+                                if is_timeout:
+                                    print(f"[OCR_REGIONS] Azure OCR timed out after {max_retries} attempts")
+                                    self._log(f"❌ Azure OCR timed out after {max_retries} retries", "error")
+                                else:
+                                    print(f"[OCR_REGIONS] Azure OCR failed after {max_retries} attempts: {error_msg}")
+                                    self._log(f"❌ Azure OCR failed after {max_retries} retries: {error_msg}", "error")
+                                return []
                     # Extract all text lines from full image OCR
                     if result.read and result.read.blocks:
                         for line in result.read.blocks[0].lines:
@@ -3835,6 +3854,8 @@ def _on_translate_text_clicked(self):
             import threading
             thread = threading.Thread(target=_run_translate_background, args=(self, self._recognized_texts.copy(), image_path),
                                     daemon=True)
+            # Store thread reference for stop button to wait on
+            self.translation_thread = thread
             thread.start()
         else:
             # Need to run detection/recognition first, then translate
@@ -3843,6 +3864,8 @@ def _on_translate_text_clicked(self):
             import threading
             thread = threading.Thread(target=_run_full_translate_pipeline, args=(self, image_path, regions_for_recognition),
                                     daemon=True)
+            # Store thread reference for stop button to wait on
+            self.translation_thread = thread
             thread.start()
         
     except Exception as e:
@@ -9806,10 +9829,12 @@ def _on_translate_all_clicked(self):
         # Add blue pulse processing overlay
         _add_processing_overlay(self, )
         
-        # Run in background thread
+        # Run in background thread and store reference so stop button can wait for it
         import threading
         thread = threading.Thread(target=_run_translate_all_background, args=(self, image_paths),
                                 daemon=True)
+        # Store thread reference for stop button to wait on
+        self.translation_thread = thread
         thread.start()
         
     except Exception as e:
