@@ -2696,12 +2696,18 @@ class MangaImagePreviewWidget(QWidget):
         menu.exec(self.thumbnail_list.mapToGlobal(position))
     
     def _on_thumbnail_clicked(self, item):
-        """Handle thumbnail click - load the corresponding image"""
+        """Handle thumbnail click - load the corresponding image and sync file list selection"""
         from PySide6.QtCore import Qt
         image_path = item.data(Qt.ItemDataRole.UserRole)
         if image_path and os.path.exists(image_path):
-            # Per-image overlay isolation: Don't remove overlays when switching - they're managed per-image
-            self.load_image(image_path)
+            # Find the index of this image
+            try:
+                index = self.image_paths.index(image_path)
+                # Sync with file list selection (this will trigger proper state restoration)
+                self._sync_file_list_selection(index, image_path)
+            except (ValueError, AttributeError):
+                # Fallback: just load the image directly
+                self.load_image(image_path)
     
     def keyPressEvent(self, event):
         """Handle keyboard navigation for switching images"""

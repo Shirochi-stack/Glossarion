@@ -9178,6 +9178,12 @@ class MangaTranslationTab(QObject):
                             ImageRenderer._restore_image_state(self, image_path)
                         except Exception:
                             pass
+                        # Sync thumbnail selection to match file list selection
+                        try:
+                            if hasattr(self.image_preview_widget, '_update_thumbnail_selection'):
+                                self.image_preview_widget._update_thumbnail_selection(image_path)
+                        except Exception:
+                            pass
                         self._log(f"✅ Preview loaded: {os.path.basename(image_path)}", "debug")
                     else:
                         self._log(f"❌ Image file not found: {image_path}", "error")
