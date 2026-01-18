@@ -4150,8 +4150,14 @@ class BatchTranslationProcessor:
                 """Process a single chunk in parallel"""
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 
+                # Check if stop requested - but respect wait_for_chunks setting
                 if local_stop_cb():
-                    return None, chunk_idx
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                    if not (graceful_stop_active and wait_for_chunks and chunk_total > 1):
+                        # Return 5 values to match expected signature
+                        return None, chunk_idx, None, False, "cancelled"
+                    # If wait_for_chunks is enabled, continue processing
                 
                 # Build user prompt for this chunk
                 if total_chunks > 1:
@@ -4279,9 +4285,9 @@ class BatchTranslationProcessor:
                     + [{"role": "user", "content": user_prompt}]
                 )
 
-                # Abort immediately if a prior chunk triggered stop/prohibition
-                if local_stop_cb():
-                    raise UnifiedClientError("Chunk aborted due to earlier failure", error_type="cancelled")
+                # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
+                if chunk_abort_event.is_set():
+                    raise UnifiedClientError("Chunk aborted due to prohibited content", error_type="cancelled")
                 
                 # Log combined prompt token count, including assistant/memory tokens when present
                 total_tokens = 0
@@ -4426,12 +4432,12 @@ class BatchTranslationProcessor:
                         
                         # Interruptible sleep - check stop flag every 0.1s
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
-                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                        
                         elapsed = 0
                         check_interval = 0.1
                         while elapsed < thread_delay:
+                            # Read env vars INSIDE loop to catch stop pressed mid-delay
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                             if local_stop_cb() and not (graceful_stop_active and wait_for_chunks):
                                 print(f"🛑 Chunk submission delay interrupted")
                                 raise Exception("Translation stopped by user during chunk submission delay")
@@ -4444,11 +4450,12 @@ class BatchTranslationProcessor:
                     future_to_chunk[future] = chunk_data[1]  # Store chunk index
                 
                 # Collect results as they complete
-                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                 completed_chunks = 0
                 
                 for future in as_completed(future_to_chunk):
+                    # Read env vars INSIDE loop to catch stop pressed mid-chunk
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                     
                     # Skip stop check if graceful stop + wait_for_chunks is enabled
                     if local_stop_cb() and not (graceful_stop_active and wait_for_chunks and total_chunks > 1):
@@ -4460,6 +4467,12 @@ class BatchTranslationProcessor:
                     
                     try:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
+
+                        # Handle cancelled chunks (skipped due to stop request)
+                        if finish_reason == "cancelled" or (result is None and finish_reason != "stop"):
+                            print(f"⏭️ Chunk {chunk_idx}/{total_chunks} cancelled (stop requested)")
+                            chunk_executor.shutdown(wait=False, cancel_futures=True)
+                            raise Exception("Translation stopped by user")
 
                         # Immediate QA fail: stop remaining chunks and mark chapter
                         if finish_reason in ("content_filter", "prohibited_content", "error"):
@@ -8845,9 +8858,16 @@ def main(log_callback=None, stop_callback=None):
                 while active_futures:
                     for future in concurrent.futures.as_completed(list(active_futures.keys())):
                         if check_stop():
-                            print("❌ Translation stopped")
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            return
+                            # Check if wait_for_chunks is enabled - if so, let current chapters finish
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                            if graceful_stop_active and wait_for_chunks:
+                                print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
+                                # Don't shutdown - let this future complete, but don't submit new ones
+                            else:
+                                print("❌ Translation stopped")
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return
                         unit = active_futures.pop(future)
                         completed_in_batch = 0
                         failed_in_batch = 0
@@ -8977,6 +8997,14 @@ def main(log_callback=None, stop_callback=None):
                             with batch_submit_lock:
                                 while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                                     pass
+                
+                # After all futures complete, if stop was requested with wait_for_chunks, exit
+                if check_stop():
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                    if graceful_stop_active and wait_for_chunks:
+                        print("\n✅ All current chapter(s) completed. Stopping as requested (wait for chunks).")
+                    return
             
             else:
                 # direct or conservative: keep legacy batch grouping behaviour
@@ -9020,9 +9048,16 @@ def main(log_callback=None, stop_callback=None):
                     
                     for future in concurrent.futures.as_completed(future_to_unit):
                         if check_stop():
-                            print("❌ Translation stopped")
-                            executor.shutdown(wait=False)
-                            return
+                            # Check if wait_for_chunks is enabled - if so, let current chapters finish
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                            if graceful_stop_active and wait_for_chunks:
+                                print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
+                                # Don't shutdown - let this batch complete
+                            else:
+                                print("❌ Translation stopped")
+                                executor.shutdown(wait=False)
+                                return
                         
                         unit = future_to_unit[future]
                         
@@ -9166,6 +9201,14 @@ def main(log_callback=None, stop_callback=None):
                     print(f"\n📦 Batch Summary:")
                     print(f"   ✅ Successful: {completed_in_batch}")
                     print(f"   ❌ Failed: {failed_in_batch}")
+                    
+                    # After batch completes, if stop was requested with wait_for_chunks, exit
+                    if check_stop():
+                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                        if graceful_stop_active and wait_for_chunks:
+                            print("\n✅ Current batch completed. Stopping as requested (wait for chunks).")
+                            return
                     
                     if batch_end < total_to_process:
                         print(f"⏳ Waiting {config.DELAY}s before next batch...")
@@ -9876,12 +9919,12 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Interruptible sleep - check stop flag every 0.1s
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
-                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                        
                         elapsed = 0
                         check_interval = 0.1
                         while elapsed < thread_delay:
+                            # Read env vars INSIDE loop to catch stop pressed mid-delay
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                             if check_stop() and not (graceful_stop_active and wait_for_chunks):
                                 print(f"🛑 Chunk delay interrupted")
                                 return
