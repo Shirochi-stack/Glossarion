@@ -135,36 +135,46 @@ def _reset_cancellation_flags(self):
     MUST be called at the very start of each background operation to clear
     any stale flags from previous operations.
     """
+    print("[CANCEL_RESET] Starting flag reset...")
     try:
         # Reset stop_flag (threading.Event)
         if hasattr(self, 'stop_flag') and self.stop_flag:
+            was_set = self.stop_flag.is_set()
             self.stop_flag.clear()
+            print(f"[CANCEL_RESET] stop_flag was {was_set}, now cleared")
         
         # Reset global cancellation on self
+        was_global = getattr(self, '_global_cancellation', None)
         if hasattr(self, '_global_cancellation'):
             self._global_cancellation = False
+        print(f"[CANCEL_RESET] _global_cancellation was {was_global}, now False")
         
         # Reset MangaTranslator global cancellation AND its internal flags
         try:
             from manga_translator import MangaTranslator
+            was_mt_cancelled = MangaTranslator.is_globally_cancelled()
             MangaTranslator.set_global_cancellation(False)
             MangaTranslator.reset_global_flags()  # Also call the class reset method
-        except Exception:
-            pass
+            print(f"[CANCEL_RESET] MangaTranslator was {was_mt_cancelled}, now reset")
+        except Exception as e:
+            print(f"[CANCEL_RESET] MangaTranslator reset failed: {e}")
         
         # Reset UnifiedClient global cancellation
         try:
             from unified_api_client import UnifiedClient
+            was_uc_cancelled = UnifiedClient.is_globally_cancelled()
             UnifiedClient.set_global_cancellation(False)
-        except Exception:
-            pass
+            print(f"[CANCEL_RESET] UnifiedClient was {was_uc_cancelled}, now reset")
+        except Exception as e:
+            print(f"[CANCEL_RESET] UnifiedClient reset failed: {e}")
         
         # Reset module-level global_stop_flag in unified_api_client
         try:
             from unified_api_client import set_stop_flag
             set_stop_flag(False)
-        except Exception:
-            pass
+            print(f"[CANCEL_RESET] unified_api_client global_stop_flag reset")
+        except Exception as e:
+            print(f"[CANCEL_RESET] set_stop_flag failed: {e}")
         
         # CRITICAL: Reset OCR manager's _stopped flag
         # This flag gets latched to True and must be explicitly reset
