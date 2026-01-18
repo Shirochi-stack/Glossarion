@@ -3904,6 +3904,9 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
     # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
     _reset_cancellation_flags(self)
     
+    # Track inpaint thread at function scope so finally block can wait for it
+    inpaint_thread = None
+    
     try:
         import threading
         
@@ -4027,6 +4030,13 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         self._log(f"❌ Background translation failed: {str(e)}", "error")
         print(f"Background translate error traceback: {traceback.format_exc()}")
     finally:
+        # Wait for inpainting thread to complete before restoring buttons
+        # This prevents "Stopping..." from clearing while inpainting is still running
+        if inpaint_thread is not None and inpaint_thread.is_alive():
+            print(f"[TRANSLATE_CONCURRENT] Waiting for inpainting thread to complete before restoring buttons...")
+            inpaint_thread.join(timeout=60)  # Wait up to 60 seconds
+            print(f"[TRANSLATE_CONCURRENT] Inpainting thread completed (or timed out)")
+        
         # Always restore the button
         self.update_queue.put(('translate_button_restore', None))
 
