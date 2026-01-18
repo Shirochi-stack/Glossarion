@@ -914,6 +914,7 @@ class MangaTranslationTab(QObject):
         
         # Preload shared models in background to avoid lag on first use
         # This spawns worker processes/loads models ahead of time so GUI stays responsive
+        self._preload_complete = False
         try:
             def _bg_preload_models():
                 try:
@@ -929,11 +930,17 @@ class MangaTranslationTab(QObject):
                     ImageRenderer._preload_shared_inpainter(self)
                 except Exception as e:
                     print(f"[INIT_PRELOAD] Background model preload failed: {e}")
+                finally:
+                    # Mark preload complete regardless of success/failure
+                    self._preload_complete = True
             
             self._preload_thread = threading.Thread(target=_bg_preload_models, daemon=True)
             self._preload_thread.start()
+            
+            # Start monitoring preload status to update button states
+            QTimer.singleShot(100, self._check_preload_status)
         except Exception:
-            pass
+            self._preload_complete = True  # Mark complete on error so buttons aren't stuck
         
         # Circle mode for selections and pipeline masks (rect by default)
         self._use_circle_shapes = False
@@ -1080,6 +1087,138 @@ class MangaTranslationTab(QObject):
             self.stop_flag.clear()
         self._reset_global_cancellation()
         self._log("🔄 Stop flags reset for new translation", "debug")
+    
+    def _is_local_inpainting_enabled(self) -> bool:
+        """Check if local inpainting is enabled (not skipped and method is 'local')."""
+        skip_inpainting = self.main_gui.config.get('manga_skip_inpainting', False)
+        if skip_inpainting:
+            return False
+        inpaint_settings = self.main_gui.config.get('manga_settings', {}).get('inpainting', {})
+        inpainting_method = inpaint_settings.get('method', 'local')
+        return inpainting_method == 'local'
+    
+    def _check_preload_status(self):
+        """Check preload thread status and update button states accordingly."""
+        try:
+            # Check if we should show waiting state
+            preload_running = (hasattr(self, '_preload_thread') and 
+                              self._preload_thread and 
+                              self._preload_thread.is_alive())
+            local_inpainting = self._is_local_inpainting_enabled()
+            should_wait = preload_running and local_inpainting
+            
+            if should_wait:
+                # Disable buttons and show "Waiting..." state
+                self._set_translation_buttons_waiting(True)
+                # Check again in 500ms
+                QTimer.singleShot(500, self._check_preload_status)
+            else:
+                # Preload complete or not needed - enable buttons
+                self._set_translation_buttons_waiting(False)
+        except Exception as e:
+            print(f"[PRELOAD_CHECK] Error: {e}")
+            # On error, enable buttons to avoid being stuck
+            self._set_translation_buttons_waiting(False)
+    
+    def _set_translation_buttons_waiting(self, waiting: bool):
+        """Set translation buttons to waiting or ready state.
+        
+        Args:
+            waiting: If True, disable buttons and show 'Waiting...' text.
+                    If False, enable buttons and restore normal text.
+        """
+        try:
+            # Start Translation button
+            if hasattr(self, 'start_button') and self.start_button:
+                if waiting:
+                    self.start_button.setEnabled(False)
+                    if hasattr(self, 'start_button_text'):
+                        self.start_button_text.setText("⏳ Waiting for model...")
+                    self.start_button.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #6c757d; "
+                        "  color: white; "
+                        "  padding: 28px 30px; "
+                        "  font-size: 14pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 8px; "
+                        "} "
+                        "QPushButton:disabled { "
+                        "  background-color: #6c757d; "
+                        "  color: #cccccc; "
+                        "}"
+                    )
+                else:
+                    # Only enable if setup is ready (has API key, etc.)
+                    is_ready = self._check_translation_ready()
+                    self.start_button.setEnabled(is_ready)
+                    if hasattr(self, 'start_button_text'):
+                        self.start_button_text.setText("▶ Start Translation")
+                    self.start_button.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #28a745; "
+                        "  color: white; "
+                        "  padding: 28px 30px; "
+                        "  font-size: 14pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 8px; "
+                        "} "
+                        "QPushButton:hover { background-color: #218838; } "
+                        "QPushButton:disabled { "
+                        "  background-color: #2d2d2d; "
+                        "  color: #666666; "
+                        "}"
+                    )
+            
+            # Translate and Translate All buttons in image preview
+            if hasattr(self, 'image_preview_widget'):
+                ipw = self.image_preview_widget
+                
+                if hasattr(ipw, 'translate_btn') and ipw.translate_btn:
+                    if waiting:
+                        ipw.translate_btn.setEnabled(False)
+                        ipw.translate_btn.setText("⏳ Waiting...")
+                    else:
+                        ipw.translate_btn.setEnabled(True)
+                        ipw.translate_btn.setText("Translate")
+                
+                if hasattr(ipw, 'translate_all_btn') and ipw.translate_all_btn:
+                    if waiting:
+                        ipw.translate_all_btn.setEnabled(False)
+                        ipw.translate_all_btn.setText("⏳ Waiting...")
+                    else:
+                        ipw.translate_all_btn.setEnabled(True)
+                        ipw.translate_all_btn.setText("Translate All")
+        except Exception as e:
+            print(f"[BUTTON_STATE] Error setting button state: {e}")
+    
+    def _check_translation_ready(self) -> bool:
+        """Check if translation prerequisites are met (API key, credentials, etc.)."""
+        try:
+            # Check API key
+            if hasattr(self.main_gui, 'api_key_entry'):
+                if hasattr(self.main_gui.api_key_entry, 'text'):
+                    has_api_key = bool(self.main_gui.api_key_entry.text().strip())
+                elif hasattr(self.main_gui.api_key_entry, 'get'):
+                    has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+                else:
+                    has_api_key = False
+            else:
+                has_api_key = False
+            
+            if not has_api_key:
+                return False
+            
+            # Check provider-specific credentials
+            saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+            if saved_provider == 'google':
+                return os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
+            elif saved_provider == 'azure':
+                return bool(self.main_gui.config.get('azure_vision_key', ''))
+            else:
+                return True  # Local providers only need API key
+        except Exception:
+            return True  # Default to ready on error
     
     def _install_fullscreen_handler(self):
         """Install event filter to handle F11 key for fullscreen toggle"""
