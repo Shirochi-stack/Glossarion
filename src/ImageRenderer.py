@@ -9353,6 +9353,11 @@ def _on_translate_all_clicked(self):
             self.image_preview_widget.translate_all_btn.setEnabled(False)
             self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
         
+        # Disable thumbnail list to prevent user from switching images during translation
+        if hasattr(self.image_preview_widget, 'thumbnail_list'):
+            self.image_preview_widget.thumbnail_list.setEnabled(False)
+            print(f"[TRANSLATE_ALL] Disabled thumbnail list during batch translation")
+        
         # Add blue pulse processing overlay
         _add_processing_overlay(self, )
         
@@ -9379,6 +9384,17 @@ def _run_translate_all_background(self, image_paths: list):
         
         for idx, image_path in enumerate(image_paths, 1):
             try:
+                import time
+                
+                # Load this image into the preview FIRST so user can see what's being processed
+                self.update_queue.put(('load_preview_image', {
+                    'path': image_path,
+                    'preserve_rectangles': False,
+                    'preserve_overlays': False
+                }))
+                print(f"[TRANSLATE_ALL] Switched preview to: {os.path.basename(image_path)}")
+                time.sleep(0.3)  # Brief pause to let UI update
+                
                 # Update progress
                 self._log(f"📄 [{idx}/{total}] Processing: {os.path.basename(image_path)}", "info")
                 
@@ -9387,10 +9403,6 @@ def _run_translate_all_background(self, image_paths: list):
                     'current': idx,
                     'total': total
                 }))
-                
-                # REMOVED: auto-advance to next image during translation
-                # This was causing translated output of image N to show on image N+1
-                import time
                 
                 # Run the full translate pipeline for this image
                 # This includes detect -> recognize -> translate
@@ -9541,9 +9553,19 @@ def _run_translate_all_background(self, image_paths: list):
                     'step': 'translated'
                 })
                 
-                # Wait for rendering to complete and give user time to see final result
-                # The _render_with_manga_translator will load the rendered image into preview
-                time.sleep(1.5)
+                # Wait for rendering to complete
+                time.sleep(1.0)
+                
+                # Refresh preview to show the rendered result for this image
+                self.update_queue.put(('load_preview_image', {
+                    'path': image_path,
+                    'preserve_rectangles': True,
+                    'preserve_overlays': True
+                }))
+                print(f"[TRANSLATE_ALL] Refreshed preview to show rendered result: {os.path.basename(image_path)}")
+                
+                # Give user time to see the final result before moving to next image
+                time.sleep(1.0)
                 
                 translated_count += 1
                 
@@ -9584,6 +9606,11 @@ def _restore_translate_all_button(self):
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
             self.image_preview_widget.translate_all_btn.setEnabled(True)
             self.image_preview_widget.translate_all_btn.setText("Translate All")
+        
+        # Re-enable thumbnail list
+        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'thumbnail_list'):
+            self.image_preview_widget.thumbnail_list.setEnabled(True)
+            print(f"[TRANSLATE_ALL] Re-enabled thumbnail list after batch translation")
     except Exception:
         pass
 

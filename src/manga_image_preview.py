@@ -2012,21 +2012,27 @@ class MangaImagePreviewWidget(QWidget):
     
     def refresh_experimental_tools(self):
         """Refresh visibility of experimental tools based on current setting."""
-        enabled = self._is_experimental_enabled()
+        experimental_enabled = self._is_experimental_enabled()
+        manual_editing_enabled = getattr(self, 'manual_editing_enabled', False)
         
-        # Update visibility of all experimental widgets
+        # Experimental editing tools require BOTH experimental AND manual editing enabled
+        show_editing_tools = experimental_enabled and manual_editing_enabled
+        
+        # Update visibility of experimental editing widgets
         if hasattr(self, 'brush_btn') and self.brush_btn:
-            self.brush_btn.setVisible(enabled)
+            self.brush_btn.setVisible(show_editing_tools)
         if hasattr(self, 'eraser_btn') and self.eraser_btn:
-            self.eraser_btn.setVisible(enabled)
+            self.eraser_btn.setVisible(show_editing_tools)
         if hasattr(self, 'clear_strokes_btn') and self.clear_strokes_btn:
-            self.clear_strokes_btn.setVisible(enabled)
+            self.clear_strokes_btn.setVisible(show_editing_tools)
         if hasattr(self, 'size_slider') and self.size_slider:
-            self.size_slider.setVisible(enabled)
+            self.size_slider.setVisible(show_editing_tools)
         if hasattr(self, 'size_label') and self.size_label:
-            self.size_label.setVisible(enabled)
+            self.size_label.setVisible(show_editing_tools)
+        
+        # Translate All button only requires experimental enabled (not manual editing)
         if hasattr(self, 'translate_all_btn') and self.translate_all_btn:
-            self.translate_all_btn.setVisible(enabled)
+            self.translate_all_btn.setVisible(experimental_enabled and manual_editing_enabled)
     
     def _active_viewer(self) -> CompactImageViewer:
         """Return the active viewer (always source viewer now)."""
@@ -2838,6 +2844,8 @@ class MangaImagePreviewWidget(QWidget):
         from PySide6.QtCore import Qt
         enabled = (state == Qt.CheckState.Checked.value)
         
+        # Check if experimental features are enabled
+        experimental_enabled = self._is_experimental_enabled()
         
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
@@ -2846,21 +2854,21 @@ class MangaImagePreviewWidget(QWidget):
         if hasattr(self, 'lasso_btn') and self.lasso_btn is not None:
             self.lasso_btn.setVisible(enabled)
         self.save_overlay_btn.setVisible(enabled)
-        # Only set visibility for experimental tools if they exist
+        # Experimental tools require BOTH manual editing AND experimental toggle
         if self.brush_btn is not None:
-            self.brush_btn.setVisible(enabled)
+            self.brush_btn.setVisible(enabled and experimental_enabled)
         if self.eraser_btn is not None:
-            self.eraser_btn.setVisible(enabled)
+            self.eraser_btn.setVisible(enabled and experimental_enabled)
         self.delete_btn.setVisible(enabled)
         self.clear_boxes_btn.setVisible(enabled)
-        # Only set visibility for clear strokes button if it exists
+        # Clear strokes is experimental
         if self.clear_strokes_btn is not None:
-            self.clear_strokes_btn.setVisible(enabled)
-        # Only set visibility for size controls if they exist
+            self.clear_strokes_btn.setVisible(enabled and experimental_enabled)
+        # Size controls are experimental
         if self.size_slider is not None:
-            self.size_slider.setVisible(enabled)
+            self.size_slider.setVisible(enabled and experimental_enabled)
         if self.size_label is not None:
-            self.size_label.setVisible(enabled)
+            self.size_label.setVisible(enabled and experimental_enabled)
         self.box_count_label.setVisible(enabled)
         
         # Show/hide the entire Translation Workflow frame based on manual editing toggle

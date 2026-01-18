@@ -9908,23 +9908,28 @@ class MangaTranslationTab(QObject):
                                 preserve_overlays = False
                             
                             # Gate: only allow loading into the preview if this path matches the current selection
-                            try:
-                                current_selected = None
-                                if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.currentRow() >= 0:
-                                    idx = self.file_listbox.currentRow()
-                                    if 0 <= idx < len(self.selected_files):
-                                        current_selected = self.selected_files[idx]
-                                current_loaded = getattr(self.image_preview_widget, 'current_image_path', None)
-                                if image_path and current_selected and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_selected)):
-                                    # Ignore background updates for non-current images
-                                    print(f"[LOAD_IMAGE] Skipping non-current image update: {os.path.basename(image_path)}")
-                                    return
-                                # Also ignore if we're trying to replace a different image than currently loaded
-                                if image_path and current_loaded and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_loaded)):
-                                    print(f"[LOAD_IMAGE] Skipping update that doesn't match current loaded image")
-                                    return
-                            except Exception:
-                                pass
+                            # EXCEPTION: During batch mode, allow any image to be loaded so user can see progress
+                            is_batch_mode = getattr(self, '_batch_mode_active', False)
+                            if not is_batch_mode:
+                                try:
+                                    current_selected = None
+                                    if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.currentRow() >= 0:
+                                        idx = self.file_listbox.currentRow()
+                                        if 0 <= idx < len(self.selected_files):
+                                            current_selected = self.selected_files[idx]
+                                    current_loaded = getattr(self.image_preview_widget, 'current_image_path', None)
+                                    if image_path and current_selected and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_selected)):
+                                        # Ignore background updates for non-current images
+                                        print(f"[LOAD_IMAGE] Skipping non-current image update: {os.path.basename(image_path)}")
+                                        return
+                                    # Also ignore if we're trying to replace a different image than currently loaded
+                                    if image_path and current_loaded and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_loaded)):
+                                        print(f"[LOAD_IMAGE] Skipping update that doesn't match current loaded image")
+                                        return
+                                except Exception:
+                                    pass
+                            else:
+                                print(f"[LOAD_IMAGE] Batch mode active - bypassing gate for: {os.path.basename(image_path)}")
                             
                             # Store original path for state restoration
                             original_image_path = image_path
