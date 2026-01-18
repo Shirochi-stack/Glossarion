@@ -4448,7 +4448,7 @@ class MangaSettingsDialog(QDialog):
         self.experimental_translate_all_checkbox.setChecked(experimental_enabled)
         experimental_layout.addWidget(self.experimental_translate_all_checkbox)
         
-        experimental_note = QLabel("Changes apply immediately. Sets EXPERIMENTAL_TRANSLATE_ALL=1")
+        experimental_note = QLabel("⚠️ Requires restart to apply")
         experimental_note_font = QFont('Arial', 9)
         experimental_note.setFont(experimental_note_font)
         experimental_note.setStyleSheet("color: #888888;")
