@@ -1807,6 +1807,38 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_all_btn.setToolTip("Translate all images in the preview list")
         workflow_layout.addWidget(self.translate_all_btn, stretch=1)
         
+        # Stop button - appears during translation operations
+        self.stop_translation_btn = QPushButton("⏹ Stop")
+        self.stop_translation_btn.setMinimumHeight(28)
+        self.stop_translation_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: 1px solid #dc3545;
+                border-radius: 3px;
+                padding: 4px 12px;
+                font-size: 8pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+                border-color: #c82333;
+            }
+            QPushButton:pressed {
+                background-color: #bd2130;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+                color: #cccccc;
+                border-color: #6c757d;
+            }
+        """)
+        self.stop_translation_btn.setToolTip("Stop the current translation operation")
+        self.stop_translation_btn.clicked.connect(self._on_stop_translation_clicked)
+        self.stop_translation_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        workflow_layout.addWidget(self.stop_translation_btn, stretch=1)
+        self.stop_translation_btn.setVisible(False)  # Hidden by default
+        
         layout.addWidget(self.workflow_frame)
         
         # Current file label with download button
@@ -2347,6 +2379,99 @@ class MangaImagePreviewWidget(QWidget):
     def _emit_translate_all_signal(self):
         """Emit translate all signal"""
         self.translate_all_clicked.emit()
+    
+    def _on_stop_translation_clicked(self):
+        """Stop the current translation operation using all standard cancellation flags."""
+        print("[STOP] Stop translation button clicked")
+        
+        try:
+            # Update button to show stopping state
+            self.stop_translation_btn.setEnabled(False)
+            self.stop_translation_btn.setText("⏹ Stopping...")
+            
+            mi = getattr(self, 'manga_integration', None)
+            if not mi:
+                print("[STOP] No manga_integration reference")
+                return
+            
+            # Set is_running to False
+            if hasattr(mi, 'is_running'):
+                mi.is_running = False
+            
+            # Set stop_flag
+            if hasattr(mi, 'stop_flag') and mi.stop_flag:
+                mi.stop_flag.set()
+                print("[STOP] Set stop_flag")
+            
+            # Clear batch mode flag
+            if hasattr(mi, '_batch_mode_active'):
+                mi._batch_mode_active = False
+                print("[STOP] Cleared batch mode flag")
+            
+            # Set global cancellation on manga_integration
+            if hasattr(mi, 'set_global_cancellation'):
+                mi.set_global_cancellation(True)
+                print("[STOP] Set global cancellation on manga_integration")
+            
+            # Set global cancellation on MangaTranslator
+            try:
+                from manga_translator import MangaTranslator
+                MangaTranslator.set_global_cancellation(True)
+                MangaTranslator.force_release_all_pool_checkouts()
+                print("[STOP] Set MangaTranslator global cancellation and released pool checkouts")
+            except ImportError:
+                pass
+            
+            # Set global cancellation on UnifiedClient
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.set_global_cancellation(True)
+                print("[STOP] Set UnifiedClient global cancellation")
+            except ImportError:
+                pass
+            
+            # Hard cancel active HTTP sessions
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+                    print("[STOP] Called hard_cancel_all")
+            except Exception:
+                pass
+            
+            # Log the stop action
+            if hasattr(mi, '_log'):
+                mi._log("⏹ Translation stopped by user", "warning")
+            
+            # Remove processing overlay
+            try:
+                import ImageRenderer
+                ImageRenderer._remove_processing_overlay(mi, None)
+            except Exception:
+                pass
+            
+            # Re-enable all workflow buttons after a short delay
+            from PySide6.QtCore import QTimer
+            def restore_buttons():
+                try:
+                    import ImageRenderer
+                    ImageRenderer._enable_workflow_buttons(mi)
+                    # Hide stop button
+                    self.stop_translation_btn.setVisible(False)
+                    self.stop_translation_btn.setEnabled(True)
+                    self.stop_translation_btn.setText("⏹ Stop")
+                    # Re-enable thumbnail list
+                    if hasattr(self, 'thumbnail_list'):
+                        self.thumbnail_list.setEnabled(True)
+                except Exception as e:
+                    print(f"[STOP] Error restoring buttons: {e}")
+            
+            QTimer.singleShot(500, restore_buttons)
+            
+        except Exception as e:
+            print(f"[STOP] Error stopping translation: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_save_overlay_clicked(self):
         """Re-render overlay with current rectangle positions and rendering settings"""

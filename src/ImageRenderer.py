@@ -9324,6 +9324,12 @@ def _disable_workflow_buttons(self, exclude=None):
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
         
+        # Show the stop button when translation operations start
+        if hasattr(ipw, 'stop_translation_btn'):
+            ipw.stop_translation_btn.setVisible(True)
+            ipw.stop_translation_btn.setEnabled(True)
+            ipw.stop_translation_btn.setText("⏹ Stop")
+        
         print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude})")
     except Exception as e:
         print(f"[WORKFLOW] Error disabling buttons: {e}")
@@ -9352,6 +9358,12 @@ def _enable_workflow_buttons(self):
         # Also re-enable start_button in manga_integration if it exists
         if hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(True)
+        
+        # Hide the stop button when operations complete
+        if hasattr(ipw, 'stop_translation_btn'):
+            ipw.stop_translation_btn.setVisible(False)
+            ipw.stop_translation_btn.setEnabled(True)
+            ipw.stop_translation_btn.setText("⏹ Stop")
         
         print(f"[WORKFLOW] Re-enabled all workflow buttons")
     except Exception as e:
