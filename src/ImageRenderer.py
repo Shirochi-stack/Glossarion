@@ -5097,11 +5097,16 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                     iterations_action.triggered.connect(make_iterations_handler(actual_index, rect_item))
                     menu.addAction(iterations_action)
                     
-                    # Add "Clean This Rectangle" option
-                    clean_action = QAction("🧽 Clean This Rectangle", menu)
-                    def make_clean_handler(idx, rect):
-                        return lambda: _handle_clean_this_rectangle(self, idx, rect)
-                    clean_action.triggered.connect(make_clean_handler(actual_index, rect_item))
+                    # Add "Clean This Rectangle" option (disabled when waiting for model)
+                    is_waiting = getattr(self, '_waiting_for_model', False)
+                    if is_waiting:
+                        clean_action = QAction("⏳ Clean This Rectangle (Waiting...)", menu)
+                        clean_action.setEnabled(False)
+                    else:
+                        clean_action = QAction("🧽 Clean This Rectangle", menu)
+                        def make_clean_handler(idx, rect):
+                            return lambda: _handle_clean_this_rectangle(self, idx, rect)
+                        clean_action.triggered.connect(make_clean_handler(actual_index, rect_item))
                     menu.addAction(clean_action)
                     
                     # Add "Delete Selected" option

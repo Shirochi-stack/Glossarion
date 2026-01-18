@@ -1128,6 +1128,9 @@ class MangaTranslationTab(QObject):
                     If False, enable buttons and restore normal text.
         """
         try:
+            # Store waiting state for context menu checks
+            self._waiting_for_model = waiting
+            
             # Start Translation button
             if hasattr(self, 'start_button') and self.start_button:
                 if waiting:
@@ -1170,7 +1173,7 @@ class MangaTranslationTab(QObject):
                         "}"
                     )
             
-            # Translate and Translate All buttons in image preview
+            # Translate, Translate All, and Clean buttons in image preview
             if hasattr(self, 'image_preview_widget'):
                 ipw = self.image_preview_widget
                 
@@ -1189,6 +1192,15 @@ class MangaTranslationTab(QObject):
                     else:
                         ipw.translate_all_btn.setEnabled(True)
                         ipw.translate_all_btn.setText("Translate All")
+                
+                # Clean button in image preview
+                if hasattr(ipw, 'clean_btn') and ipw.clean_btn:
+                    if waiting:
+                        ipw.clean_btn.setEnabled(False)
+                        ipw.clean_btn.setText("⏳ Waiting...")
+                    else:
+                        ipw.clean_btn.setEnabled(True)
+                        ipw.clean_btn.setText("Clean")
         except Exception as e:
             print(f"[BUTTON_STATE] Error setting button state: {e}")
     
