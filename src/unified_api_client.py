@@ -4028,6 +4028,10 @@ class UnifiedClient:
             if image_data:
                 messages = self._prepare_image_messages(messages, image_data)
             
+            # Check if system prompt should be moved to user message
+            if os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1':
+                messages = self._merge_system_into_user(messages)
+            
             # Validate request
             valid, error_msg = self._validate_request(messages, max_tokens)
             if not valid:
@@ -4140,6 +4144,10 @@ class UnifiedClient:
                 # For image requests, prepare messages with embedded image BEFORE validation
                 if image_data:
                     messages = self._prepare_image_messages(messages, image_data)
+                
+                # Check if system prompt should be moved to user message
+                if os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1':
+                    messages = self._merge_system_into_user(messages)
                 
                 # Validate request
                 valid, error_msg = self._validate_request(messages, max_tokens)

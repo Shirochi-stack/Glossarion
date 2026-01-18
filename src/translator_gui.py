@@ -1047,6 +1047,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Track the currently active profile to prevent cross-profile saves
         self._active_profile_for_autosave = None
         
+        # System prompt to user message toggle
+        self.system_prompt_to_user_var = self.config.get('system_prompt_to_user', False)
+        os.environ['SYSTEM_PROMPT_TO_USER'] = '1' if self.system_prompt_to_user_var else '0'
+        
         # Initialize compression-related variables
         self.enable_image_compression_var = self.config.get('enable_image_compression', False)
         self.auto_compress_enabled_var = self.config.get('auto_compress_enabled', True)
@@ -3806,6 +3810,35 @@ Recent translations to summarize:
             # Silently fail to avoid disrupting user's typing
             pass
     
+    def _toggle_system_prompt_mode(self):
+        """Toggle between system message and user message mode for system prompt"""
+        self.system_prompt_to_user_var = not self.system_prompt_to_user_var
+        os.environ['SYSTEM_PROMPT_TO_USER'] = '1' if self.system_prompt_to_user_var else '0'
+        
+        # Update label text
+        self.prompt_label.setText("User Prompt:" if self.system_prompt_to_user_var else "System Prompt:")
+        
+        # Update switch emoji and tooltip
+        self.system_prompt_switch.setText("🔀" if self.system_prompt_to_user_var else "↕️")
+        self.system_prompt_switch.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+            ("System prompt content will be sent as part of user message (🔀 mode)" if self.system_prompt_to_user_var 
+             else "System prompt content will be sent as system message (↕️ mode)") +
+            "<br><br>Click to toggle.</p></qt>"
+        )
+        
+        # Save to config
+        self.config['system_prompt_to_user'] = self.system_prompt_to_user_var
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(encrypt_config(self.config), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save config: {e}")
+        
+        # Log the change
+        mode_name = "user message" if self.system_prompt_to_user_var else "system message"
+        self.append_log(f"🔀 System prompt will be sent as {mode_name}")
+    
     def open_output_folder(self):
         """Open the output folder that is expected to be created"""
         import subprocess
@@ -3914,9 +3947,6 @@ Recent translations to summarize:
     
     def _create_prompt_section(self):
         """Create system prompt section"""
-        # System Prompt Label (row 9, column 0)
-        prompt_label = QLabel("System Prompt:")
-        self.frame.addWidget(prompt_label, 9, 0, Qt.AlignTop | Qt.AlignLeft)
         
         # System Prompt Text Edit (row 9, spans 3 columns)
         self.prompt_text = QTextEdit()
@@ -3942,7 +3972,30 @@ Recent translations to summarize:
         output_container = QWidget()
         output_layout = QVBoxLayout(output_container)
         output_layout.setContentsMargins(0, 0, 0, 0)
-        output_layout.addWidget(prompt_label)
+        
+        # System Prompt Label with toggle switch
+        prompt_label_container = QWidget()
+        prompt_label_layout = QHBoxLayout(prompt_label_container)
+        prompt_label_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_label_layout.setSpacing(5)
+        
+        self.prompt_label = QLabel("User Prompt:" if self.system_prompt_to_user_var else "System Prompt:")
+        prompt_label_layout.addWidget(self.prompt_label)
+        
+        # Add clickable switch emoji
+        self.system_prompt_switch = QLabel("🔀" if self.system_prompt_to_user_var else "↕️")
+        self.system_prompt_switch.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+            ("System prompt content will be sent as part of user message (🔀 mode)" if self.system_prompt_to_user_var 
+             else "System prompt content will be sent as system message (↕️ mode)") +
+            "<br><br>Click to toggle.</p></qt>"
+        )
+        self.system_prompt_switch.setStyleSheet("cursor: pointer; font-size: 16pt;")
+        self.system_prompt_switch.mousePressEvent = lambda e: self._toggle_system_prompt_mode()
+        prompt_label_layout.addWidget(self.system_prompt_switch)
+        prompt_label_layout.addStretch()
+        
+        output_layout.addWidget(prompt_label_container)
         output_layout.addWidget(self.output_btn)
         
         # Target Language Dropdown (below output token limit)
