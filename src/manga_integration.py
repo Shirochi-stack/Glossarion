@@ -814,6 +814,10 @@ class MangaTranslationTab(QObject):
         # Do NOT preload big local models by default to avoid startup crashes
         self.preload_local_models_on_open = bool(adv_cfg.get('preload_local_models_on_open', False))
         
+        # Initialize experimental features env var from config
+        experimental_enabled = self.main_gui.config.get('experimental_translate_all', False)
+        os.environ['EXPERIMENTAL_TRANSLATE_ALL'] = '1' if experimental_enabled else '0'
+        
         # Queue for thread-safe GUI updates
         self.update_queue = Queue()
         

@@ -174,6 +174,10 @@ class MangaSettingsDialog(QDialog):
         # Merge with existing config
         self.settings = self._merge_settings(config.get('manga_settings', {}))
         
+        # Initialize experimental features env var from config
+        experimental_enabled = self.main_gui.config.get('experimental_translate_all', False)
+        os.environ['EXPERIMENTAL_TRANSLATE_ALL'] = '1' if experimental_enabled else '0'
+        
         # Show dialog
         self.show_dialog()
             
@@ -4389,6 +4393,67 @@ class MangaSettingsDialog(QDialog):
         # This is called after the Advanced tab is fully created to sync with OCR tab state
         QTimer.singleShot(0, self._sync_rtdetr_concurrency_visibility)
         
+        # Experimental Features section
+        experimental_group = QGroupBox("⚠️ Experimental Features")
+        experimental_group.setStyleSheet("""
+            QGroupBox {
+                color: #ff6b6b;
+                font-weight: bold;
+                border: 1px solid #ff6b6b;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        main_layout.addWidget(experimental_group)
+        experimental_layout = QVBoxLayout(experimental_group)
+        experimental_layout.setContentsMargins(8, 8, 8, 6)
+        experimental_layout.setSpacing(4)
+        
+        # Warning label
+        warning_label = QLabel("⚠️ WARNING: These features are unstable and may cause crashes or unexpected behavior!")
+        warning_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+        warning_label.setWordWrap(True)
+        experimental_layout.addWidget(warning_label)
+        
+        # Experimental translate all checkbox
+        self.experimental_translate_all_checkbox = self._create_styled_checkbox("Enable experimental tools (Translate All, Brush, Eraser) [BROKEN]")
+        self.experimental_translate_all_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #ffaa00;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #ff6b6b;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #ff6b6b;
+                border-color: #ff6b6b;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #ff8888;
+            }
+        """)
+        # Load from config
+        experimental_enabled = self.main_gui.config.get('experimental_translate_all', False)
+        self.experimental_translate_all_checkbox.setChecked(experimental_enabled)
+        experimental_layout.addWidget(self.experimental_translate_all_checkbox)
+        
+        experimental_note = QLabel("Changes apply immediately. Sets EXPERIMENTAL_TRANSLATE_ALL=1")
+        experimental_note_font = QFont('Arial', 9)
+        experimental_note.setFont(experimental_note_font)
+        experimental_note.setStyleSheet("color: #888888;")
+        experimental_layout.addWidget(experimental_note)
+        
         # Add stretch at the end to push all content to the top and prevent sections from stretching
         main_layout.addStretch()
 
@@ -4919,6 +4984,20 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'ram_gate_floor_spinbox'):
                 ram_gate_floor = int(self.ram_gate_floor_spinbox.value())
                 self.settings['advanced']['ram_min_floor_over_baseline_mb'] = ram_gate_floor
+            
+            # Experimental features - save to main config (not manga_settings)
+            if hasattr(self, 'experimental_translate_all_checkbox'):
+                experimental_enabled = bool(self.experimental_translate_all_checkbox.isChecked())
+                self.main_gui.config['experimental_translate_all'] = experimental_enabled
+                # Also set environment variable for immediate effect
+                os.environ['EXPERIMENTAL_TRANSLATE_ALL'] = '1' if experimental_enabled else '0'
+                # Refresh any open preview panels to show/hide experimental tools
+                try:
+                    if hasattr(self.main_gui, 'manga_tab') and self.main_gui.manga_tab:
+                        if hasattr(self.main_gui.manga_tab, 'image_preview_widget') and self.main_gui.manga_tab.image_preview_widget:
+                            self.main_gui.manga_tab.image_preview_widget.refresh_experimental_tools()
+                except Exception as e:
+                    print(f"[EXPERIMENTAL] Failed to refresh preview: {e}")
             
             # Manual Edit settings
             if 'manual_edit' not in self.settings:

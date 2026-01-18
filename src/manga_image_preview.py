@@ -1691,36 +1691,21 @@ class MangaImagePreviewWidget(QWidget):
         self.save_overlay_btn.clicked.connect(self._on_save_overlay_clicked)
         tools_layout.addWidget(self.save_overlay_btn)
         
-        # Conditionally show brush/eraser tools only when experimental flag is enabled
-        enable_experimental_tools = False
-        try:
-            if self.main_gui and hasattr(self.main_gui, 'config') and isinstance(self.main_gui.config, dict):
-                cfg = self.main_gui.config
-                # Either flat key or nested under an experimental block
-                enable_experimental_tools = bool(
-                    cfg.get('experimental_translate_all', False) or
-                    (isinstance(cfg.get('experimental'), dict) and cfg.get('experimental', {}).get('translate_all', False))
-                )
-            # Environment override
-            if not enable_experimental_tools:
-                enable_experimental_tools = (os.getenv('EXPERIMENTAL_TRANSLATE_ALL', '0') == '1')
-        except Exception:
-            enable_experimental_tools = False
+        # Check experimental tools flag
+        enable_experimental_tools = self._is_experimental_enabled()
         
-        if enable_experimental_tools:
-            self.brush_btn = self._create_tool_button("🖌", "Brush")
-            self.brush_btn.setCheckable(True)
-            self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
-            tools_layout.addWidget(self.brush_btn)
-            
-            self.eraser_btn = self._create_tool_button("✏️", "Eraser")
-            self.eraser_btn.setCheckable(True)
-            self.eraser_btn.clicked.connect(lambda: self._set_tool('eraser'))
-            tools_layout.addWidget(self.eraser_btn)
-        else:
-            # Do not create the buttons at all when experimental is disabled
-            self.brush_btn = None
-            self.eraser_btn = None
+        # Always create experimental tools but show/hide based on setting
+        self.brush_btn = self._create_tool_button("🖌", "Brush [EXPERIMENTAL]")
+        self.brush_btn.setCheckable(True)
+        self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
+        tools_layout.addWidget(self.brush_btn)
+        self.brush_btn.setVisible(enable_experimental_tools)
+        
+        self.eraser_btn = self._create_tool_button("✏️", "Eraser [EXPERIMENTAL]")
+        self.eraser_btn.setCheckable(True)
+        self.eraser_btn.clicked.connect(lambda: self._set_tool('eraser'))
+        tools_layout.addWidget(self.eraser_btn)
+        self.eraser_btn.setVisible(enable_experimental_tools)
         
         self.delete_btn = self._create_tool_button("🗑", "Delete Selected")
         self.delete_btn.clicked.connect(self.viewer.delete_selected_rectangle)
@@ -1730,46 +1715,40 @@ class MangaImagePreviewWidget(QWidget):
         self.clear_boxes_btn.clicked.connect(self._on_clear_boxes_clicked)
         tools_layout.addWidget(self.clear_boxes_btn)
         
-        # Only show clear strokes button when experimental tools are enabled
-        if enable_experimental_tools:
-            self.clear_strokes_btn = self._create_tool_button("🧹", "Clear Strokes")
-            self.clear_strokes_btn.clicked.connect(self._clear_strokes)
-            tools_layout.addWidget(self.clear_strokes_btn)
-        else:
-            # Do not create the button at all when experimental is disabled
-            self.clear_strokes_btn = None
+        # Clear strokes button (experimental)
+        self.clear_strokes_btn = self._create_tool_button("🧹", "Clear Strokes [EXPERIMENTAL]")
+        self.clear_strokes_btn.clicked.connect(self._clear_strokes)
+        tools_layout.addWidget(self.clear_strokes_btn)
+        self.clear_strokes_btn.setVisible(enable_experimental_tools)
         
-        # Brush size slider (stretches to fill space) - only show when experimental tools are enabled
-        if enable_experimental_tools:
-            self.size_slider = QSlider(Qt.Orientation.Horizontal)
-            self.size_slider.setMinimum(5)
-            self.size_slider.setMaximum(50)
-            self.size_slider.setValue(20)
-            self.size_slider.setStyleSheet("""
-                QSlider::groove:horizontal {
-                    height: 6px;
-                    background: #3a3a3a;
-                    border-radius: 3px;
-                }
-                QSlider::handle:horizontal {
-                    background: #ffd700;
-                    width: 14px;
-                    height: 14px;
-                    margin: -4px 0;
-                    border-radius: 7px;
-                }
-            """)
-            self.size_slider.valueChanged.connect(self._update_brush_size)
-            self.size_slider.wheelEvent = lambda event: None
-            tools_layout.addWidget(self.size_slider, stretch=1)  # Stretch to fill
-            
-            self.size_label = QLabel("20")
-            self.size_label.setStyleSheet("color: white; min-width: 25px;")
-            tools_layout.addWidget(self.size_label)
-        else:
-            # Do not create the slider/label at all when experimental is disabled
-            self.size_slider = None
-            self.size_label = None
+        # Brush size slider (experimental)
+        self.size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setMinimum(5)
+        self.size_slider.setMaximum(50)
+        self.size_slider.setValue(20)
+        self.size_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #3a3a3a;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #ffd700;
+                width: 14px;
+                height: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
+            }
+        """)
+        self.size_slider.valueChanged.connect(self._update_brush_size)
+        self.size_slider.wheelEvent = lambda event: None
+        tools_layout.addWidget(self.size_slider, stretch=1)
+        self.size_slider.setVisible(enable_experimental_tools)
+        
+        self.size_label = QLabel("20")
+        self.size_label.setStyleSheet("color: white; min-width: 25px;")
+        tools_layout.addWidget(self.size_label)
+        self.size_label.setVisible(enable_experimental_tools)
         
         # Box count
         self.box_count_label = QLabel("0")
@@ -1815,30 +1794,12 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
         
-        # Conditionally show Translate All only when experimental flag is enabled
-        enable_translate_all = False
-        try:
-            if self.main_gui and hasattr(self.main_gui, 'config') and isinstance(self.main_gui.config, dict):
-                cfg = self.main_gui.config
-                # Either flat key or nested under an experimental block
-                enable_translate_all = bool(
-                    cfg.get('experimental_translate_all', False) or
-                    (isinstance(cfg.get('experimental'), dict) and cfg.get('experimental', {}).get('translate_all', False))
-                )
-            # Environment override
-            if not enable_translate_all:
-                enable_translate_all = (os.getenv('EXPERIMENTAL_TRANSLATE_ALL', '0') == '1')
-        except Exception:
-            enable_translate_all = False
-        
-        if enable_translate_all:
-            self.translate_all_btn = self._create_compact_button("Translate All")
-            self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
-            self.translate_all_btn.setToolTip("Translate all images in preview (experimental)")
-            workflow_layout.addWidget(self.translate_all_btn, stretch=1)
-        else:
-            # Do not create the button at all when experimental is disabled
-            self.translate_all_btn = None
+        # Translate All button (experimental) - always create but show/hide
+        self.translate_all_btn = self._create_compact_button("Translate All")
+        self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
+        self.translate_all_btn.setToolTip("Translate all images in preview [EXPERIMENTAL]")
+        workflow_layout.addWidget(self.translate_all_btn, stretch=1)
+        self.translate_all_btn.setVisible(enable_experimental_tools)
         
         layout.addWidget(self.workflow_frame)
         
@@ -2032,6 +1993,40 @@ class MangaImagePreviewWidget(QWidget):
         # Add title as data attribute
         frame.setProperty("title", title)
         return frame
+    
+    def _is_experimental_enabled(self) -> bool:
+        """Check if experimental features are enabled via config or env var."""
+        try:
+            if self.main_gui and hasattr(self.main_gui, 'config') and isinstance(self.main_gui.config, dict):
+                cfg = self.main_gui.config
+                if cfg.get('experimental_translate_all', False):
+                    return True
+                if isinstance(cfg.get('experimental'), dict) and cfg.get('experimental', {}).get('translate_all', False):
+                    return True
+            # Environment override
+            if os.getenv('EXPERIMENTAL_TRANSLATE_ALL', '0') == '1':
+                return True
+        except Exception:
+            pass
+        return False
+    
+    def refresh_experimental_tools(self):
+        """Refresh visibility of experimental tools based on current setting."""
+        enabled = self._is_experimental_enabled()
+        
+        # Update visibility of all experimental widgets
+        if hasattr(self, 'brush_btn') and self.brush_btn:
+            self.brush_btn.setVisible(enabled)
+        if hasattr(self, 'eraser_btn') and self.eraser_btn:
+            self.eraser_btn.setVisible(enabled)
+        if hasattr(self, 'clear_strokes_btn') and self.clear_strokes_btn:
+            self.clear_strokes_btn.setVisible(enabled)
+        if hasattr(self, 'size_slider') and self.size_slider:
+            self.size_slider.setVisible(enabled)
+        if hasattr(self, 'size_label') and self.size_label:
+            self.size_label.setVisible(enabled)
+        if hasattr(self, 'translate_all_btn') and self.translate_all_btn:
+            self.translate_all_btn.setVisible(enabled)
     
     def _active_viewer(self) -> CompactImageViewer:
         """Return the active viewer (always source viewer now)."""
