@@ -2345,11 +2345,15 @@ def _create_response_handling_section(self, parent):
         wait_chunks_desc.setEnabled(graceful_checked)
         if graceful_checked:
             # Reset to default styled checkbox appearance (same as graceful stop)
+            # Use 'none' to force clear previous styles, then set to empty
+            self.wait_for_chunks_checkbox.setStyleSheet("none")
             self.wait_for_chunks_checkbox.setStyleSheet("")
+            self.wait_for_chunks_checkbox.style().unpolish(self.wait_for_chunks_checkbox)
+            self.wait_for_chunks_checkbox.style().polish(self.wait_for_chunks_checkbox)
             wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
         else:
-            self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; } QCheckBox::indicator { background-color: #404040; border: 1px solid #505050; } QCheckBox::indicator:checked { background-color: #505050; }")
-            wait_chunks_desc.setStyleSheet("color: #505050; font-size: 10pt;")
+            self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
+            wait_chunks_desc.setStyleSheet("color: #606060; font-size: 10pt;")
     
     self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
     

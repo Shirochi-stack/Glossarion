@@ -1227,6 +1227,8 @@ Text to analyze:
         
         # Graceful stop - wait for in-flight API calls to complete instead of aborting them
         self.graceful_stop_var = self.config.get('graceful_stop', False)
+        # Wait for chunks - when graceful stop is active, wait for all chunks of a chapter to complete
+        self.wait_for_chunks_var = self.config.get('wait_for_chunks', False)
         
         # Initialize HTTP/Network tuning variables (from Other Settings)
         self.enable_http_tuning_var = self.config.get('enable_http_tuning', False)
