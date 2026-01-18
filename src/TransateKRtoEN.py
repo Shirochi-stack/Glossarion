@@ -9943,16 +9943,29 @@ def main(log_callback=None, stop_callback=None):
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
                         elapsed = 0
                         check_interval = 0.1
+                        chunk_delay_interrupted = False
                         while elapsed < thread_delay:
                             # Read env vars INSIDE loop to catch stop pressed mid-delay
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                            if check_stop() and not (graceful_stop_active and wait_for_chunks):
-                                print(f"🛑 Chunk delay interrupted")
-                                return
+                            if check_stop():
+                                if graceful_stop_active and wait_for_chunks:
+                                    pass  # Continue processing all chunks
+                                elif graceful_stop_active:
+                                    # Graceful stop without wait_for_chunks: break to save partial
+                                    print(f"⏳ Graceful stop — saving completed chunks...")
+                                    chunk_delay_interrupted = True
+                                    break
+                                else:
+                                    # No graceful stop: return immediately
+                                    print(f"🛑 Chunk delay interrupted")
+                                    return
                             sleep_chunk = min(check_interval, thread_delay - elapsed)
                             time.sleep(sleep_chunk)
                             elapsed += sleep_chunk
+                        
+                        if chunk_delay_interrupted:
+                            break  # Exit the chunk loop to save partial results
                 
                 chapter_key_str = content_hash
                 old_key_str = str(idx)
@@ -9991,8 +10004,15 @@ def main(log_callback=None, stop_callback=None):
                     if graceful_stop_active and wait_for_chunks and total_chunks > 1:
                         # Don't stop yet - let chunks complete
                         print(f"⏳ Graceful stop — waiting for remaining chunks ({chunk_idx}/{total_chunks}) of chapter {actual_num}...")
+                    elif graceful_stop_active and total_chunks > 1 and len(translated_chunks) > 0:
+                        # Graceful stop without wait_for_chunks, but we have some chunks: save partial
+                        print(f"⏳ Graceful stop — saving {len(translated_chunks)} completed chunk(s), skipping remaining...")
+                        break  # Exit chunk loop to save partial results
+                    elif graceful_stop_active and total_chunks == 1:
+                        # Single chunk chapter with graceful stop - already completed, continue to save
+                        pass
                     else:
-                        # Actually stop
+                        # No graceful stop - actually stop immediately
                         log_stop_once()
                         print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
                         # Mark any in_progress chapter(s) as failed so the UI reflects the stop
