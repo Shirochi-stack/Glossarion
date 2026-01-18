@@ -2445,23 +2445,12 @@ class MangaImagePreviewWidget(QWidget):
             except Exception:
                 pass
             
-            # Re-enable all workflow buttons after a short delay
-            from PySide6.QtCore import QTimer
-            def restore_buttons():
-                try:
-                    import ImageRenderer
-                    ImageRenderer._enable_workflow_buttons(mi)
-                    # Hide stop button
-                    self.stop_translation_btn.setVisible(False)
-                    self.stop_translation_btn.setEnabled(True)
-                    self.stop_translation_btn.setText("⏹ Stop")
-                    # Re-enable thumbnail list
-                    if hasattr(self, 'thumbnail_list'):
-                        self.thumbnail_list.setEnabled(True)
-                except Exception as e:
-                    print(f"[STOP] Error restoring buttons: {e}")
-            
-            QTimer.singleShot(500, restore_buttons)
+            # NOTE: We do NOT restore buttons here with a fixed timer.
+            # The button stays as "Stopping..." until the background operation
+            # actually completes (either successfully or via cancellation check).
+            # The background threads call _enable_workflow_buttons() in their
+            # finally blocks, which will restore the stop button properly.
+            print("[STOP] Waiting for ongoing operations to complete...")
             
         except Exception as e:
             print(f"[STOP] Error stopping translation: {e}")

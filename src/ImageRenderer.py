@@ -573,6 +573,13 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
             self.update_queue.put(('detect_button_restore', None))
             return
         
+        # ===== CANCELLATION CHECK: After detection, before processing results =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Detection cancelled after detection", "warning")
+            print(f"[DETECT] Cancelled after detection")
+            self.update_queue.put(('detect_button_restore', None))
+            return
+        
         self._log(f"✅ Found {len(boxes)} text regions", "success")
         
         # Merge overlapping/nested boxes to avoid duplicates (match regular pipeline)
@@ -614,6 +621,13 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
         except Exception:
             # No RT-DETR class info available
             pass
+        
+        # ===== CANCELLATION CHECK: Before processing boxes =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Detection cancelled before processing boxes", "warning")
+            print(f"[DETECT] Cancelled before processing boxes")
+            self.update_queue.put(('detect_button_restore', None))
+            return
         
         # Process detection boxes and store regions
         regions = []
@@ -691,6 +705,13 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
                     continue
         
         print(f"[DETECT] Total regions after deduplication: {len(regions)}")
+        
+        # ===== CANCELLATION CHECK: Final check before sending results =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Detection cancelled - NOT sending results", "warning")
+            print(f"[DETECT] Cancelled at final check - NOT sending detect_results")
+            self.update_queue.put(('detect_button_restore', None))
+            return
         
         # Send detection results to main thread using update queue
         self.update_queue.put(('detect_results', {
@@ -1760,6 +1781,11 @@ def _process_detect_results(self, results: dict):
     
     STATE ISOLATION: Only draws rectangles if the detection results are for the currently displayed image.
     """
+    # ===== CANCELLATION CHECK: Discard results if stop was clicked =====
+    if _is_translation_cancelled(self):
+        print(f"[DETECT_RESULTS] Discarding results - stop was clicked")
+        return
+    
     try:
         image_path = results['image_path']
         regions = results['regions']
@@ -2091,6 +2117,13 @@ def _run_clean_background(self, image_path: str, regions: list):
         
         self._log(f"🎨 Creating mask from {len(filtered_regions)} regions ({excluded_count} excluded)", "info")
         
+        # ===== CANCELLATION CHECK: Before creating mask =====
+        if _is_translation_cancelled(self):
+            self._log(f"⏹ Cleaning cancelled before mask creation", "warning")
+            print(f"[CLEAN] Cancelled before mask creation")
+            self.update_queue.put(('clean_button_restore', None))
+            return
+        
         # Create mask from filtered regions
         mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
         
@@ -2196,6 +2229,13 @@ def _run_clean_background(self, image_path: str, regions: list):
                     if inpainter:
                         # Immediately update GUI pool tracker after checkout
                         self.update_queue.put(('update_pool_tracker', None))
+                        
+                        # ===== CANCELLATION CHECK: After getting inpainter =====
+                        if _is_translation_cancelled(self):
+                            self._log(f"⏹ Cleaning cancelled after getting inpainter", "warning")
+                            print(f"[CLEAN] Cancelled after getting inpainter")
+                            self.update_queue.put(('clean_button_restore', None))
+                            return
                     else:
                         self._log(f"⚠️ No inpainter available after {poll_timeout}s timeout", "warning")
                         
@@ -3103,6 +3143,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 
                 # Process each region individually (cropped)
                 for i, region in enumerate(regions):
+                    # ===== CANCELLATION CHECK: In OCR loop =====
+                    if _is_translation_cancelled(self):
+                        print(f"[OCR_REGIONS] Cancelled at region {i+1}/{len(regions)}")
+                        return []
+                    
                     bbox = region.get('bbox', [])
                     if len(bbox) >= 4:
                         region_x, region_y, region_w, region_h = bbox
@@ -4635,6 +4680,11 @@ def _update_rectangles_with_translations(self, translated_texts: list):
 def _add_processing_overlay(self):
     """Add a pulsing overlay effect to indicate processing on the active viewer (source or output)."""
     try:
+        # ===== CANCELLATION CHECK: Don't add overlay if stop was clicked =====
+        if _is_translation_cancelled(self):
+            print(f"[OVERLAY] Not adding overlay - stop was clicked")
+            return
+        
         if not hasattr(self, 'image_preview_widget'):
             return
         
@@ -10122,6 +10172,11 @@ def _get_ocr_config(self) -> dict:
 
 def _process_recognize_results(self, results: dict):
     """Process recognition results on main thread (image-aware)."""
+    # ===== CANCELLATION CHECK: Discard results if stop was clicked =====
+    if _is_translation_cancelled(self):
+        print(f"[RECOG_RESULTS] Discarding results - stop was clicked")
+        return
+    
     try:
         recognized_texts = results['recognized_texts']
         image_path = results.get('image_path') or getattr(self, '_current_image_path', None)
@@ -10170,6 +10225,11 @@ def _process_recognize_results(self, results: dict):
 
 def _process_translate_results(self, results: dict):       
     """Process translation results on main thread - USE PIL RENDERING!"""
+    # ===== CANCELLATION CHECK: Discard results if stop was clicked =====
+    if _is_translation_cancelled(self):
+        print(f"[TRANSLATE_RESULTS] Discarding results - stop was clicked")
+        return
+    
     try:
         translated_texts = results['translated_texts']
         image_path = results.get('image_path')  # This might be cleaned image
