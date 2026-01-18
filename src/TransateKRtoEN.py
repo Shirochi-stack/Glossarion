@@ -4456,15 +4456,10 @@ class BatchTranslationProcessor:
                     # Read env vars INSIDE loop to catch stop pressed mid-chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                    stop_requested = local_stop_cb()
                     
-                    # Skip stop check if graceful stop + wait_for_chunks is enabled
-                    if local_stop_cb() and not (graceful_stop_active and wait_for_chunks and total_chunks > 1):
-                        print("❌ Translation stopped during chunk processing")
-                        chunk_executor.shutdown(wait=False, cancel_futures=True)
-                        raise Exception("Translation stopped by user")
-                    elif local_stop_cb() and graceful_stop_active and wait_for_chunks and total_chunks > 1:
-                        print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {actual_num}...")
-                    
+                    # FIRST: Get the result (future already completed, so this is instant)
+                    # With graceful stop ON, we should save completed work before stopping
                     try:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
 
@@ -4503,6 +4498,18 @@ class BatchTranslationProcessor:
                                     chapter_truncated = True
                             
                             print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
+                            
+                            # AFTER storing result: check if we should stop (for multi-chunk without wait_for_chunks)
+                            # For single-chunk chapters, just continue to save
+                            if stop_requested and total_chunks > 1:
+                                if graceful_stop_active and wait_for_chunks:
+                                    # Wait for all chunks - continue processing
+                                    print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {actual_num}...")
+                                else:
+                                    # Graceful stop but NOT wait_for_chunks: cancel remaining, save what we have
+                                    print(f"⏳ Graceful stop — saving {completed_chunks} completed chunk(s), cancelling remaining...")
+                                    chunk_executor.shutdown(wait=False, cancel_futures=True)
+                                    break  # Exit loop to save partial results
                     except Exception as e:
                         chunk_idx = future_to_chunk[future]
                         print(f"❌ Chunk {chunk_idx}/{total_chunks} failed: {e}")
@@ -4511,10 +4518,19 @@ class BatchTranslationProcessor:
                 print(f"⚠️ Chapter {actual_num}: aborted due to prohibited content; skipping remaining chunks")
                 return False, actual_num, None, None, None
 
-            # Verify all chunks completed
+            # Verify chunks - handle partial completion gracefully
             if None in translated_chunks:
                 missing = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is None]
-                raise Exception(f"Failed to translate chunks: {missing}")
+                completed = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is not None]
+                
+                # If graceful stop was active and we have at least some chunks, that's expected
+                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                if graceful_stop_active and completed:
+                    print(f"⚠️ Chapter {actual_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
+                    # Filter out None values and continue with partial result
+                    translated_chunks = [c for c in translated_chunks if c is not None]
+                else:
+                    raise Exception(f"Failed to translate chunks: {missing}")
             
             # Combine all chunks
             if total_chunks > 1:
