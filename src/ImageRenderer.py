@@ -2819,27 +2819,67 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                     resolved_model_path = None
             
             # Use shared inpainter via pool - check out from class-level pool
+            # IMPORTANT: Wait/poll for preloaded inpainter instead of creating new instance
             if resolved_model_path and os.path.exists(resolved_model_path):
                 try:
                     from manga_translator import MangaTranslator
                     from local_inpainter import LocalInpainter
+                    import time
                     
                     # Normalize model path to match pool key
                     resolved_model_path = os.path.abspath(os.path.normpath(resolved_model_path))
                     key = (local_model, resolved_model_path)
                     
-                    # Check out inpainter from class-level pool
+                    # Poll for inpainter from pool with timeout
+                    # This waits for preloading to complete instead of creating a new instance
                     inpainter = None
-                    with MangaTranslator._inpaint_pool_lock:
-                        rec = MangaTranslator._inpaint_pool.get(key)
+                    poll_timeout = 60  # Wait up to 60 seconds for preloading
+                    poll_interval = 0.5  # Check every 500ms
+                    start_time = time.time()
+                    attempt = 0
+                    
+                    while time.time() - start_time < poll_timeout:
+                        attempt += 1
                         
-                        # If pool doesn't exist or has no spares, initialize it
-                        if not rec or not rec.get('spares'):
-                            print(f"[INPAINT_SYNC] Pool not initialized for {local_model}, initializing now...")
-                            # Create a new inpainter and add it to the pool
-                            new_inpainter = LocalInpainter()
-                            if new_inpainter.load_model(local_model, resolved_model_path):
-                                # Initialize pool record if needed
+                        # Check for cancellation while polling
+                        if _is_translation_cancelled(self):
+                            print(f"[INPAINT_SYNC] Cancelled while waiting for inpainter")
+                            return None
+                        
+                        with MangaTranslator._inpaint_pool_lock:
+                            rec = MangaTranslator._inpaint_pool.get(key)
+                            
+                            if rec and rec.get('spares'):
+                                spares = rec.get('spares', [])
+                                checked_out = rec.setdefault('checked_out', [])
+                                
+                                # Find an available spare that's fully loaded
+                                for spare in spares:
+                                    if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                        checked_out.append(spare)
+                                        inpainter = spare
+                                        print(f"[INPAINT_SYNC] Checked out inpainter from pool ({len(checked_out)}/{len(spares)} in use)")
+                                        break
+                        
+                        if inpainter:
+                            break
+                        
+                        # Log waiting status periodically
+                        elapsed = time.time() - start_time
+                        if attempt == 1 or (elapsed >= 2 and int(elapsed) % 5 == 0):
+                            print(f"[INPAINT_SYNC] Waiting for preloaded inpainter... ({int(elapsed)}s)")
+                            self._log(f"⏳ Waiting for inpainter to load... ({int(elapsed)}s)", "info")
+                        
+                        time.sleep(poll_interval)
+                    
+                    # If still no inpainter after timeout, create one as last resort
+                    if not inpainter:
+                        print(f"[INPAINT_SYNC] Timeout waiting for pool, creating new inpainter...")
+                        self._log(f"⚠️ Inpainter pool not ready, loading new instance...", "warning")
+                        new_inpainter = LocalInpainter()
+                        if new_inpainter.load_model(local_model, resolved_model_path):
+                            with MangaTranslator._inpaint_pool_lock:
+                                rec = MangaTranslator._inpaint_pool.get(key)
                                 if not rec:
                                     MangaTranslator._inpaint_pool[key] = {
                                         'spares': [],
@@ -2848,30 +2888,13 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                                         'model_path': resolved_model_path
                                     }
                                     rec = MangaTranslator._inpaint_pool[key]
-                                
-                                # Add to spares
                                 rec['spares'].append(new_inpainter)
-                                print(f"[INPAINT_SYNC] Initialized pool with 1 inpainter for {local_model}")
-                            else:
-                                print(f"[INPAINT_SYNC] Failed to load inpainter model")
-                        
-                        # Now try to check out from pool
-                        if rec and rec.get('spares'):
-                            spares = rec.get('spares', [])
-                            checked_out = rec.setdefault('checked_out', [])
-                            
-                            # Find an available spare
-                            for spare in spares:
-                                if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
-                                    checked_out.append(spare)
-                                    inpainter = spare
-                                    print(f"[INPAINT_SYNC] Checked out inpainter from pool ({len(checked_out)}/{len(spares)} in use)")
-                                    break
-                            
-                            if not inpainter:
-                                print(f"[INPAINT_SYNC] All {len(spares)} inpainters are checked out, waiting...")
+                                rec['checked_out'].append(new_inpainter)
+                                inpainter = new_inpainter
+                            print(f"[INPAINT_SYNC] Created and checked out new inpainter")
                         else:
-                            print(f"[INPAINT_SYNC] Failed to initialize pool for {local_model}")
+                            print(f"[INPAINT_SYNC] Failed to load new inpainter model")
+                            return None
                     
                     if inpainter:
                         # Store key for return
