@@ -643,8 +643,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 target_w = target_h = max(label.minimumWidth(), label.minimumHeight(), label.maximumWidth(), label.maximumHeight(), 36)
             if target_w <= 0 or target_h <= 0:
                 target_w = target_h = 36
-            # Scale to 120% of container size for larger icon
-            inner_size = int(min(target_w, target_h) * 1.20)
+            # Scale to 115% of container size for larger icon
+            inner_size = int(min(target_w, target_h) * 1.15)
             base_pm = base_pm.scaled(inner_size, inner_size,
                                      Qt.KeepAspectRatio,
                                      Qt.SmoothTransformation)
