@@ -5913,32 +5913,46 @@ def _update_image_preview_with_result(self, result_image, original_path):
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Failed to persist state: {e}")
         
-        # Don't reload the source image - this preserves rectangles!
-        # Instead, just update the Output tab with the cleaned image (same as Clean button)
+        # Switch display mode to 'cleaned' and update the preview (same behavior as Clean button)
         try:
-            if hasattr(self.image_preview_widget, 'output_viewer'):
-                self.image_preview_widget.output_viewer.load_image(cleaned_path)
-                self.image_preview_widget.current_translated_path = cleaned_path
-                print(f"[UPDATE_PREVIEW] Updated output tab with cleaned image (source unchanged)")
-                
-                # Don't auto-switch tabs - let user manually switch to see result
-                # This matches the behavior of the main Clean button
-                
-                # Add sponge button refresh logic (same as main Clean button)
-                # If sponge button is enabled, also refresh source tab with cleaned image
-                try:
-                    if (hasattr(self.image_preview_widget, 'cleaned_images_enabled') and 
-                        self.image_preview_widget.cleaned_images_enabled and
-                        '_cleaned' in cleaned_path):
-                        print(f"[UPDATE_PREVIEW] Refreshing source tab with cleaned image due to sponge button being enabled")
-                        # Reload the source image which will automatically pick up the cleaned version
-                        # due to the sponge button being enabled
-                        self.image_preview_widget.viewer.load_image(self.image_preview_widget._check_for_cleaned_image(original_path))
-                except Exception as refresh_err:
-                    print(f"[UPDATE_PREVIEW] Failed to refresh source tab: {refresh_err}")
+            ipw = self.image_preview_widget
+            
+            # Update the source_display_mode to 'cleaned' so user sees the result
+            ipw.source_display_mode = 'cleaned'
+            ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+            
+            # Update the cleaned toggle button appearance to match 'cleaned' state
+            if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                ipw.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
+                ipw.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
+                ipw.cleaned_toggle_btn.setStyleSheet("""
+                    QToolButton {
+                        background-color: #4a7ba7;
+                        border: 2px solid #5a9fd4;
+                        font-size: 12pt;
+                        min-width: 32px;
+                        min-height: 32px;
+                        max-width: 36px;
+                        max-height: 36px;
+                        padding: 3px;
+                        border-radius: 3px;
+                        color: white;
+                    }
+                    QToolButton:hover {
+                        background-color: #5a9fd4;
+                    }
+                """)
+            
+            # Store the cleaned path
+            ipw.current_translated_path = cleaned_path
+            print(f"[UPDATE_PREVIEW] Switched display mode to 'cleaned'")
+            
+            # Reload the image to show the cleaned version while preserving rectangles
+            ipw.load_image(original_path, preserve_rectangles=True, preserve_text_overlays=True)
+            print(f"[UPDATE_PREVIEW] Refreshed preview with cleaned image")
                     
         except Exception as e:
-            print(f"[UPDATE_PREVIEW] Failed to update output tab: {e}")
+            print(f"[UPDATE_PREVIEW] Failed to update preview: {e}")
         
     except Exception as e:
         print(f"[UPDATE_PREVIEW] Error updating preview: {e}")

@@ -10173,6 +10173,37 @@ class MangaTranslationTab(QObject):
                                 except Exception as render_err:
                                     print(f"[TRANSLATE_THIS_TEXT] Render error: {render_err}")
                                     self._log(f"⚠️ Failed to render to output file: {render_err}", "warning")
+                                
+                                # Switch display mode to 'translated' so user sees the result
+                                try:
+                                    ipw = self.image_preview_widget
+                                    ipw.source_display_mode = 'translated'
+                                    ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
+                                    
+                                    # Update the toggle button appearance to match 'translated' state
+                                    if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                                        ipw.cleaned_toggle_btn.setText("✒️")  # Pen for translated output
+                                        ipw.cleaned_toggle_btn.setToolTip("Showing translated output (click to cycle)")
+                                        ipw.cleaned_toggle_btn.setStyleSheet("""
+                                            QToolButton {
+                                                background-color: #28a745;
+                                                border: 2px solid #34ce57;
+                                                font-size: 12pt;
+                                                min-width: 32px;
+                                                min-height: 32px;
+                                                max-width: 36px;
+                                                max-height: 36px;
+                                                padding: 3px;
+                                                border-radius: 3px;
+                                                color: white;
+                                            }
+                                            QToolButton:hover {
+                                                background-color: #34ce57;
+                                            }
+                                        """)
+                                    print(f"[TRANSLATE_THIS_TEXT] Switched display mode to 'translated'")
+                                except Exception as mode_err:
+                                    print(f"[TRANSLATE_THIS_TEXT] Failed to switch display mode: {mode_err}")
                         except Exception as file_render_err:
                             print(f"[TRANSLATE_THIS_TEXT] File render setup error: {file_render_err}")
                             self._log(f"⚠️ Failed to setup file rendering: {file_render_err}", "warning")
