@@ -159,12 +159,23 @@ def _reset_cancellation_flags(self):
         except Exception as e:
             print(f"[CANCEL_RESET] MangaTranslator reset failed: {e}")
         
+        # CRITICAL: Reset instance-level cancel_requested on MangaTranslator
+        # _check_stop() latches this to True and keeps returning True!
+        try:
+            if hasattr(self, '_manga_translator') and self._manga_translator:
+                self._manga_translator.cancel_requested = False
+                if hasattr(self._manga_translator, 'reset_stop_flags'):
+                    self._manga_translator.reset_stop_flags()
+                print(f"[CANCEL_RESET] Reset _manga_translator.cancel_requested and stop flags")
+        except Exception as e:
+            print(f"[CANCEL_RESET] _manga_translator.cancel_requested reset failed: {e}")
+        
         # Reset UnifiedClient global cancellation
         try:
             from unified_api_client import UnifiedClient
             was_uc_cancelled = UnifiedClient.is_globally_cancelled()
             UnifiedClient.set_global_cancellation(False)
-            print(f"[CANCEL_RESET] UnifiedClient was {was_uc_cancelled}, now reset")
+            print(f"[CANCEL_RESET] UnifiedClient class-level was {was_uc_cancelled}, now reset")
         except Exception as e:
             print(f"[CANCEL_RESET] UnifiedClient reset failed: {e}")
         
@@ -176,26 +187,53 @@ def _reset_cancellation_flags(self):
         except Exception as e:
             print(f"[CANCEL_RESET] set_stop_flag failed: {e}")
         
+        # Reset module-level _stop_requested in TransateKRtoEN
+        # This flag is checked by UnifiedClient._is_stop_requested()
+        try:
+            from TransateKRtoEN import set_stop_flag as translate_set_stop_flag
+            translate_set_stop_flag(False)
+            print(f"[CANCEL_RESET] TransateKRtoEN _stop_requested reset")
+        except Exception as e:
+            print(f"[CANCEL_RESET] TransateKRtoEN set_stop_flag failed: {e}")
+        
+        # CRITICAL: Reset instance-level _cancelled flag on any existing UnifiedClient instances
+        # This flag gets latched to True and prevents API calls until explicitly reset
+        try:
+            # Reset on manga_translator's unified_client if it exists
+            if hasattr(self, '_manga_translator') and self._manga_translator:
+                if hasattr(self._manga_translator, 'unified_client') and self._manga_translator.unified_client:
+                    self._manga_translator.unified_client._cancelled = False
+                    print(f"[CANCEL_RESET] Reset _manga_translator.unified_client._cancelled")
+            # Reset on translator's unified_client if it exists
+            if hasattr(self, 'translator') and self.translator:
+                if hasattr(self.translator, 'unified_client') and self.translator.unified_client:
+                    self.translator.unified_client._cancelled = False
+                    print(f"[CANCEL_RESET] Reset translator.unified_client._cancelled")
+        except Exception as e:
+            print(f"[CANCEL_RESET] UnifiedClient instance reset failed: {e}")
+        
         # CRITICAL: Reset OCR manager's _stopped flag
         # This flag gets latched to True and must be explicitly reset
         if hasattr(self, 'ocr_manager') and self.ocr_manager:
             if hasattr(self.ocr_manager, 'reset_stop_flags'):
                 self.ocr_manager.reset_stop_flags()
-            # Also reset individual providers
-            if hasattr(self.ocr_manager, '_providers'):
-                for provider in self.ocr_manager._providers.values():
+                print(f"[CANCEL_RESET] Called ocr_manager.reset_stop_flags()")
+            # Also reset individual providers (attribute is 'providers' not '_providers')
+            if hasattr(self.ocr_manager, 'providers'):
+                for name, provider in self.ocr_manager.providers.items():
                     if hasattr(provider, 'reset_stop_flags'):
                         provider.reset_stop_flags()
                     if hasattr(provider, '_stopped'):
                         provider._stopped = False
+                print(f"[CANCEL_RESET] Reset {len(self.ocr_manager.providers)} OCR provider flags")
         
         # Reset translator's OCR manager if available
         if hasattr(self, 'translator') and self.translator:
             if hasattr(self.translator, 'ocr_manager') and self.translator.ocr_manager:
                 if hasattr(self.translator.ocr_manager, 'reset_stop_flags'):
                     self.translator.ocr_manager.reset_stop_flags()
-                if hasattr(self.translator.ocr_manager, '_providers'):
-                    for provider in self.translator.ocr_manager._providers.values():
+                if hasattr(self.translator.ocr_manager, 'providers'):
+                    for name, provider in self.translator.ocr_manager.providers.items():
                         if hasattr(provider, 'reset_stop_flags'):
                             provider.reset_stop_flags()
                         if hasattr(provider, '_stopped'):
@@ -390,6 +428,10 @@ def _render_single_region_overlay(region_data: dict, image_size: tuple, render_s
     
 def _on_detect_text_clicked(self):
     """Detect text button - run detection in background thread"""
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    # This MUST happen on the main thread BEFORE any cancellation checks
+    _reset_cancellation_flags(self)
+    
     try:
         # GUARD: Prevent processing during rendering
         if hasattr(self, '_rendering_in_progress') and self._rendering_in_progress:
@@ -3663,6 +3705,10 @@ def _on_recognize_text_clicked(self):
     print("[DEBUG] _on_recognize_text_clicked called!")
     self._log("🐛 DEBUG: Recognize text button clicked", "debug")
     
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    # This MUST happen on the main thread BEFORE any cancellation checks
+    _reset_cancellation_flags(self)
+    
     try:
         # Debug: Check widget existence
         print(f"[DEBUG] Has image_preview_widget: {hasattr(self, 'image_preview_widget')}")
@@ -3874,6 +3920,10 @@ def _restore_recognize_button(self):
 def _on_translate_text_clicked(self):
     """Translate recognized text using the selected API - runs full pipeline if needed"""
     self._log("🐛 Translate button clicked - starting translation", "info")
+    
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    # This MUST happen on the main thread BEFORE any cancellation checks
+    _reset_cancellation_flags(self)
     
     try:
         # GUARD: Prevent processing during rendering
@@ -10121,6 +10171,10 @@ def _restore_translate_button(self):
 def _on_translate_all_clicked(self):
     """Translate all images in the preview list"""
     self._log("🚀 Starting batch translation of all images", "info")
+    
+    # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
+    # This MUST happen on the main thread BEFORE any cancellation checks
+    _reset_cancellation_flags(self)
     
     try:
         # Mark batch mode active (used to suppress preview shuffles)
