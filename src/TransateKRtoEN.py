@@ -2732,6 +2732,7 @@ class ContentProcessor:
     def emergency_restore_images(text, original_html=None, verbose=True):
         """Emergency restoration of images lost during translation - Filename Pattern Search"""
         if not original_html or not text:
+            print(f"🖼️ [DEBUG] Emergency restore skipped: original_html={bool(original_html)}, text={bool(text)}")
             return text
             
         def log(message):
@@ -2748,7 +2749,9 @@ class ContentProcessor:
             
             # Extract images from source
             orig_images = soup_orig.find_all('img')
+            print(f"🖼️ [DEBUG] Found {len(orig_images)} images in original, {len(soup_text.find_all('img'))} in translation")
             if not orig_images:
+                print(f"🖼️ [DEBUG] No images in original HTML, skipping restoration")
                 return text
                 
             # Extract images from translation
@@ -2789,16 +2792,28 @@ class ContentProcessor:
                 for src, orig_img in missing_images:
                     # Extract just the filename from the path
                     filename = os.path.basename(src)
+                    log(f"   🔍 Processing missing image: {src}")
                     
-                    # Strip response_ prefix and extension to get the core name
-                    core_name = filename
-                    if core_name.lower().startswith('response_'):
-                        core_name = core_name[9:]  # Remove 'response_'
-                    core_name = os.path.splitext(core_name)[0]  # Remove extension
-                    
-                    # Search for the core name in the SOURCE HTML to find its position
-                    pattern = re.escape(core_name)
+                    # Try to find with full filename first (most specific)
+                    pattern = re.escape(filename)
                     source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
+                    log(f"      Searching for full filename '{filename}': {len(source_matches)} matches")
+                    
+                    # If not found, try without response_ prefix
+                    if not source_matches and filename.lower().startswith('response_'):
+                        filename_no_prefix = filename[9:]  # Remove 'response_'
+                        pattern = re.escape(filename_no_prefix)
+                        source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
+                        log(f"      Searching without response_ prefix '{filename_no_prefix}': {len(source_matches)} matches")
+                    
+                    # If still not found, try core name without extension (least specific)
+                    if not source_matches:
+                        core_name = os.path.splitext(filename)[0]
+                        if core_name.lower().startswith('response_'):
+                            core_name = core_name[9:]
+                        pattern = re.escape(core_name)
+                        source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
+                        log(f"      Searching for core name '{core_name}': {len(source_matches)} matches")
                     
                     if source_matches:
                         # Found the filename in source! Calculate its relative position
@@ -3692,8 +3707,11 @@ class TranslationProcessor:
                     result = convert_enhanced_text_to_html(result, c)
                 
                 # Emergency Image Restoration (if enabled)
+                print(f"🔍 [DEBUG] EMERGENCY_IMAGE_RESTORE={self.config.EMERGENCY_IMAGE_RESTORE}, result={bool(result)}, chunk_html={bool(chunk_html)}")
                 if result and self.config.EMERGENCY_IMAGE_RESTORE:
+                    print(f"🖼️ [DEBUG] Calling emergency_restore_images...")
                     result = ContentProcessor.emergency_restore_images(result, chunk_html)
+                    print(f"🖼️ [DEBUG] emergency_restore_images completed")
                     
                 retry_needed = False
                 retry_reason = ""
@@ -4557,6 +4575,13 @@ class BatchTranslationProcessor:
             if result and chapter.get("enhanced_extraction", False):
                 print(f"🔄 Converting translated markdown back to HTML...")
                 result = convert_enhanced_text_to_html(result, chapter)
+            
+            # Emergency Image Restoration (if enabled)
+            print(f"🔍 [DEBUG BATCH] EMERGENCY_IMAGE_RESTORE={self.config.EMERGENCY_IMAGE_RESTORE}, result={bool(result)}, chapter_body={bool(chapter_body)}")
+            if result and self.config.EMERGENCY_IMAGE_RESTORE:
+                print(f"🖼️ [DEBUG BATCH] Calling emergency_restore_images...")
+                result = ContentProcessor.emergency_restore_images(result, chapter_body)
+                print(f"🖼️ [DEBUG BATCH] emergency_restore_images completed")
             
             if self.config.REMOVE_AI_ARTIFACTS:
                 result = ContentProcessor.clean_ai_artifacts(result, True)
