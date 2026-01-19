@@ -8840,7 +8840,8 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                     # Update all regions - use current rectangle positions for ALL
                     if int(idx_key) < len(rectangles):
                         rect = rectangles[int(idx_key)].sceneBoundingRect()
-                        sx, sy, sw, sh = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                        # Use round() for consistent rounding across all regions
+                        sx, sy, sw, sh = round(rect.x()), round(rect.y()), round(rect.width()), round(rect.height())
                     else:
                         # Fall back to last position if rectangle doesn't exist
                         lp = last_pos.get(str(int(idx_key)))
@@ -8851,7 +8852,9 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                     # Edited region — use current rectangle
                     if int(idx_key) < len(rectangles):
                         rect = rectangles[int(idx_key)].sceneBoundingRect()
-                        sx, sy, sw, sh = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                        # Use round() for consistent rounding
+                        sx, sy, sw, sh = round(rect.x()), round(rect.y()), round(rect.width()), round(rect.height())
+                        print(f"[DEBUG] Region {idx_key} (MOVED) using current position: [{sx}, {sy}, {sw}, {sh}]")
                     else:
                         lp = last_pos.get(str(int(idx_key)))
                         if not lp:
@@ -8863,9 +8866,14 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                     if not lp:
                         if int(idx_key) < len(rectangles):
                             rect = rectangles[int(idx_key)].sceneBoundingRect()
-                            lp = [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
+                            # CRITICAL FIX: Use round() instead of int() for consistent rounding
+                            # int() truncates, which can cause 1-pixel shifts between regions
+                            lp = [round(rect.x()), round(rect.y()), round(rect.width()), round(rect.height())]
+                            print(f"[DEBUG] Region {idx_key} (unedited) using current position: {lp} (no last_pos available)")
                         else:
                             continue
+                    else:
+                        print(f"[DEBUG] Region {idx_key} (unedited) using locked last_pos: {lp}")
                     sx, sy, sw, sh = map(int, lp)
                 
                 region = TextRegion(
@@ -8909,6 +8917,7 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                     print(f"[DEBUG] Using cleaned image as base for incremental preview")
                 
                 # Scale regions (from source coords) to base image dimensions if needed
+                # CRITICAL: Only scale the MOVED region, not locked regions which are already in base coords
                 try:
                     from PIL import Image as _PILImage
                     base_w, base_h = _PILImage.open(base_image).size
@@ -8918,9 +8927,24 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                         print(f"[DEBUG] Scaling regions from src ({src_w}x{src_h}) -> base ({base_w}x{base_h}) with factors (sx={sx:.4f}, sy={sy:.4f})")
                         from manga_translator import TextRegion as _TR
                         scaled = []
-                        for r in regions:
-                            x, y, w, h = r.bounding_box
-                            nx = int(round(x * sx)); ny = int(round(y * sy)); nw = int(round(w * sx)); nh = int(round(h * sy))
+                        for idx, r in enumerate(regions):
+                            # Check if this region came from last_pos (already scaled) or current rectangle (needs scaling)
+                            # The moved region (region_index) always needs scaling since it's from current rectangle
+                            idx_key = sorted(self._translation_data.keys())[idx]
+                            is_moved = (region_index is not None and int(idx_key) == int(region_index))
+                            has_last_pos = str(int(idx_key)) in last_pos
+                            
+                            # Only scale if it's the moved region OR if there's no last_pos (first time)
+                            if is_moved or not has_last_pos:
+                                x, y, w, h = r.bounding_box
+                                nx = int(round(x * sx)); ny = int(round(y * sy)); nw = int(round(w * sx)); nh = int(round(h * sy))
+                                print(f"[DEBUG] Scaling region {idx_key}: {[x,y,w,h]} -> {[nx,ny,nw,nh]} (is_moved={is_moved})")
+                            else:
+                                # Already in base coords from last_pos - don't scale again!
+                                x, y, w, h = r.bounding_box
+                                nx, ny, nw, nh = x, y, w, h
+                                print(f"[DEBUG] NOT scaling region {idx_key}: {[x,y,w,h]} (using locked last_pos)")
+                            
                             v = [(nx, ny), (nx + nw, ny), (nx + nw, ny + nh), (nx, ny + nh)]
                             nr = _TR(text=r.text, vertices=v, bounding_box=(nx, ny, nw, nh), confidence=r.confidence, region_type=r.region_type)
                             nr.translated_text = r.translated_text
@@ -8956,7 +8980,13 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                 except Exception as e:
                     print(f"[DEBUG] Failed to generate output path: {e}")
                     output_path = None
-                _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
+                
+                # CRITICAL FIX: Disable overlap adjustment for manual position updates
+                # When user manually positions rectangles, we should respect their positions
+                # and not automatically shift them to prevent overlaps
+                # Pass a flag to the render function to disable overlap adjustment
+                print(f"[DEBUG] Disabling overlap adjustment for manual position update")
+                _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False, disable_overlap_adjustment=True)
                 return True  # Success!
             else:
                 print(f"[DEBUG] ❌ No regions to render")
@@ -9142,11 +9172,12 @@ def save_positions_and_rerender(self):
         import traceback
         print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
 
-def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True):
+def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True, disable_overlap_adjustment: bool = False):
     """Render translated text using MangaTranslator's PIL pipeline.
     - image_bgr: optional OpenCV BGR image to render on (in-memory, preferred if provided)
     - output_path: where to save the rendered image (isolated per-image folder)
     - original_image_path: the original source image path for mapping/state
+    - disable_overlap_adjustment: if True, disable automatic overlap adjustment for manual positioning
     """
     print(f"{'='*80}\n")
     
@@ -9340,10 +9371,21 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         
         print(f"[RENDER] Filtered regions: {len(regions)} -> {len(filtered_regions)} (excluded {len(regions) - len(filtered_regions)} regions)")
         
-        # Call MangaTranslator's render_translated_text method with filtered regions
-        print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
-        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
-        print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
+        # Set overlap adjustment flag if requested
+        if disable_overlap_adjustment:
+            print(f"[RENDER] Setting _disable_overlap_adjustment flag on translator instance")
+            translator_inst._disable_overlap_adjustment = True
+        
+        try:
+            # Call MangaTranslator's render_translated_text method with filtered regions
+            print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
+            rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
+            print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
+        finally:
+            # Always restore the flag
+            if disable_overlap_adjustment:
+                translator_inst._disable_overlap_adjustment = False
+                print(f"[RENDER] Restored _disable_overlap_adjustment flag to False")
         
         # Convert back to PIL and save
         rendered_rgb = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
