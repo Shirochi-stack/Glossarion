@@ -2829,13 +2829,50 @@ class ContentProcessor:
                         insert_pos = int(relative_pos * text_len)
                         log(f"      Initial insert position in translation: {insert_pos}/{text_len}")
                         
-                        # Find a good insertion point (after a tag close, not in the middle of text)
-                        # Search backwards for the nearest '>' to insert after a complete tag
+                        # Find a good insertion point - prefer after closing tag or before opening tag
+                        # Search backwards for '>' or forwards for '<' within reasonable distance
                         original_insert_pos = insert_pos
-                        while insert_pos > 0 and text_str[insert_pos] != '>':
-                            insert_pos -= 1
-                        insert_pos += 1  # Insert after the '>'
-                        log(f"      Adjusted insert position to after tag: {insert_pos} (moved {original_insert_pos - insert_pos} chars back)")
+                        max_search_distance = 200
+                        
+                        # Search backwards for closing tag
+                        backward_pos = insert_pos
+                        search_start = max(0, insert_pos - max_search_distance)
+                        while backward_pos > search_start and text_str[backward_pos] != '>':
+                            backward_pos -= 1
+                        backward_found = (text_str[backward_pos] == '>')
+                        backward_distance = insert_pos - backward_pos if backward_found else max_search_distance + 1
+                        
+                        # Search forwards for opening tag (but skip closing tags like </h1>)
+                        forward_pos = insert_pos
+                        search_end = min(len(text_str), insert_pos + max_search_distance)
+                        forward_found = False
+                        while forward_pos < search_end:
+                            if text_str[forward_pos] == '<':
+                                # Check if it's a closing tag
+                                if forward_pos + 1 < len(text_str) and text_str[forward_pos + 1] != '/':
+                                    # It's an opening tag, use it
+                                    forward_found = True
+                                    break
+                                # It's a closing tag, keep searching
+                            forward_pos += 1
+                        forward_distance = forward_pos - insert_pos if forward_found else max_search_distance + 1
+                        
+                        # Use whichever is closer
+                        if backward_found and backward_distance <= forward_distance:
+                            insert_pos = backward_pos + 1  # After the '>'
+                            log(f"      Adjusted to after closing tag at position {insert_pos} (moved {original_insert_pos - insert_pos} chars back)")
+                        elif forward_found:
+                            insert_pos = forward_pos  # Before the '<'
+                            log(f"      Adjusted to before opening tag at position {insert_pos} (moved {insert_pos - original_insert_pos} chars forward)")
+                        else:
+                            log(f"      No nearby tags found within {max_search_distance} chars, using original position: {insert_pos}")
+                        
+                        # Show context around insertion point
+                        context_start = max(0, insert_pos - 30)
+                        context_end = min(len(text_str), insert_pos + 30)
+                        before_context = text_str[context_start:insert_pos]
+                        after_context = text_str[insert_pos:context_end]
+                        log(f"      Context: ...{before_context}[INSERT HERE]{after_context}...")
                         
                         # Create the image tag HTML
                         img_html = f'<p><img src="{src}"'
