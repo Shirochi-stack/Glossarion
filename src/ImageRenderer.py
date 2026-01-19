@@ -10092,7 +10092,7 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
                 btn.setEnabled(False)
         
         # Disable editing tools during processing
-        editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn']
+        editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn', 'box_draw_btn', 'circle_draw_btn', 'lasso_btn']
         for btn_name in editing_buttons:
             if hasattr(ipw, btn_name):
                 btn = getattr(ipw, btn_name)
@@ -10138,7 +10138,7 @@ def _enable_workflow_buttons(self):
             self.start_button.setEnabled(True)
         
         # Re-enable editing tools after processing
-        editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn']
+        editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn', 'box_draw_btn', 'circle_draw_btn', 'lasso_btn']
         for btn_name in editing_buttons:
             if hasattr(ipw, btn_name):
                 btn = getattr(ipw, btn_name)
