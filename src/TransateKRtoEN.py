@@ -6850,6 +6850,18 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                             processed_lines.append(line)
                     html = '\n'.join(processed_lines)
                 
+                # CRITICAL: Unescape img tags that were converted to HTML entities
+                # Pattern matches: &lt;img ... /&gt; where the tag ends with /
+                img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', html, flags=re.IGNORECASE))
+                if img_count > 0:
+                    print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (markdown2)")
+                html = re.sub(
+                    r'&lt;(img\s[^>]*?/)&gt;',
+                    r'<\1>',
+                    html,
+                    flags=re.IGNORECASE
+                )
+                
                 return html
         except ImportError:
             print("⚠️ markdown2 not available, falling back to markdown library")
@@ -6902,6 +6914,18 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                     elif line:
                         processed_lines.append(line)
                 html = '\n'.join(processed_lines)
+            
+            # CRITICAL: Unescape img tags that were converted to HTML entities
+            # Pattern matches: &lt;img ... /&gt; where the tag ends with /
+            img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', html, flags=re.IGNORECASE))
+            if img_count > 0:
+                print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (markdown)")
+            html = re.sub(
+                r'&lt;(img\s[^>]*?/)&gt;',
+                r'<\1>',
+                html,
+                flags=re.IGNORECASE
+            )
             
             return html
             
