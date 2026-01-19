@@ -1306,9 +1306,9 @@ class ImprovedAIHunterDetection:
         else:
             text = re.sub(r'<[^>]+>', '', text)
         
-        # Normalize unicode
+        # Normalize unicode - use NFC to preserve Korean/CJK characters
         if prep_config.get('normalize_unicode', True):
-            text = unicodedata.normalize('NFKD', text)
+            text = unicodedata.normalize('NFC', text)
         
         # Remove extra whitespace
         if prep_config.get('remove_extra_whitespace', True):
