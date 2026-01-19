@@ -2401,6 +2401,8 @@ def _process_single_html_file(
             chapter_info["enhanced_extraction"] = True
             chapter_info["enhanced_filtering"] = enhanced_filtering
             chapter_info["preserve_structure"] = preserve_structure
+            # Store original HTML for image restoration
+            chapter_info["original_html"] = html_content
         
         # Add merge info if applicable
         if not disable_merging and file_path in merge_candidates:

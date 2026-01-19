@@ -2730,7 +2730,16 @@ class ContentProcessor:
     
     @staticmethod
     def emergency_restore_images(text, original_html=None, verbose=True):
-        """Emergency restoration of images lost during translation - Filename Pattern Search"""
+        """Emergency restoration of images lost during translation - Filename Pattern Search
+        
+        Args:
+            text: Translated HTML or markdown text
+            original_html: Original HTML before translation (can be actual HTML or converted markdown)
+            verbose: Whether to print debug messages
+            
+        Returns:
+            Text with restored image tags
+        """
         if not original_html or not text:
             return text
             
@@ -3748,7 +3757,9 @@ class TranslationProcessor:
                 
                 # Emergency Image Restoration (if enabled)
                 if result and self.config.EMERGENCY_IMAGE_RESTORE:
-                    result = ContentProcessor.emergency_restore_images(result, chunk_html)
+                    # Use original HTML if available (for enhanced extraction), otherwise use chunk_html
+                    source_html = c.get('original_html', chunk_html)
+                    result = ContentProcessor.emergency_restore_images(result, source_html)
                     
                 retry_needed = False
                 retry_reason = ""
@@ -4615,7 +4626,9 @@ class BatchTranslationProcessor:
             
             # Emergency Image Restoration (if enabled)
             if result and self.config.EMERGENCY_IMAGE_RESTORE:
-                result = ContentProcessor.emergency_restore_images(result, chapter_body)
+                # Use original HTML if available (for enhanced extraction), otherwise use chapter_body
+                source_html = chapter.get('original_html', chapter_body)
+                result = ContentProcessor.emergency_restore_images(result, source_html)
             
             if self.config.REMOVE_AI_ARTIFACTS:
                 result = ContentProcessor.clean_ai_artifacts(result, True)
