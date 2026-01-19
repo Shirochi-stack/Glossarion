@@ -2732,7 +2732,6 @@ class ContentProcessor:
     def emergency_restore_images(text, original_html=None, verbose=True):
         """Emergency restoration of images lost during translation - Filename Pattern Search"""
         if not original_html or not text:
-            print(f"🖼️ [DEBUG] Emergency restore skipped: original_html={bool(original_html)}, text={bool(text)}")
             return text
             
         def log(message):
@@ -2749,9 +2748,7 @@ class ContentProcessor:
             
             # Extract images from source
             orig_images = soup_orig.find_all('img')
-            print(f"🖼️ [DEBUG] Found {len(orig_images)} images in original, {len(soup_text.find_all('img'))} in translation")
             if not orig_images:
-                print(f"🖼️ [DEBUG] No images in original HTML, skipping restoration")
                 return text
                 
             # Extract images from translation
@@ -3750,11 +3747,8 @@ class TranslationProcessor:
                     result = convert_enhanced_text_to_html(result, c)
                 
                 # Emergency Image Restoration (if enabled)
-                print(f"🔍 [DEBUG] EMERGENCY_IMAGE_RESTORE={self.config.EMERGENCY_IMAGE_RESTORE}, result={bool(result)}, chunk_html={bool(chunk_html)}")
                 if result and self.config.EMERGENCY_IMAGE_RESTORE:
-                    print(f"🖼️ [DEBUG] Calling emergency_restore_images...")
                     result = ContentProcessor.emergency_restore_images(result, chunk_html)
-                    print(f"🖼️ [DEBUG] emergency_restore_images completed")
                     
                 retry_needed = False
                 retry_reason = ""
@@ -4620,11 +4614,8 @@ class BatchTranslationProcessor:
                 result = convert_enhanced_text_to_html(result, chapter)
             
             # Emergency Image Restoration (if enabled)
-            print(f"🔍 [DEBUG BATCH] EMERGENCY_IMAGE_RESTORE={self.config.EMERGENCY_IMAGE_RESTORE}, result={bool(result)}, chapter_body={bool(chapter_body)}")
             if result and self.config.EMERGENCY_IMAGE_RESTORE:
-                print(f"🖼️ [DEBUG BATCH] Calling emergency_restore_images...")
                 result = ContentProcessor.emergency_restore_images(result, chapter_body)
-                print(f"🖼️ [DEBUG BATCH] emergency_restore_images completed")
             
             if self.config.REMOVE_AI_ARTIFACTS:
                 result = ContentProcessor.clean_ai_artifacts(result, True)
