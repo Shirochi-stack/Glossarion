@@ -9235,9 +9235,20 @@ class MangaTranslationTab(QObject):
         
         try:
             
-            # Get parent directory
+            # Get parent directory - respect OUTPUT_DIRECTORY override
             first_file = self.selected_files[0]
-            parent_dir = os.path.dirname(first_file)
+            
+            # Check for output directory override
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
+            if override_dir and os.path.isdir(override_dir):
+                parent_dir = override_dir
+            else:
+                parent_dir = os.path.dirname(first_file)
             
             # Find all *_translated folders
             translated_folders = []
