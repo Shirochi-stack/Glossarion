@@ -105,6 +105,11 @@ class MoveableRectItem(QGraphicsRectItem):
     
     def hoverMoveEvent(self, event):
         """Update cursor based on position for resize handles"""
+        # Don't show resize cursors when locked
+        if getattr(self, '_locked', False):
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            super().hoverMoveEvent(event)
+            return
         if not self._is_resizing:
             resize_mode = self._get_resize_mode(event.pos())
             if resize_mode:
@@ -135,7 +140,10 @@ class MoveableRectItem(QGraphicsRectItem):
         super().hoverLeaveEvent(event)
         
     def _is_processing_blocked(self) -> bool:
-        """Check if interaction should be blocked during batch processing"""
+        """Check if interaction should be blocked during batch processing or workflow lock"""
+        # Check if explicitly locked by workflow
+        if getattr(self, '_locked', False):
+            return True
         try:
             if hasattr(self, '_viewer') and self._viewer:
                 mi = getattr(self._viewer, 'manga_integration', None)
@@ -405,6 +413,11 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
     
     def hoverMoveEvent(self, event):
         """Update cursor based on position for resize handles"""
+        # Don't show resize cursors when locked
+        if getattr(self, '_locked', False):
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            super().hoverMoveEvent(event)
+            return
         if not self._is_resizing:
             resize_mode = self._get_resize_mode(event.pos())
             if resize_mode:
@@ -435,7 +448,10 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         super().hoverLeaveEvent(event)
         
     def _is_processing_blocked(self) -> bool:
-        """Check if interaction should be blocked during batch processing"""
+        """Check if interaction should be blocked during batch processing or workflow lock"""
+        # Check if explicitly locked by workflow
+        if getattr(self, '_locked', False):
+            return True
         try:
             if hasattr(self, '_viewer') and self._viewer:
                 mi = getattr(self._viewer, 'manga_integration', None)
@@ -700,6 +716,11 @@ class MoveablePathItem(QGraphicsPathItem):
     
     def hoverMoveEvent(self, event):
         """Update cursor based on position for resize handles"""
+        # Don't show resize cursors when locked
+        if getattr(self, '_locked', False):
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            super().hoverMoveEvent(event)
+            return
         if not self._is_resizing:
             resize_mode = self._get_resize_mode(event.pos())
             if resize_mode:
@@ -748,7 +769,10 @@ class MoveablePathItem(QGraphicsPathItem):
         return transform.map(path)
     
     def _is_processing_blocked(self) -> bool:
-        """Check if interaction should be blocked during batch processing"""
+        """Check if interaction should be blocked during batch processing or workflow lock"""
+        # Check if explicitly locked by workflow
+        if getattr(self, '_locked', False):
+            return True
         try:
             if hasattr(self, '_viewer') and self._viewer:
                 mi = getattr(self._viewer, 'manga_integration', None)
@@ -1473,6 +1497,34 @@ class CompactImageViewer(QGraphicsView):
         self._scene.addItem(self.photo)
         self.empty = True
         self._loading = False
+    
+    def lock_rectangles(self):
+        """Disable rectangle move/resize during workflow operations"""
+        try:
+            for rect in self.rectangles:
+                if isinstance(rect, (MoveableRectItem, MoveableEllipseItem, MoveablePathItem)):
+                    rect._locked = True
+                    rect.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+                    rect.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, False)
+                    rect.setAcceptHoverEvents(False)
+                    rect.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            print(f"[WORKFLOW] Locked {len(self.rectangles)} rectangles")
+        except Exception as e:
+            print(f"[WORKFLOW] Error locking rectangles: {e}")
+    
+    def unlock_rectangles(self):
+        """Re-enable rectangle move/resize after workflow operations complete"""
+        try:
+            for rect in self.rectangles:
+                if isinstance(rect, (MoveableRectItem, MoveableEllipseItem, MoveablePathItem)):
+                    rect._locked = False
+                    rect.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+                    rect.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+                    rect.setAcceptHoverEvents(True)
+                    rect.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            print(f"[WORKFLOW] Unlocked {len(self.rectangles)} rectangles")
+        except Exception as e:
+            print(f"[WORKFLOW] Error unlocking rectangles: {e}")
     
     def enterEvent(self, event):
         """Give focus to viewer when mouse enters"""

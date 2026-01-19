@@ -9983,6 +9983,10 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
             ipw.stop_translation_btn.setEnabled(True)
             ipw.stop_translation_btn.setText("⏹ Stop")
         
+        # Lock rectangles to prevent accidental resize/move during workflow
+        if hasattr(ipw, 'viewer') and hasattr(ipw.viewer, 'lock_rectangles'):
+            ipw.viewer.lock_rectangles()
+        
         print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude}, show_stop={show_stop_button})")
     except Exception as e:
         print(f"[WORKFLOW] Error disabling buttons: {e}")
@@ -10017,6 +10021,10 @@ def _enable_workflow_buttons(self):
             ipw.stop_translation_btn.setVisible(False)
             ipw.stop_translation_btn.setEnabled(True)
             ipw.stop_translation_btn.setText("⏹ Stop")
+        
+        # Unlock rectangles to allow resize/move again
+        if hasattr(ipw, 'viewer') and hasattr(ipw.viewer, 'unlock_rectangles'):
+            ipw.viewer.unlock_rectangles()
         
         print(f"[WORKFLOW] Re-enabled all workflow buttons")
     except Exception as e:
