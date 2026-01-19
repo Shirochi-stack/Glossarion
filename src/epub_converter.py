@@ -4327,6 +4327,9 @@ img {
 # Main entry point
 def compile_epub(base_dir: str, log_callback: Optional[Callable] = None):
     """Compile translated HTML files into EPUB"""
+    # Reset stop flag for new compilation
+    set_stop_flag(False)
+    
     compiler = EPUBCompiler(base_dir, log_callback)
     compiler.compile()
 
