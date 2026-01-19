@@ -2783,10 +2783,22 @@ class MangaImagePreviewWidget(QWidget):
         if not image_path or not os.path.exists(image_path):
             return
         
-        # Build path to translated folder
-        parent_dir = os.path.dirname(image_path)
+        # Build path to translated folder - respect OUTPUT_DIRECTORY override
         source_name_no_ext = os.path.splitext(os.path.basename(image_path))[0]
-        translated_folder = os.path.join(parent_dir, f"{source_name_no_ext}_translated")
+        
+        # Check for output directory override
+        override_dir = None
+        if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+            override_dir = self.main_gui.config.get('output_directory', '')
+        if not override_dir:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+        
+        # Use override directory if set, otherwise use source directory
+        if override_dir and os.path.isdir(override_dir):
+            translated_folder = os.path.join(override_dir, f"{source_name_no_ext}_translated")
+        else:
+            parent_dir = os.path.dirname(image_path)
+            translated_folder = os.path.join(parent_dir, f"{source_name_no_ext}_translated")
         
         # Create context menu
         menu = QMenu(self)

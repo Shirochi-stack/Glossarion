@@ -10629,6 +10629,10 @@ def _restore_translate_all_button(self):
                     # Also update thumbnail selection to first item
                     if hasattr(ipw, 'thumbnail_list') and ipw.thumbnail_list.count() > 0:
                         ipw.thumbnail_list.setCurrentRow(0)
+                    # Sync file_listbox selection to first item
+                    if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.count() > 0:
+                        self.file_listbox.setCurrentRow(0)
+                        print(f"[TRANSLATE_ALL] Synced file_listbox to first item")
                     print(f"[TRANSLATE_ALL] Returned to first image: {os.path.basename(first_image)}")
                 else:
                     # Fallback: refresh current image
