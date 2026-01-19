@@ -2822,16 +2822,20 @@ class ContentProcessor:
                         
                         # Calculate proportional position (0.0 to 1.0)
                         relative_pos = source_pos / source_len if source_len > 0 else 0.5
+                        log(f"      Position in source: {source_pos}/{source_len} ({relative_pos:.1%})")
                         
                         # Calculate corresponding position in translation
                         text_len = len(text_str)
                         insert_pos = int(relative_pos * text_len)
+                        log(f"      Initial insert position in translation: {insert_pos}/{text_len}")
                         
                         # Find a good insertion point (after a tag close, not in the middle of text)
                         # Search backwards for the nearest '>' to insert after a complete tag
+                        original_insert_pos = insert_pos
                         while insert_pos > 0 and text_str[insert_pos] != '>':
                             insert_pos -= 1
                         insert_pos += 1  # Insert after the '>'
+                        log(f"      Adjusted insert position to after tag: {insert_pos} (moved {original_insert_pos - insert_pos} chars back)")
                         
                         # Create the image tag HTML
                         img_html = f'<p><img src="{src}"'
@@ -2839,10 +2843,12 @@ class ContentProcessor:
                             if attr != 'src':
                                 img_html += f' {attr}="{val}"'
                         img_html += '/></p>'
+                        log(f"      Inserting: {img_html[:80]}...")
                         
                         # Insert the image HTML at the calculated position
                         text_str = text_str[:insert_pos] + img_html + text_str[insert_pos:]
                         inserted_count += 1
+                        log(f"      ✅ Inserted successfully at position {insert_pos}")
                     else:
                         # Filename not found in source - append to end as fallback
                         soup_text = BeautifulSoup(text_str, 'html.parser')
