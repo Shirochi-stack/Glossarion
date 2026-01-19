@@ -2095,6 +2095,11 @@ class MangaImagePreviewWidget(QWidget):
                 background-color: #5a9fd4;
                 border-color: #7bb3e0;
             }
+            QToolButton:disabled {
+                background-color: #1a1a1a;
+                color: #555555;
+                border-color: #2a2a2a;
+            }
         """)
         # Prevent focus and scroll issues
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)

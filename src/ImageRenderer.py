@@ -10091,6 +10091,13 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
                 btn = getattr(ipw, btn_name)
                 btn.setEnabled(False)
         
+        # Disable editing tools during processing
+        editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn']
+        for btn_name in editing_buttons:
+            if hasattr(ipw, btn_name):
+                btn = getattr(ipw, btn_name)
+                btn.setEnabled(False)
+        
         # Also disable start_button in manga_integration if it exists
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
@@ -10129,6 +10136,13 @@ def _enable_workflow_buttons(self):
         # Also re-enable start_button in manga_integration if it exists
         if hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(True)
+        
+        # Re-enable editing tools after processing
+        editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn']
+        for btn_name in editing_buttons:
+            if hasattr(ipw, btn_name):
+                btn = getattr(ipw, btn_name)
+                btn.setEnabled(True)
         
         # Hide the stop button when operations complete
         if hasattr(ipw, 'stop_translation_btn'):
