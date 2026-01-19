@@ -685,7 +685,6 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     
     if extraction_mode == "enhanced":
         print("🚀 Initializing Enhanced extraction mode with html2text...")
-        print("   ℹ️ html2text will preserve img tags with images_as_html=True")
         
         # Get enhanced mode configuration from environment
         enhanced_filtering = os.getenv("ENHANCED_FILTERING", "smart")

@@ -76,10 +76,27 @@ from config_backup import (
 )
 
 
+def initialize_extraction_variables(gui_instance):
+    """Initialize extraction-related variables early so profile switching works"""
+    # Initialize text_extraction_method_var if it doesn't exist
+    if not hasattr(gui_instance, 'text_extraction_method_var'):
+        # Check config for saved value, or use default
+        if gui_instance.config.get('extraction_mode') == 'enhanced':
+            gui_instance.text_extraction_method_var = 'enhanced'
+        else:
+            gui_instance.text_extraction_method_var = gui_instance.config.get('text_extraction_method', 'standard')
+    
+    # Initialize file_filtering_level_var if it doesn't exist
+    if not hasattr(gui_instance, 'file_filtering_level_var'):
+        gui_instance.file_filtering_level_var = gui_instance.config.get('file_filtering_level', 'smart')
+
 def setup_other_settings_methods(gui_instance):
     """Inject all other settings methods into the GUI instance"""
     import types
     import sys
+    
+    # CRITICAL: Initialize extraction variables FIRST before any profile selection happens
+    initialize_extraction_variables(gui_instance)
     
     # Get this module
     current_module = sys.modules[__name__]
@@ -8160,6 +8177,26 @@ def on_profile_select(self, event=None):
         
         # Set this as the active profile for autosave
         self._active_profile_for_autosave = name
+        
+        # AUTO-SWITCH EXTRACTION METHOD BASED ON PROFILE NAME
+        # Update both the variable AND the config so it persists
+        profile_lower = name.lower()
+        
+        # Check if profile indicates an extraction mode
+        if 'beautifulsoup' in profile_lower:
+            # Switch to BeautifulSoup extraction mode
+            self.text_extraction_method_var = 'standard'
+            self.config['text_extraction_method'] = 'standard'
+            # Update radio button state if Other Settings dialog is open
+            if hasattr(self, 'standard_extraction_radio') and hasattr(self, 'enhanced_extraction_radio'):
+                self.standard_extraction_radio.setChecked(True)
+        elif 'html2text' in profile_lower:
+            # Switch to html2text extraction mode
+            self.text_extraction_method_var = 'enhanced'
+            self.config['text_extraction_method'] = 'enhanced'
+            # Update radio button state if Other Settings dialog is open
+            if hasattr(self, 'enhanced_extraction_radio') and hasattr(self, 'standard_extraction_radio'):
+                self.enhanced_extraction_radio.setChecked(True)
 
 def save_profile(self):
     """Save current prompt under selected profile and persist."""

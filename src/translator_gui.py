@@ -6171,34 +6171,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Switch to BeautifulSoup extraction mode
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = 'standard'
-                        # Update Other Settings dialog UI if it exists
-                        if hasattr(self, 'other_settings_dialog') and self.other_settings_dialog:
-                            try:
-                                self.other_settings_dialog.text_extraction_method_var = 'standard'
-                                # Update radio buttons if they exist
-                                if hasattr(self.other_settings_dialog, 'standard_extraction_radio'):
-                                    self.other_settings_dialog.standard_extraction_radio.setChecked(True)
-                            except:
-                                pass
-                        self.append_log(f"🔄 Profile '{current_profile}' auto-switched extraction mode:")
-                        self.append_log(f"   • Method: BeautifulSoup (standard)")
-                        self.append_log(f"   • Filtering: {getattr(self, 'file_filtering_level_var', 'smart')}")
+                        self.append_log(f"🔄 Auto-switched to BeautifulSoup extraction (profile: {current_profile})")
                 elif 'html2text' in profile_lower:
                     # Switch to html2text extraction mode  
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = 'enhanced'
-                        # Update Other Settings dialog UI if it exists
-                        if hasattr(self, 'other_settings_dialog') and self.other_settings_dialog:
-                            try:
-                                self.other_settings_dialog.text_extraction_method_var = 'enhanced'
-                                # Update radio buttons if they exist
-                                if hasattr(self.other_settings_dialog, 'enhanced_extraction_radio'):
-                                    self.other_settings_dialog.enhanced_extraction_radio.setChecked(True)
-                            except:
-                                pass
-                        self.append_log(f"🔄 Profile '{current_profile}' auto-switched extraction mode:")
-                        self.append_log(f"   • Method: html2text (enhanced)")
-                        self.append_log(f"   • Filtering: {getattr(self, 'file_filtering_level_var', 'smart')}")
+                        self.append_log(f"🔄 Auto-switched to html2text extraction (profile: {current_profile})")
             
             # AUTO-TOGGLE IMAGE TRANSLATION BASED ON PROFILE
             # Toggle OFF for BeautifulSoup and html2text profiles
