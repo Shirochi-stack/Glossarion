@@ -4660,6 +4660,18 @@ class BatchTranslationProcessor:
             # History is now written in the main thread per batch, in a stable order.
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
             
+            # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
+            # Pattern matches: &lt;img ... /&gt; where the tag ends with /
+            img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
+            if img_count > 0:
+                print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (post-processing)")
+            cleaned = re.sub(
+                r'&lt;(img\s[^>]*?/)&gt;',
+                r'<\1>',
+                cleaned,
+                flags=re.IGNORECASE
+            )
+            
             if self.is_text_file:
                 # For text files, save as plain text
                 fname_txt = fname.replace('.html', '.txt') if fname.endswith('.html') else fname
@@ -4684,18 +4696,6 @@ class BatchTranslationProcessor:
                     
                     final_html = str(soup_with_text)
                     cleaned = final_html
-                
-                # CRITICAL: Unescape img tags that were converted to HTML entities
-                # Pattern matches: &lt;img ... /&gt; where the tag ends with /
-                img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
-                if img_count > 0:
-                    print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (BeautifulSoup)")
-                cleaned = re.sub(
-                    r'&lt;(img\s[^>]*?/)&gt;',
-                    r'<\1>',
-                    cleaned,
-                    flags=re.IGNORECASE
-                )
 
                 with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
@@ -10977,6 +10977,18 @@ def main(log_callback=None, stop_callback=None):
                 # Skip normal save since we handled it above and exit this translation run
                 continue
 
+            # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
+            # Pattern matches: &lt;img ... /&gt; where the tag ends with /
+            img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
+            if img_count > 0:
+                print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (post-processing)")
+            cleaned = re.sub(
+                r'&lt;(img\s[^>]*?/)&gt;',
+                r'<\1>',
+                cleaned,
+                flags=re.IGNORECASE
+            )
+            
             if is_text_file and not is_pdf_file:
                 # For text files (but NOT PDFs), save as plain text instead of HTML
                 fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
