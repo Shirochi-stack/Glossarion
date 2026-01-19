@@ -9543,24 +9543,26 @@ def _load_save_position_output(self):
         if not override_dir:
             override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
         
-        # Build list of possible paths - check override directory first if set
+        # Build list of possible paths
+        # STRICT: If OUTPUT_DIRECTORY is set, ONLY check there (no source fallback)
         possible_paths = []
         if override_dir:
-            # Check override directory first
+            # Check override directory ONLY
             possible_paths.extend([
                 os.path.join(override_dir, f"{base_name}_translated", source_filename),
                 os.path.join(override_dir, "3_translated", source_filename),
             ])
-        
-        # Then check source directory as fallback
-        possible_paths.extend([
-            # 3_translated folder
-            os.path.join(source_dir, "3_translated", source_filename),
-            # isolated folder
-            os.path.join(source_dir, f"{base_name}_translated", source_filename),
-            # same directory with _translated suffix
-            os.path.join(source_dir, f"{base_name}_translated{os.path.splitext(source_filename)[1]}")
-        ])
+            print(f"[DEBUG] Save Position Output: Using OUTPUT_DIRECTORY ONLY: {override_dir}")
+        else:
+            # No override, check source directory
+            possible_paths.extend([
+                # 3_translated folder
+                os.path.join(source_dir, "3_translated", source_filename),
+                # isolated folder
+                os.path.join(source_dir, f"{base_name}_translated", source_filename),
+                # same directory with _translated suffix
+                os.path.join(source_dir, f"{base_name}_translated{os.path.splitext(source_filename)[1]}")
+            ])
         
         print(f"[DEBUG] Save Position Output: Looking for rendered images at:")
         for path in possible_paths:
@@ -9603,24 +9605,26 @@ def _load_rendered_output_direct(self):
         if not override_dir:
             override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
         
-        # Build list of possible paths - check override directory first if set
+        # Build list of possible paths
+        # STRICT: If OUTPUT_DIRECTORY is set, ONLY check there (no source fallback)
         possible_paths = []
         if override_dir:
-            # Check override directory first
+            # Check override directory ONLY
             possible_paths.extend([
                 os.path.join(override_dir, f"{base_name}_translated", source_filename),
                 os.path.join(override_dir, "3_translated", source_filename),
             ])
-        
-        # Then check source directory as fallback
-        possible_paths.extend([
-            # 3_translated folder
-            os.path.join(source_dir, "3_translated", source_filename),
-            # isolated folder
-            os.path.join(source_dir, f"{base_name}_translated", source_filename),
-            # same directory with _translated suffix
-            os.path.join(source_dir, f"{base_name}_translated{os.path.splitext(source_filename)[1]}")
-        ])
+            print(f"[DIRECT] Using OUTPUT_DIRECTORY ONLY: {override_dir}")
+        else:
+            # No override, check source directory
+            possible_paths.extend([
+                # 3_translated folder
+                os.path.join(source_dir, "3_translated", source_filename),
+                # isolated folder
+                os.path.join(source_dir, f"{base_name}_translated", source_filename),
+                # same directory with _translated suffix
+                os.path.join(source_dir, f"{base_name}_translated{os.path.splitext(source_filename)[1]}")
+            ])
         
         print(f"[DIRECT] Looking for rendered images at:")
         for path in possible_paths:
