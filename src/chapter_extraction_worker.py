@@ -70,23 +70,45 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
         # Create output directory early (after override)
         os.makedirs(output_dir, exist_ok=True)
 
-        with zipfile.ZipFile(epub_path, 'r') as zf:
-            # Extract metadata first
-            metadata = Chapter_Extractor._extract_epub_metadata(zf)
-            print(f"[INFO] Extracted metadata: {list(metadata.keys())}", flush=True)
-            
-            # Extract chapters using module-level function
-            chapters = Chapter_Extractor.extract_chapters(zf, output_dir, progress_callback=worker_progress_callback)
-            
-            print(f"[INFO] Extracted {len(chapters)} chapters", flush=True)
-            
-            # The extract_chapters method already handles OPF sorting internally
-            # Just log if OPF was used
-            opf_path = os.path.join(output_dir, 'content.opf')
-            if os.path.exists(opf_path):
-                print(f"[INFO] OPF file available for chapter ordering", flush=True)
-            
-            # CRITICAL: Save the full chapters with body content!
+        # Open ZIP with UTF-8 encoding for Korean filenames (Python 3.11+)
+        # Falls back to CP437 re-encoding if not supported
+        try:
+            with zipfile.ZipFile(epub_path, 'r', metadata_encoding='utf-8') as zf:
+                # Extract metadata first
+                metadata = Chapter_Extractor._extract_epub_metadata(zf)
+                print(f"[INFO] Extracted metadata: {list(metadata.keys())}", flush=True)
+                
+                # Extract chapters using module-level function
+                chapters = Chapter_Extractor.extract_chapters(zf, output_dir, progress_callback=worker_progress_callback)
+                
+                print(f"[INFO] Extracted {len(chapters)} chapters", flush=True)
+                
+                # The extract_chapters method already handles OPF sorting internally
+                # Just log if OPF was used
+                opf_path = os.path.join(output_dir, 'content.opf')
+                if os.path.exists(opf_path):
+                    print(f"[INFO] OPF file available for chapter ordering", flush=True)
+        except TypeError:
+            # Python < 3.11 doesn't support metadata_encoding, fall back to CP437 re-encoding
+            print("[INFO] Using CP437→UTF-8 re-encoding for Korean filenames (Python < 3.11)", flush=True)
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                # Extract metadata first
+                metadata = Chapter_Extractor._extract_epub_metadata(zf)
+                print(f"[INFO] Extracted metadata: {list(metadata.keys())}", flush=True)
+                
+                # Extract chapters using module-level function
+                chapters = Chapter_Extractor.extract_chapters(zf, output_dir, progress_callback=worker_progress_callback)
+                
+                print(f"[INFO] Extracted {len(chapters)} chapters", flush=True)
+                
+                # The extract_chapters method already handles OPF sorting internally
+                # Just log if OPF was used
+                opf_path = os.path.join(output_dir, 'content.opf')
+                if os.path.exists(opf_path):
+                    print(f"[INFO] OPF file available for chapter ordering", flush=True)
+        
+        # Continue with processing after ZipFile is closed
+        # CRITICAL: Save the full chapters with body content!
             # This is what the main process needs to load
             chapters_full_path = os.path.join(output_dir, "chapters_full.json")
             try:
