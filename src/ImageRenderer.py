@@ -10622,10 +10622,19 @@ def _restore_translate_all_button(self):
                         }
                     """)
                 
-                # Refresh preview to show translated output
-                current_image = getattr(ipw, 'current_image_path', None)
-                if current_image:
-                    ipw.load_image(current_image, preserve_rectangles=True, preserve_text_overlays=True)
+                # Go back to the first image in the preview list
+                if hasattr(ipw, 'image_paths') and ipw.image_paths:
+                    first_image = ipw.image_paths[0]
+                    ipw.load_image(first_image, preserve_rectangles=True, preserve_text_overlays=True)
+                    # Also update thumbnail selection to first item
+                    if hasattr(ipw, 'thumbnail_list') and ipw.thumbnail_list.count() > 0:
+                        ipw.thumbnail_list.setCurrentRow(0)
+                    print(f"[TRANSLATE_ALL] Returned to first image: {os.path.basename(first_image)}")
+                else:
+                    # Fallback: refresh current image
+                    current_image = getattr(ipw, 'current_image_path', None)
+                    if current_image:
+                        ipw.load_image(current_image, preserve_rectangles=True, preserve_text_overlays=True)
                 
                 print(f"[TRANSLATE_ALL] Switched display mode to 'translated'")
         except Exception as mode_err:

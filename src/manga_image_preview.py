@@ -3690,31 +3690,46 @@ class MangaImagePreviewWidget(QWidget):
                         print(f"[SRC] State has cleaned_image_path: {os.path.basename(cand)}")
                         print(f"[SRC] Validating filename: '{cand_filename}' contains '_cleaned': {'_cleaned' in cand_filename}")
                         if '_cleaned' in cand_filename and not cand_filename.endswith('.json'):
-                            # Accept if path is inside translated folder or the active search directory
-                            try:
-                                cand_abs = os.path.abspath(cand)
-                                tdir_abs = os.path.abspath(translated_folder)
-                                def _under(p, base):
-                                    try:
-                                        return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
-                                    except Exception:
-                                        return False
-                                # Check translated folder and the active search directory (override OR source, not both)
-                                is_valid = _under(cand_abs, tdir_abs)
-                                for valid_dir in search_dirs:
-                                    if _under(cand_abs, os.path.abspath(valid_dir)):
-                                        is_valid = True
-                                        break
-                                
-                                if is_valid:
-                                    cleaned_path = cand_abs
-                                    print(f"[SRC] Found validated cleaned image from state: {os.path.basename(cleaned_path)}")
-                                else:
-                                    # Ignore stale path from another folder/session
-                                    print(f"[SRC] Ignoring cleaned image path from different folder: {os.path.basename(cand)}")
-                                    cleaned_path = None
-                            except Exception:
+                            # CRITICAL: Verify the cleaned image's base name matches the source
+                            # Extract base name from cleaned filename (e.g., "image_cleaned.jpg" -> "image")
+                            cand_base = cand_filename
+                            for ext in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'):
+                                if cand_base.endswith(ext):
+                                    cand_base = cand_base[:-len(ext)]
+                                    break
+                            if cand_base.endswith('_cleaned'):
+                                cand_base = cand_base[:-8]  # Remove '_cleaned' suffix
+                            
+                            # Base name must match source exactly
+                            if cand_base != source_name_no_ext.lower():
+                                print(f"[SRC] Ignoring cleaned image with wrong base name: {os.path.basename(cand)} (expected base: {source_name_no_ext})")
                                 cleaned_path = None
+                            else:
+                                # Accept if path is inside translated folder or the active search directory
+                                try:
+                                    cand_abs = os.path.abspath(cand)
+                                    tdir_abs = os.path.abspath(translated_folder)
+                                    def _under(p, base):
+                                        try:
+                                            return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
+                                        except Exception:
+                                            return False
+                                    # Check translated folder and the active search directory (override OR source, not both)
+                                    is_valid = _under(cand_abs, tdir_abs)
+                                    for valid_dir in search_dirs:
+                                        if _under(cand_abs, os.path.abspath(valid_dir)):
+                                            is_valid = True
+                                            break
+                                    
+                                    if is_valid:
+                                        cleaned_path = cand_abs
+                                        print(f"[SRC] Found validated cleaned image from state: {os.path.basename(cleaned_path)}")
+                                    else:
+                                        # Ignore stale path from another folder/session
+                                        print(f"[SRC] Ignoring cleaned image path from different folder: {os.path.basename(cand)}")
+                                        cleaned_path = None
+                                except Exception:
+                                    cleaned_path = None
                         else:
                             # This path doesn't look like a cleaned image - might be a translated image
                             print(f"[SRC] Ignoring non-cleaned image path from state: {os.path.basename(cand)}")
@@ -3727,7 +3742,19 @@ class MangaImagePreviewWidget(QWidget):
                 image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
                 for filename in os.listdir(translated_folder):
                     name_lower = filename.lower()
-                    if (name_lower.startswith(f"{source_name_no_ext.lower()}_cleaned") and 
+                    # Extract base name from cleaned filename (e.g., "image_cleaned.jpg" -> "image")
+                    file_base_lower = name_lower
+                    for ext in image_extensions:
+                        if file_base_lower.endswith(ext):
+                            file_base_lower = file_base_lower[:-len(ext)]
+                            break
+                    # Remove _cleaned suffix to get original base name
+                    if file_base_lower.endswith('_cleaned'):
+                        file_base_lower = file_base_lower[:-8]  # len('_cleaned') = 8
+                    
+                    # STRICT match: base name must match source exactly (not just startswith)
+                    if (file_base_lower == source_name_no_ext.lower() and 
+                        '_cleaned' in name_lower and
                         name_lower.endswith(image_extensions)):
                         cleaned_path = os.path.join(translated_folder, filename)
                         print(f"[SRC] Found cleaned image in isolated folder: {os.path.basename(cleaned_path)}")
