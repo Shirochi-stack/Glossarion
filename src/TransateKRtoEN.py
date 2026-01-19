@@ -2747,12 +2747,16 @@ class ContentProcessor:
             # Only unescape img tags to avoid affecting legitimate HTML entities
             if '&lt;img' in text.lower():
                 log("🔧 Found HTML-escaped img tags, unescaping them...")
-                # Use regex to find and unescape only img tags
+                # Find all escaped img tags and unescape them completely
+                def unescape_img_tag(match):
+                    # Get the full escaped img tag and unescape it
+                    return html.unescape(match.group(0))
+                
                 text = re.sub(
-                    r'&lt;img\s+([^&]*?)/?&gt;',
-                    lambda m: '<img ' + m.group(1) + '/>',
+                    r'&lt;img\s+.*?/?&gt;',
+                    unescape_img_tag,
                     text,
-                    flags=re.IGNORECASE
+                    flags=re.IGNORECASE | re.DOTALL
                 )
                 log("✅ Unescaped img tags")
             
@@ -6880,18 +6884,6 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     """
     import re
     
-    # CRITICAL: Unescape img tags specifically if the AI escaped them
-    # Only unescape img tags to avoid affecting legitimate HTML entities
-    if '&lt;img' in plain_text.lower():
-        print("🔧 Unescaping HTML-escaped img tags in AI response...")
-        # Use regex to find and unescape only img tags
-        plain_text = re.sub(
-            r'&lt;img\s+([^&]*?)/?&gt;',
-            lambda m: '<img ' + m.group(1) + '/>',
-            plain_text,
-            flags=re.IGNORECASE
-        )
-    
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
     # Check if user prefers markdown2 (legacy behavior)
@@ -6937,6 +6929,19 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                         elif line:
                             processed_lines.append(line)
                     html = '\n'.join(processed_lines)
+                
+                # CRITICAL: Unescape img tags AFTER markdown2 conversion
+                if '&lt;img' in html.lower():
+                    print("🔧 Unescaping HTML-escaped img tags after markdown2 conversion...")
+                    import html as html_module
+                    def unescape_img_tag(match):
+                        return html_module.unescape(match.group(0))
+                    html = re.sub(
+                        r'&lt;img\s+.*?/?&gt;',
+                        unescape_img_tag,
+                        html,
+                        flags=re.IGNORECASE | re.DOTALL
+                    )
                 
                 return html
         except ImportError:
@@ -6990,6 +6995,20 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                     elif line:
                         processed_lines.append(line)
                 html = '\n'.join(processed_lines)
+            
+            # CRITICAL: Unescape img tags AFTER markdown conversion
+            # Markdown library may escape them, so we unescape at the end
+            if '&lt;img' in html.lower():
+                print("🔧 Unescaping HTML-escaped img tags after markdown conversion...")
+                import html as html_module
+                def unescape_img_tag(match):
+                    return html_module.unescape(match.group(0))
+                html = re.sub(
+                    r'&lt;img\s+.*?/?&gt;',
+                    unescape_img_tag,
+                    html,
+                    flags=re.IGNORECASE | re.DOTALL
+                )
             
             return html
             
@@ -7094,7 +7113,22 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     if in_list:
         final_html.append(f'</{list_type}>')
     
-    return '\n'.join(final_html)
+    result_html = '\n'.join(final_html)
+    
+    # CRITICAL: Unescape img tags AFTER fallback conversion
+    if '&lt;img' in result_html.lower():
+        print("🔧 Unescaping HTML-escaped img tags after fallback conversion...")
+        import html as html_module
+        def unescape_img_tag(match):
+            return html_module.unescape(match.group(0))
+        result_html = re.sub(
+            r'&lt;img\s+.*?/?&gt;',
+            unescape_img_tag,
+            result_html,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+    
+    return result_html
 # =====================================================
 # MAIN TRANSLATION FUNCTION
 # =====================================================
