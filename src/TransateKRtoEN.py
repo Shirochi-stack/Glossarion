@@ -2790,8 +2790,14 @@ class ContentProcessor:
                     # Extract just the filename from the path
                     filename = os.path.basename(src)
                     
-                    # Search for the filename in the SOURCE HTML to find its position
-                    pattern = re.escape(filename)
+                    # Strip response_ prefix and extension to get the core name
+                    core_name = filename
+                    if core_name.lower().startswith('response_'):
+                        core_name = core_name[9:]  # Remove 'response_'
+                    core_name = os.path.splitext(core_name)[0]  # Remove extension
+                    
+                    # Search for the core name in the SOURCE HTML to find its position
+                    pattern = re.escape(core_name)
                     source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
                     
                     if source_matches:
