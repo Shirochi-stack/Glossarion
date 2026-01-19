@@ -4684,6 +4684,18 @@ class BatchTranslationProcessor:
                     
                     final_html = str(soup_with_text)
                     cleaned = final_html
+                
+                # CRITICAL: Unescape img tags that were converted to HTML entities
+                # Pattern matches: &lt;img ... /&gt; where the tag ends with /
+                img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
+                if img_count > 0:
+                    print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (BeautifulSoup)")
+                cleaned = re.sub(
+                    r'&lt;(img\s[^>]*?/)&gt;',
+                    r'<\1>',
+                    cleaned,
+                    flags=re.IGNORECASE
+                )
 
                 with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
