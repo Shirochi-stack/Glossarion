@@ -4403,9 +4403,10 @@ class UnifiedClient:
 
                         # Prevent infinite recursion: only allow one truncation retry chain per request
                         already_tried_truncation = bool(retry_reason and "truncation_retry" in str(retry_reason))
-
-                        # Respect internal retry budget (from Other Settings → MAX_RETRIES)
-                        if attempts_remaining <= 0:
+                        
+                        if already_tried_truncation:
+                            print(f"  📋 Already in truncation retry chain - skipping nested retry")
+                        elif attempts_remaining <= 0:
                             print(f"  📊 No internal retries remaining ({internal_retries}); skipping truncation retry")
                         else:
                             allowed_attempts = min(truncation_retry_attempts, attempts_remaining)
