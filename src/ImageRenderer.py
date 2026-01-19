@@ -239,6 +239,40 @@ def _reset_cancellation_flags(self):
                         if hasattr(provider, '_stopped'):
                             provider._stopped = False
         
+        # CRITICAL: Reset local inpainter _stopped flag
+        # The inpainter latches _stopped = True and keeps skipping inpainting!
+        inpainter_reset_count = 0
+        try:
+            # Reset inpainter on manga_translator if it exists
+            if hasattr(self, '_manga_translator') and self._manga_translator:
+                if hasattr(self._manga_translator, 'local_inpainter') and self._manga_translator.local_inpainter:
+                    self._manga_translator.local_inpainter._stopped = False
+                    if hasattr(self._manga_translator.local_inpainter, 'reset_stop_flags'):
+                        self._manga_translator.local_inpainter.reset_stop_flags()
+                    inpainter_reset_count += 1
+            
+            # CRITICAL: Reset ALL inpainters in the MangaTranslator pool
+            # Pool stores inpainters in _inpaint_pool[key]['spares']
+            try:
+                from manga_translator import MangaTranslator
+                if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                    for key, rec in MangaTranslator._inpaint_pool.items():
+                        if rec and 'spares' in rec:
+                            for inpainter in rec['spares']:
+                                if inpainter is not None:
+                                    if hasattr(inpainter, '_stopped'):
+                                        inpainter._stopped = False
+                                    if hasattr(inpainter, 'reset_stop_flags'):
+                                        inpainter.reset_stop_flags()
+                                    inpainter_reset_count += 1
+            except Exception as pool_err:
+                print(f"[CANCEL_RESET] Inpainter pool reset error: {pool_err}")
+            
+            if inpainter_reset_count > 0:
+                print(f"[CANCEL_RESET] Reset {inpainter_reset_count} inpainter _stopped flag(s)")
+        except Exception as e:
+            print(f"[CANCEL_RESET] Local inpainter reset failed: {e}")
+        
         print("[CANCEL_RESET] All cancellation flags reset")
     except Exception as e:
         print(f"[CANCEL_RESET] Error resetting flags: {e}")
