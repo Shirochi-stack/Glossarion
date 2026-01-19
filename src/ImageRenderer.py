@@ -3037,10 +3037,23 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
         
         if cleaned_image is not None:
             # Save cleaned image into per-image isolated folder and return path
+            # Check for OUTPUT_DIRECTORY override (prefer config over env var)
             parent_dir = os.path.dirname(image_path)
             filename = os.path.basename(image_path)
             base, ext = os.path.splitext(filename)
-            output_dir = os.path.join(parent_dir, f"{base}_translated")
+            
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
+            if override_dir:
+                output_dir = os.path.join(override_dir, f"{base}_translated")
+                print(f"[INPAINT_SYNC] Using output directory override: {override_dir}")
+            else:
+                output_dir = os.path.join(parent_dir, f"{base}_translated")
+            
             os.makedirs(output_dir, exist_ok=True)
             cleaned_path = os.path.join(output_dir, f"{base}_cleaned{ext}")
 
@@ -3635,6 +3648,11 @@ def _on_recognize_text_clicked(self):
         # Track which image we're recognizing for overlay removal
         self._recognized_texts_image_path = image_path
         
+        # STATE ISOLATION: Track which image detection was started for
+        # This ensures rectangles are drawn for the correct image when auto-detection runs
+        self._detection_started_for_image = os.path.abspath(image_path)
+        print(f"[STATE_ISOLATION] Recognize started for: {os.path.basename(self._detection_started_for_image)}")
+        
         # Add processing overlay effect (after tracking image)
         _add_processing_overlay(self, )
         
@@ -3857,6 +3875,11 @@ def _on_translate_text_clicked(self):
         
         # Track which image we're translating for overlay removal
         self._translating_image_path = image_path
+        
+        # STATE ISOLATION: Track which image detection/translation was started for
+        # This ensures rectangles are drawn for the correct image when results come back
+        self._detection_started_for_image = os.path.abspath(image_path)
+        print(f"[STATE_ISOLATION] Translate started for: {os.path.basename(self._detection_started_for_image)}")
         
         # Disable ALL workflow buttons to prevent concurrent operations
         _disable_workflow_buttons(self, exclude=None)
@@ -5993,10 +6016,22 @@ def _update_image_preview_with_result(self, result_image, original_path):
         import os
         
         # Save cleaned image to permanent location (same as Clean button)
+        # Check for OUTPUT_DIRECTORY override (prefer config over env var)
         parent_dir = os.path.dirname(original_path)
         filename = os.path.basename(original_path)
         base, ext = os.path.splitext(filename)
-        output_dir = os.path.join(parent_dir, f"{base}_translated")
+        
+        override_dir = None
+        if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+            override_dir = self.main_gui.config.get('output_directory', '')
+        if not override_dir:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+        
+        if override_dir:
+            output_dir = os.path.join(override_dir, f"{base}_translated")
+        else:
+            output_dir = os.path.join(parent_dir, f"{base}_translated")
+        
         os.makedirs(output_dir, exist_ok=True)
         cleaned_path = os.path.join(output_dir, f"{base}_cleaned{ext}")
         
@@ -7707,6 +7742,31 @@ def _do_source_refresh(self):
             else:
                 rendered_path = None
         
+        # If still no rendered path, search in override directory and source directory
+        if not rendered_path:
+            source_dir = os.path.dirname(current_image)
+            source_filename = os.path.basename(current_image)
+            base_name = os.path.splitext(source_filename)[0]
+            
+            # Check for OUTPUT_DIRECTORY override
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
+            # Build search paths - check override first if set
+            search_paths = []
+            if override_dir:
+                search_paths.append(os.path.join(override_dir, f"{base_name}_translated", source_filename))
+            search_paths.append(os.path.join(source_dir, f"{base_name}_translated", source_filename))
+            
+            for path in search_paths:
+                if os.path.exists(path):
+                    rendered_path = path
+                    print(f"[REFRESH] Found rendered image via directory search: {os.path.basename(rendered_path)}")
+                    break
+        
         # Reload the appropriate image
         if rendered_path:
             print(f"[REFRESH] Loading rendered image: {rendered_path}")
@@ -9201,13 +9261,20 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
             self._rendered_images_map = {}
         
         # Determine the original image path for mapping
-        original_path = original_image_path or image_path
-        try:
-            if output_path and os.path.basename(os.path.dirname(output_path)).endswith('_translated'):
-                original_path = os.path.join(os.path.dirname(os.path.dirname(output_path)), os.path.basename(output_path))
-                print(f"[RENDER] Mapped output back to original: {os.path.basename(original_path)} -> {os.path.basename(output_path)}")
-        except Exception:
-            pass
+        # If original_image_path was explicitly provided, use it directly (important for output directory override)
+        # Only try to derive from output path when original_image_path was not provided
+        if original_image_path:
+            original_path = original_image_path
+            print(f"[RENDER] Using explicitly provided original_image_path: {os.path.basename(original_path)}")
+        else:
+            original_path = image_path
+            try:
+                # Only derive from output path when no original was explicitly provided
+                if output_path and os.path.basename(os.path.dirname(output_path)).endswith('_translated'):
+                    original_path = os.path.join(os.path.dirname(os.path.dirname(output_path)), os.path.basename(output_path))
+                    print(f"[RENDER] Mapped output back to original: {os.path.basename(original_path)} -> {os.path.basename(output_path)}")
+            except Exception:
+                pass
         
         # Store mapping
         self._rendered_images_map[original_path] = output_path
@@ -9333,16 +9400,33 @@ def _load_save_position_output(self):
         # Look for rendered image in the expected location
         source_dir = os.path.dirname(current_image_path)
         source_filename = os.path.basename(current_image_path)
+        base_name = os.path.splitext(source_filename)[0]
         
-        # Check various possible locations for translated images
-        possible_paths = [
+        # Check for OUTPUT_DIRECTORY override (prefer config over env var)
+        override_dir = None
+        if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+            override_dir = self.main_gui.config.get('output_directory', '')
+        if not override_dir:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+        
+        # Build list of possible paths - check override directory first if set
+        possible_paths = []
+        if override_dir:
+            # Check override directory first
+            possible_paths.extend([
+                os.path.join(override_dir, f"{base_name}_translated", source_filename),
+                os.path.join(override_dir, "3_translated", source_filename),
+            ])
+        
+        # Then check source directory as fallback
+        possible_paths.extend([
             # 3_translated folder
             os.path.join(source_dir, "3_translated", source_filename),
             # isolated folder
-            os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
+            os.path.join(source_dir, f"{base_name}_translated", source_filename),
             # same directory with _translated suffix
-            os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
-        ]
+            os.path.join(source_dir, f"{base_name}_translated{os.path.splitext(source_filename)[1]}")
+        ])
         
         print(f"[DEBUG] Save Position Output: Looking for rendered images at:")
         for path in possible_paths:
@@ -9376,16 +9460,33 @@ def _load_rendered_output_direct(self):
         # Look for rendered image in the expected location
         source_dir = os.path.dirname(current_image_path)
         source_filename = os.path.basename(current_image_path)
+        base_name = os.path.splitext(source_filename)[0]
         
-        # Check various possible locations for translated images
-        possible_paths = [
+        # Check for OUTPUT_DIRECTORY override (prefer config over env var)
+        override_dir = None
+        if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+            override_dir = self.main_gui.config.get('output_directory', '')
+        if not override_dir:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+        
+        # Build list of possible paths - check override directory first if set
+        possible_paths = []
+        if override_dir:
+            # Check override directory first
+            possible_paths.extend([
+                os.path.join(override_dir, f"{base_name}_translated", source_filename),
+                os.path.join(override_dir, "3_translated", source_filename),
+            ])
+        
+        # Then check source directory as fallback
+        possible_paths.extend([
             # 3_translated folder
             os.path.join(source_dir, "3_translated", source_filename),
             # isolated folder
-            os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
+            os.path.join(source_dir, f"{base_name}_translated", source_filename),
             # same directory with _translated suffix
-            os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
-        ]
+            os.path.join(source_dir, f"{base_name}_translated{os.path.splitext(source_filename)[1]}")
+        ])
         
         print(f"[DIRECT] Looking for rendered images at:")
         for path in possible_paths:
