@@ -3300,6 +3300,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 return []
         
         elif provider == 'google':
+            # ===== CANCELLATION CHECK: Before Google OCR =====
+            if _is_translation_cancelled(self):
+                print(f"[OCR_REGIONS] Cancelled before Google OCR")
+                return []
+            
             # Use Google Cloud Vision OCR on full image
             print(f"[OCR_REGIONS] Running Google Cloud Vision OCR on full image")
             try:
@@ -3353,6 +3358,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 
                 print(f"[OCR_REGIONS] Google OCR found {len(full_image_ocr_results)} text regions")
                 
+                # ===== CANCELLATION CHECK: After Google OCR =====
+                if _is_translation_cancelled(self):
+                    print(f"[OCR_REGIONS] Cancelled after Google OCR - discarding results")
+                    return []
+                
             except Exception as e:
                 print(f"[OCR_REGIONS] Google OCR error: {str(e)}")
                 import traceback
@@ -3361,6 +3371,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 return []
         
         elif provider in ['azure', 'azure-document-intelligence']:
+            # ===== CANCELLATION CHECK: Before Azure OCR =====
+            if _is_translation_cancelled(self):
+                print(f"[OCR_REGIONS] Cancelled before Azure OCR")
+                return []
+            
             # Use correct Azure API per provider name
             print(f"[OCR_REGIONS] Running {provider} OCR on full image")
             try:
@@ -3464,6 +3479,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                         **ocr_config
                     )
                     print(f"[OCR_REGIONS] azure-document-intelligence found {len(full_image_ocr_results)} text regions")
+                
+                # ===== CANCELLATION CHECK: After Azure OCR =====
+                if _is_translation_cancelled(self):
+                    print(f"[OCR_REGIONS] Cancelled after Azure OCR - discarding results")
+                    return []
             except Exception as e:
                 print(f"[OCR_REGIONS] Azure OCR error: {str(e)}")
                 import traceback
@@ -3493,6 +3513,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 
                 # Process each region individually (cropped) - same approach as custom-api
                 for i, region in enumerate(regions):
+                    # ===== CANCELLATION CHECK: In manga-ocr loop =====
+                    if _is_translation_cancelled(self):
+                        print(f"[OCR_REGIONS] Cancelled at manga-ocr region {i+1}/{len(regions)}")
+                        return []
+                    
                     bbox = region.get('bbox', [])
                     if len(bbox) >= 4:
                         region_x, region_y, region_w, region_h = bbox
@@ -3533,6 +3558,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 return []
                 
         else:
+            # ===== CANCELLATION CHECK: Before other OCR providers =====
+            if _is_translation_cancelled(self):
+                print(f"[OCR_REGIONS] Cancelled before {provider} OCR")
+                return []
+            
             # For non-Azure/custom-api providers, use OCRManager on full image
             print(f"[OCR_REGIONS] Running {provider} OCR on full image")
             try:
@@ -3559,6 +3589,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 )
                 print(f"[OCR_REGIONS] {provider} OCR found {len(full_image_ocr_results)} text regions")
                 
+                # ===== CANCELLATION CHECK: After other OCR =====
+                if _is_translation_cancelled(self):
+                    print(f"[OCR_REGIONS] Cancelled after {provider} OCR - discarding results")
+                    return []
+                
             except Exception as e:
                 print(f"[OCR_REGIONS] {provider} OCR error: {str(e)}")
                 import traceback
@@ -3566,10 +3601,19 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 self._log(f"❌ {provider} OCR failed: {str(e)}", "error")
                 return []
         
+        # ===== CANCELLATION CHECK: Before region matching =====
+        if _is_translation_cancelled(self):
+            print(f"[OCR_REGIONS] Cancelled before region matching")
+            return []
+        
         # STEP 2: Match OCR results to detected regions
         print(f"[OCR_REGIONS] Matching {len(full_image_ocr_results)} OCR results to {len(regions)} regions")
         
         for i, region in enumerate(regions):
+            # Check cancellation periodically during region matching
+            if i > 0 and i % 5 == 0 and _is_translation_cancelled(self):
+                print(f"[OCR_REGIONS] Cancelled during region matching at region {i}")
+                return []
             bbox = region.get('bbox', [])
             if len(bbox) >= 4:
                 region_x, region_y, region_w, region_h = bbox
