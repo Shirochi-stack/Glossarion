@@ -2741,8 +2741,22 @@ class ContentProcessor:
         try:
             import re
             import os
+            import html
             
-            # Parse both documents
+            # STEP 0: Unescape img tags specifically if the AI escaped them
+            # Only unescape img tags to avoid affecting legitimate HTML entities
+            if '&lt;img' in text.lower():
+                log("🔧 Found HTML-escaped img tags, unescaping them...")
+                # Use regex to find and unescape only img tags
+                text = re.sub(
+                    r'&lt;img\s+([^&]*?)/?&gt;',
+                    lambda m: '<img ' + m.group(1) + '/>',
+                    text,
+                    flags=re.IGNORECASE
+                )
+                log("✅ Unescaped img tags")
+            
+            # Parse both documents (text now has unescaped img tags)
             soup_orig = BeautifulSoup(original_html, 'html.parser')
             soup_text = BeautifulSoup(text, 'html.parser')
             
@@ -2754,11 +2768,36 @@ class ContentProcessor:
             # Extract images from translation
             text_images = soup_text.find_all('img')
             
-            # If counts match, nothing to do
-            if len(orig_images) == len(text_images):
-                return text
+            # Check for broken images (images with fewer attributes than originals)
+            broken_images = []
+            if len(text_images) == len(orig_images):
+                # Counts match, but check if any images lost attributes
+                for orig_img in orig_images:
+                    src = orig_img.get('src')
+                    if not src:
+                        continue
+                    
+                    # Find matching image in translation by src
+                    matching_text_img = None
+                    for text_img in text_images:
+                        if text_img.get('src') == src:
+                            matching_text_img = text_img
+                            break
+                    
+                    if matching_text_img:
+                        # Check if translation image has fewer attributes
+                        if len(matching_text_img.attrs) < len(orig_img.attrs):
+                            broken_images.append((src, orig_img))
                 
-            # If translation has fewer images, try to restore them
+                if broken_images:
+                    log(f"🖼️ Found {len(broken_images)} images with missing attributes")
+                    log("🔧 Attempting to restore complete image tags...")
+                else:
+                    # Counts match and all attributes present
+                    return text
+            
+            # If translation has fewer images, collect missing ones
+            missing_images = []
             if len(text_images) < len(orig_images):
                 log(f"🖼️ Image mismatch! Source: {len(orig_images)}, Translation: {len(text_images)}")
                 log("🔧 Attempting emergency image restoration (filename search method)...")
@@ -2771,25 +2810,56 @@ class ContentProcessor:
                         present_srcs.add(src)
                 
                 # Collect missing images
-                missing_images = []
                 for img in orig_images:
                     src = img.get('src')
                     if src and src not in present_srcs:
                         missing_images.append((src, img))
+            
+            # Combine broken and missing images for processing
+            images_to_fix = broken_images + missing_images
+            
+            if not images_to_fix:
+                return text
                 
-                if not missing_images:
-                    return text
-                
-                # Convert both to strings for searching
-                source_str = str(original_html)
-                text_str = str(text)
-                inserted_count = 0
-                
-                # For each missing image, find where it appears in source and insert at same relative position in output
-                for src, orig_img in missing_images:
+            # Convert both to strings for searching
+            source_str = str(original_html)
+            text_str = str(text)
+            inserted_count = 0
+            replaced_count = 0
+            
+            # For each image to fix, try to replace broken tags or insert missing ones
+            for src, orig_img in images_to_fix:
                     # Extract just the filename from the path
                     filename = os.path.basename(src)
                     
+                    # STEP 1: Try to find and replace broken img tags first
+                    # Look for incomplete img tags that might have the same src but missing attributes
+                    # Patterns: <img src="path"> or <img src='path' /> with minimal attributes
+                    broken_patterns = [
+                        rf'<img\s+src=["\']?{re.escape(src)}["\']?\s*/?>',  # Basic img with just src
+                        rf'<img\s+src=["\']?{re.escape(src)}["\']?[^>]*?/?>',  # Img with some attrs but incomplete
+                    ]
+                    
+                    replaced = False
+                    for broken_pattern in broken_patterns:
+                        if re.search(broken_pattern, text_str, re.IGNORECASE):
+                            # Found a broken img tag! Replace it with the full original
+                            img_html = '<img'
+                            for attr, val in orig_img.attrs.items():
+                                img_html += f' {attr}="{val}"'
+                            img_html += '/>'
+                            
+                            text_str = re.sub(broken_pattern, img_html, text_str, count=1, flags=re.IGNORECASE)
+                            replaced = True
+                            replaced_count += 1
+                            log(f"✅ Replaced broken img tag for: {filename}")
+                            break
+                    
+                    # If we replaced it, skip to next image
+                    if replaced:
+                        continue
+                    
+                    # STEP 2: Try positional insertion (original logic)
                     # Search for the filename in the SOURCE HTML to find its position
                     pattern = re.escape(filename)
                     source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
@@ -2836,11 +2906,17 @@ class ContentProcessor:
                                 new_img[attr] = val
                         new_p.append(new_img)
                         body.append(new_p)
-                        text_str = str(soup_text)
-                        inserted_count += 1
-                
-                log(f"✅ Restored {inserted_count} missing images using filename search")
-                return text_str
+                    text_str = str(soup_text)
+                    inserted_count += 1
+            
+            total_restored = replaced_count + inserted_count
+            if replaced_count > 0 and inserted_count > 0:
+                log(f"✅ Restored {total_restored} images: {replaced_count} replaced broken tags, {inserted_count} inserted new")
+            elif replaced_count > 0:
+                log(f"✅ Restored {replaced_count} images by replacing broken tags")
+            elif inserted_count > 0:
+                log(f"✅ Restored {inserted_count} images by inserting at calculated positions")
+            return text_str
                 
         except Exception as e:
             log(f"⚠️ Failed to restore images: {e}")
@@ -6803,6 +6879,18 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     The input is the TRANSLATED text that was originally extracted using html2text.
     """
     import re
+    
+    # CRITICAL: Unescape img tags specifically if the AI escaped them
+    # Only unescape img tags to avoid affecting legitimate HTML entities
+    if '&lt;img' in plain_text.lower():
+        print("🔧 Unescaping HTML-escaped img tags in AI response...")
+        # Use regex to find and unescape only img tags
+        plain_text = re.sub(
+            r'&lt;img\s+([^&]*?)/?&gt;',
+            lambda m: '<img ' + m.group(1) + '/>',
+            plain_text,
+            flags=re.IGNORECASE
+        )
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
