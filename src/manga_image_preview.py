@@ -2449,6 +2449,16 @@ class MangaImagePreviewWidget(QWidget):
                         st.pop('detection_regions', None)  # Clear detection data
                         st.pop('viewer_rectangles', None)  # Clear rectangle data
                         self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+                        # Force immediate flush to disk to ensure deletion persists across image switches
+                        self.manga_integration.image_state_manager.flush()
+                        print(f"[CLEAR_ALL] Flushed cleared state to disk for {os.path.basename(self.current_image_path)}")
+                except Exception:
+                    pass
+                # Also clear in-memory _current_regions that would be used to redraw boxes
+                try:
+                    if hasattr(self.manga_integration, '_current_regions'):
+                        self.manga_integration._current_regions = []
+                        print(f"[CLEAR_ALL] Cleared in-memory _current_regions")
                 except Exception:
                     pass
         except Exception:
