@@ -7473,17 +7473,9 @@ def main(log_callback=None, stop_callback=None):
                 log_callback("✅ Chapters sorted according to OPF reading order")
         else:
             print("🚀 Using comprehensive chapter extraction with resource handling...")
-            # Open ZIP with UTF-8 encoding for Korean filenames (Python 3.11+)
-            try:
-                with zipfile.ZipFile(input_path, 'r', metadata_encoding='utf-8') as zf:
-                    metadata = Chapter_Extractor._extract_epub_metadata(zf)
-                    chapters = Chapter_Extractor.extract_chapters(zf, out, progress_callback=chapter_progress_callback)
-            except TypeError:
-                # Python < 3.11 doesn't support metadata_encoding, fall back to CP437 re-encoding
-                print("[INFO] Using CP437→UTF-8 re-encoding for Korean filenames (Python < 3.11)")
-                with zipfile.ZipFile(input_path, 'r') as zf:
-                    metadata = Chapter_Extractor._extract_epub_metadata(zf)
-                    chapters = Chapter_Extractor.extract_chapters(zf, out, progress_callback=chapter_progress_callback)
+            with zipfile.ZipFile(input_path, 'r') as zf:
+                metadata = Chapter_Extractor._extract_epub_metadata(zf)
+                chapters = Chapter_Extractor.extract_chapters(zf, out, progress_callback=chapter_progress_callback)
 
             print(f"\n📚 Extraction Summary:")
             print(f"   Total chapters extracted: {len(chapters)}")

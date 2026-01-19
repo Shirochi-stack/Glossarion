@@ -3993,33 +3993,14 @@ class AsyncProcessingDialog:
             # Extract ALL resources from EPUB (CSS, fonts, images)
             self._log("📦 Extracting EPUB resources...")
             import zipfile
-            import sys
             
-            # CRITICAL: Enable UTF-8 support for filenames with Korean/CJK characters
-            # Try Python 3.11+ metadata_encoding parameter, fallback to manual decoding
-            try:
-                zf = zipfile.ZipFile(source_path, 'r', metadata_encoding='utf-8')
-            except TypeError:
-                # Python < 3.11 doesn't support metadata_encoding
-                zf = zipfile.ZipFile(source_path, 'r')
-            
-            with zf:
+            with zipfile.ZipFile(source_path, 'r') as zf:
                 # Create resource directories
                 for res_type in ['css', 'fonts', 'images']:
                     os.makedirs(os.path.join(output_dir, res_type), exist_ok=True)
                 
                 # Extract all resources, flatten images into images/
-                for file_path_raw in zf.namelist():
-                    # CRITICAL: Manually decode UTF-8 filenames for Korean/CJK support
-                    # ZIP files with UTF-8 filenames may be incorrectly decoded by default
-                    try:
-                        # Try to detect if the filename was incorrectly decoded
-                        # by attempting to encode it back and re-decode as UTF-8
-                        file_path = file_path_raw.encode('cp437').decode('utf-8')
-                    except (UnicodeDecodeError, UnicodeEncodeError):
-                        # If that fails, use the raw filename as-is
-                        file_path = file_path_raw
-                    
+                for file_path in zf.namelist():
                     if file_path.endswith('/'):
                         continue
                         
@@ -4031,35 +4012,14 @@ class AsyncProcessingDialog:
                         continue
                     
                     if file_lower.endswith('.css'):
-                        # Read using raw name, extract with corrected UTF-8 name
-                        data = zf.read(file_path_raw)
-                        dest = os.path.join(output_dir, 'css', file_name)
-                        with open(dest, 'wb') as f:
-                            f.write(data)
+                        zf.extract(file_path, os.path.join(output_dir, 'css'))
                     elif file_lower.endswith(('.ttf', '.otf', '.woff', '.woff2')):
-                        # Read using raw name, extract with corrected UTF-8 name
-                        data = zf.read(file_path_raw)
-                        dest = os.path.join(output_dir, 'fonts', file_name)
-                        with open(dest, 'wb') as f:
-                            f.write(data)
+                        zf.extract(file_path, os.path.join(output_dir, 'fonts'))
                     elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp')):
                         # Flatten: copy image into output_dir/images with basename only
-                        # Use UTF-8 encoding to properly handle Korean/CJK characters
                         dest = os.path.join(output_dir, 'images', file_name)
-                        try:
-                            # Ensure proper UTF-8 handling for filenames with Korean characters
-                            # Read using raw name from ZIP, but save with corrected UTF-8 name
-                            with open(dest, 'wb') as img_out:
-                                img_out.write(zf.read(file_path_raw))
-                        except (UnicodeEncodeError, UnicodeDecodeError, OSError) as e:
-                            # Fallback: sanitize filename if it contains problematic characters
-                            import unicodedata
-                            # Normalize the filename to NFC form for better compatibility
-                            safe_name = unicodedata.normalize('NFC', file_name)
-                            dest = os.path.join(output_dir, 'images', safe_name)
-                            with open(dest, 'wb') as img_out:
-                                img_out.write(zf.read(file_path))
-                            print(f"⚠️ Filename encoding issue, normalized: {file_name} -> {safe_name}")
+                        with open(dest, 'wb') as img_out:
+                            img_out.write(zf.read(file_path))
             
             # Extract chapter info and metadata from source EPUB
             self._log("📋 Extracting metadata from source EPUB...")

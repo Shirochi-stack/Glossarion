@@ -53,8 +53,8 @@ class ProgressBar:
 def sanitize_resource_filename(filename):
     """Sanitize resource filenames to be filesystem-safe"""
     import unicodedata
-    # Normalize unicode - use NFC to preserve Korean/CJK characters properly
-    # NFKD decomposition corrupts Korean Hangul characters
+    # Normalize unicode - use NFC to preserve Korean/CJK characters
+    # NFKD decomposes Korean Hangul into jamo components, corrupting them
     filename = unicodedata.normalize('NFC', filename)
     # Remove or replace problematic characters
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
@@ -580,27 +580,13 @@ def _extract_all_resources(zf, output_dir, progress_callback=None):
     # Thread-safe lock for extracted_resources
     resource_lock = threading.Lock()
     
-    def extract_single_resource(file_path_raw):
+    def extract_single_resource(file_path):
         if is_stop_requested():
             return None
             
         try:
-            # Fix Korean character encoding in filenames
-            # ZIP files often use CP437 encoding, but Korean filenames need UTF-8
-            file_path = file_path_raw
-            try:
-                # Try to re-encode from CP437 to UTF-8
-                file_path = file_path_raw.encode('cp437').decode('utf-8')
-            except (UnicodeEncodeError, UnicodeDecodeError):
-                # If re-encoding fails, use original (it might already be correct)
-                file_path = file_path_raw
-            
-            # Read from ZIP using the RAW filename (as stored in ZIP)
-            file_data = zf.read(file_path_raw)
-            
-            # Use the corrected UTF-8 filename for categorization and saving
-            basename_utf8 = os.path.basename(file_path)
-            resource_info = _categorize_resource(file_path, basename_utf8)
+            file_data = zf.read(file_path)
+            resource_info = _categorize_resource(file_path, os.path.basename(file_path))
             
             if resource_info:
                 resource_type, target_dir, safe_filename = resource_info
@@ -613,13 +599,9 @@ def _extract_all_resources(zf, output_dir, progress_callback=None):
                 with resource_lock:
                     extracted_resources[resource_type].append(safe_filename)
                 
-                # Log Korean filename handling
-                if file_path != file_path_raw:
-                    print(f"🌏 Fixed Korean filename: {basename_utf8}")
-                
                 return (resource_type, safe_filename)
         except Exception as e:
-            print(f"[WARNING] Failed to extract {file_path_raw}: {e}")
+            print(f"[WARNING] Failed to extract {file_path}: {e}")
             return None
     
     # Process files in parallel
