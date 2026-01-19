@@ -3620,12 +3620,13 @@ class MangaImagePreviewWidget(QWidget):
             source_ext = os.path.splitext(source_filename)[1]
             
             # Determine where to look for translated folder
-            # If OUTPUT_DIRECTORY is set, look there first; otherwise use source directory
+            # If OUTPUT_DIRECTORY is set, ONLY look there (no fallback to source)
             search_dirs = []
-            if override_dir:
-                search_dirs.append(override_dir)  # Check override directory first
-                print(f"[SRC] Checking OUTPUT_DIRECTORY override: {override_dir}")
-            search_dirs.append(source_dir)  # Always check source directory as fallback
+            if override_dir and os.path.isdir(override_dir):
+                search_dirs.append(override_dir)  # ONLY check override directory
+                print(f"[SRC] Using OUTPUT_DIRECTORY override ONLY: {override_dir}")
+            else:
+                search_dirs.append(source_dir)  # No override, use source directory
             
             # Try each search directory
             translated_folder = None
@@ -3645,15 +3646,23 @@ class MangaImagePreviewWidget(QWidget):
                 # Check for translated output (non-cleaned file in isolated folder)
                 translated_path = None
                 if os.path.exists(translated_folder):
+                    # First, check for EXACT filename match (translated output has same name as source)
+                    exact_match = os.path.join(translated_folder, source_filename)
+                    if os.path.exists(exact_match):
+                        print(f"[SRC] Found exact translated output: {source_filename}")
+                        return exact_match
+                    
+                    # Fallback: look for files with same base name but possibly different extension
                     image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
                     for filename in os.listdir(translated_folder):
                         name_lower = filename.lower()
-                        # Find files that match the source name but NOT cleaned files
-                        if (name_lower.startswith(source_name_no_ext.lower()) and 
+                        file_base = os.path.splitext(filename)[0].lower()
+                        # Match exact base name (not startswith) and ensure not cleaned
+                        if (file_base == source_name_no_ext.lower() and 
                             name_lower.endswith(image_extensions) and
                             '_cleaned' not in name_lower):
                             translated_path = os.path.join(translated_folder, filename)
-                            print(f"[SRC] Found translated output: {os.path.basename(translated_path)}")
+                            print(f"[SRC] Found translated output (alt ext): {os.path.basename(translated_path)}")
                             return translated_path
                 
                 # Fall back to cleaned if no translated output found
@@ -3676,21 +3685,21 @@ class MangaImagePreviewWidget(QWidget):
                         print(f"[SRC] State has cleaned_image_path: {os.path.basename(cand)}")
                         print(f"[SRC] Validating filename: '{cand_filename}' contains '_cleaned': {'_cleaned' in cand_filename}")
                         if '_cleaned' in cand_filename and not cand_filename.endswith('.json'):
-                            # Accept if path is inside translated folder, source directory, or override directory
+                            # Accept if path is inside translated folder or the active search directory
                             try:
                                 cand_abs = os.path.abspath(cand)
                                 tdir_abs = os.path.abspath(translated_folder)
-                                sdir_abs = os.path.abspath(source_dir)
                                 def _under(p, base):
                                     try:
                                         return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
                                     except Exception:
                                         return False
-                                # Check translated folder, source dir, and override dir
-                                is_valid = _under(cand_abs, tdir_abs) or _under(cand_abs, sdir_abs)
-                                if override_dir:
-                                    odir_abs = os.path.abspath(override_dir)
-                                    is_valid = is_valid or _under(cand_abs, odir_abs)
+                                # Check translated folder and the active search directory (override OR source, not both)
+                                is_valid = _under(cand_abs, tdir_abs)
+                                for valid_dir in search_dirs:
+                                    if _under(cand_abs, os.path.abspath(valid_dir)):
+                                        is_valid = True
+                                        break
                                 
                                 if is_valid:
                                     cleaned_path = cand_abs
