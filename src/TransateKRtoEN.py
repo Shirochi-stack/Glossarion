@@ -7012,8 +7012,17 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 # =====================================================
 def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection and progress tracking"""
-    global STOP_LOGGED
+    global STOP_LOGGED, _stop_requested
     STOP_LOGGED = False
+    _stop_requested = False  # Reset stop flag for new translation instance
+    
+    # Also reset unified_api_client global flags
+    try:
+        from unified_api_client import set_stop_flag as uac_set_stop_flag
+        uac_set_stop_flag(False)
+    except Exception:
+        pass
+    
     config = TranslationConfig()
     builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
     
