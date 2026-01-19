@@ -11170,19 +11170,13 @@ class MangaTranslator:
                 if not getattr(self, 'concise_logs', True):
                     self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
         
-        # Only adjust overlapping regions if constraining to bubbles AND not manually disabled
-        # The _disable_overlap_adjustment flag is set during manual rectangle positioning
-        # to prevent automatic shifts when user is manually adjusting positions
-        disable_adjustment = getattr(self, '_disable_overlap_adjustment', False)
-        if self.constrain_to_bubble and not disable_adjustment:
+        # Only adjust overlapping regions if constraining to bubbles
+        if self.constrain_to_bubble:
             adjusted_regions = self._adjust_overlapping_regions(regions, image_width, image_height)
         else:
-            # Skip adjustment when not constraining (allows overflow) or when manually disabled
+            # Skip adjustment when not constraining (allows overflow)
             adjusted_regions = regions
-            if disable_adjustment:
-                self._log("  📝 Using original regions (manual positioning mode)", "info")
-            else:
-                self._log("  📝 Using original regions (overflow allowed)", "info")
+            self._log("  📝 Using original regions (overflow allowed)", "info")
         
         # Check if any regions still overlap after adjustment (shouldn't happen, but let's verify)
         has_overlaps = False
