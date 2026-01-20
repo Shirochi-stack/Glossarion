@@ -2416,7 +2416,7 @@ def _create_response_handling_section(self, parent):
     retry_tokens_edit.textChanged.connect(_on_retry_tokens_changed)
     retry_frame_h.addWidget(retry_tokens_edit)
 
-    retry_attempts_label = QLabel("Attempts:")
+    retry_attempts_label = QLabel("Truncated attempts:")
     retry_frame_h.addWidget(retry_attempts_label)
 
     retry_attempts_edit = QLineEdit()
@@ -2508,7 +2508,7 @@ def _create_response_handling_section(self, parent):
     timeout_edit.textChanged.connect(_on_timeout_changed)
     timeout_h.addWidget(timeout_edit)
     
-    timeout_attempts_label = QLabel("Retry attempts:")
+    timeout_attempts_label = QLabel("Timeout attempts:")
     timeout_h.addWidget(timeout_attempts_label)
     
     timeout_attempts_edit = QLineEdit()
