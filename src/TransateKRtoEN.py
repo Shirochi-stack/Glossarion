@@ -4488,7 +4488,10 @@ class BatchTranslationProcessor:
                                         self.client._setup_client()
                                     except Exception as reinit_err:
                                         print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
-                                time.sleep(2)
+                                # Stagger retries to avoid simultaneous API calls
+                                import random
+                                retry_delay = 2 + random.uniform(0, 2)  # 2-4 seconds
+                                time.sleep(retry_delay)
                                 continue
                             else:
                                 # Max retries reached, mark as failed
@@ -4500,7 +4503,10 @@ class BatchTranslationProcessor:
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
-                                time.sleep(2)
+                                # Stagger retries to avoid simultaneous API calls
+                                import random
+                                retry_delay = 2 + random.uniform(0, 2)  # 2-4 seconds
+                                time.sleep(retry_delay)
                                 continue
                             else:
                                 # Max retries reached, mark as failed
