@@ -3908,9 +3908,14 @@ class TranslationProcessor:
                         raise UnifiedClientError("Translation failed after timeout retries")
                 
                 elif "timed out" in error_msg and "timeout:" not in error_msg:
-                    print(f"⚠️ {error_msg}, retrying...")
-                    time.sleep(5)
-                    continue
+                    if timeout_retry_count < max_timeout_retries:
+                        timeout_retry_count += 1
+                        print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        time.sleep(2)
+                        continue
+                    else:
+                        print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
+                        raise UnifiedClientError(f"Translation failed after {max_timeout_retries} timeout retries")
                 
                 elif getattr(e, "error_type", None) == "rate_limit" or getattr(e, "http_status", None) == 429:
                     # Rate limit errors - clean handling without traceback
@@ -4457,7 +4462,7 @@ class BatchTranslationProcessor:
                         if "timed out" in error_msg:
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
-                                print(f"⚠️ API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                                 time.sleep(2)
                                 continue
                             else:
