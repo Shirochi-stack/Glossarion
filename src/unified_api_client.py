@@ -4419,7 +4419,9 @@ class UnifiedClient:
                         new_max_tokens = max(current_max_tokens, target_tokens)
 
                         # Prevent infinite recursion: only allow one truncation retry chain per request
-                        already_tried_truncation = bool(retry_reason and "truncation_retry" in str(retry_reason))
+                        # Use thread-local flag since retry_reason may not be passed through all call paths
+                        tls = self._get_thread_local_client()
+                        already_tried_truncation = getattr(tls, '_in_truncation_retry', False) or bool(retry_reason and "truncation_retry" in str(retry_reason))
                         
                         if already_tried_truncation:
                             print(f"  📋 Already in truncation retry chain - skipping nested retry")
@@ -4432,6 +4434,8 @@ class UnifiedClient:
                                 tls = self._get_thread_local_client()
                                 prev_override = getattr(tls, 'max_retries_override', None)
                                 tls.max_retries_override = max(1, attempts_remaining)
+                                # Set flag to prevent nested truncation retries
+                                tls._in_truncation_retry = True
                                 try:
                                     retry_content, retry_finish_reason = self._send_internal(
                                         messages=messages,
@@ -4445,6 +4449,8 @@ class UnifiedClient:
                                     )
                                     return retry_content, retry_finish_reason
                                 finally:
+                                    # Clear the flag after retry completes
+                                    tls._in_truncation_retry = False
                                     tls.max_retries_override = prev_override
 
                             print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
