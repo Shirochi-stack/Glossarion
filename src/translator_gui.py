@@ -2335,6 +2335,7 @@ Recent translations to summarize:
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('image_output_resolution_var', 'image_output_resolution', '1K'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
+            ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
             ('batch_size_var', 'batch_size', '3'),
             ('batch_mode_var', 'batching_mode', 'direct'),
             ('batch_group_size_var', 'batch_group_size', '3'),
