@@ -9136,7 +9136,10 @@ def main(log_callback=None, stop_callback=None):
                             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                             if graceful_stop_active and wait_for_chunks:
                                 print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
-                                # Don't shutdown - let this future complete, but don't submit new ones
+                                # Process only completed futures, skip cancelled ones
+                                # Clear all remaining futures and exit loop
+                                active_futures.clear()
+                                break
                             else:
                                 print("❌ Translation stopped")
                                 executor.shutdown(wait=False, cancel_futures=True)
