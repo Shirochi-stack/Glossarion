@@ -4491,6 +4491,7 @@ class BatchTranslationProcessor:
                                 # Stagger retries to avoid simultaneous API calls
                                 import random
                                 retry_delay = 2 + random.uniform(0, 2)  # 2-4 seconds
+                                print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                                 time.sleep(retry_delay)
                                 continue
                             else:
@@ -4506,6 +4507,7 @@ class BatchTranslationProcessor:
                                 # Stagger retries to avoid simultaneous API calls
                                 import random
                                 retry_delay = 2 + random.uniform(0, 2)  # 2-4 seconds
+                                print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                                 time.sleep(retry_delay)
                                 continue
                             else:
@@ -4841,7 +4843,12 @@ class BatchTranslationProcessor:
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
+                # Check if it's a timeout failure
+                error_msg = str(e)
+                if "[TIMEOUT]" in error_msg or (hasattr(e, 'error_type') and e.error_type == 'timeout'):
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=chapter)
+                else:
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
             # Print consolidated error message
             if total_chunks > 1:
