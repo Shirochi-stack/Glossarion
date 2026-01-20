@@ -4236,7 +4236,8 @@ def main(log_callback=None, stop_callback=None):
                                 temperature=temp,
                                 max_tokens=mtoks,
                                 stop_check_fn=check_stop,
-                                chunk_timeout=chunk_timeout
+                                chunk_timeout=chunk_timeout,
+                                chapter_idx=idx
                             )
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
@@ -4387,7 +4388,8 @@ def main(log_callback=None, stop_callback=None):
                             temperature=temp,
                             max_tokens=mtoks,
                             stop_check_fn=check_stop,
-                            chunk_timeout=chunk_timeout
+                            chunk_timeout=chunk_timeout,
+                            chapter_idx=idx
                         )
                                 
                     except UnifiedClientError as e:
