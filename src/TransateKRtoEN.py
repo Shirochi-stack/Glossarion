@@ -3004,7 +3004,7 @@ def log_stop_once(message="❌ Translation stopped by user request."):
     """Print a single stop message per run."""
     global STOP_LOGGED
     if not STOP_LOGGED:
-        print(message)
+        # print(message)  # Redundant with "Translation stopped by user" from exception
         STOP_LOGGED = True
     
 class TranslationProcessor:
