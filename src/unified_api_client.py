@@ -1607,8 +1607,13 @@ class UnifiedClient:
             if should_log:
                 log_message = f"🧵 [{threading.current_thread().name}] Reserved slot: wait {wait:.2f}s (delay={thread_delay}s)"
             elif self._thread_submission_count == 3:
-                log_message = f"🧵 [Subsequent threads: {thread_delay}s spacing enforced...]"
-                should_log = True
+                # Suppress "Subsequent threads" log during stop to avoid clutter
+                if not self._is_stop_requested():
+                    log_message = f"🧵 [Subsequent threads: {thread_delay}s spacing enforced...]"
+                    should_log = True
+                else:
+                    log_message = ""
+                    should_log = False
             else:
                 log_message = ""
             
@@ -1626,7 +1631,7 @@ class UnifiedClient:
                 # Use comprehensive stop check
                 if self._is_stop_requested():
                     self._cancelled = True
-                    print(f"🛑 Thread delay cancelled")
+                    # print(f"🛑 Thread delay cancelled")  # Redundant - summary will show stop
                     return
                 
                 sleep_chunk = min(check_interval, wait - elapsed)
@@ -6966,7 +6971,7 @@ class UnifiedClient:
         self._cancelled = True
         self._in_cleanup = True  # Set cleanup flag correctly
         # Show a single cancellation message
-        print("🛑 Operation cancelled (timeout or user stop)")
+        # print("🛑 Operation cancelled (timeout or user stop)")  # Redundant - other logs show this
         # Set global cancellation to affect all instances
         self.set_global_cancellation(True)
         # Close all active streaming responses first
@@ -6995,10 +7000,51 @@ class UnifiedClient:
         # Close Gemini client to abort in-flight native API requests
         try:
             if hasattr(self, 'gemini_client') and self.gemini_client is not None:
-                if hasattr(self.gemini_client, 'close'):
-                    self.gemini_client.close()
+                # Try to close underlying HTTP client/transport
+                try:
+                    if hasattr(self.gemini_client, '_client'):
+                        http_client = self.gemini_client._client
+                        if hasattr(http_client, 'close'):
+                            http_client.close()
+                        if hasattr(http_client, '_transport'):
+                            http_client._transport.close()
+                except Exception:
+                    pass
+                
+                # Close the Gemini client itself
+                try:
+                    if hasattr(self.gemini_client, 'close'):
+                        self.gemini_client.close()
+                except Exception:
+                    pass
+                
                 # Force None to prevent further use
                 self.gemini_client = None
+        except Exception:
+            pass
+        
+        # Also try to close thread-local Gemini clients
+        try:
+            if hasattr(self, '_thread_local'):
+                tls = self._get_thread_local_client()
+                if hasattr(tls, 'gemini_client') and tls.gemini_client is not None:
+                    try:
+                        if hasattr(tls.gemini_client, '_client'):
+                            http_client = tls.gemini_client._client
+                            if hasattr(http_client, 'close'):
+                                http_client.close()
+                            if hasattr(http_client, '_transport'):
+                                http_client._transport.close()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        if hasattr(tls.gemini_client, 'close'):
+                            tls.gemini_client.close()
+                    except Exception:
+                        pass
+                    
+                    tls.gemini_client = None
         except Exception:
             pass
         # Suppress httpx logging when cancelled
@@ -7009,15 +7055,29 @@ class UnifiedClient:
         import logging
         # Suppress httpx logs (used by OpenAI client)
         httpx_logger = logging.getLogger('httpx')
-        httpx_logger.setLevel(logging.WARNING)
+        httpx_logger.setLevel(logging.CRITICAL)
         
         # Suppress OpenAI client logs
         openai_logger = logging.getLogger('openai')
-        openai_logger.setLevel(logging.WARNING)
+        openai_logger.setLevel(logging.CRITICAL)
+        
+        # Suppress Google API client logs (Gemini SDK)
+        google_logger = logging.getLogger('google')
+        google_logger.setLevel(logging.CRITICAL)
+        
+        google_api_logger = logging.getLogger('google.api_core')
+        google_api_logger.setLevel(logging.CRITICAL)
+        
+        google_generativeai_logger = logging.getLogger('google.generativeai')
+        google_generativeai_logger.setLevel(logging.CRITICAL)
+        
+        # Suppress urllib3 logs (used by requests/httpx)
+        urllib3_logger = logging.getLogger('urllib3')
+        urllib3_logger.setLevel(logging.CRITICAL)
         
         # Suppress our own API client logs  
         unified_logger = logging.getLogger('unified_api_client')
-        unified_logger.setLevel(logging.WARNING)
+        unified_logger.setLevel(logging.CRITICAL)
     
     def _reset_http_logs(self):
         """Reset HTTP and API logging levels for new operations"""
@@ -8847,13 +8907,16 @@ class UnifiedClient:
     def _log_pre_stagger(self, messages, context: Optional[str] = None) -> None:
         """Emit a pre-stagger log line so users see what's being sent before delay."""
         try:
-            thread_name = threading.current_thread().name
-            label = self._extract_chapter_label(messages)
-            ctx = context or 'translation'
-            print(f"📤 [{thread_name}] Sending {label} ({ctx}) — queuing staggered API call...")
+            # Suppress log if stop is requested to avoid clutter after summary
+            if not self._is_stop_requested():
+                thread_name = threading.current_thread().name
+                label = self._extract_chapter_label(messages)
+                ctx = context or 'translation'
+                print(f"📤 [{thread_name}] Sending {label} ({ctx}) — queuing staggered API call...")
             # Stash label so stagger logger can show what is being translated
             try:
                 tls = self._get_thread_local_client()
+                label = self._extract_chapter_label(messages)
                 tls.current_request_label = label
             except Exception:
                 pass
