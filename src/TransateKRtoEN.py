@@ -4095,14 +4095,20 @@ class BatchTranslationProcessor:
                         thread_name = threading.current_thread().name
                         
                         # Use actual_num now that it's been determined
-                        print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {actual_num}")
+                        # Only log if not during graceful stop (about to be cancelled)
+                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        if not graceful_stop_active:
+                            print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {actual_num}")
                         
                         # Interruptible sleep - check stop flag every 0.1 seconds
                         elapsed = 0
                         check_interval = 0.1
                         while elapsed < sleep_time:
                             if self.check_stop_fn():
-                                print(f"🛑 Threading delay interrupted by stop flag")
+                                # Only log if not during graceful stop (expected interruption)
+                                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                                if not graceful_stop_active:
+                                    print(f"🛑 Threading delay interrupted by stop flag")
                                 raise Exception("Translation stopped by user during threading delay")
                             
                             sleep_chunk = min(check_interval, sleep_time - elapsed)
@@ -9108,6 +9114,8 @@ def main(log_callback=None, stop_callback=None):
                     while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                         pass
                 
+                graceful_stop_message_shown = False  # Track if we've shown the message
+                
                 while active_futures or next_unit_idx < len(units_to_process):
                     # Check for graceful stop before submitting new work
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -9135,7 +9143,10 @@ def main(log_callback=None, stop_callback=None):
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                             if graceful_stop_active and wait_for_chunks:
-                                print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
+                                # Only print message once
+                                if not graceful_stop_message_shown:
+                                    print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
+                                    graceful_stop_message_shown = True
                                 # Process only completed futures, skip cancelled ones
                                 # Clear all remaining futures and exit loop
                                 active_futures.clear()
