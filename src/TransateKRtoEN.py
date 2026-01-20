@@ -4476,16 +4476,36 @@ class BatchTranslationProcessor:
                     except UnifiedClientError as e:
                         error_msg = str(e)
                         
+                        # Treat cancelled errors (from client being closed) as timeout
+                        if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
+                            if timeout_retry_count < max_timeout_retries:
+                                timeout_retry_count += 1
+                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                # Reinitialize the client if it was closed
+                                if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+                                    try:
+                                        print(f"   🔄 Reinitializing Gemini client...")
+                                        self.client._setup_client()
+                                    except Exception as reinit_err:
+                                        print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                                time.sleep(2)
+                                continue
+                            else:
+                                # Max retries reached, mark as failed
+                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
+                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
+                        
                         # Check for timeout errors
-                        if "timed out" in error_msg:
+                        elif "timed out" in error_msg:
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                                 time.sleep(2)
                                 continue
                             else:
-                                # Max retries reached, re-raise
-                                raise
+                                # Max retries reached, mark as failed
+                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
+                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
                         else:
                             # Not a timeout error, re-raise
                             raise
