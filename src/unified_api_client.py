@@ -4075,7 +4075,7 @@ class UnifiedClient:
                 usage = response.usage
             
             # Extract text uniformly
-            extracted_content, finish_reason = self._extract_response_text(response, provider=getattr(self, 'client_type', 'unknown'))
+            extracted_content, finish_reason = self._extract_response_text(response, provider=getattr(self, 'client_type', 'unknown'), messages=messages)
             
             # Save response if any
             if extracted_content:
@@ -4247,6 +4247,9 @@ class UnifiedClient:
                     
                     # Add provider-specific parameters if applicable
                     extraction_kwargs.update(self._get_extraction_kwargs())
+                    
+                    # Add messages for chapter/chunk logging
+                    extraction_kwargs['messages'] = messages
                     
 # Try universal extraction with provider-specific parameters
                     extracted_content, finish_reason = self._extract_response_text(
@@ -5880,7 +5883,14 @@ class UnifiedClient:
             if response.content is not None and isinstance(response.content, str):
                 # Always return the content from UnifiedResponse
                 if len(response.content) > 0:
-                    self._debug_log(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
+                    # Extract chapter info for better logging
+                    chapter_info = kwargs.get('messages', None)
+                    log_label = self._extract_chapter_label(chapter_info) if chapter_info else None
+                    
+                    if log_label and log_label != "request":
+                        self._debug_log(f"   ✅ Got text from {log_label}: {len(response.content)} chars")
+                    else:
+                        self._debug_log(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
                 else:
                     self._debug_log(f"   ⚠️ Model returned no text (finish_reason: {response.finish_reason})")
                 return response.content, response.finish_reason or 'stop'
