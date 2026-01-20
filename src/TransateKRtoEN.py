@@ -4918,12 +4918,22 @@ class BatchTranslationProcessor:
         parent_idx, parent_chapter = merge_group[0]
         parent_actual_num = parent_chapter.get('actual_chapter_num', parent_chapter['num'])
         
-        thread_name = threading.current_thread().name
-        print(f"\n🔗 [{thread_name}] Processing MERGED group: Chapters {[c.get('actual_chapter_num', c['num']) for _, c in merge_group]}")
-        
         # Check for graceful stop before starting work
         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
         if graceful_stop_active or self.check_stop_fn():
+            # Return failed results for all chapters in the group
+            results = []
+            for idx, chapter in merge_group:
+                actual_num = chapter.get('actual_chapter_num', chapter['num'])
+                results.append((False, actual_num, None, None, None))
+            raise Exception("Translation stopped by user")
+        
+        # Only log if not about to be stopped
+        thread_name = threading.current_thread().name
+        print(f"\n🔗 [{thread_name}] Processing MERGED group: Chapters {[c.get('actual_chapter_num', c['num']) for _, c in merge_group]}")
+        
+        # Double-check stop after logging but before doing real work
+        if self.check_stop_fn():
             # Return failed results for all chapters in the group
             results = []
             for idx, chapter in merge_group:
