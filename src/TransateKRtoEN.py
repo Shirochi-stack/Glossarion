@@ -4427,16 +4427,39 @@ class BatchTranslationProcessor:
                 retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
                 chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if retry_timeout_enabled else None
                 
-                result, finish_reason, raw_obj_from_send = send_with_interrupt(
-                    chapter_msgs,
-                    self.client,
-                    self.config.TEMP,
-                    self.config.MAX_OUTPUT_TOKENS,
-                    local_stop_cb,
-                    chunk_timeout=chunk_timeout,
-                    context='translation',
-                    chapter_context=chapter_ctx,
-                )
+                # Timeout retry logic (same as sequential mode)
+                max_timeout_retries = 2
+                timeout_retry_count = 0
+                
+                while True:
+                    try:
+                        result, finish_reason, raw_obj_from_send = send_with_interrupt(
+                            chapter_msgs,
+                            self.client,
+                            self.config.TEMP,
+                            self.config.MAX_OUTPUT_TOKENS,
+                            local_stop_cb,
+                            chunk_timeout=chunk_timeout,
+                            context='translation',
+                            chapter_context=chapter_ctx,
+                        )
+                        break  # Success, exit retry loop
+                    except UnifiedClientError as e:
+                        error_msg = str(e)
+                        
+                        # Check for timeout errors
+                        if "timed out" in error_msg:
+                            if timeout_retry_count < max_timeout_retries:
+                                timeout_retry_count += 1
+                                print(f"⚠️ API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                time.sleep(2)
+                                continue
+                            else:
+                                # Max retries reached, re-raise
+                                raise
+                        else:
+                            # Not a timeout error, re-raise
+                            raise
                 
                 # Use the raw object directly from send_with_interrupt
                 raw_obj = raw_obj_from_send
