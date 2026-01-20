@@ -10332,7 +10332,7 @@ class UnifiedClient:
                     try:
                         # Check if gemini_client exists and is not None
                         if not hasattr(self, 'gemini_client') or self.gemini_client is None:
-                            print("⚠️ Gemini client is None. This typically happens when stop was requested.")
+                            # print("⚠️ Gemini client is None. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
 
                         if use_streaming:
@@ -10408,7 +10408,7 @@ class UnifiedClient:
                             )
                     except AttributeError as e:
                         if "'NoneType' object has no attribute 'models'" in str(e):
-                            print("⚠️ Gemini client is None or invalid. This typically happens when stop was requested.")
+                            # print("⚠️ Gemini client is None or invalid. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
                         else:
                             raise
