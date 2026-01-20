@@ -3561,6 +3561,13 @@ class TranslationProcessor:
             self.client._in_cleanup = False
         if hasattr(self.client, '_cancelled'):
             self.client._cancelled = False
+        
+        # Reinitialize Gemini client if it was closed by a previous timeout
+        if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+            try:
+                self.client._setup_client()
+            except Exception:
+                pass
     
 
         truncation_retry_count = 0
@@ -4110,6 +4117,13 @@ class BatchTranslationProcessor:
         # Initialize variables that might be needed in except block
         content_hash = None
         ai_features = None
+        
+        # Reinitialize Gemini client if it was closed by a previous timeout
+        if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+            try:
+                self.client._setup_client()
+            except Exception:
+                pass
         
         try:
             # Check if this is from a text file
