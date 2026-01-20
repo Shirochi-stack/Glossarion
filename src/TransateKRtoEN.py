@@ -3905,15 +3905,20 @@ class TranslationProcessor:
                 
                 # Treat cancelled errors (from client being closed) as timeout
                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
-                    # Check stop flag before retrying (respect graceful stop)
-                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                    if self.check_stop() or graceful_stop_active:
+                    # Check stop flag before retrying
+                    if self.check_stop():
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
+                    # During graceful stop, don't retry - just return to fail fast
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if graceful_stop_active:
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                        return "[TIMEOUT]", "timeout", None
+                    
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                         # Reinitialize the client if it was closed
                         if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
                             try:
@@ -3929,19 +3934,24 @@ class TranslationProcessor:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
+                        print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
                         return "[TIMEOUT]", "timeout", None
                 
                 if "took" in error_msg and "timeout:" in error_msg:
-                    # Check stop flag before retrying (respect graceful stop)
-                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                    if self.check_stop() or graceful_stop_active:
+                    # Check stop flag before retrying
+                    if self.check_stop():
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
+                    # During graceful stop, don't retry - just return to fail fast
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if graceful_stop_active:
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                        return "[TIMEOUT]", "timeout", None
+                    
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                        print(f"    ⏱️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
                         # Use SEND_INTERVAL_SECONDS as base, random from half to full
                         import random
                         base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -3950,19 +3960,24 @@ class TranslationProcessor:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print(f"    ❌ Max timeout retries reached - marking chunk as failed")
+                        print(f"    ❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries reached - marking chunk as failed")
                         return "[TIMEOUT]", "timeout", None
                 
                 elif "timed out" in error_msg and "timeout:" not in error_msg:
-                    # Check stop flag before retrying (respect graceful stop)
-                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                    if self.check_stop() or graceful_stop_active:
+                    # Check stop flag before retrying
+                    if self.check_stop():
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
+                    # During graceful stop, don't retry - just return to fail fast
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if graceful_stop_active:
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                        return "[TIMEOUT]", "timeout", None
+                    
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                         # Use SEND_INTERVAL_SECONDS as base, random from half to full
                         import random
                         base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -3971,7 +3986,7 @@ class TranslationProcessor:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
+                        print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
                         return "[TIMEOUT]", "timeout", None
                 
                 elif getattr(e, "error_type", None) == "rate_limit" or getattr(e, "http_status", None) == 429:
@@ -4530,11 +4545,16 @@ class BatchTranslationProcessor:
                         
                         # Treat cancelled errors (from client being closed) as timeout
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
-                            # Check stop flag before retrying (respect graceful stop)
-                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            if local_stop_cb() or graceful_stop_active:
+                            # Check stop flag before retrying
+                            if local_stop_cb():
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+                            
+                            # During graceful stop, don't retry - just raise to fail fast
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            if graceful_stop_active:
+                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
@@ -4561,11 +4581,16 @@ class BatchTranslationProcessor:
                         
                         # Check for timeout errors
                         elif "timed out" in error_msg:
-                            # Check stop flag before retrying (respect graceful stop)
-                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            if local_stop_cb() or graceful_stop_active:
+                            # Check stop flag before retrying
+                            if local_stop_cb():
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+                            
+                            # During graceful stop, don't retry - just raise to fail fast
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            if graceful_stop_active:
+                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
