@@ -116,7 +116,7 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None):
     """Send API request with interrupt capability and optional timeout retry"""
     # Mark that an API call is now active (for graceful stop logic)
     os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
@@ -124,6 +124,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     # Get timeout retry settings
     max_timeout_retries = int(os.getenv('TIMEOUT_RETRY_ATTEMPTS', '2'))
     timeout_retry_count = 0
+    
+    # Format chapter context for logs
+    chapter_label = f"Chapter {chapter_idx+1}" if chapter_idx is not None else "API call"
     
     result_queue = queue.Queue()
 
@@ -227,7 +230,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # During graceful stop, don't cancel the API call - let it complete
                     if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
                         # More aggressive cancellation
-                        print("🛑 Stop requested - cancelling API call immediately...")
+                        # print("🛑 Stop requested - cancelling API call immediately...")  # Redundant
                         
                         # Set cleanup flag
                         if hasattr(client, '_in_cleanup'):
@@ -256,12 +259,21 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if "cancelled" in error_msg.lower() or "Gemini client not initialized" in error_msg or "timed out" in error_msg.lower():
                 # Check stop flag before retrying
                 if stop_check_fn():
-                    print("❌ Glossary extraction stopped by user during timeout retry")
+                    # print("❌ Glossary extraction stopped by user during timeout retry")  # Redundant
                     raise
                 
                 if timeout_retry_count < max_timeout_retries:
                     timeout_retry_count += 1
-                    print(f"⚠️ API call error: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                    # Detailed log with chapter context like TransateKRtoEN.py
+                    if "timed out" in error_msg.lower():
+                        if chunk_timeout:
+                            print(f"⚠️ {chapter_label}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        else:
+                            print(f"⚠️ {chapter_label}: API call timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                    elif "Gemini client not initialized" in error_msg:
+                        print(f"⚠️ {chapter_label}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                    else:
+                        print(f"⚠️ {chapter_label}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                     
                     # Reinitialize the client if it was closed
                     if hasattr(client, 'gemini_client') and client.gemini_client is None:
@@ -2322,7 +2334,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
         for future in as_completed(futures):  # Removed timeout - let futures complete
             # Normal stop check (during graceful stop, check_stop() returns False)
             if check_stop():
-                print("🛑 Stop detected - cancelling all pending operations...")
+                # print("🛑 Stop detected - cancelling all pending operations...")  # Redundant
                 # Cancel all pending futures immediately
                 cancelled = cancel_all_futures(list(futures.keys()))
                 if cancelled > 0:
@@ -2425,7 +2437,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     check_interval = 0.1
                     while elapsed < sleep_time:
                         if stop_check_fn():
-                            print(f"🛑 Threading delay interrupted by stop flag")
+                            # print(f"🛑 Threading delay interrupted by stop flag")  # Redundant
                             raise UnifiedClientError("Glossary extraction stopped by user during threading delay")
                         
                         sleep_chunk = min(check_interval, sleep_time - elapsed)
@@ -2471,7 +2483,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             temperature=temp,
             max_tokens=mtoks,
             stop_check_fn=stop_check_fn,
-            chunk_timeout=chunk_timeout
+            chunk_timeout=chunk_timeout,
+            chapter_idx=idx
         )
 
         # Handle the response - it might be a tuple or a string
@@ -2735,14 +2748,15 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }, f, indent=2, ensure_ascii=False)
         
-        # Make API call
+        # Make API call (use parent chapter idx for logging)
         raw, finish_reason, raw_obj = send_with_interrupt(
             messages=msgs,
             client=client,
             temperature=temp,
             max_tokens=mtoks,
             stop_check_fn=stop_check_fn,
-            chunk_timeout=chunk_timeout
+            chunk_timeout=chunk_timeout,
+            chapter_idx=parent_idx
         )
         
         # Extract response text
@@ -2826,7 +2840,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         # Check if this is a user stop (not an actual error)
         err_lower = str(e).lower()
         if "stopped by user" in err_lower or "cancelled" in err_lower or "operation cancelled" in err_lower:
-            print(f"🛑 Glossary extraction stopped by user")
+            # print(f"🛑 Glossary extraction stopped by user")  # Redundant
             # Re-raise to propagate the stop signal up the call stack
             raise
         else:
@@ -3696,7 +3710,7 @@ def main(log_callback=None, stop_callback=None):
                     while active_futures:
                         for future in as_completed(list(active_futures.keys())):
                             if check_stop():
-                                print("🛑 Stop detected - cancelling all pending operations...")
+                                # print("🛑 Stop detected - cancelling all pending operations...")  # Redundant
                                 stopped_early = True
                                 cancelled = cancel_all_futures(list(active_futures.keys()))
                                 if cancelled > 0:
@@ -3737,7 +3751,7 @@ def main(log_callback=None, stop_callback=None):
                     # Process results AS THEY COMPLETE, not all at once
                     for future in as_completed(futures):
                         if check_stop():
-                            print("🛑 Stop detected - cancelling all pending operations...")
+                            # print("🛑 Stop detected - cancelling all pending operations...")  # Redundant
                             stopped_early = True
                             cancelled = cancel_all_futures(list(futures.keys()))
                             if cancelled > 0:
@@ -4012,7 +4026,7 @@ def main(log_callback=None, stop_callback=None):
                 # Check if processing text file chapters
                 is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
                 terminology = "section" if is_text_chapter else "chapter"
-                print(f"Skipping {terminology} {idx+1} (already processed)")
+                # print(f"Skipping {terminology} {idx+1} (already processed)")  # Redundant - already shown in summary
                 continue
                     
             print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
