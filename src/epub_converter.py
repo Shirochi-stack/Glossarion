@@ -400,57 +400,34 @@ class TitleExtractor:
     
     @staticmethod
     def clean_title(title: str) -> str:
-        """Clean and normalize extracted title - PRESERVE SHORT TITLES LIKE ROMAN NUMERALS"""
+        """Clean and normalize extracted title - trust HTML headers, minimal cleanup only"""
         if not title:
             return ""
         
-        # Remove any [tag] patterns first
-        #title = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', title)
-        
-        # Decode entities - PRESERVES UNICODE
+        # Decode HTML entities - PRESERVES UNICODE
         title = HTMLEntityDecoder.decode(title)
         
-        # Remove HTML tags
+        # Remove HTML tags only
         title = re.sub(r'<[^>]+>', '', title)
         
-        # Normalize spaces
+        # Normalize whitespace (convert non-breaking spaces, multiple spaces, etc.)
         title = re.sub(r'[\xa0\u2000-\u200a\u202f\u205f\u3000]+', ' ', title)
         title = re.sub(r'\s+', ' ', title).strip()
         
-        # Remove leading/trailing punctuation EXCEPT for roman numeral dots, parentheses, and brackets in titles
-        # Don't strip trailing dots from roman numerals like "III." or "IX."
-        # Don't strip parentheses or brackets as they're often part of the title (e.g., "Chapter (1)", "[You are a BUG.]")
-        if not re.match(r'^[IVXLCDM]+\.?$', title, re.IGNORECASE):
-            # Removed [] from character class - brackets are part of titles, not separators
-            title = re.sub(r'^[{}\\s\\-\\u2013\\u2014:;,|/\\\\]+', '', title).strip()
-            title = re.sub(r'[{}\\s\\-\\u2013\\u2014:;,|/\\\\]+$', '', title).strip()
-        
-        # Remove quotes if they wrap the entire title
-        quote_pairs = [
-            ('"', '"'), ("'", "'"),
-            ('\u201c', '\u201d'), ('\u2018', '\u2019'),  # Smart quotes
-            ('«', '»'), ('‹', '›'),  # Guillemets
-        ]
-        
-        for open_q, close_q in quote_pairs:
-            if title.startswith(open_q) and title.endswith(close_q):
-                title = title[len(open_q):-len(close_q)].strip()
-                break
-        
-        # Normalize Unicode - PRESERVES READABILITY
+        # Normalize Unicode to NFC form
         title = unicodedata.normalize('NFC', title)
         
-        # Remove zero-width characters
+        # Remove invisible zero-width characters only
         title = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', title)
         
-        # Final cleanup
+        # Final whitespace cleanup
         title = ' '.join(title.split())
         
-        # Truncate if too long
-        if len(title) > 150:
-            truncated = title[:147]
+        # Truncate if excessively long (safety check only)
+        if len(title) > 200:
+            truncated = title[:197]
             last_space = truncated.rfind(' ')
-            if last_space > 100:
+            if last_space > 150:
                 truncated = truncated[:last_space]
             title = truncated + "..."
         
