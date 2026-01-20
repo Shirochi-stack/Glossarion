@@ -232,7 +232,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         client._in_cleanup = True
                     if hasattr(client, 'cancel_current_operation'):
                         client.cancel_current_operation()
-                    raise UnifiedClientError(f"API call timed out after {timeout} seconds")
+                    raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
 
 # Parse token limit from environment variable (same logic as translation)
 def parse_glossary_token_limit():
@@ -2776,8 +2776,6 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         else:
             # Actual API error (timeout, etc.)
             print(f"❌ Merged group failed: {e}")
-            import traceback
-            print(f"   Traceback: {traceback.format_exc()}")
             
             return {
                 'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}
