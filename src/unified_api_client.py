@@ -6990,6 +6990,15 @@ class UnifiedClient:
                     pass
         except Exception:
             pass
+        # Close Gemini client to abort in-flight native API requests
+        try:
+            if hasattr(self, 'gemini_client') and self.gemini_client is not None:
+                if hasattr(self.gemini_client, 'close'):
+                    self.gemini_client.close()
+                # Force None to prevent further use
+                self.gemini_client = None
+        except Exception:
+            pass
         # Suppress httpx logging when cancelled
         self._suppress_http_logs()
 
@@ -10489,9 +10498,11 @@ class UnifiedClient:
                             extracted_text = response.text
                             if extracted_text:
                                 text_content = extracted_text
-                                print(f"   ✅ Extracted {len(text_content)} chars from response.text")
+                                if not self._is_stop_requested():
+                                    print(f"   ✅ Extracted {len(text_content)} chars from response.text")
                         except Exception as e:
-                            print(f"   ⚠️ Could not access response.text: {e}")
+                            if not self._is_stop_requested():
+                                print(f"   ⚠️ Could not access response.text: {e}")
                     # Capture raw content object if available (even when .text was used)
                     if raw_content_obj is None and hasattr(response, 'candidates') and response.candidates:
                         try:
@@ -10506,7 +10517,8 @@ class UnifiedClient:
                     if (not text_content) or need_image:
                         # CRITICAL FIX: Check if candidates exists AND is not None before iterating
                         if hasattr(response, 'candidates') and response.candidates is not None:
-                            print(f"   🔍 Extracting from candidates...")
+                            if not self._is_stop_requested():
+                                print(f"   🔍 Extracting from candidates...")
                             # Ensure text_content is a string before appending
                             if text_content is None:
                                 text_content = ""
@@ -10534,13 +10546,15 @@ class UnifiedClient:
                                             if not text_content:
                                                 text_content += candidate.content.text
                                 
-                                if text_content and not response.text: # Only print if we didn't get it from .text
+                                if text_content and not response.text and not self._is_stop_requested(): # Only print if we didn't get it from .text
                                     print(f"   ✅ Extracted {len(text_content)} chars from candidates")
                             except TypeError as e:
-                                print(f"   ⚠️ Error iterating candidates: {e}")
-                                print(f"   🔍 Candidates type: {type(response.candidates)}")
+                                if not self._is_stop_requested():
+                                    print(f"   ⚠️ Error iterating candidates: {e}")
+                                    print(f"   🔍 Candidates type: {type(response.candidates)}")
                         else:
-                            print(f"   ⚠️ No candidates found in response or candidates is None")
+                            if not self._is_stop_requested():
+                                print(f"   ⚠️ No candidates found in response or candidates is None")
                     
                     # Save image if present
                     if image_data and enable_image_output:
