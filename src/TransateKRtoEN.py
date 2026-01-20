@@ -4509,7 +4509,8 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
 
-                print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
+                # Log removed - unified_api_client._log_pre_stagger will log this
+                # print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
                 chapter_ctx = {
                     'chapter': actual_num,
                     'chunk': chunk_idx,
@@ -4748,7 +4749,8 @@ class BatchTranslationProcessor:
                                 if is_truncated:
                                     chapter_truncated = True
                             
-                            print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
+                            # Log redundant with "Received Chapter X, Chunk Y" above
+                            # print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
                             
                             # AFTER storing result: check if we should stop (for multi-chunk without wait_for_chunks)
                             # For single-chunk chapters, just continue to save
@@ -4927,7 +4929,8 @@ class BatchTranslationProcessor:
                     self.save_progress_fn()
                     self.chapters_completed += 1
             
-            print(f"✅ Chapter {actual_num} completed successfully")
+            # Log removed - executor loop will log "Chapter X done"
+            # print(f"✅ Chapter {actual_num} completed successfully")
             # Return chapter body and final cleaned translation so the main thread
             # can append to translation history in a stable batch order.
             return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
