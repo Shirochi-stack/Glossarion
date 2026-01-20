@@ -3905,8 +3905,9 @@ class TranslationProcessor:
                 
                 # Treat cancelled errors (from client being closed) as timeout
                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
-                    # Check stop flag before retrying
-                    if self.check_stop():
+                    # Check stop flag before retrying (respect graceful stop)
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if self.check_stop() or graceful_stop_active:
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
@@ -3932,6 +3933,12 @@ class TranslationProcessor:
                         return "[TIMEOUT]", "timeout", None
                 
                 if "took" in error_msg and "timeout:" in error_msg:
+                    # Check stop flag before retrying (respect graceful stop)
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if self.check_stop() or graceful_stop_active:
+                        print("❌ Translation stopped by user during timeout retry")
+                        return None, None, None
+                    
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
                         print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
@@ -3947,6 +3954,12 @@ class TranslationProcessor:
                         return "[TIMEOUT]", "timeout", None
                 
                 elif "timed out" in error_msg and "timeout:" not in error_msg:
+                    # Check stop flag before retrying (respect graceful stop)
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if self.check_stop() or graceful_stop_active:
+                        print("❌ Translation stopped by user during timeout retry")
+                        return None, None, None
+                    
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
                         print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
@@ -4519,7 +4532,7 @@ class BatchTranslationProcessor:
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
                             # Check stop flag before retrying (respect graceful stop)
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            if local_stop_cb() and not graceful_stop_active:
+                            if local_stop_cb() or graceful_stop_active:
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
                             
@@ -4550,7 +4563,7 @@ class BatchTranslationProcessor:
                         elif "timed out" in error_msg:
                             # Check stop flag before retrying (respect graceful stop)
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            if local_stop_cb() and not graceful_stop_active:
+                            if local_stop_cb() or graceful_stop_active:
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
                             
