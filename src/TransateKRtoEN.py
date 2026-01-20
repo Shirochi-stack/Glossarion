@@ -9157,6 +9157,9 @@ def main(log_callback=None, stop_callback=None):
                     # Use wait() with FIRST_COMPLETED to properly handle dynamic future sets
                     done, _ = concurrent.futures.wait(active_futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
                     
+                    # Track if we should exit the outer loop after processing done futures
+                    should_exit_outer_loop = False
+                    
                     for future in done:
                         if check_stop():
                             # Check if wait_for_chunks is enabled - if so, let current chapters finish
@@ -9168,8 +9171,9 @@ def main(log_callback=None, stop_callback=None):
                                     print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
                                     graceful_stop_message_shown = True
                                 # Process only completed futures, skip cancelled ones
-                                # Clear all remaining futures and exit loop
+                                # Clear all remaining futures and exit both loops
                                 active_futures.clear()
+                                should_exit_outer_loop = True
                                 break
                             else:
                                 print("❌ Translation stopped")
@@ -9304,6 +9308,10 @@ def main(log_callback=None, stop_callback=None):
                             with batch_submit_lock:
                                 while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                                     pass
+                    
+                    # Exit outer loop if graceful stop was triggered
+                    if should_exit_outer_loop:
+                        break
                 
                 # After all futures complete, if stop was requested with wait_for_chunks, exit
                 if check_stop():
@@ -9770,6 +9778,9 @@ def main(log_callback=None, stop_callback=None):
 
                     groups.append(group)
             
+            # Check graceful stop before logging merge groups
+            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+            
             for group in groups:
                 if len(group) > 1:
                     parent_idx = group[0][0]  # First chapter in group is the parent
@@ -9782,10 +9793,13 @@ def main(log_callback=None, stop_callback=None):
                         if i > 0:
                             merged_children.add(idx)
                     
-                    child_nums = [g[2] for g in group[1:]]
-                    print(f"   📎 Chapters {parent_actual_num} + {child_nums} will be merged into one request")
+                    # Only log merge planning if not in graceful stop
+                    if not graceful_stop_active:
+                        child_nums = [g[2] for g in group[1:]]
+                        print(f"   📎 Chapters {parent_actual_num} + {child_nums} will be merged into one request")
             
-            print(f"   📊 Created {len(merge_groups)} merge groups from {len(chapters_needing_translation)} chapters")
+            if not graceful_stop_active:
+                print(f"   📊 Created {len(merge_groups)} merge groups from {len(chapters_needing_translation)} chapters")
 
         # Second pass: process chapters
         for idx, c in enumerate(chapters):
