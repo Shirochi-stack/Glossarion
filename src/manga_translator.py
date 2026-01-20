@@ -7331,6 +7331,10 @@ class MangaTranslator:
             system_prompt = ''
             if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
                 system_prompt = self.main_gui.prompt_profiles[profile_name]
+                # Replace {target_lang} placeholder with actual target language
+                target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+                if "{target_lang}" in system_prompt:
+                    system_prompt = system_prompt.replace("{target_lang}", target_lang)
                 self._log(f"📋 Using profile: {profile_name}")
             else:
                 self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
@@ -7879,11 +7883,19 @@ class MangaTranslator:
             system_prompt = ''
             if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
                 system_prompt = self.main_gui.prompt_profiles[profile_name]
+                # Replace {target_lang} placeholder with actual target language
+                target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+                if "{target_lang}" in system_prompt:
+                    system_prompt = system_prompt.replace("{target_lang}", target_lang)
                 self._log(f"📋 Using profile: {profile_name}")
             else:
                 # Fallback to check if it's stored as a direct attribute (legacy support)
                 system_prompt = getattr(self.main_gui, profile_name.replace(' ', '_'), '')
                 if system_prompt:
+                    # Replace {target_lang} placeholder with actual target language
+                    target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+                    if "{target_lang}" in system_prompt:
+                        system_prompt = system_prompt.replace("{target_lang}", target_lang)
                     self._log(f"📋 Using profile (legacy): {profile_name}")
                 else:
                     self._log(f"⚠️ Profile '{profile_name}' not found, using empty prompt", "warning")
