@@ -3601,7 +3601,10 @@ class TranslationProcessor:
         
         duplicate_retry_count = 0
         timeout_retry_count = 0
-        max_timeout_retries = 2
+        try:
+            max_timeout_retries = int(os.getenv("TIMEOUT_RETRY_ATTEMPTS", "2"))
+        except Exception:
+            max_timeout_retries = 2
         history_purged = False
         
         original_max_tokens = self.config.MAX_OUTPUT_TOKENS
@@ -4428,7 +4431,10 @@ class BatchTranslationProcessor:
                 chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if retry_timeout_enabled else None
                 
                 # Timeout retry logic (same as sequential mode)
-                max_timeout_retries = 2
+                try:
+                    max_timeout_retries = int(os.getenv("TIMEOUT_RETRY_ATTEMPTS", "2"))
+                except Exception:
+                    max_timeout_retries = 2
                 timeout_retry_count = 0
                 
                 while True:

@@ -7642,6 +7642,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
             'RETRY_TIMEOUT': "1" if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else "0",
             'CHUNK_TIMEOUT': str(self.chunk_timeout_var),
+            'TIMEOUT_RETRY_ATTEMPTS': str(getattr(self, 'timeout_retry_attempts_var', self.config.get('timeout_retry_attempts', 2))),
             # New network/HTTP controls
             'ENABLE_HTTP_TUNING': '1' if self.config.get('enable_http_tuning', False) else '0',
             'CONNECT_TIMEOUT': str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))),
@@ -11519,6 +11520,7 @@ Important rules:
                 ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('split_failed_retry_attempts', ['split_failed_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('retry_timeout', ['retry_timeout_var'], False, bool),
+                ('timeout_retry_attempts', ['timeout_retry_attempts_var'], 2, lambda v: safe_int(v, 2)),
                 ('preserve_original_text_on_failure', ['preserve_original_text_var'], False, bool),
                 
                 # Rolling summary

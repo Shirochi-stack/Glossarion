@@ -2491,7 +2491,7 @@ def _create_response_handling_section(self, parent):
     timeout_h = QHBoxLayout(timeout_w)
     timeout_h.setContentsMargins(20, 5, 0, 0)
     
-    timeout_label_1 = QLabel("Timeout after")
+    timeout_label_1 = QLabel("Timeout after (seconds):")
     timeout_h.addWidget(timeout_label_1)
     
     timeout_edit = QLineEdit()
@@ -2508,11 +2508,28 @@ def _create_response_handling_section(self, parent):
     timeout_edit.textChanged.connect(_on_timeout_changed)
     timeout_h.addWidget(timeout_edit)
     
-    timeout_label_2 = QLabel("seconds")
-    timeout_h.addWidget(timeout_label_2)
+    timeout_attempts_label = QLabel("Retry attempts:")
+    timeout_h.addWidget(timeout_attempts_label)
+    
+    timeout_attempts_edit = QLineEdit()
+    timeout_attempts_edit.setFixedWidth(50)
+    if not hasattr(self, 'timeout_retry_attempts_var'):
+        self.timeout_retry_attempts_var = str(self.config.get('timeout_retry_attempts', '2'))
+    try:
+        timeout_attempts_edit.setText(str(self.timeout_retry_attempts_var))
+    except Exception:
+        timeout_attempts_edit.setText("2")
+    def _on_timeout_attempts_changed(text):
+        try:
+            self.timeout_retry_attempts_var = text
+        except Exception:
+            pass
+    timeout_attempts_edit.textChanged.connect(_on_timeout_attempts_changed)
+    timeout_h.addWidget(timeout_attempts_edit)
+    
     timeout_h.addStretch()
     
-    timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\nThis will also affect chapter extraction timeout")
+    timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\\nThis will also affect chapter extraction timeout")
     timeout_desc.setContentsMargins(20, 0, 0, 5)
     
     def _on_retry_slow_toggle(checked):
@@ -2522,17 +2539,20 @@ def _create_response_handling_section(self, parent):
             # Update UI state
             timeout_edit.setEnabled(bool(checked))
             timeout_label_1.setEnabled(bool(checked))
-            timeout_label_2.setEnabled(bool(checked))
+            timeout_attempts_label.setEnabled(bool(checked))
+            timeout_attempts_edit.setEnabled(bool(checked))
             timeout_desc.setEnabled(bool(checked))
 
             # Update styles
             if checked:
                 timeout_label_1.setStyleSheet("color: white;")
-                timeout_label_2.setStyleSheet("color: white;")
+                timeout_attempts_label.setStyleSheet("color: white;")
+                timeout_attempts_edit.setStyleSheet("color: white;")
                 timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
             else:
                 timeout_label_1.setStyleSheet("color: #606060;")
-                timeout_label_2.setStyleSheet("color: #606060;")
+                timeout_attempts_label.setStyleSheet("color: #606060;")
+                timeout_attempts_edit.setStyleSheet("color: #909090;")
                 timeout_desc.setStyleSheet("color: #606060; font-size: 10pt;")
         except Exception:
             pass
