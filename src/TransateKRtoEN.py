@@ -9109,13 +9109,22 @@ def main(log_callback=None, stop_callback=None):
                         pass
                 
                 while active_futures or next_unit_idx < len(units_to_process):
-                    # Ensure we have work submitted
+                    # Check for graceful stop before submitting new work
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    
+                    # Ensure we have work submitted (but not during graceful stop)
                     if not active_futures:
                         with batch_submit_lock:
                             while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                                 pass
                         if not active_futures:
                             break  # No more work to do
+                    elif not graceful_stop_active:
+                        # Auto-refill: submit new work to maintain BATCH_SIZE parallel calls
+                        # But DON'T submit new work if graceful stop is active
+                        with batch_submit_lock:
+                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
+                                pass
                     
                     # Use wait() with FIRST_COMPLETED to properly handle dynamic future sets
                     done, _ = concurrent.futures.wait(active_futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)

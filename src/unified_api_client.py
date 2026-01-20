@@ -4498,7 +4498,9 @@ class UnifiedClient:
                 # Handle cancellation specially for timeout support
                 if e.error_type == "cancelled" or "cancelled" in str(e):
                     self._in_cleanup = False  # Ensure cleanup flag is set
-                    if not self._is_stop_requested():
+                    # Only log if not during graceful stop (expected cancellation)
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if not self._is_stop_requested() and not graceful_stop_active:
                         logger.info("Propagating cancellation to caller")
                     # Re-raise so send_with_interrupt can handle it
                     raise
