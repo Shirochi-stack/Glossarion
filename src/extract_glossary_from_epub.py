@@ -3706,7 +3706,7 @@ def main(log_callback=None, stop_callback=None):
                         active_futures[last_future] = futures[last_future]
                         return True
 
-                    # Prime the executor
+                    # Prime the executor to fill all slots
                     while len(active_futures) < batch_size and _submit_next():
                         pass
 
@@ -3723,6 +3723,13 @@ def main(log_callback=None, stop_callback=None):
                                 break
 
                             unit = active_futures.pop(future)
+                            
+                            # IMMEDIATELY refill the slot BEFORE processing result to maintain full parallelism
+                            # This ensures we always have batch_size API calls in flight
+                            if os.environ.get('GRACEFUL_STOP') != '1':
+                                _submit_next()
+                            
+                            # Now process the completed result
                             _handle_future_result(future, unit)
                             if stopped_early:
                                 break
@@ -3737,11 +3744,6 @@ def main(log_callback=None, stop_callback=None):
                                 executor.shutdown(wait=False)
                                 active_futures.clear()
                                 break
-                            
-                            # Refill pool (but not during graceful stop)
-                            if os.environ.get('GRACEFUL_STOP') != '1':
-                                if _submit_next():
-                                    pass
                         if stopped_early:
                             break
                 else:
