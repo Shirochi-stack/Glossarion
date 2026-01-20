@@ -4424,7 +4424,8 @@ class UnifiedClient:
                         already_tried_truncation = getattr(tls, '_in_truncation_retry', False) or bool(retry_reason and "truncation_retry" in str(retry_reason))
                         
                         if already_tried_truncation:
-                            print(f"  📋 Already in truncation retry chain - skipping nested retry")
+                            pass
+                            # print(f"  📋 Already in truncation retry chain - skipping nested retry")
                         elif attempts_remaining <= 0:
                             print(f"  📊 No internal retries remaining ({internal_retries}); skipping truncation retry")
                         else:

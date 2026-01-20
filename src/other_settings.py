@@ -8259,7 +8259,7 @@ def save_profile(self):
     # Ensure the current selection is set to the saved profile
     self.profile_menu.setCurrentText(name)
     
-    # Show save confirmation with Halgakos icon
+    # Show save confirmation with Halgakos icon (non-modal)
     from PySide6.QtGui import QIcon
     msg_box = QMessageBox()
     msg_box.setWindowTitle("Saved")
@@ -8273,7 +8273,7 @@ def save_profile(self):
     except:
         pass
     _center_messagebox_buttons(msg_box)
-    msg_box.exec()
+    msg_box.show()
     self.save_profiles()
 
 def delete_profile(self):
