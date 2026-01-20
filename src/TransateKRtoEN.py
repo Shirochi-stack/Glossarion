@@ -9757,9 +9757,10 @@ def main(log_callback=None, stop_callback=None):
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
             
-            # Graceful stop check: if an API call completed during graceful stop, stop now
-            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
-                print("✅ Graceful stop: Chapter completed, stopping...")
+            # Graceful stop check: stop processing new chapters when graceful stop is active
+            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+            if graceful_stop_active or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                print("✅ Graceful stop: Stopping new chapter processing...")
                 break
             
             # Skip if this chapter was merged into another
