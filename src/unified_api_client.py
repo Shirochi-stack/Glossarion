@@ -5874,8 +5874,11 @@ class UnifiedClient:
         if provider is None:
             provider = self.client_type
         
-        self._debug_log(f"   🔍 Extracting text from {provider} response...")
-        self._debug_log(f"   🔍 Response type: {type(response)}")
+        # Only log "Extracting" if we're actually extracting from raw response
+        # For UnifiedResponse, content is already extracted
+        if not isinstance(response, UnifiedResponse):
+            self._debug_log(f"   🔍 Extracting text from {provider} response...")
+        # self._debug_log(f"   🔍 Response type: {type(response)}")
         
         # Handle UnifiedResponse objects
         if isinstance(response, UnifiedResponse):
@@ -5888,9 +5891,9 @@ class UnifiedClient:
                     log_label = self._extract_chapter_label(chapter_info) if chapter_info else None
                     
                     if log_label and log_label != "request":
-                        self._debug_log(f"   ✅ Got text from {log_label}: {len(response.content)} chars")
+                        self._debug_log(f"   ✅ Received {log_label}: {len(response.content)} chars")
                     else:
-                        self._debug_log(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
+                        self._debug_log(f"   ✅ Received response: {len(response.content)} chars")
                 else:
                     self._debug_log(f"   ⚠️ Model returned no text (finish_reason: {response.finish_reason})")
                 return response.content, response.finish_reason or 'stop'
@@ -10592,8 +10595,9 @@ class UnifiedClient:
                             extracted_text = response.text
                             if extracted_text:
                                 text_content = extracted_text
-                                if not self._is_stop_requested():
-                                    print(f"   ✅ Extracted {len(text_content)} chars from response.text")
+                                # Log suppressed - universal extraction will log final result
+                                # if not self._is_stop_requested():
+                                #     print(f"   ✅ Extracted {len(text_content)} chars from response.text")
                         except Exception as e:
                             if not self._is_stop_requested():
                                 print(f"   ⚠️ Could not access response.text: {e}")
@@ -10640,8 +10644,9 @@ class UnifiedClient:
                                             if not text_content:
                                                 text_content += candidate.content.text
                                 
-                                if text_content and not response.text and not self._is_stop_requested(): # Only print if we didn't get it from .text
-                                    print(f"   ✅ Extracted {len(text_content)} chars from candidates")
+                                # Log suppressed - universal extraction will log final result
+                                # if text_content and not response.text and not self._is_stop_requested():
+                                #     print(f"   ✅ Extracted {len(text_content)} chars from candidates")
                             except TypeError as e:
                                 if not self._is_stop_requested():
                                     print(f"   ⚠️ Error iterating candidates: {e}")
