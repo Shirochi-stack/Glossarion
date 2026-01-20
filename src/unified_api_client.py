@@ -5562,7 +5562,7 @@ class UnifiedClient:
             self.pattern_counts.clear()
             self.last_pattern = None
         
-        logger.info(f"Reset conversation state for new context: {new_context}")
+        # logger.info(f"Reset conversation state for new context: {new_context}")
     
     def _apply_pure_reinforcement(self, messages):
         """Apply PURE frequency-based reinforcement pattern"""
