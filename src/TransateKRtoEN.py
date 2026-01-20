@@ -3896,6 +3896,24 @@ class TranslationProcessor:
                     print("❌ Translation stopped by user during API call")
                     return None, None, None
                 
+                # Treat cancelled errors (from client being closed) as timeout
+                if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
+                    if timeout_retry_count < max_timeout_retries:
+                        timeout_retry_count += 1
+                        print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        # Reinitialize the client if it was closed
+                        if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+                            try:
+                                print(f"   🔄 Reinitializing Gemini client...")
+                                self.client._setup_client()
+                            except Exception as reinit_err:
+                                print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
+                        return "[TIMEOUT]", "timeout", None
+                
                 if "took" in error_msg and "timeout:" in error_msg:
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
@@ -3904,8 +3922,8 @@ class TranslationProcessor:
                         time.sleep(2)
                         continue
                     else:
-                        print(f"    ❌ Max timeout retries reached")
-                        raise UnifiedClientError("Translation failed after timeout retries")
+                        print(f"    ❌ Max timeout retries reached - marking chunk as failed")
+                        return "[TIMEOUT]", "timeout", None
                 
                 elif "timed out" in error_msg and "timeout:" not in error_msg:
                     if timeout_retry_count < max_timeout_retries:
@@ -3914,8 +3932,8 @@ class TranslationProcessor:
                         time.sleep(2)
                         continue
                     else:
-                        print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
-                        raise UnifiedClientError(f"Translation failed after {max_timeout_retries} timeout retries")
+                        print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
+                        return "[TIMEOUT]", "timeout", None
                 
                 elif getattr(e, "error_type", None) == "rate_limit" or getattr(e, "http_status", None) == 429:
                     # Rate limit errors - clean handling without traceback
@@ -10426,7 +10444,11 @@ def main(log_callback=None, stop_callback=None):
                 
                 if is_failed:
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
+                    # Check if it's a timeout failure
+                    if result == "[TIMEOUT]" or finish_reason == "timeout":
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=c)
+                    else:
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
                     progress_manager.save()
                     print(f"❌ Translation failed for chapter {actual_num} - marked as failed, no output file created")
                     continue
