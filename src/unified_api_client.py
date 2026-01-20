@@ -177,10 +177,15 @@ def setup_http_logging():
     """Enable detailed HTTP request/response logging for debugging"""
     import logging
     
+    # Suppress HTTP logs during graceful stop
+    if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_HTTP_SUPPRESS') == '1':
+        httpx_logger = logging.getLogger("httpx")
+        httpx_logger.setLevel(logging.CRITICAL)
+        return
+    
     # Enable httpx logging (used by OpenAI SDK)
     httpx_logger = logging.getLogger("httpx")
     httpx_logger.setLevel(logging.INFO)
-    
     # Enable requests logging (fallback HTTP calls)
     requests_logger = logging.getLogger("requests.packages.urllib3")
     requests_logger.setLevel(logging.INFO)
@@ -4091,6 +4096,10 @@ class UnifiedClient:
         # Main implementation with retry logic
         start_time = time.time()
         
+        # Suppress HTTP logs if graceful stop is active
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            self._suppress_http_logs()
+        
         # Generate request hash WITH request ID if provided
         if image_data:
             image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
@@ -6968,8 +6977,6 @@ class UnifiedClient:
         
         IMPORTANT: Called by send_with_interrupt when timeout occurs
         """
-
-        
         self._cancelled = True
         self._in_cleanup = True  # Set cleanup flag correctly
         # Show a single cancellation message
@@ -6981,7 +6988,8 @@ class UnifiedClient:
         # Let in-flight requests complete naturally
         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
         if graceful_stop_active:
-            # Only suppress logs, don't close connections
+            # Suppress logs and mark graceful stop mode
+            os.environ['GRACEFUL_STOP_HTTP_SUPPRESS'] = '1'
             self._suppress_http_logs()
             return
         
