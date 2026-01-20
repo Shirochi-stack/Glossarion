@@ -4422,12 +4422,18 @@ class BatchTranslationProcessor:
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                 }
+                
+                # Get chunk timeout from environment
+                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+                chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if retry_timeout_enabled else None
+                
                 result, finish_reason, raw_obj_from_send = send_with_interrupt(
                     chapter_msgs,
                     self.client,
                     self.config.TEMP,
                     self.config.MAX_OUTPUT_TOKENS,
                     local_stop_cb,
+                    chunk_timeout=chunk_timeout,
                     context='translation',
                     chapter_context=chapter_ctx,
                 )
