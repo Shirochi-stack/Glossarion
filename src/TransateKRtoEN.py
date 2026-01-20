@@ -9046,7 +9046,7 @@ def main(log_callback=None, stop_callback=None):
                                     print(f"✅ Chapter {chap_num} done")
                                 else:
                                     failed_in_batch += 1
-                                    print(f"❌ Chapter {chap_num} failed")
+                                    # Error already printed by worker thread
                                 processed += 1
                         except Exception as e:
                             if is_merged_mode:
@@ -9234,7 +9234,7 @@ def main(log_callback=None, stop_callback=None):
                                         batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
                                 else:
                                     failed_in_batch += 1
-                                    print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
+                                    # Error already printed by worker thread
                                 processed += 1
                         except Exception as e:
                             if is_merged_mode:
