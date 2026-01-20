@@ -9652,6 +9652,15 @@ Important rules:
         except:
             pass
         
+        # Suppress HTTP logs during graceful stop
+        if graceful_stop:
+            try:
+                import logging
+                for logger_name in ['httpx', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']:
+                    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+            except Exception:
+                pass
+        
         # Log message depends on stop mode
         if graceful_stop:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
@@ -9756,6 +9765,15 @@ Important rules:
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
+        
+        # Suppress HTTP logs during graceful stop
+        if graceful_stop:
+            try:
+                import logging
+                for logger_name in ['httpx', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']:
+                    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+            except Exception:
+                pass
         
         self.stop_requested = True
         

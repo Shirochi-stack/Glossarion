@@ -2887,7 +2887,7 @@ def main(log_callback=None, stop_callback=None):
             return False
         
         if stop_callback and stop_callback():
-            print("❌ Glossary extraction stopped by user request.")
+            # print("❌ Glossary extraction stopped by user request.")  # Redundant - logged elsewhere
             return True
         return is_stop_requested()
         
@@ -3738,9 +3738,10 @@ def main(log_callback=None, stop_callback=None):
                                 active_futures.clear()
                                 break
                             
-                            # Refill pool
-                            if _submit_next():
-                                pass
+                            # Refill pool (but not during graceful stop)
+                            if os.environ.get('GRACEFUL_STOP') != '1':
+                                if _submit_next():
+                                    pass
                         if stopped_early:
                             break
                 else:
