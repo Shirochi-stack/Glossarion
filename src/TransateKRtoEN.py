@@ -5052,7 +5052,8 @@ class BatchTranslationProcessor:
                     except Exception:
                         pass
                 
-                if self.check_stop_fn():
+                # During graceful stop, let the split complete instead of aborting
+                if self.check_stop_fn() and os.environ.get('GRACEFUL_STOP') != '1':
                     raise Exception("Translation stopped by user")
                 
                 if not merged_response:
