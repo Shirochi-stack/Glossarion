@@ -3776,9 +3776,13 @@ class TranslationProcessor:
                 retry_limit_for_reason = None
                 is_duplicate_retry = False
                 
+                # Mark if we're already in a truncation retry to prevent nested retries
+                # This flag is set by the char-ratio check below to prevent infinite recursion
+                in_truncation_retry = c.get('__in_truncation_retry', False)
+                
                 # Debug logging to verify the toggle state
                 #print(f"    DEBUG: finish_reason='{finish_reason}', truncation_enabled={truncation_retry_enabled}, split_retry_enabled={split_retry_enabled}")
-                if finish_reason == "length":
+                if finish_reason == "length" and not in_truncation_retry:
                     if truncation_retry_enabled and truncation_retry_count < truncation_retry_limit:
                         # Always attempt a truncation retry, even if token limits are equal
                         new_token_limit = self.config.MAX_RETRY_TOKENS
@@ -3793,6 +3797,9 @@ class TranslationProcessor:
                         print(f"    ⚠️ TRUNCATION DETECTED: Max truncation retries ({truncation_retry_limit}) reached - accepting truncated response")
                     else:
                         print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
+                elif finish_reason == "length" and in_truncation_retry:
+                    # We're in a char-ratio triggered retry - don't nest another retry
+                    print(f"    📋 Already in truncation retry chain - skipping nested retry")
 
                 # Treat split failures like truncation for auto-retry
                 split_failed_in_finish = bool(finish_reason and 'split' in str(finish_reason).lower())
@@ -10641,7 +10648,10 @@ def main(log_callback=None, stop_callback=None):
                 # Check if this result came from a fallback key
                 used_fallback = hasattr(translation_processor.client, '_used_fallback_key') and translation_processor.client._used_fallback_key
                 
-                if not has_base64_image:
+                # Check if we're already in a nested truncation retry (prevents infinite loops)
+                already_in_retry = c.get('__in_truncation_retry', False)
+                
+                if not has_base64_image and not already_in_retry:
                     input_char_count = len(chunk_html)
                     output_char_count = len(result)
                     char_ratio = output_char_count / input_char_count if input_char_count > 0 else 0
@@ -10654,18 +10664,17 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio)")
                             
-                            # Override finish_reason to trigger retry logic
-                            # This will be caught by the retry logic if RETRY_TRUNCATED is enabled
+                            # Override finish_reason to trigger retry logic WITHIN translate_with_retry
+                            # This will be caught by the internal retry loop if RETRY_TRUNCATED is enabled
                             if finish_reason != "length" and finish_reason != "max_tokens":
-                                print(f"    🔄 Setting finish_reason to 'length' to trigger auto-retry logic")
-                                finish_reason = "length"
-                                
-                                # If retry is enabled, call translate_with_retry again (even at same token limit)
                                 retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
                                 if retry_truncated_enabled:
-                                    print(f"    🔄 Retrying after char-ratio truncation check...")
+                                    print(f"    🔄 Character ratio indicates truncation - marking for internal retry")
+                                    # Mark chapter for retry and call translate_with_retry ONE MORE TIME
+                                    # Set flag to prevent nested retries
+                                    c['__in_truncation_retry'] = True
+                                    
                                     original_max = config.MAX_OUTPUT_TOKENS
-                                    # Use the configured retry cap; if non-positive, stick with current
                                     target_tokens = config.MAX_RETRY_TOKENS if config.MAX_RETRY_TOKENS > 0 else original_max
                                     config.MAX_OUTPUT_TOKENS = max(original_max, target_tokens)
                                     
@@ -10673,15 +10682,19 @@ def main(log_callback=None, stop_callback=None):
                                         msgs, chunk_html, c, chunk_idx, total_chunks
                                     )
                                     
+                                    # Clear retry flag and restore original token limit
+                                    c.pop('__in_truncation_retry', None)
                                     config.MAX_OUTPUT_TOKENS = original_max
                                     
                                     if result_retry and len(result_retry) > len(result):
-                                        print(f"    ✅ Retry succeeded: {len(result):,} → {len(result_retry):,} chars")
+                                        print(f"    ✅ Char-ratio retry succeeded: {len(result):,} → {len(result_retry):,} chars")
                                         result = result_retry
                                         finish_reason = finish_reason_retry
                                         raw_obj = raw_obj_retry
                                     else:
-                                        print(f"    ⚠️ Retry did not improve output, using original")
+                                        print(f"    ⚠️ Char-ratio retry did not improve output, using original")
+                                else:
+                                    print(f"    ⏭️ TRUNCATION DETECTED via char-ratio but auto-retry is DISABLED - accepting truncated response")
 
                 if config.REMOVE_AI_ARTIFACTS:
                     result = ContentProcessor.clean_ai_artifacts(result, True)
