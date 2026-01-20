@@ -3898,9 +3898,14 @@ class TranslationProcessor:
                 
                 # Treat cancelled errors (from client being closed) as timeout
                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
+                    # Check stop flag before retrying
+                    if self.check_stop():
+                        print("❌ Translation stopped by user during timeout retry")
+                        return None, None, None
+                    
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                         # Reinitialize the client if it was closed
                         if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
                             try:
@@ -4478,6 +4483,12 @@ class BatchTranslationProcessor:
                         
                         # Treat cancelled errors (from client being closed) as timeout
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
+                            # Check stop flag before retrying (respect graceful stop)
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            if local_stop_cb() and not graceful_stop_active:
+                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+                            
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
@@ -4501,6 +4512,12 @@ class BatchTranslationProcessor:
                         
                         # Check for timeout errors
                         elif "timed out" in error_msg:
+                            # Check stop flag before retrying (respect graceful stop)
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            if local_stop_cb() and not graceful_stop_active:
+                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+                            
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
