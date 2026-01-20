@@ -121,6 +121,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     # Mark that an API call is now active (for graceful stop logic)
     os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
     
+    # Get timeout retry settings
+    max_timeout_retries = int(os.getenv('TIMEOUT_RETRY_ATTEMPTS', '2'))
+    timeout_retry_count = 0
+    
     result_queue = queue.Queue()
 
     # Honor runtime toggle: if RETRY_TIMEOUT is off, disable chunk timeout entirely.
@@ -142,97 +146,149 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             except Exception:
                 pass
     
-    def api_call():
+    while True:  # Retry loop for timeout and cancelled errors
+    
+        def api_call():
+            try:
+                # Reinitialize Gemini client if it's None
+                if hasattr(client, 'gemini_client') and client.gemini_client is None:
+                    try:
+                        print("   🔄 Reinitializing Gemini client...")
+                        client._setup_client()
+                    except Exception as reinit_err:
+                        print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                
+                start_time = time.time()
+                result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
+                elapsed = time.time() - start_time
+                
+                # Capture raw response object for thought signatures (if available)
+                raw_obj = None
+                if hasattr(client, 'get_last_response_object'):
+                    resp_obj = client.get_last_response_object()
+                    if resp_obj and hasattr(resp_obj, 'raw_content_object'):
+                        raw_obj = resp_obj.raw_content_object
+                        # if raw_obj:
+                        #     print("🧠 Captured thought signature for glossary extraction")
+                
+                # Include raw_obj in the result tuple
+                result_queue.put((result, elapsed, raw_obj))
+            except Exception as e:
+                result_queue.put(e)
+    
+        api_thread = threading.Thread(target=api_call)
+        api_thread.daemon = True
+        api_thread.start()
+        
+        timeout = chunk_timeout  # None means wait indefinitely
+        check_interval = 0.1
+        elapsed = 0
+        
         try:
-            start_time = time.time()
-            result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
-            elapsed = time.time() - start_time
+            while True:
+                try:
+                    # Check for results with shorter timeout
+                    result = result_queue.get(timeout=check_interval)
+                    if isinstance(result, Exception):
+                        raise result
+                    if isinstance(result, tuple):
+                        # Check if we have the new format with response object
+                        if len(result) == 3:
+                            api_result, api_time, raw_obj = result
+                        else:
+                            # Old format without response object
+                            api_result, api_time = result
+                            raw_obj = None
+                        
+                        if chunk_timeout and api_time > chunk_timeout:
+                            if hasattr(client, '_in_cleanup'):
+                                client._in_cleanup = True
+                            if hasattr(client, 'cancel_current_operation'):
+                                client.cancel_current_operation()
+                            raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                        
+                        # client.send() returns (str, Optional[str]) tuple
+                        # Extract the content and finish_reason from the tuple
+                        if isinstance(api_result, tuple):
+                            content, finish_reason = api_result
+                        else:
+                            # Single string result
+                            content = api_result
+                            finish_reason = 'stop'
+                        
+                        # raw_obj was already captured in the API thread and included in result
+                        # Mark API call as no longer active
+                        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
+                        # If graceful stop was requested, mark that an API call completed
+                        if os.environ.get('GRACEFUL_STOP') == '1':
+                            os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
+                        return content, finish_reason or 'stop', raw_obj
+                except queue.Empty:
+                    # During graceful stop, don't cancel the API call - let it complete
+                    if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
+                        # More aggressive cancellation
+                        print("🛑 Stop requested - cancelling API call immediately...")
+                        
+                        # Set cleanup flag
+                        if hasattr(client, '_in_cleanup'):
+                            client._in_cleanup = True
+                        
+                        # Try to cancel the operation
+                        if hasattr(client, 'cancel_current_operation'):
+                            client.cancel_current_operation()
+                        
+                        # Don't wait for the thread to finish - just raise immediately
+                        raise UnifiedClientError("Glossary extraction stopped by user")
+                    
+                    if timeout is not None:
+                        elapsed += check_interval
+                        if elapsed >= timeout:
+                            if hasattr(client, '_in_cleanup'):
+                                client._in_cleanup = True
+                            if hasattr(client, 'cancel_current_operation'):
+                                client.cancel_current_operation()
+                            raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
+        
+        except UnifiedClientError as e:
+            error_msg = str(e)
             
-            # Capture raw response object for thought signatures (if available)
-            raw_obj = None
-            if hasattr(client, 'get_last_response_object'):
-                resp_obj = client.get_last_response_object()
-                if resp_obj and hasattr(resp_obj, 'raw_content_object'):
-                    raw_obj = resp_obj.raw_content_object
-                    # if raw_obj:
-                    #     print("🧠 Captured thought signature for glossary extraction")
-            
-            # Include raw_obj in the result tuple
-            result_queue.put((result, elapsed, raw_obj))
-        except Exception as e:
-            result_queue.put(e)
-    
-    api_thread = threading.Thread(target=api_call)
-    api_thread.daemon = True
-    api_thread.start()
-    
-    timeout = chunk_timeout  # None means wait indefinitely
-    check_interval = 0.1
-    elapsed = 0
-    
-    while True:
-        try:
-            # Check for results with shorter timeout
-            result = result_queue.get(timeout=check_interval)
-            if isinstance(result, Exception):
-                raise result
-            if isinstance(result, tuple):
-                # Check if we have the new format with response object
-                if len(result) == 3:
-                    api_result, api_time, raw_obj = result
+            # Treat cancelled errors (from client being closed) as timeout
+            if "cancelled" in error_msg.lower() or "Gemini client not initialized" in error_msg or "timed out" in error_msg.lower():
+                # Check stop flag before retrying
+                if stop_check_fn():
+                    print("❌ Glossary extraction stopped by user during timeout retry")
+                    raise
+                
+                if timeout_retry_count < max_timeout_retries:
+                    timeout_retry_count += 1
+                    print(f"⚠️ API call error: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                    
+                    # Reinitialize the client if it was closed
+                    if hasattr(client, 'gemini_client') and client.gemini_client is None:
+                        try:
+                            print(f"   🔄 Reinitializing Gemini client...")
+                            client._setup_client()
+                        except Exception as reinit_err:
+                            print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                    
+                    # Add staggered delay before retry (2-4 seconds random)
+                    import random
+                    retry_delay = random.uniform(2.0, 4.0)
+                    time.sleep(retry_delay)
+                    
+                    # Clear the queue and continue retry loop
+                    while not result_queue.empty():
+                        try:
+                            result_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    continue
                 else:
-                    # Old format without response object
-                    api_result, api_time = result
-                    raw_obj = None
-                
-                if chunk_timeout and api_time > chunk_timeout:
-                    if hasattr(client, '_in_cleanup'):
-                        client._in_cleanup = True
-                    if hasattr(client, 'cancel_current_operation'):
-                        client.cancel_current_operation()
-                    raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
-                
-                # client.send() returns (str, Optional[str]) tuple
-                # Extract the content and finish_reason from the tuple
-                if isinstance(api_result, tuple):
-                    content, finish_reason = api_result
-                else:
-                    # Single string result
-                    content = api_result
-                    finish_reason = 'stop'
-                
-                # raw_obj was already captured in the API thread and included in result
-                # Mark API call as no longer active
-                os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
-                # If graceful stop was requested, mark that an API call completed
-                if os.environ.get('GRACEFUL_STOP') == '1':
-                    os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
-                return content, finish_reason or 'stop', raw_obj
-        except queue.Empty:
-            # During graceful stop, don't cancel the API call - let it complete
-            if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
-                # More aggressive cancellation
-                print("🛑 Stop requested - cancelling API call immediately...")
-                
-                # Set cleanup flag
-                if hasattr(client, '_in_cleanup'):
-                    client._in_cleanup = True
-                
-                # Try to cancel the operation
-                if hasattr(client, 'cancel_current_operation'):
-                    client.cancel_current_operation()
-                
-                # Don't wait for the thread to finish - just raise immediately
-                raise UnifiedClientError("Glossary extraction stopped by user")
-            
-            if timeout is not None:
-                elapsed += check_interval
-                if elapsed >= timeout:
-                    if hasattr(client, '_in_cleanup'):
-                        client._in_cleanup = True
-                    if hasattr(client, 'cancel_current_operation'):
-                        client.cancel_current_operation()
-                    raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
+                    print(f"❌ Max timeout retries ({max_timeout_retries}) reached")
+                    raise
+            else:
+                # Other errors, re-raise immediately
+                raise
 
 # Parse token limit from environment variable (same logic as translation)
 def parse_glossary_token_limit():
