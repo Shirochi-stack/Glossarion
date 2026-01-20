@@ -4590,7 +4590,7 @@ class BatchTranslationProcessor:
                                     break  # Exit loop to save partial results
                     except Exception as e:
                         chunk_idx = future_to_chunk[future]
-                        print(f"❌ Chunk {chunk_idx}/{total_chunks} failed: {e}")
+                        # Don't print chunk error - will be printed at chapter level
                         raise
             if chunk_abort:
                 print(f"⚠️ Chapter {actual_num}: aborted due to prohibited content; skipping remaining chunks")
@@ -4760,12 +4760,16 @@ class BatchTranslationProcessor:
             return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
             
         except Exception as e:
-            print(f"❌ Chapter {actual_num} failed: {e}")
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                 self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
+            # Print consolidated error message
+            if total_chunks > 1:
+                print(f"❌ Chapter {actual_num} failed (chunk {chunk_idx}/{total_chunks}): {e}")
+            else:
+                print(f"❌ Chapter {actual_num} failed: {e}")
             # No history for failed chapters
             return False, actual_num, None, None, None
     
