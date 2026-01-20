@@ -11630,6 +11630,13 @@ def main(log_callback=None, stop_callback=None):
             print("TRANSLATION_COMPLETE_SIGNAL")
             return
     else:
+        # Skip EPUB building if graceful stop was triggered
+        graceful_stop_triggered = os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+        if graceful_stop_triggered:
+            print("⏳ Graceful stop triggered - skipping EPUB building")
+            print("TRANSLATION_COMPLETE_SIGNAL")
+            return
+        
         print("🔍 Checking for translated chapters...")
         # Respect retain extension toggle: if enabled, don't look for response_ prefix
         if should_retain_source_extension():
