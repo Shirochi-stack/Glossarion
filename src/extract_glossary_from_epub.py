@@ -288,6 +288,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     import random
                     base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
                     retry_delay = random.uniform(base_delay / 2, base_delay)
+                    print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                     time.sleep(retry_delay)
                     
                     # Clear the queue and continue retry loop

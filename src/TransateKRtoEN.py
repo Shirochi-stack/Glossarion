@@ -3920,7 +3920,12 @@ class TranslationProcessor:
                                 self.client._setup_client()
                             except Exception as reinit_err:
                                 print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
-                        time.sleep(2)
+                        # Use SEND_INTERVAL_SECONDS as base, random from half to full
+                        import random
+                        base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                        retry_delay = random.uniform(base_delay / 2, base_delay)
+                        print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
+                        time.sleep(retry_delay)
                         continue
                     else:
                         print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
@@ -3930,8 +3935,12 @@ class TranslationProcessor:
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
                         print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
-                        print(f"    🔄 Retrying")
-                        time.sleep(2)
+                        # Use SEND_INTERVAL_SECONDS as base, random from half to full
+                        import random
+                        base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                        retry_delay = random.uniform(base_delay / 2, base_delay)
+                        print(f"    ⏳ Waiting {retry_delay:.1f}s before retry...")
+                        time.sleep(retry_delay)
                         continue
                     else:
                         print(f"    ❌ Max timeout retries reached - marking chunk as failed")
@@ -3941,7 +3950,12 @@ class TranslationProcessor:
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
                         print(f"⚠️ Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
-                        time.sleep(2)
+                        # Use SEND_INTERVAL_SECONDS as base, random from half to full
+                        import random
+                        base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                        retry_delay = random.uniform(base_delay / 2, base_delay)
+                        print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
+                        time.sleep(retry_delay)
                         continue
                     else:
                         print(f"❌ Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
