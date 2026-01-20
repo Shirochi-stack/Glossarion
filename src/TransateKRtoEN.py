@@ -9176,7 +9176,7 @@ def main(log_callback=None, stop_callback=None):
                                 should_exit_outer_loop = True
                                 break
                             else:
-                                print("❌ Translation stopped")
+                                # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return
                         unit = active_futures.pop(future)
@@ -9370,7 +9370,7 @@ def main(log_callback=None, stop_callback=None):
                                 print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
                                 # Don't shutdown - let this batch complete
                             else:
-                                print("❌ Translation stopped")
+                                # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False)
                                 return
                         
