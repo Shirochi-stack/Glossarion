@@ -10330,6 +10330,7 @@ def main(log_callback=None, stop_callback=None):
             progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
             
             translated_chunks = []
+            chunk_abort = False  # Flag to abort chapter processing on QA failures
             
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
