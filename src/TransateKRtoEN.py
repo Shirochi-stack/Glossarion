@@ -4760,6 +4760,25 @@ class BatchTranslationProcessor:
                                 self.save_progress_fn()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             return False, actual_num, None, None, None
+                        
+                        # Handle truncation - abort chapter and mark as failed
+                        # Check if RETRY_TRUNCATED is enabled - if so, truncation should abort chapter
+                        retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                        if is_truncated and retry_truncated_enabled:
+                            chunk_abort_event.set()
+                            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                            print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Truncated - aborting chapter")
+                            with self.progress_lock:
+                                self.update_progress_fn(
+                                    idx, actual_num, content_hash, fname,
+                                    status="qa_failed",
+                                    qa_issues_found=["TRUNCATED"],
+                                    chapter_obj=chapter
+                                )
+                                self.save_progress_fn()
+                            chunk_executor.shutdown(wait=False, cancel_futures=True)
+                            return False, actual_num, None, None, None
+                        
                         if result:
                             # Store result at correct index to maintain order
                             with chunks_lock:
