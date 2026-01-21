@@ -10662,6 +10662,11 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Char-ratio retry loop
                 while not has_base64_image and not already_in_retry:
+                    # Check for stop signal before each retry
+                    if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
+                        print("❌ Char-ratio retry stopped by user")
+                        break
+                    
                     input_char_count = len(chunk_html)
                     output_char_count = len(result)
                     char_ratio = output_char_count / input_char_count if input_char_count > 0 else 0
@@ -10683,7 +10688,7 @@ def main(log_callback=None, stop_callback=None):
                                 # Check if we've hit the retry limit
                                 if char_ratio_retry_count >= truncation_retry_limit:
                                     # All retries exhausted - mark as QA_failed with TRUNCATED
-                                    print(f"    ❌ All char-ratio retries ({truncation_retry_limit}) exhausted - marking as QA_failed")
+                                    print(f"    ❌ All char-ratio retries ({truncation_retry_limit}) exhausted for Chapter {actual_num} Chunk {chunk_idx}/{total_chunks} - marking as QA_failed")
                                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                                     progress_manager.update(idx, actual_num, content_hash, fname,
                                                             status="qa_failed",
@@ -10696,11 +10701,11 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Log truncation detection on first attempt
                                 if char_ratio_retry_count == 0:
-                                    print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio) - {truncation_retry_limit} retry attempt(s) available")
+                                    print(f"    ⚠️ TRUNCATION DETECTED (char comparison) Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}: Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio) - {truncation_retry_limit} retry attempt(s) available")
                                 
                                 char_ratio_retry_count += 1
                                 c['__char_ratio_retry_count'] = char_ratio_retry_count
-                                print(f"    🔄 Character ratio retry attempt {char_ratio_retry_count}/{truncation_retry_limit}")
+                                print(f"    🔄 Character ratio retry attempt {char_ratio_retry_count}/{truncation_retry_limit} [Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}]")
                                 
                                 # Set flag to prevent nested retries at BOTH levels
                                 c['__in_truncation_retry'] = True
