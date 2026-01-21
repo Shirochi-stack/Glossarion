@@ -10675,7 +10675,7 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             # Override finish_reason to trigger retry logic WITHIN translate_with_retry
                             # This will be caught by the internal retry loop if RETRY_TRUNCATED is enabled
-                            if finish_reason != "length" and finish_reason != "max_tokens":
+                            if finish_reason != "length" and finish_reason != "max_tokens" and finish_reason not in ["content_filter", "prohibited_content"]:
                                 retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
                                 if not retry_truncated_enabled:
                                     break
