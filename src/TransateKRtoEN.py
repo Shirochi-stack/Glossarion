@@ -10652,8 +10652,16 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Check if we're already in a nested truncation retry (prevents infinite loops)
                 already_in_retry = c.get('__in_truncation_retry', False)
+                char_ratio_retry_count = c.get('__char_ratio_retry_count', 0)
                 
-                if not has_base64_image and not already_in_retry:
+                # Get truncation retry limit from env
+                try:
+                    truncation_retry_limit = int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1"))
+                except Exception:
+                    truncation_retry_limit = 1
+                
+                # Char-ratio retry loop
+                while not has_base64_image and not already_in_retry:
                     input_char_count = len(chunk_html)
                     output_char_count = len(result)
                     char_ratio = output_char_count / input_char_count if input_char_count > 0 else 0
@@ -10663,49 +10671,82 @@ def main(log_callback=None, stop_callback=None):
                         if used_fallback:
                             # For fallback keys, just warn - don't retry (would go back to refusing model)
                             print(f"    ⚠️ Truncated output from fallback key - accepting as-is")
+                            break
                         else:
-                            print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio)")
-                            
                             # Override finish_reason to trigger retry logic WITHIN translate_with_retry
                             # This will be caught by the internal retry loop if RETRY_TRUNCATED is enabled
                             if finish_reason != "length" and finish_reason != "max_tokens":
                                 retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
-                                if retry_truncated_enabled:
-                                    print(f"    🔄 Character ratio indicates truncation - marking for internal retry")
-                                    # Mark chapter for retry and call translate_with_retry ONE MORE TIME
-                                    # Set flag to prevent nested retries at BOTH levels
-                                    c['__in_truncation_retry'] = True
+                                if not retry_truncated_enabled:
+                                    break
                                     
-                                    # CRITICAL: Set thread-local flag to prevent unified_api_client from doing its own truncation retries
-                                    # This prevents the nested retry cascade
-                                    if hasattr(translation_processor.client, '_get_thread_local_client'):
-                                        tls = translation_processor.client._get_thread_local_client()
-                                        tls._in_truncation_retry = True
-                                    
-                                    original_max = config.MAX_OUTPUT_TOKENS
-                                    target_tokens = config.MAX_RETRY_TOKENS if config.MAX_RETRY_TOKENS > 0 else original_max
-                                    config.MAX_OUTPUT_TOKENS = max(original_max, target_tokens)
-                                    
-                                    result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
-                                        msgs, chunk_html, c, chunk_idx, total_chunks
-                                    )
-                                    
-                                    # Clear retry flags and restore original token limit
-                                    c.pop('__in_truncation_retry', None)
-                                    if hasattr(translation_processor.client, '_get_thread_local_client'):
-                                        tls = translation_processor.client._get_thread_local_client()
-                                        tls._in_truncation_retry = False
-                                    config.MAX_OUTPUT_TOKENS = original_max
-                                    
-                                    if result_retry and len(result_retry) > len(result):
-                                        print(f"    ✅ Char-ratio retry succeeded: {len(result):,} → {len(result_retry):,} chars")
-                                        result = result_retry
-                                        finish_reason = finish_reason_retry
-                                        raw_obj = raw_obj_retry
-                                    else:
-                                        print(f"    ⚠️ Char-ratio retry did not improve output, using original")
+                                # Check if we've hit the retry limit
+                                if char_ratio_retry_count >= truncation_retry_limit:
+                                    # All retries exhausted - mark as QA_failed with TRUNCATED
+                                    print(f"    ❌ All char-ratio retries ({truncation_retry_limit}) exhausted - marking as QA_failed")
+                                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                    progress_manager.update(idx, actual_num, content_hash, fname,
+                                                            status="qa_failed",
+                                                            qa_issues_found=["TRUNCATED"],
+                                                            chapter_obj=c)
+                                    progress_manager.save()
+                                    # Set flag to skip further processing of this chapter
+                                    chunk_abort = True
+                                    break
+                                
+                                # Log truncation detection on first attempt
+                                if char_ratio_retry_count == 0:
+                                    print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio) - {truncation_retry_limit} retry attempt(s) available")
+                                
+                                char_ratio_retry_count += 1
+                                c['__char_ratio_retry_count'] = char_ratio_retry_count
+                                print(f"    🔄 Character ratio retry attempt {char_ratio_retry_count}/{truncation_retry_limit}")
+                                
+                                # Set flag to prevent nested retries at BOTH levels
+                                c['__in_truncation_retry'] = True
+                                
+                                # CRITICAL: Set thread-local flag to prevent unified_api_client from doing its own truncation retries
+                                if hasattr(translation_processor.client, '_get_thread_local_client'):
+                                    tls = translation_processor.client._get_thread_local_client()
+                                    tls._in_truncation_retry = True
+                                
+                                original_max = config.MAX_OUTPUT_TOKENS
+                                target_tokens = config.MAX_RETRY_TOKENS if config.MAX_RETRY_TOKENS > 0 else original_max
+                                config.MAX_OUTPUT_TOKENS = max(original_max, target_tokens)
+                                
+                                result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
+                                    msgs, chunk_html, c, chunk_idx, total_chunks
+                                )
+                                
+                                # Clear retry flags and restore original token limit
+                                c.pop('__in_truncation_retry', None)
+                                if hasattr(translation_processor.client, '_get_thread_local_client'):
+                                    tls = translation_processor.client._get_thread_local_client()
+                                    tls._in_truncation_retry = False
+                                config.MAX_OUTPUT_TOKENS = original_max
+                                
+                                # Check if retry improved the output
+                                retry_output_count = len(result_retry) if result_retry else 0
+                                if result_retry and retry_output_count > output_char_count:
+                                    print(f"    ✅ Char-ratio retry succeeded: {output_char_count:,} → {retry_output_count:,} chars")
+                                    result = result_retry
+                                    finish_reason = finish_reason_retry
+                                    raw_obj = raw_obj_retry
+                                    # Don't break - check if this new result is STILL truncated
+                                    # Loop will continue and check char_ratio again
                                 else:
-                                    print(f"    ⏭️ TRUNCATION DETECTED via char-ratio but auto-retry is DISABLED - accepting truncated response")
+                                    print(f"    ⚠️ Char-ratio retry did not improve output ({output_char_count} chars)")
+                                    # Continue to next retry attempt
+                            else:
+                                # finish_reason is already 'length' - unified_api_client already retried
+                                break
+                    else:
+                        # Not truncated - exit loop
+                        break
+                
+                # If truncation retries were exhausted, skip further processing
+                if chunk_abort:
+                    break
 
                 if config.REMOVE_AI_ARTIFACTS:
                     result = ContentProcessor.clean_ai_artifacts(result, True)
