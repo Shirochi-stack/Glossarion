@@ -3782,7 +3782,9 @@ class TranslationProcessor:
                 
                 # Debug logging to verify the toggle state
                 #print(f"    DEBUG: finish_reason='{finish_reason}', truncation_enabled={truncation_retry_enabled}, split_retry_enabled={split_retry_enabled}")
-                if finish_reason == "length" and not in_truncation_retry:
+                # DISABLED: Truncation retries are now handled entirely by unified_api_client.py
+                # This prevents double/triple retry cascades (unified_api_client → translate_with_retry → char-ratio check)
+                if False and finish_reason == "length" and not in_truncation_retry:
                     if truncation_retry_enabled and truncation_retry_count < truncation_retry_limit:
                         # Always attempt a truncation retry, even if token limits are equal
                         new_token_limit = self.config.MAX_RETRY_TOKENS
@@ -3797,7 +3799,7 @@ class TranslationProcessor:
                         print(f"    ⚠️ TRUNCATION DETECTED: Max truncation retries ({truncation_retry_limit}) reached - accepting truncated response")
                     else:
                         print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
-                elif finish_reason == "length" and in_truncation_retry:
+                elif False and finish_reason == "length" and in_truncation_retry:
                     # We're in a char-ratio triggered retry - don't nest another retry
                     print(f"    📋 Already in truncation retry chain - skipping nested retry")
 
@@ -10671,8 +10673,14 @@ def main(log_callback=None, stop_callback=None):
                                 if retry_truncated_enabled:
                                     print(f"    🔄 Character ratio indicates truncation - marking for internal retry")
                                     # Mark chapter for retry and call translate_with_retry ONE MORE TIME
-                                    # Set flag to prevent nested retries
+                                    # Set flag to prevent nested retries at BOTH levels
                                     c['__in_truncation_retry'] = True
+                                    
+                                    # CRITICAL: Set thread-local flag to prevent unified_api_client from doing its own truncation retries
+                                    # This prevents the nested retry cascade
+                                    if hasattr(translation_processor.client, '_get_thread_local_client'):
+                                        tls = translation_processor.client._get_thread_local_client()
+                                        tls._in_truncation_retry = True
                                     
                                     original_max = config.MAX_OUTPUT_TOKENS
                                     target_tokens = config.MAX_RETRY_TOKENS if config.MAX_RETRY_TOKENS > 0 else original_max
@@ -10682,8 +10690,11 @@ def main(log_callback=None, stop_callback=None):
                                         msgs, chunk_html, c, chunk_idx, total_chunks
                                     )
                                     
-                                    # Clear retry flag and restore original token limit
+                                    # Clear retry flags and restore original token limit
                                     c.pop('__in_truncation_retry', None)
+                                    if hasattr(translation_processor.client, '_get_thread_local_client'):
+                                        tls = translation_processor.client._get_thread_local_client()
+                                        tls._in_truncation_retry = False
                                     config.MAX_OUTPUT_TOKENS = original_max
                                     
                                     if result_retry and len(result_retry) > len(result):
