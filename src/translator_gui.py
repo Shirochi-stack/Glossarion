@@ -9667,7 +9667,7 @@ Important rules:
         if graceful_stop:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
         else:
-            self.append_log("🛑 Stop requested — waiting for current operation to finish")
+            self.append_log("🛑 Force stop requested — cancelling immediately")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
         
         if current_file and hasattr(self, 'entry_epub'):
@@ -9937,8 +9937,7 @@ Important rules:
         if graceful_stop:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
         else:
-            self.append_log("❌ EPUB converter stop requested.")
-            self.append_log("⌛ Please wait... stopping after current operation completes.")
+            self.append_log("❌ EPUB converter force stop requested — current call will be cancelled ASAP.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
     def stop_qa_scan(self):

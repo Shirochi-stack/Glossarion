@@ -659,6 +659,11 @@ def translate_headers_standalone(
     
     # Call translate_and_save_headers - IDENTICAL TO PIPELINE
     # This method uses the EXACT same translation prompts, HTML update logic, and file saving
+    # Reset translator stop flag at start
+    translator.set_stop_flag(False)
+    if gui_instance is not None and hasattr(gui_instance, '_headers_stop_requested'):
+        gui_instance._headers_stop_requested = False
+
     try:
         translated_headers = translator.translate_and_save_headers(
             html_dir=output_dir,
@@ -679,7 +684,16 @@ def translate_headers_standalone(
             log("\n⛔ Translation stopped by user")
             return {}
         raise
+    # If stop was requested during the call, exit quietly without further logging
+    if translator.stop_flag or (gui_instance and hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested):
+        return {}
     
+    # If stop was requested and NOT graceful, skip further logging and mapping
+    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+    stop_requested = translator.stop_flag or (gui_instance and hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested)
+    if stop_requested and not graceful_stop_active:
+        return {}
+
     # Step 5: Map back to output filenames
     log("\nStep 5: Mapping translations to output files...")
     result = {}
@@ -688,11 +702,16 @@ def translate_headers_standalone(
             output_file = current_titles_map[idx]['filename']
             result[output_file] = translated_title
             log(f"  {output_file}: {translated_title}")
-    
+
     log("\n" + "=" * 80)
     log(f"Translation complete! Translated {len(result)} chapter headers")
     log("=" * 80)
-    
+
+    # Clear stop flags after completion
+    translator.set_stop_flag(False)
+    if gui_instance is not None and hasattr(gui_instance, '_headers_stop_requested'):
+        gui_instance._headers_stop_requested = False
+
     return result
 
 

@@ -1614,6 +1614,12 @@ class BatchHeaderTranslator:
         def translate_batch(batch_num: int, batch_headers: Dict[int, str]):
             """Translate a single batch - thread-safe function"""
             if self.stop_flag:
+                if os.environ.get('GRACEFUL_STOP') != '1':
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.hard_cancel_all()
+                    except Exception:
+                        pass
                 return None
             
             try:
@@ -1712,6 +1718,7 @@ class BatchHeaderTranslator:
                              for batch_num, headers in batch_tasks}
             
             # Collect results as they complete
+            force_stopped = False
             completed = 0
             # Initialize progress bar
             from TransateKRtoEN import ProgressBar
@@ -1727,11 +1734,18 @@ class BatchHeaderTranslator:
                     else:
                         print("\n❌ Translation interrupted by user")
                         executor.shutdown(wait=False, cancel_futures=True)
+                        force_stopped = True
+                        self.stop_flag = True
                         break
                 
                 batch_num = future_to_batch[future]
                 try:
                     translations = future.result()
+                    # If stop was requested mid-flight and not in graceful mode, abort immediately before progress updates
+                    if self.stop_flag and os.environ.get('GRACEFUL_STOP') != '1':
+                        force_stopped = True
+                        self.stop_flag = True
+                        break
                     if translations:
                         with translations_lock:
                             all_translations.update(translations)
@@ -1742,8 +1756,11 @@ class BatchHeaderTranslator:
                     print(f"\n❌ Batch {batch_num + 1} generated exception: {e}")
                     completed += 1
                     ProgressBar.update(completed, total_batches, prefix="Batch Progress", bar_length=30)
-            
             # Finish progress bar
+            # If force stop, skip finishing bar and return immediately
+            if force_stopped and os.environ.get('GRACEFUL_STOP') != '1':
+                self.stop_flag = True
+                return all_translations
             ProgressBar.finish()
         
         print(f"\n✅ Translated {len(all_translations)} headers total (using parallel execution)")
