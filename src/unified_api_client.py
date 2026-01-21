@@ -7801,6 +7801,38 @@ class UnifiedClient:
                             f"Model {model_name} not found in region {location}\n"
                             "Try: gemini-1.5-flash-002, gemini-1.5-pro-002"
                         )
+                    elif "maxOutputTokens" in error_str and "supported range" in error_str:
+                        import re
+                        max_match = re.search(r'to (\d+) \(exclusive\)', error_str)
+                        if max_match:
+                            max_exclusive = int(max_match.group(1))
+                            adjusted_max = max_exclusive - 1
+                            print(f"⚠️ {model_name} max_output_tokens exceeds limit, retrying with {adjusted_max}")
+                            try:
+                                config_params["max_output_tokens"] = adjusted_max
+                                generation_config = types.GenerateContentConfig(**config_params)
+                                response = vertex_genai_client.models.generate_content(
+                                    model=model_name,
+                                    contents=contents,
+                                    config=generation_config
+                                )
+                                result_text = ""
+                                if hasattr(response, 'candidates') and response.candidates:
+                                    for candidate in response.candidates:
+                                        if hasattr(candidate, 'content') and candidate.content:
+                                            if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                                                for part in candidate.content.parts:
+                                                    if hasattr(part, 'text') and part.text:
+                                                        result_text += part.text
+                                if not result_text:
+                                    raise UnifiedClientError("Empty response after token adjustment")
+                                return UnifiedResponse(
+                                    content=result_text,
+                                    finish_reason='stop',
+                                    raw_response=response
+                                )
+                            except Exception as retry_err:
+                                raise UnifiedClientError(f"Vertex AI Gemini error after token adjustment: {str(retry_err)[:200]}")
                     raise UnifiedClientError(f"Vertex AI Gemini error: {str(e)[:200]}")
                 
         except UnifiedClientError:
