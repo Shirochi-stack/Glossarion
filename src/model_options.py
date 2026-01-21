@@ -155,7 +155,7 @@ def get_model_options() -> List[str]:
         "eh/grok-4-0709", "eh/grok-3", "eh/grok-3-mini-fast", "eh/grok-3-mini", "eh/grok-3-fast",
         "eh/grok-code-fast-1","eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large", "eh/deepseek-v3-0324:free",
         "eh/deepseek-v3.1:free", "eh/deepseek-v3.1", "eh/deepseek-v3.2-exp:free", "eh/deepseek-v3.2-exp" , "eh/deepseek-v3.2-exp-thinking" ,
-        "eh/gemini-pro", "eh/deepseek-coder-33b", "eh/gemma-3-27b-it",
+        "eh/gemini-pro", "eh/deepseek-coder-33b", "eh/gemma-3-27b-it", "eh/glm-4.6", "eh/glm-4.7",
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
         "nd/deepseek-ai/deepseek-v3.2",
