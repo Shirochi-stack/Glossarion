@@ -9854,7 +9854,7 @@ Important rules:
         if graceful_stop:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
         else:
-            self.append_log("❌ Glossary extraction stop requested.")
+            self.append_log("🛑 Force stop requested — cancelling now")
             self.append_log("⏳ Please wait... stopping after current API call completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
