@@ -8259,21 +8259,59 @@ def save_profile(self):
     # Ensure the current selection is set to the saved profile
     self.profile_menu.setCurrentText(name)
     
-    # Show save confirmation with Halgakos icon (non-modal)
-    from PySide6.QtGui import QIcon
-    msg_box = QMessageBox()
-    msg_box.setWindowTitle("Saved")
-    msg_box.setText(f"Profile '{name}' saved.")
-    msg_box.setIcon(QMessageBox.Information)
-    msg_box.setStandardButtons(QMessageBox.Ok)
-    try:
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        if os.path.exists(icon_path):
-            msg_box.setWindowIcon(QIcon(icon_path))
-    except:
-        pass
-    _center_messagebox_buttons(msg_box)
-    msg_box.show()
+    # Animate the save button to show confirmation
+    if hasattr(self, '_save_profile_btn'):
+        from PySide6.QtCore import QTimer
+        btn = self._save_profile_btn
+        original_text = btn.text()
+        
+        # Play Windows notification sound
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except:
+            pass
+        
+        # Change to "Saved!" with green background
+        btn.setText("✓ Saved!")
+        btn.setStyleSheet(
+            "QPushButton { "
+            "background-color: #28a745; "
+            "color: white; "
+            "font-weight: bold; "
+            "border-radius: 3px; "
+            "} "
+            "QPushButton:hover { background-color: #28a745; }"
+        )
+        btn.setEnabled(False)  # Disable button during animation
+        
+        # Use a more robust approach with QTimer parent
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        
+        def restore_button():
+            try:
+                btn.setText(original_text)
+                btn.setStyleSheet("")  # Clear inline style
+                # Force Qt to recompute the style
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
+                btn.setEnabled(True)
+            except Exception as e:
+                # Fallback: restore without animation
+                btn.setText(original_text)
+                btn.setStyleSheet("")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
+                btn.setEnabled(True)
+        
+        timer.timeout.connect(restore_button)
+        timer.start(1000)
+        
+        # Store timer reference to prevent garbage collection
+        self._save_profile_timer = timer
     self.save_profiles()
 
 def delete_profile(self):

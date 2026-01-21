@@ -3222,6 +3222,8 @@ Recent translations to summarize:
         save_profile_btn.clicked.connect(self.save_profile)
         save_profile_btn.setFixedWidth(95)
         profile_buttons_layout.addWidget(save_profile_btn)
+        # Store reference for save animation
+        self._save_profile_btn = save_profile_btn
         
         # Delete Profile button
         delete_profile_btn = QPushButton("Delete Profile")
