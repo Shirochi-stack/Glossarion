@@ -7778,6 +7778,11 @@ class UnifiedClient:
                     if not result_text and not image_data:
                         raise UnifiedClientError("Empty response from Vertex AI Gemini")
                     
+                    # CHECK STOP FLAG AFTER RESPONSE
+                    if is_stop_requested():
+                        logger.info("Stop requested after Vertex AI Gemini response, discarding result")
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                    
                     return UnifiedResponse(
                         content=result_text,
                         finish_reason='stop',
