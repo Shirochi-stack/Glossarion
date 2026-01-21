@@ -8259,6 +8259,10 @@ def save_profile(self):
     # Ensure the current selection is set to the saved profile
     self.profile_menu.setCurrentText(name)
     
+    # Log the save
+    if hasattr(self, 'append_log'):
+        self.append_log(f"✅ Profile '{name}' saved")
+    
     # Animate the save button to show confirmation
     if hasattr(self, '_save_profile_btn'):
         from PySide6.QtCore import QTimer
