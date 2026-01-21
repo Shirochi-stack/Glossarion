@@ -4485,7 +4485,13 @@ class UnifiedClient:
                                 except Exception as retry_error:
                                     print(f"  ❌ Truncation retry #{attempt_idx+1}/{allowed_attempts} failed: {retry_error}")
                             print(f"  ⚠️ All truncation retries ({allowed_attempts}) exhausted; returning original response")
+                            # Set flag on both instance and thread-local storage so batch mode can detect it
                             self._truncation_retries_exhausted = True
+                            try:
+                                tls = self._get_thread_local_client()
+                                tls._truncation_retries_exhausted = True
+                            except Exception:
+                                pass
                     else:
                         print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
                 
