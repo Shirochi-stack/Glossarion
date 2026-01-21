@@ -4341,7 +4341,7 @@ class UnifiedClient:
                             print(f"[RETRY CLIENT] Already in fallback, not recursing further")
                             # Just finalize the empty response without trying more fallbacks
                         elif self._multi_key_mode:
-                            # Multi-key mode: try main key retry
+                            # Multi-key mode: try main key retry (includes main GUI key + fallback keys)
                             if not main_key_attempted and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None):
                                 main_key_attempted = True
                                 try:
@@ -4907,7 +4907,7 @@ class UnifiedClient:
                     continue  # Retry the attempt
 
                     
-    def _retry_with_main_key(
+    def _retry_with_main_key(self, messages, temperature, max_tokens,
                             max_completion_tokens=None, context=None,
                             request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
         """
@@ -5449,7 +5449,7 @@ class UnifiedClient:
                 except Exception as e:
                     print(f"[FALLBACK DIRECT {idx+1}] ❌ Exception: {e}")
                     import traceback
-                    print(f"[FALLBACK DIRECT {idx+1}] Traceback: {traceback.format_exc()[:200]}")
+                    print(f"[FALLBACK DIRECT {idx+1}] Traceback:\n{traceback.format_exc()}")
                     continue
             
             print(f"[FALLBACK DIRECT] All fallback keys failed")
