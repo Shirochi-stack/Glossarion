@@ -632,6 +632,8 @@ def translate_headers_standalone(
     
     # Create translator with same config as pipeline
     translator = BatchHeaderTranslator(api_client, config or {})
+    # Ensure stop flag is cleared at start of every run
+    translator.set_stop_flag(False)
     
     # Store reference in GUI instance so stop button can access it
     if gui_instance is not None:

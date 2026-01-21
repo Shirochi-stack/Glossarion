@@ -1570,17 +1570,14 @@ class BatchHeaderTranslator:
         # Handle output language - this is what {target_lang} should be replaced with
         # Check environment variable first (set by GUI), then config, then fallback to English
         output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
-        print(f"[DEBUG] BatchHeaderTranslator output_lang: '{output_lang}'")
-        print(f"[DEBUG] OUTPUT_LANGUAGE env var: '{os.getenv('OUTPUT_LANGUAGE', 'NOT SET')}'")
-        print(f"[DEBUG] output_language from config: '{self.config.get('output_language', 'NOT IN CONFIG')}'")
-        print(f"[DEBUG] system_prompt BEFORE replacement: '{self.system_prompt[:150]}...'")
+        # Trimmed debug: just show final prompts
         
         # Replace {target_lang} variable in both system prompt and user prompt with the output language
         system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
-        print(f"[DEBUG] system_prompt AFTER replacement: '{system_prompt[:150]}...'")
-        print(f"[DEBUG] prompt_template AFTER replacement: '{prompt_template[:150]}...'")
+        print(f"[DEBUG] System prompt: '{system_prompt[:150]}...'")
+        print(f"[DEBUG] User prompt: '{prompt_template[:150]}...'")
         
         # Add the titles to translate
         user_prompt_template = prompt_template + "\n\nTitles to translate:\n"
