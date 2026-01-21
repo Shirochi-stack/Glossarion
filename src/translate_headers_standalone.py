@@ -659,11 +659,6 @@ def translate_headers_standalone(
     
     # Call translate_and_save_headers - IDENTICAL TO PIPELINE
     # This method uses the EXACT same translation prompts, HTML update logic, and file saving
-    # Reset translator stop flag at start
-    translator.set_stop_flag(False)
-    if gui_instance is not None and hasattr(gui_instance, '_headers_stop_requested'):
-        gui_instance._headers_stop_requested = False
-
     try:
         translated_headers = translator.translate_and_save_headers(
             html_dir=output_dir,
@@ -684,37 +679,23 @@ def translate_headers_standalone(
             log("\n⛔ Translation stopped by user")
             return {}
         raise
-    # If stop was requested during the call, exit quietly without further logging
-    if translator.stop_flag or (gui_instance and hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested):
-        return {}
     
-    # If stop was requested and NOT graceful, skip further logging and mapping
-    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-    stop_requested = translator.stop_flag or (gui_instance and hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested)
-    if stop_requested and not graceful_stop_active:
-        return {}
-
     # Step 5: Map back to output filenames
     log("\nStep 5: Mapping translations to output files...")
     result = {}
     for idx, translated_title in translated_headers.items():
         if idx in current_titles_map:
             output_file = current_titles_map[idx]['filename']
-            output_path = os.path.join(output_dir, output_file)
             result[output_file] = translated_title
+            output_path = os.path.join(output_dir, output_file)
             if os.path.exists(output_path):
                 log(f"  {output_file}: {translated_title}")
-            # Skip log if file is missing to avoid misleading output
-
+            # if the file is missing, skip logging to avoid misleading entries
+    
     log("\n" + "=" * 80)
     log(f"Translation complete! Translated {len(result)} chapter headers")
     log("=" * 80)
-
-    # Clear stop flags after completion
-    translator.set_stop_flag(False)
-    if gui_instance is not None and hasattr(gui_instance, '_headers_stop_requested'):
-        gui_instance._headers_stop_requested = False
-
+    
     return result
 
 

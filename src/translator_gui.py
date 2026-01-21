@@ -795,7 +795,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.3.1"
+        __version__ = "7.3.0"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -868,7 +868,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.3.1')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.3.0')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2516,7 +2516,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.3.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.3.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -9667,7 +9667,7 @@ Important rules:
         if graceful_stop:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
         else:
-            self.append_log("🛑 Force stop requested — cancelling immediately")
+            self.append_log("🛑 Stop requested — waiting for current operation to finish")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
         
         if current_file and hasattr(self, 'entry_epub'):
@@ -9937,7 +9937,8 @@ Important rules:
         if graceful_stop:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
         else:
-            self.append_log("❌ EPUB converter force stop requested — current call will be cancelled ASAP.")
+            self.append_log("❌ EPUB converter stop requested.")
+            self.append_log("⌛ Please wait... stopping after current operation completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
     def stop_qa_scan(self):
@@ -12622,7 +12623,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.3.1...")
+    print("🚀 Starting Glossarion v7.3.0...")
     
     # Initialize splash screen
     splash_manager = None
