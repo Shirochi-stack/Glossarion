@@ -4315,7 +4315,6 @@ class BatchTranslationProcessor:
             # Initialize shared structures for chunk processing (works for 1 or many chunks)
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
             chunks_lock = threading.Lock()
-            chunk_abort = False
 
             if total_chunks > 1:
                 print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
@@ -4558,13 +4557,13 @@ class BatchTranslationProcessor:
                             # Check stop flag before retrying
                             if local_stop_cb():
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
-                                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+                                return None, chunk_idx, None, False, "cancelled"
                             
-                            # During graceful stop, don't retry - just raise to fail fast
+                            # During graceful stop, don't retry - return timeout to trigger chapter abort
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
                                 print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
-                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
+                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
@@ -4585,22 +4584,22 @@ class BatchTranslationProcessor:
                                 time.sleep(retry_delay)
                                 continue
                             else:
-                                # Max retries reached, mark as failed
+                                # Max retries reached, return timeout to trigger chapter abort
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
-                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
+                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
                         
                         # Check for timeout errors
                         elif "timed out" in error_msg:
                             # Check stop flag before retrying
                             if local_stop_cb():
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
-                                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+                                return None, chunk_idx, None, False, "cancelled"
                             
-                            # During graceful stop, don't retry - just raise to fail fast
+                            # During graceful stop, don't retry - return timeout to trigger chapter abort
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
                                 print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
-                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
+                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
@@ -4614,9 +4613,9 @@ class BatchTranslationProcessor:
                                 time.sleep(retry_delay)
                                 continue
                             else:
-                                # Max retries reached, mark as failed
+                                # Max retries reached, return timeout to trigger chapter abort
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
-                                raise UnifiedClientError("[TIMEOUT]", error_type="timeout")
+                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
                         else:
                             # Not a timeout error, re-raise
                             raise
@@ -4745,6 +4744,22 @@ class BatchTranslationProcessor:
                                 self.save_progress_fn()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             return False, actual_num, None, None, None
+                        
+                        # Handle timeout failures - abort chapter and mark as failed
+                        if finish_reason == "timeout":
+                            chunk_abort_event.set()
+                            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                            print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timeout - aborting chapter")
+                            with self.progress_lock:
+                                self.update_progress_fn(
+                                    idx, actual_num, content_hash, fname,
+                                    status="qa_failed",
+                                    qa_issues_found=["TIMEOUT"],
+                                    chapter_obj=chapter
+                                )
+                                self.save_progress_fn()
+                            chunk_executor.shutdown(wait=False, cancel_futures=True)
+                            return False, actual_num, None, None, None
                         if result:
                             # Store result at correct index to maintain order
                             with chunks_lock:
@@ -4776,10 +4791,7 @@ class BatchTranslationProcessor:
                         chunk_idx = future_to_chunk[future]
                         # Don't print chunk error - will be printed at chapter level
                         raise
-            if chunk_abort:
-                print(f"⚠️ Chapter {actual_num}: aborted due to prohibited content; skipping remaining chunks")
-                return False, actual_num, None, None, None
-
+            
             # Verify chunks - handle partial completion gracefully
             is_partial_result = False
             if None in translated_chunks:
