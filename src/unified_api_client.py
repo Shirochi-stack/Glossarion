@@ -7807,6 +7807,10 @@ class UnifiedClient:
                         if max_match:
                             max_exclusive = int(max_match.group(1))
                             adjusted_max = max_exclusive - 1
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            # If force stop is active, do NOT retry — abort immediately
+                            if not graceful_stop_active:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             # Check if stop was requested before retrying
                             if is_stop_requested():
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")

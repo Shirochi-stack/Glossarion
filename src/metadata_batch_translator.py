@@ -1862,6 +1862,10 @@ class BatchHeaderTranslator:
         Returns:
             tuple: (has_header, soup) where has_header is bool and soup is BeautifulSoup object
         """
+        # If file is missing, assume it has a header to avoid rewriting and skip logging
+        if not os.path.exists(html_path):
+            return True, None
+
         try:
             with open(html_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -1879,9 +1883,9 @@ class BatchHeaderTranslator:
             
             return has_header, soup
             
-        except Exception as e:
-            print(f"❌ Error checking HTML structure for {html_path}: {e}")
-            return True, None  # Assume it has header to avoid accidental overwrites
+        except Exception:
+            # Suppress noisy per-file errors; assume header to avoid accidental overwrites
+            return True, None
     
     def _insert_header_into_html(self, soup, new_title: str, preferred_tag: str = 'h1') -> bool:
         """Insert a header into HTML that lacks one
@@ -2023,7 +2027,6 @@ class BatchHeaderTranslator:
                 has_header, soup = self._check_html_has_header(html_path)
                 
                 if not soup:
-                    print(f"⚠️ Could not parse {html_file}")
                     continue
                 
                 if not has_header:

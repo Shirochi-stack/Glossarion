@@ -274,16 +274,21 @@ def match_output_to_source_chapters(
                 output_file = candidate
                 break
         
+        # Always include this chapter for translation, even if output file doesn't exist
+        current_title = source_title  # Use source title as default
+        
         if output_file:
-            # Read current title from output file
+            # Read current title from output file if it exists
             try:
                 output_path = os.path.join(output_dir, output_file)
+                if not os.path.exists(output_path):
+                    log(f"  ⚠️ Skipping {output_file} (file not found)")
+                    continue
                 with open(output_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                current_title = None
                 for tag_name in ['h1', 'h2', 'h3', 'title']:
                     tag = soup.find(tag_name)
                     if tag:
@@ -292,24 +297,19 @@ def match_output_to_source_chapters(
                             current_title = text
                             break
                 
-                if not current_title:
-                    current_title = f"Chapter {source_basename}"
-                
-                matches[output_file] = (source_title, current_title, output_file)
-                matched_count += 1
-                
-                if matched_count <= 5:
-                    log(f"  ✓ Matched: {output_file}")
-                    log(f"    Contains source: '{source_basename}'")
-                    log(f"    Source title: '{source_title}'")
-                    log(f"    Current title: '{current_title}'")
-                
             except Exception as e:
                 log(f"  ⚠️ Error reading {output_file}: {e}")
-        else:
-            skipped_count += 1
-            if skipped_count <= 3:
-                log(f"  ⊝ Skipped (no match): {source_basename}")
+        
+        # Add to matches regardless of whether output file exists
+        matches[output_file or f"{source_basename}.html"] = (source_title, current_title, output_file or f"{source_basename}.html")
+        matched_count += 1
+        
+        if matched_count <= 5:
+            if output_file:
+                log(f"  ✓ Matched: {output_file}")
+            else:
+                log(f"  ⊕ Added (no output file): {source_basename}")
+            log(f"    Source title: '{source_title}'")
     
     log(f"\n📊 Matching results:")
     log(f"  ✓ Matched: {matched_count} chapters")
