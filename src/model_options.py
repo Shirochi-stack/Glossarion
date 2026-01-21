@@ -66,6 +66,7 @@ def get_model_options() -> List[str]:
         "chutes/deepseek-ai/DeepSeek-V3-0324",
         "chutes/deepseek-ai/DeepSeek-R1-0528",
         "chutes/moonshotai/Kimi-K2-Thinking",
+        "chutes/zai-org/GLM-4.6-TEE", "chutes/zai-org/GLM-4.7-TEE",
         
         # DeepSeek Models
         "deepseek-chat","deepseek-reasoner", "deepseek-coder", "deepseek-coder-33b-instruct",
