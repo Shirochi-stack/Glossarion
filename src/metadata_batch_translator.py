@@ -1496,6 +1496,8 @@ class BatchHeaderTranslator:
             save_to_file: Whether to save translations to file
             current_titles: Dict mapping chapter numbers to {'title': str, 'filename': str}
         """
+        # Reset stop flag at the start of each run to avoid carry-over between runs
+        self.stop_flag = False
         # Use configured batch size if not explicitly provided
         if batch_size is None:
             batch_size = int(os.getenv('HEADERS_PER_BATCH', str(self.default_batch_size)))
@@ -1529,6 +1531,8 @@ class BatchHeaderTranslator:
         
     def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None) -> Dict[int, str]:
         """Translate headers in batches using configured prompts with parallel execution"""
+        # Reset stop flag at start of batch translation
+        self.stop_flag = False
         if not headers_dict:
             return {}
         
