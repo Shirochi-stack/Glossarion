@@ -10637,11 +10637,14 @@ def main(log_callback=None, stop_callback=None):
                     # Check if it's a timeout failure
                     if result == "[TIMEOUT]" or finish_reason == "timeout":
                         progress_manager.update(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=c)
+                        print(f"❌ Chunk {chunk_idx}/{total_chunks} timed out; aborting chapter {actual_num}")
+                        chunk_abort = True
                     else:
                         progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
+                        print(f"❌ Translation failed for chapter {actual_num} - marked as failed, aborting chapter")
+                        chunk_abort = True
                     progress_manager.save()
-                    print(f"❌ Translation failed for chapter {actual_num} - marked as failed, no output file created")
-                    continue
+                    break
                 
                 # ENHANCED TRUNCATION CHECK: Compare input vs output character counts
                 # Skip this check if base64 images are present (they skew the character count)

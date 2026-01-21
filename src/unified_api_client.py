@@ -11736,12 +11736,12 @@ class UnifiedClient:
                         else:
                             # Catch-all for SDK errors - reduce verbosity for known errors
                             err_str = str(sdk_err)
-                            is_timeout = "read operation timed out" in err_str or "ReadTimeout" in err_str
+                            is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
                             is_402 = "402" in err_str and "insufficient" in err_str.lower()
                             
                             if is_timeout:
                                 # Just log the error, skip full traceback for timeouts
-                                print(f"🛑 [{provider}] SDK error: {sdk_err}")
+                                print(f"🛑 [{provider}] SDK call failed: Request timed out.")
                             elif is_402:
                                 # Just log the error, skip full traceback for 402 payment errors
                                 print(f"🛑 [{provider}] SDK error: {sdk_err}")
