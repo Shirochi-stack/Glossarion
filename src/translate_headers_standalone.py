@@ -700,8 +700,11 @@ def translate_headers_standalone(
     for idx, translated_title in translated_headers.items():
         if idx in current_titles_map:
             output_file = current_titles_map[idx]['filename']
+            output_path = os.path.join(output_dir, output_file)
             result[output_file] = translated_title
-            log(f"  {output_file}: {translated_title}")
+            if os.path.exists(output_path):
+                log(f"  {output_file}: {translated_title}")
+            # Skip log if file is missing to avoid misleading output
 
     log("\n" + "=" * 80)
     log(f"Translation complete! Translated {len(result)} chapter headers")
