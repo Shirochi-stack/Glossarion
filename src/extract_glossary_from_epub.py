@@ -153,10 +153,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
         def api_call():
             try:
-                # Reinitialize Gemini client if it's None
-                if hasattr(client, 'gemini_client') and client.gemini_client is None:
+                # Reinitialize client if needed (check correct client based on type)
+                client_type = getattr(client, 'client_type', 'unknown')
+                needs_reinit = False
+                
+                if client_type == 'gemini':
+                    needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                elif client_type == 'openai':
+                    needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                
+                if needs_reinit:
                     try:
-                        print("   🔄 Reinitializing Gemini client...")
+                        print(f"   🔄 Reinitializing {client_type} client...")
                         client._setup_client()
                     except Exception as reinit_err:
                         print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
@@ -275,10 +283,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     else:
                         print(f"⚠️ {chapter_label}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                     
-                    # Reinitialize the client if it was closed
-                    if hasattr(client, 'gemini_client') and client.gemini_client is None:
+                    # Reinitialize the client if it was closed (check correct client based on type)
+                    client_type = getattr(client, 'client_type', 'unknown')
+                    needs_reinit = False
+                    
+                    if client_type == 'gemini':
+                        needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                    elif client_type == 'openai':
+                        needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                    
+                    if needs_reinit:
                         try:
-                            print(f"   🔄 Reinitializing Gemini client...")
+                            print(f"   🔄 Reinitializing {client_type} client...")
                             client._setup_client()
                         except Exception as reinit_err:
                             print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")

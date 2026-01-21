@@ -3928,10 +3928,18 @@ class TranslationProcessor:
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
                         print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
-                        # Reinitialize the client if it was closed
-                        if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+                        # Reinitialize the client if it was closed (check correct client based on type)
+                        client_type = getattr(self.client, 'client_type', 'unknown')
+                        needs_reinit = False
+                        
+                        if client_type == 'gemini':
+                            needs_reinit = hasattr(self.client, 'gemini_client') and self.client.gemini_client is None
+                        elif client_type == 'openai':
+                            needs_reinit = hasattr(self.client, 'openai_client') and self.client.openai_client is None
+                        
+                        if needs_reinit:
                             try:
-                                print(f"   🔄 Reinitializing Gemini client...")
+                                print(f"   🔄 Reinitializing {client_type} client...")
                                 self.client._setup_client()
                             except Exception as reinit_err:
                                 print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
@@ -4568,10 +4576,18 @@ class BatchTranslationProcessor:
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
-                                # Reinitialize the client if it was closed
-                                if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+                                # Reinitialize the client if it was closed (check correct client based on type)
+                                client_type = getattr(self.client, 'client_type', 'unknown')
+                                needs_reinit = False
+                                
+                                if client_type == 'gemini':
+                                    needs_reinit = hasattr(self.client, 'gemini_client') and self.client.gemini_client is None
+                                elif client_type == 'openai':
+                                    needs_reinit = hasattr(self.client, 'openai_client') and self.client.openai_client is None
+                                
+                                if needs_reinit:
                                     try:
-                                        print(f"   🔄 Reinitializing Gemini client...")
+                                        print(f"   🔄 Reinitializing {client_type} client...")
                                         self.client._setup_client()
                                     except Exception as reinit_err:
                                         print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
