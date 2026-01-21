@@ -95,6 +95,10 @@ class GlossaryManagerMixin:
         dialog.setWindowTitle("Glossary Manager")
         dialog.setFont(QFont("Segoe UI", 10))
         
+        # Make non-modal but stay on top
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
         min_width = int(self._screen.width() * 0.47)   # 50% of screen width
@@ -633,10 +637,10 @@ class GlossaryManagerMixin:
         
         # Show dialog with fade animation
         try:
-            from dialog_animations import exec_dialog_with_fade
-            exec_dialog_with_fade(dialog, duration=250)
+            from dialog_animations import show_dialog_with_fade
+            show_dialog_with_fade(dialog, duration=250)
         except Exception:
-            dialog.exec()
+            dialog.show()
 
     def _setup_manual_glossary_tab(self, parent):
         """Setup manual glossary tab - simplified for new format"""
