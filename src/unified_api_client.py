@@ -7218,16 +7218,12 @@ class UnifiedClient:
             if not project_id:
                 raise ValueError("Project ID not found in credentials file")
             
-            logger.info(f"Using project ID: {project_id}")
-            
             # Parse model name
             model_name = self.model
             if model_name.startswith('vertex_ai/'):
                 model_name = model_name[10:]  # Remove "vertex_ai/" prefix
             elif model_name.startswith('vertex/'):
                 model_name = model_name[7:]  # Remove "vertex/" prefix
-            
-            logger.info(f"Using model: {model_name}")
             
             # For Claude models, use the Anthropic SDK with Vertex AI
             if 'claude' in model_name.lower():
@@ -7577,11 +7573,9 @@ class UnifiedClient:
                 elif enable_image_output and not self._is_stop_requested():
                     print(f"🎨 Image output mode enabled for {model_name}")
                 
-                # Log configuration
-                print(f"\n🔧 Vertex AI Gemini Configuration (google-genai SDK):")
-                print(f"   Model: {model_name}")
-                print(f"   Region: {location}")
-                print(f"   Project: {project_id}")
+                # Log configuration (consolidate all info in one log)
+                if not self._is_stop_requested():
+                    print(f"🔧 Vertex AI Gemini: {model_name} | Region: {location} | Project: {project_id}")
                 
                 # Build generation config using google-genai SDK types
                 config_params = {
@@ -7692,10 +7686,6 @@ class UnifiedClient:
                 
                 # Save configuration to file with thread isolation
                 self._save_gemini_safety_config(config_data, response_name)
-            
-                # Only log if not stopping
-                if not self._is_stop_requested():
-                    print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens or 8192}")
                 
                 try:
                     # Make API call using google-genai SDK
@@ -8994,6 +8984,15 @@ class UnifiedClient:
         # Instance-level flag
         if getattr(self, '_cancelled', False):
             return True
+        
+        # Custom stop callback (for header translation, etc.)
+        if hasattr(self, '_stop_callback') and callable(self._stop_callback):
+            try:
+                if self._stop_callback():
+                    self._cancelled = True
+                    return True
+            except Exception:
+                pass
 
         # Glossary stop flag (if glossary extraction is running)
         try:

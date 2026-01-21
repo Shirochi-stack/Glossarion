@@ -636,18 +636,49 @@ def translate_headers_standalone(
     # Store reference in GUI instance so stop button can access it
     if gui_instance is not None:
         gui_instance._batch_header_translator = translator
+        # Reset stop flag at the start of translation
+        if hasattr(gui_instance, '_headers_stop_requested'):
+            gui_instance._headers_stop_requested = False
+        
+        # Hook up stop callback to propagate GUI stop to API client and translator
+        def check_gui_stop():
+            if hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested:
+                # Also set translator stop flag
+                translator.set_stop_flag(True)
+                return True
+            return False
+        
+        # Set stop callback on API client to check GUI flag
+        if hasattr(api_client, '_stop_callback'):
+            # Store original callback if exists
+            original_stop_callback = api_client._stop_callback
+            api_client._stop_callback = lambda: original_stop_callback() or check_gui_stop()
+        else:
+            # Just set our callback
+            api_client._stop_callback = check_gui_stop
     
     # Call translate_and_save_headers - IDENTICAL TO PIPELINE
     # This method uses the EXACT same translation prompts, HTML update logic, and file saving
-    translated_headers = translator.translate_and_save_headers(
-        html_dir=output_dir,
-        headers_dict=headers_to_translate,
-        batch_size=config.get('headers_per_batch', 350) if config else 350,
-        output_dir=output_dir,
-        update_html=update_html,  # Uses _update_html_headers_exact - same as pipeline
-        save_to_file=save_to_file,  # Saves to translated_headers.txt - same as pipeline
-        current_titles=current_titles_map  # Enables exact title replacement
-    )
+    try:
+        translated_headers = translator.translate_and_save_headers(
+            html_dir=output_dir,
+            headers_dict=headers_to_translate,
+            batch_size=config.get('headers_per_batch', 350) if config else 350,
+            output_dir=output_dir,
+            update_html=update_html,  # Uses _update_html_headers_exact - same as pipeline
+            save_to_file=save_to_file,  # Saves to translated_headers.txt - same as pipeline
+            current_titles=current_titles_map  # Enables exact title replacement
+        )
+    except KeyboardInterrupt:
+        log("\n⛔ Translation interrupted by user")
+        translator.set_stop_flag(True)
+        return {}
+    except Exception as e:
+        # Check if this was a stop request
+        if translator.stop_flag or (gui_instance and hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested):
+            log("\n⛔ Translation stopped by user")
+            return {}
+        raise
     
     # Step 5: Map back to output filenames
     log("\nStep 5: Mapping translations to output files...")
@@ -889,9 +920,10 @@ def run_translate_headers_gui(gui_instance):
         gui_instance.append_log(f"📊 Will process {total_files} EPUB file(s)")
         
         for idx, current_epub in enumerate(epub_files, 1):
-            # Check if stop was requested
+            # Check if stop was requested before starting a new EPUB
             if hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested:
                 gui_instance.append_log("\n⛔ Translation stopped by user")
+                gui_instance.append_log(f"📊 Stopped after processing {successful + failed}/{total_files} file(s)")
                 break
             
             gui_instance.append_log(f"\n{'='*60}")
@@ -992,19 +1024,28 @@ def run_translate_headers_gui(gui_instance):
                 gui_instance.append_log("🌐 Starting standalone header translation...")
             
             # Run translation
-            result = translate_headers_standalone(
-                epub_path=current_epub,
-                output_dir=output_dir,
-                api_client=gui_instance.api_client,
-                config=config,
-                update_html=update_html,
-                save_to_file=save_to_file,
-                log_callback=gui_instance.append_log,
-                gui_instance=gui_instance  # Pass GUI instance for stop button support
-            )
+            try:
+                result = translate_headers_standalone(
+                    epub_path=current_epub,
+                    output_dir=output_dir,
+                    api_client=gui_instance.api_client,
+                    config=config,
+                    update_html=update_html,
+                    save_to_file=save_to_file,
+                    log_callback=gui_instance.append_log,
+                    gui_instance=gui_instance  # Pass GUI instance for stop button support
+                )
+            except KeyboardInterrupt:
+                gui_instance.append_log("\n⛔ Translation interrupted by user")
+                failed += 1
+                break
             
+            # Check if translation was stopped
+            if hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested:
+                gui_instance.append_log(f"⛔ Translation stopped for: {epub_base}")
+                failed += 1
             # Log results
-            if result:
+            elif result:
                 gui_instance.append_log(f"✅ Successfully translated {len(result)} chapter headers!")
                 # Show the translated_headers.txt file path only if saving was enabled
                 if save_to_file:
