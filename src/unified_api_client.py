@@ -7807,6 +7807,9 @@ class UnifiedClient:
                         if max_match:
                             max_exclusive = int(max_match.group(1))
                             adjusted_max = max_exclusive - 1
+                            # Check if stop was requested before retrying
+                            if is_stop_requested():
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             print(f"⚠️ {model_name} max_output_tokens exceeds limit, retrying with {adjusted_max}")
                             try:
                                 config_params["max_output_tokens"] = adjusted_max

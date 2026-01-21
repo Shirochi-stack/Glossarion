@@ -1640,6 +1640,13 @@ class BatchHeaderTranslator:
                     if len(batch_headers) > 3:
                         print(f"    ... and {len(batch_headers) - 3} more")
                 
+                # Check stop flag before making API call (respect graceful stop mode)
+                if self.stop_flag:
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if not graceful_stop_active:
+                        # Force stop - abort immediately
+                        return None
+                
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
