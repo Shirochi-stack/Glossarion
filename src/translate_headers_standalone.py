@@ -593,33 +593,6 @@ def translate_headers_standalone(
     log("=" * 80)
     log("Starting Standalone Header Translation (Content.OPF Based)")
     log("=" * 80)
-    # --- Hard reset of any lingering stop signals ---
-    try:
-        import unified_api_client as _uac
-        if hasattr(_uac, "set_stop_flag"):
-            _uac.set_stop_flag(False)
-        if hasattr(_uac, "UnifiedClient") and hasattr(_uac.UnifiedClient, "set_global_cancellation"):
-            _uac.UnifiedClient.set_global_cancellation(False)
-    except Exception:
-        pass
-    try:
-        import TransateKRtoEN as _tke
-        if hasattr(_tke, "set_stop_flag"):
-            _tke.set_stop_flag(False)
-    except Exception:
-        pass
-    # Remove glossary stop file if it exists
-    stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-    if stop_file and os.path.exists(stop_file):
-        try:
-            os.remove(stop_file)
-        except Exception:
-            pass
-    # Reset env flags
-    os.environ['GRACEFUL_STOP'] = '0'
-    os.environ['WAIT_FOR_CHUNKS'] = '0'
-    os.environ['TRANSLATION_CANCELLED'] = '0'
-    # --- End reset ---
     
     # Step 1: Extract source chapters with OPF mapping (UNIQUE TO STANDALONE)
     log("\nStep 1: Extracting source chapter titles from EPUB (strict OPF spine order)...")
@@ -656,24 +629,9 @@ def translate_headers_standalone(
     log("(This ensures 1:1 compatibility with pipeline translation)")
     
     from metadata_batch_translator import BatchHeaderTranslator
-    # Clear any lingering global/instance stop flags before starting
-    try:
-        import unified_api_client as _uac
-        if hasattr(_uac, "set_stop_flag"):
-            _uac.set_stop_flag(False)
-        if hasattr(_uac, "UnifiedClient") and hasattr(_uac.UnifiedClient, "set_global_cancellation"):
-            _uac.UnifiedClient.set_global_cancellation(False)
-    except Exception:
-        pass
-    # Reset stop-related environment flags
-    os.environ['GRACEFUL_STOP'] = '0'
-    os.environ['WAIT_FOR_CHUNKS'] = '0'
-    os.environ['TRANSLATION_CANCELLED'] = '0'
     
     # Create translator with same config as pipeline
     translator = BatchHeaderTranslator(api_client, config or {})
-    # Ensure stop flag is cleared at start of every run
-    translator.set_stop_flag(False)
     
     # Store reference in GUI instance so stop button can access it
     if gui_instance is not None:
@@ -732,7 +690,7 @@ def translate_headers_standalone(
             output_path = os.path.join(output_dir, output_file)
             if os.path.exists(output_path):
                 log(f"  {output_file}: {translated_title}")
-            # if the file is missing, skip logging to avoid misleading entries
+            # Skip log if the file is missing to avoid misleading output
     
     log("\n" + "=" * 80)
     log(f"Translation complete! Translated {len(result)} chapter headers")

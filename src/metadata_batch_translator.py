@@ -1570,7 +1570,6 @@ class BatchHeaderTranslator:
         # Handle output language - this is what {target_lang} should be replaced with
         # Check environment variable first (set by GUI), then config, then fallback to English
         output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
-        # Trimmed debug: just show final prompts
         
         # Replace {target_lang} variable in both system prompt and user prompt with the output language
         system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
