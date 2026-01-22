@@ -531,6 +531,22 @@ class TranslationConfig:
             self.TRUNCATION_RETRY_ATTEMPTS = int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1"))
         except Exception:
             self.TRUNCATION_RETRY_ATTEMPTS = 1
+
+        # Char-ratio truncation detection (silent truncation)
+        self.CHAR_RATIO_TRUNCATION_ENABLED = os.getenv("CHAR_RATIO_TRUNCATION_ENABLED", "1") == "1"
+        try:
+            self.CHAR_RATIO_TRUNCATION_PERCENT = float(os.getenv("CHAR_RATIO_TRUNCATION_PERCENT", "50"))
+        except Exception:
+            self.CHAR_RATIO_TRUNCATION_PERCENT = 50.0
+        try:
+            self.CHAR_RATIO_TRUNCATION_ATTEMPTS = int(os.getenv("CHAR_RATIO_TRUNCATION_ATTEMPTS", "1"))
+        except Exception:
+            self.CHAR_RATIO_TRUNCATION_ATTEMPTS = 1
+        try:
+            self.CHAR_RATIO_MIN_OUTPUT_CHARS = int(os.getenv("CHAR_RATIO_MIN_OUTPUT_CHARS", "100"))
+        except Exception:
+            self.CHAR_RATIO_MIN_OUTPUT_CHARS = 100
+
         self.RETRY_SPLIT_FAILED = os.getenv("RETRY_SPLIT_FAILED", "0") == "1"
         try:
             self.SPLIT_FAILED_RETRY_ATTEMPTS = int(os.getenv("SPLIT_FAILED_RETRY_ATTEMPTS", "1"))

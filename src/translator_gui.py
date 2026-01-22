@@ -2266,6 +2266,8 @@ Recent translations to summarize:
             ('enable_gender_nuance_var', 'enable_gender_nuance', True),
             ('include_description_var', 'include_description', True),
             ('retry_truncated_var', 'retry_truncated', True),
+            # Char-ratio truncation (silent truncation detector)
+            ('char_ratio_truncation_var', 'char_ratio_truncation_enabled', True),
             ('retry_split_failed_var', 'retry_split_failed', True),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
@@ -2324,6 +2326,10 @@ Recent translations to summarize:
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
             ('max_retry_tokens_var', 'max_retry_tokens', '-1'),
             ('truncation_retry_attempts_var', 'truncation_retry_attempts', '1'),
+            # Char-ratio truncation (silent truncation detector)
+            ('char_ratio_truncation_percent_var', 'char_ratio_truncation_percent', '50'),
+            ('char_ratio_truncation_attempts_var', 'char_ratio_truncation_attempts', '1'),
+            ('char_ratio_min_output_chars_var', 'char_ratio_min_output_chars', '100'),
             ('split_failed_retry_attempts_var', 'split_failed_retry_attempts', '1'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
             ('glossary_min_frequency_var', 'glossary_min_frequency', '2'),
@@ -11536,6 +11542,11 @@ Important rules:
 
                 # Retry settings
                 ('retry_truncated', ['retry_truncated_var'], False, bool),
+                # Char-ratio truncation (silent truncation detector)
+                ('char_ratio_truncation_enabled', ['char_ratio_truncation_var'], True, bool),
+                ('char_ratio_truncation_percent', ['char_ratio_truncation_percent_var'], 50, lambda v: safe_int(v, 50)),
+                ('char_ratio_truncation_attempts', ['char_ratio_truncation_attempts_var'], 1, lambda v: safe_int(v, 1)),
+                ('char_ratio_min_output_chars', ['char_ratio_min_output_chars_var'], 100, lambda v: safe_int(v, 100)),
                 ('retry_split_failed', ['retry_split_failed_var'], True, bool),
                 ('max_retry_tokens', ['max_retry_tokens_var'], -1, lambda v: safe_int(v, -1)),
                 ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
@@ -12292,6 +12303,11 @@ Important rules:
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
                 ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
+                # Char-ratio truncation (silent truncation detector)
+                ('CHAR_RATIO_TRUNCATION_ENABLED', '1' if getattr(self, 'char_ratio_truncation_var', True) else '0'),
+                ('CHAR_RATIO_TRUNCATION_PERCENT', str(getattr(self, 'char_ratio_truncation_percent_var', '50'))),
+                ('CHAR_RATIO_TRUNCATION_ATTEMPTS', str(getattr(self, 'char_ratio_truncation_attempts_var', '1'))),
+                ('CHAR_RATIO_MIN_OUTPUT_CHARS', str(getattr(self, 'char_ratio_min_output_chars_var', '100'))),
                 ('RETRY_SPLIT_FAILED', '1' if getattr(self, 'retry_split_failed_var', False) else '0'),
                 ('SPLIT_FAILED_RETRY_ATTEMPTS', str(getattr(self, 'split_failed_retry_attempts_var', '1'))),
                 ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),

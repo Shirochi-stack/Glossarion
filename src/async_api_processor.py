@@ -3239,6 +3239,14 @@ class AsyncProcessingDialog:
         except Exception:
             _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
         env_vars['MAX_RETRY_TOKENS'] = str(_resolved_retry_tokens)
+
+        # Truncation and silent-truncation retries
+        env_vars['TRUNCATION_RETRY_ATTEMPTS'] = str(_val(getattr(self.gui, 'truncation_retry_attempts_var', '1'), '1'))
+        env_vars['CHAR_RATIO_TRUNCATION_ENABLED'] = "1" if _val(getattr(self.gui, 'char_ratio_truncation_var', True), True) else "0"
+        env_vars['CHAR_RATIO_TRUNCATION_PERCENT'] = str(_val(getattr(self.gui, 'char_ratio_truncation_percent_var', '50'), '50'))
+        env_vars['CHAR_RATIO_TRUNCATION_ATTEMPTS'] = str(_val(getattr(self.gui, 'char_ratio_truncation_attempts_var', '1'), '1'))
+        env_vars['CHAR_RATIO_MIN_OUTPUT_CHARS'] = str(_val(getattr(self.gui, 'char_ratio_min_output_chars_var', '100'), '100'))
+
         env_vars['RETRY_DUPLICATE_BODIES'] = "1" if _val(self.gui.retry_duplicate_var, False) else "0"
         env_vars['RETRY_TIMEOUT'] = "1" if _val(self.gui.retry_timeout_var, False) else "0"
         env_vars['CHUNK_TIMEOUT'] = _val(self.gui.chunk_timeout_var, '')

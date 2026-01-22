@@ -1690,7 +1690,11 @@ class BatchHeaderTranslator:
                     return self._fallback_parse(response_content, batch_headers)
                 return {}
             except Exception as e:
-                print(f"  ❌ Batch {batch_num + 1}: Error: {e}")
+                error_msg = str(e)
+                if "cancelled" in error_msg.lower() and not self.stop_flag:
+                    print(f"  ❌ Batch {batch_num + 1}: Error: {error_msg} (NOTE: API Error triggered cancellation logic)")
+                else:
+                    print(f"  ❌ Batch {batch_num + 1}: Error: {e}")
                 return {}
         
         # Create batches

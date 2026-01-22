@@ -4531,7 +4531,7 @@ class UnifiedClient:
                     # Only log if not during graceful stop (expected cancellation)
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if not self._is_stop_requested() and not graceful_stop_active:
-                        logger.info("Propagating cancellation to caller")
+                        logger.info(f"Propagating cancellation to caller (Error: {e})")
                     # Re-raise so send_with_interrupt can handle it
                     raise
                 

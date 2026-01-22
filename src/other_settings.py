@@ -2393,6 +2393,17 @@ def _create_response_handling_section(self, parent):
     # Retry Truncated
     if not hasattr(self, 'truncation_retry_attempts_var'):
         self.truncation_retry_attempts_var = str(self.config.get('truncation_retry_attempts', '1'))
+
+    # Char-ratio truncation (silent truncation detector)
+    if not hasattr(self, 'char_ratio_truncation_var'):
+        self.char_ratio_truncation_var = bool(self.config.get('char_ratio_truncation_enabled', True))
+    if not hasattr(self, 'char_ratio_truncation_percent_var'):
+        self.char_ratio_truncation_percent_var = str(self.config.get('char_ratio_truncation_percent', '50'))
+    if not hasattr(self, 'char_ratio_truncation_attempts_var'):
+        self.char_ratio_truncation_attempts_var = str(self.config.get('char_ratio_truncation_attempts', '1'))
+    if not hasattr(self, 'char_ratio_min_output_chars_var'):
+        self.char_ratio_min_output_chars_var = str(self.config.get('char_ratio_min_output_chars', '100'))
+
     retry_truncated_cb = self._create_styled_checkbox("Auto-retry Truncated Responses")
     
     retry_frame_w = QWidget()
@@ -2437,6 +2448,121 @@ def _create_response_handling_section(self, parent):
     retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum\nSet token constraint to -1 to use the global output token limit")
     retry_desc.setContentsMargins(20, 0, 0, 10)
 
+    # Char-ratio truncation controls (silent truncation detector)
+    char_ratio_cb = self._create_styled_checkbox("Enable char-ratio truncation check")
+    char_ratio_cb.setContentsMargins(20, 0, 0, 0)
+    char_ratio_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Detect silent truncation by comparing input vs output character counts. "
+        "Skipped when base64 images are present (they skew counts)."
+        "</p></qt>"
+    )
+    try:
+        char_ratio_cb.setChecked(bool(self.char_ratio_truncation_var))
+    except Exception:
+        char_ratio_cb.setChecked(True)
+
+    char_ratio_frame_w = QWidget()
+    char_ratio_frame_h = QHBoxLayout(char_ratio_frame_w)
+    char_ratio_frame_h.setContentsMargins(40, 5, 0, 5)
+
+    char_ratio_percent_label = QLabel("Trigger below (%):")
+    char_ratio_frame_h.addWidget(char_ratio_percent_label)
+
+    char_ratio_percent_edit = QLineEdit()
+    char_ratio_percent_edit.setFixedWidth(50)
+    try:
+        char_ratio_percent_edit.setText(str(self.char_ratio_truncation_percent_var))
+    except Exception:
+        char_ratio_percent_edit.setText("50")
+    def _on_char_ratio_percent_changed(text):
+        try:
+            self.char_ratio_truncation_percent_var = text
+        except Exception:
+            pass
+    char_ratio_percent_edit.textChanged.connect(_on_char_ratio_percent_changed)
+    char_ratio_frame_h.addWidget(char_ratio_percent_edit)
+
+    char_ratio_attempts_label = QLabel("Attempts:")
+    char_ratio_frame_h.addWidget(char_ratio_attempts_label)
+
+    char_ratio_attempts_edit = QLineEdit()
+    char_ratio_attempts_edit.setFixedWidth(50)
+    try:
+        char_ratio_attempts_edit.setText(str(self.char_ratio_truncation_attempts_var))
+    except Exception:
+        char_ratio_attempts_edit.setText("1")
+    def _on_char_ratio_attempts_changed(text):
+        try:
+            self.char_ratio_truncation_attempts_var = text
+        except Exception:
+            pass
+    char_ratio_attempts_edit.textChanged.connect(_on_char_ratio_attempts_changed)
+    char_ratio_frame_h.addWidget(char_ratio_attempts_edit)
+
+    char_ratio_min_chars_label = QLabel("Min output chars:")
+    char_ratio_frame_h.addWidget(char_ratio_min_chars_label)
+
+    char_ratio_min_chars_edit = QLineEdit()
+    char_ratio_min_chars_edit.setFixedWidth(60)
+    try:
+        char_ratio_min_chars_edit.setText(str(self.char_ratio_min_output_chars_var))
+    except Exception:
+        char_ratio_min_chars_edit.setText("100")
+    def _on_char_ratio_min_chars_changed(text):
+        try:
+            self.char_ratio_min_output_chars_var = text
+        except Exception:
+            pass
+    char_ratio_min_chars_edit.textChanged.connect(_on_char_ratio_min_chars_changed)
+    char_ratio_frame_h.addWidget(char_ratio_min_chars_edit)
+
+    char_ratio_frame_h.addStretch()
+
+    char_ratio_desc = QLabel(
+        "Flags likely silent truncation when output is much shorter than input.\n"
+        "This is only evaluated when the provider did NOT return finish_reason=length."
+    )
+    char_ratio_desc.setContentsMargins(40, 0, 0, 10)
+
+    def _on_char_ratio_toggle(checked):
+        try:
+            self.char_ratio_truncation_var = bool(checked)
+
+            main_enabled = retry_truncated_cb.isChecked()
+            effective = bool(checked) and bool(main_enabled)
+
+            # Enable/disable controls
+            char_ratio_percent_label.setEnabled(effective)
+            char_ratio_percent_edit.setEnabled(effective)
+            char_ratio_attempts_label.setEnabled(effective)
+            char_ratio_attempts_edit.setEnabled(effective)
+            char_ratio_min_chars_label.setEnabled(effective)
+            char_ratio_min_chars_edit.setEnabled(effective)
+            char_ratio_desc.setEnabled(effective)
+
+            # Update styles
+            if effective:
+                char_ratio_percent_label.setStyleSheet("color: white;")
+                char_ratio_attempts_label.setStyleSheet("color: white;")
+                char_ratio_min_chars_label.setStyleSheet("color: white;")
+                char_ratio_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                char_ratio_percent_edit.setStyleSheet("color: white;")
+                char_ratio_attempts_edit.setStyleSheet("color: white;")
+                char_ratio_min_chars_edit.setStyleSheet("color: white;")
+            else:
+                char_ratio_percent_label.setStyleSheet("color: #606060;")
+                char_ratio_attempts_label.setStyleSheet("color: #606060;")
+                char_ratio_min_chars_label.setStyleSheet("color: #606060;")
+                char_ratio_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+                char_ratio_percent_edit.setStyleSheet("color: #909090;")
+                char_ratio_attempts_edit.setStyleSheet("color: #909090;")
+                char_ratio_min_chars_edit.setStyleSheet("color: #909090;")
+        except Exception:
+            pass
+
+    char_ratio_cb.toggled.connect(_on_char_ratio_toggle)
+
     def _on_retry_truncated_toggle(checked):
         try:
             self.retry_truncated_var = bool(checked)
@@ -2447,6 +2573,11 @@ def _create_response_handling_section(self, parent):
             retry_desc.setEnabled(checked)
             retry_attempts_edit.setEnabled(checked)
             retry_attempts_label.setEnabled(checked)
+
+            # Char-ratio truncation controls depend on the main retry toggle
+            char_ratio_cb.setEnabled(bool(checked))
+            # Update subordinate controls without changing the user's checkbox state
+            _on_char_ratio_toggle(char_ratio_cb.isChecked())
 
             # Update styles
             if checked:
@@ -2476,6 +2607,9 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(retry_truncated_cb)
     section_v.addWidget(retry_frame_w)
     section_v.addWidget(retry_desc)
+    section_v.addWidget(char_ratio_cb)
+    section_v.addWidget(char_ratio_frame_w)
+    section_v.addWidget(char_ratio_desc)
     
     # Separator
     sep4 = QFrame()
