@@ -144,6 +144,12 @@ class GoogleFreeTranslateNew:
                     'error': str(e)
                 }
 
+        # Log start for Google endpoints (pre-call)
+        try:
+            self.logger.info(f"🌐 Google Translate Free: Translating {len(text)} characters")
+        except Exception:
+            pass
+
         # Rate limiting
         self._rate_limit_delay()
         
@@ -229,6 +235,47 @@ class GoogleFreeTranslateNew:
                 'error': str(e)
             }
     
+    
+    def _mask_html_tags(self, text: str):
+        """Replace HTML tags/entities with placeholders to avoid translation corruption."""
+        import re
+        if ('<' not in text or '>' not in text) and '&' not in text:
+            return text, {}
+
+        tag_pattern = re.compile(r'<[^>]+>')
+        entity_pattern = re.compile(r'&[A-Za-z0-9#]+;')
+
+        tag_list = []
+        ent_list = []
+
+        def _tag_repl(match):
+            idx = len(tag_list)
+            tag_list.append(match.group(0))
+            return f"__HTML_TAG_{idx}__"
+
+        def _ent_repl(match):
+            idx = len(ent_list)
+            ent_list.append(match.group(0))
+            return f"__HTML_ENT_{idx}__"
+
+        # Mask tags first (protect inline attributes inside tags)
+        masked = tag_pattern.sub(_tag_repl, text)
+        # Mask entities in remaining text
+        masked = entity_pattern.sub(_ent_repl, masked)
+
+        tag_map = {f"__HTML_TAG_{i}__": tag for i, tag in enumerate(tag_list)}
+        ent_map = {f"__HTML_ENT_{i}__": ent for i, ent in enumerate(ent_list)}
+        tag_map.update(ent_map)
+        return masked, tag_map
+
+    def _unmask_html_tags(self, text: str, tag_map: dict):
+        """Restore HTML tags/entities from placeholders."""
+        if not tag_map:
+            return text
+        # Replace longer placeholders first (safe) – all are same pattern length anyway
+        for placeholder, tag in tag_map.items():
+            text = text.replace(placeholder, tag)
+        return text
     def _translate_via_argos(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
         """Fallback to Argos Translate (offline-capable)."""
         try:
@@ -330,7 +377,14 @@ class GoogleFreeTranslateNew:
 
             if from_lang and to_lang:
                 translation = from_lang.get_translation(to_lang)
-                translated_text = translation.translate(text)
+                try:
+                    self.logger.info(f"🌐 Argos Translate: Translating {len(text)} characters")
+                except Exception:
+                    pass
+                # Mask HTML tags to avoid corruption during Argos translation
+                masked_text, tag_map = self._mask_html_tags(text)
+                translated_text = translation.translate(masked_text)
+                translated_text = self._unmask_html_tags(translated_text, tag_map)
                 return {
                     'translatedText': translated_text,
                     'detectedSourceLanguage': argos_source,

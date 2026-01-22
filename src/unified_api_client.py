@@ -14187,8 +14187,6 @@ class UnifiedClient:
             provider_label = "Argos" if provider == 'argos' else "Google"
             provider_prefix = "Argos Translate" if provider == 'argos' else "Google Translate Free"
 
-            # Provider-aware translation log
-            logger.info(f"🌐 {provider_prefix}: Translating {len(text_to_translate)} characters")
 
             # Provider-aware language logs
             logger.info(f"🎯 {provider_prefix}: Target language: {target_lang} ({output_lang_name})")
