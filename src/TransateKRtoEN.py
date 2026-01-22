@@ -7481,14 +7481,19 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
+    # Pre-process: Convert all angle brackets that are html tags into html entities
+    # This prevents markdown converters from stripping or malforming them
+    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', r'&lt;\1&gt;', plain_text)
+    
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
     
     if use_markdown2:
-        # Use markdown2 for conversion (legacy behavior)
+    # Use markdown2 for conversion (legacy behavior)
         try:
             import markdown2
             
+
             has_markdown = any([
                 '##' in plain_text,
                 '**' in plain_text,
@@ -7525,16 +7530,20 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                             processed_lines.append(line)
                     html = '\n'.join(processed_lines)
                 
-                # CRITICAL: Unescape img tags that were converted to HTML entities
-                # Pattern matches: &lt;img ... /&gt; where the tag ends with /
-                img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', html, flags=re.IGNORECASE))
+                # CRITICAL: Unescape img, svg, picture, figure, figcaption, canvas, map, area tags that were converted to HTML entities
+                # Logic:
+                # 1. Closing tags (e.g. </map>) -> Always unescape
+                # 2. Container tags (svg, picture, figure, figcaption) -> Unescape even if bare (often used without attrs)
+                # 3. Ambiguous tags (img, area, map, canvas, source, image) -> Unescape ONLY if they have attributes (space followed by content)
+                #    This avoids false positives like "The <area> of effect" in fantasy text.
+                img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
                 if img_count > 0:
-                    print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (markdown2)")
+                    print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown2)")
                 html = re.sub(
-                    r'&lt;(img\s[^>]*?/)&gt;',
+                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
                     r'<\1>',
                     html,
-                    flags=re.IGNORECASE
+                    flags=re.IGNORECASE | re.DOTALL
                 )
                 
                 return html
@@ -7590,16 +7599,19 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                         processed_lines.append(line)
                 html = '\n'.join(processed_lines)
             
-            # CRITICAL: Unescape img tags that were converted to HTML entities
-            # Pattern matches: &lt;img ... /&gt; where the tag ends with /
-            img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', html, flags=re.IGNORECASE))
+            # CRITICAL: Unescape img, svg, picture, figure, figcaption, canvas, map, area tags that were converted to HTML entities
+            # Logic:
+            # 1. Closing tags (e.g. </map>) -> Always unescape
+            # 2. Container tags (svg, picture, figure, figcaption) -> Unescape even if bare
+            # 3. Ambiguous tags (img, area, map, canvas, source, image) -> Unescape ONLY if they have attributes
+            img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
             if img_count > 0:
-                print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (markdown)")
+                print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown)")
             html = re.sub(
-                r'&lt;(img\s[^>]*?/)&gt;',
+                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
                 r'<\1>',
                 html,
-                flags=re.IGNORECASE
+                flags=re.IGNORECASE | re.DOTALL
             )
             
             return html
@@ -7705,7 +7717,24 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     if in_list:
         final_html.append(f'</{list_type}>')
     
-    return '\n'.join(final_html)
+    html = '\\n'.join(final_html)
+
+    # CRITICAL: Unescape img, svg, picture, figure, figcaption, canvas, map, area tags that were converted to HTML entities
+    # Logic:
+    # 1. Closing tags -> Always unescape
+    # 2. Container tags -> Unescape even if bare
+    # 3. Ambiguous tags -> Unescape ONLY if they have attributes
+    img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
+    if img_count > 0:
+        print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (fallback)")
+    html = re.sub(
+        r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
+        r'<\1>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    return html
 # =====================================================
 # MAIN TRANSLATION FUNCTION
 # =====================================================
