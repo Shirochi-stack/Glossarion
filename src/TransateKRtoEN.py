@@ -3781,8 +3781,12 @@ class TranslationProcessor:
                     print(f"🔄 Converting translated markdown back to HTML...")
                     result = convert_enhanced_text_to_html(result, c)
                 
-                # Emergency Image Restoration (if enabled)
-                if result and self.config.EMERGENCY_IMAGE_RESTORE:
+                # Emergency Image Restoration (if enabled globally OR forced for this chapter)
+                # Check for forced flag in progress data attached to chunk
+                prog_data = c.get('__progress', {})
+                force_restore = prog_data.get('force_image_restore', False) if isinstance(prog_data, dict) else False
+                
+                if result and (self.config.EMERGENCY_IMAGE_RESTORE or force_restore):
                     # Use original HTML if available (for enhanced extraction), otherwise use chunk_html
                     source_html = c.get('original_html', chunk_html)
                     result = ContentProcessor.emergency_restore_images(result, source_html)
