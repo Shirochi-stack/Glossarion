@@ -236,56 +236,6 @@ class GoogleFreeTranslateNew:
             }
     
     
-    def _mask_html_tags(self, text: str):
-        """Replace HTML tags/entities with Unicode PUA placeholders to avoid translation corruption."""
-        import re
-        if ('<' not in text or '>' not in text) and '&' not in text:
-            return text, {}
-
-        tag_pattern = re.compile(r'<[^>]+>')
-        entity_pattern = re.compile(r'&[A-Za-z0-9#]+;')
-
-        tag_list = []
-        ent_list = []
-
-        # Private Use Area base (U+E000)
-        TAG_BASE = 0xE000
-        ENT_BASE = 0xF000  # separate block to avoid collisions
-
-        def _pua(codepoint):
-            try:
-                return chr(codepoint)
-            except Exception:
-                return ''
-
-        def _tag_repl(match):
-            idx = len(tag_list)
-            tag_list.append(match.group(0))
-            return _pua(TAG_BASE + idx)
-
-        def _ent_repl(match):
-            idx = len(ent_list)
-            ent_list.append(match.group(0))
-            return _pua(ENT_BASE + idx)
-
-        # Mask tags first (protect inline attributes inside tags)
-        masked = tag_pattern.sub(_tag_repl, text)
-        # Mask entities in remaining text
-        masked = entity_pattern.sub(_ent_repl, masked)
-
-        tag_map = {chr(TAG_BASE + i): tag for i, tag in enumerate(tag_list)}
-        ent_map = {chr(ENT_BASE + i): ent for i, ent in enumerate(ent_list)}
-        tag_map.update(ent_map)
-        return masked, tag_map
-
-    def _unmask_html_tags(self, text: str, tag_map: dict):
-        """Restore HTML tags/entities from Unicode PUA placeholders."""
-        if not tag_map:
-            return text
-        for placeholder, tag in tag_map.items():
-            if placeholder in text:
-                text = text.replace(placeholder, tag)
-        return text
     def _translate_via_argos(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
         """Fallback to Argos Translate (offline-capable)."""
         try:
@@ -391,10 +341,7 @@ class GoogleFreeTranslateNew:
                     self.logger.info(f"🌐 Argos Translate: Translating {len(text)} characters")
                 except Exception:
                     pass
-                # Mask HTML tags to avoid corruption during Argos translation
-                masked_text, tag_map = self._mask_html_tags(text)
-                translated_text = translation.translate(masked_text)
-                translated_text = self._unmask_html_tags(translated_text, tag_map)
+                translated_text = translation.translate(text)
                 return {
                     'translatedText': translated_text,
                     'detectedSourceLanguage': argos_source,
