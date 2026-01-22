@@ -133,6 +133,15 @@ class GoogleFreeTranslateNew:
                         self.cache[cache_key] = argos_result
                     return argos_result
                 
+                # If fallback fails even in fallback-only mode, and Argos is unavailable, disable fallback-only
+                # and continue with Google endpoints.
+                try:
+                    import importlib.util
+                    if importlib.util.find_spec("argostranslate") is None:
+                        GoogleFreeTranslateNew._use_fallback_only = False
+                        return self.translate(text)
+                except Exception:
+                    pass
                 # If fallback fails even in fallback-only mode, raise exception
                 raise Exception("Argos fallback failed in permanent fallback mode")
             except Exception as e:
