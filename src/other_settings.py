@@ -2449,11 +2449,12 @@ def _create_response_handling_section(self, parent):
     retry_desc.setContentsMargins(20, 0, 0, 10)
 
     # Char-ratio truncation controls (silent truncation detector)
-    char_ratio_cb = self._create_styled_checkbox("Enable char-ratio truncation check")
+    char_ratio_cb = self._create_styled_checkbox("Auto-retry Silent Truncation (Char-ratio)")
     char_ratio_cb.setContentsMargins(20, 0, 0, 0)
     char_ratio_cb.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "Detect silent truncation by comparing input vs output character counts. "
+        "Auto-retry logic for clear cases of truncation that the API does not report. "
+        "Detects silent truncation by comparing input vs output character counts. "
         "Skipped when base64 images are present (they skew counts)."
         "</p></qt>"
     )
@@ -2464,7 +2465,11 @@ def _create_response_handling_section(self, parent):
 
     char_ratio_frame_w = QWidget()
     char_ratio_frame_h = QHBoxLayout(char_ratio_frame_w)
-    char_ratio_frame_h.setContentsMargins(40, 5, 0, 5)
+    char_ratio_frame_h.setContentsMargins(40, 5, 0, 0)
+
+    char_ratio_frame_w2 = QWidget()
+    char_ratio_frame_h2 = QHBoxLayout(char_ratio_frame_w2)
+    char_ratio_frame_h2.setContentsMargins(40, 0, 0, 5)
 
     char_ratio_percent_label = QLabel("Trigger below (%):")
     char_ratio_frame_h.addWidget(char_ratio_percent_label)
@@ -2483,7 +2488,7 @@ def _create_response_handling_section(self, parent):
     char_ratio_percent_edit.textChanged.connect(_on_char_ratio_percent_changed)
     char_ratio_frame_h.addWidget(char_ratio_percent_edit)
 
-    char_ratio_attempts_label = QLabel("Attempts:")
+    char_ratio_attempts_label = QLabel("Char-ratio retry attempts:")
     char_ratio_frame_h.addWidget(char_ratio_attempts_label)
 
     char_ratio_attempts_edit = QLineEdit()
@@ -2499,9 +2504,10 @@ def _create_response_handling_section(self, parent):
             pass
     char_ratio_attempts_edit.textChanged.connect(_on_char_ratio_attempts_changed)
     char_ratio_frame_h.addWidget(char_ratio_attempts_edit)
+    char_ratio_frame_h.addStretch()
 
-    char_ratio_min_chars_label = QLabel("Min output chars:")
-    char_ratio_frame_h.addWidget(char_ratio_min_chars_label)
+    char_ratio_min_chars_label = QLabel("Skip check if output is less than N Characters:")
+    char_ratio_frame_h2.addWidget(char_ratio_min_chars_label)
 
     char_ratio_min_chars_edit = QLineEdit()
     char_ratio_min_chars_edit.setFixedWidth(60)
@@ -2515,13 +2521,13 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     char_ratio_min_chars_edit.textChanged.connect(_on_char_ratio_min_chars_changed)
-    char_ratio_frame_h.addWidget(char_ratio_min_chars_edit)
+    char_ratio_frame_h2.addWidget(char_ratio_min_chars_edit)
 
-    char_ratio_frame_h.addStretch()
+    char_ratio_frame_h2.addStretch()
 
     char_ratio_desc = QLabel(
-        "Flags likely silent truncation when output is much shorter than input.\n"
-        "This is only evaluated when the provider did NOT return finish_reason=length."
+        "Auto-retry logic for clear cases of truncation that the API does not report.\n"
+        "Flags likely silent truncation when output is much shorter than input."
     )
     char_ratio_desc.setContentsMargins(40, 0, 0, 10)
 
@@ -2609,6 +2615,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(retry_desc)
     section_v.addWidget(char_ratio_cb)
     section_v.addWidget(char_ratio_frame_w)
+    section_v.addWidget(char_ratio_frame_w2)
     section_v.addWidget(char_ratio_desc)
     
     # Separator
