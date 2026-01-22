@@ -426,7 +426,9 @@ class QAScannerMixin:
             """)
             mode_dialog.setWindowTitle("Select QA Scanner Mode")
             mode_dialog.resize(dialog_width, dialog_height)
-            mode_dialog.setModal(True)
+            # Non-modal but stays on top
+            mode_dialog.setModal(False)
+            mode_dialog.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
             # Set window icon
             try:
                 ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
@@ -883,8 +885,15 @@ class QAScannerMixin:
                 selected_mode_value = None
             mode_dialog.rejected.connect(on_close)
             
-            # Show dialog and wait for result
-            result = mode_dialog.exec()
+            # Show dialog non-modally and wait for result using local event loop
+            # This allows interaction with the main window while waiting
+            mode_dialog.show()
+            from PySide6.QtCore import QEventLoop
+            loop = QEventLoop()
+            mode_dialog.finished.connect(loop.quit)
+            loop.exec()
+            
+            result = mode_dialog.result()
             
             # Check if user canceled or selected a mode
             if result == QDialog.Rejected or selected_mode_value is None:
