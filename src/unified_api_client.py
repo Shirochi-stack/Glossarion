@@ -14163,10 +14163,7 @@ class UnifiedClient:
                     raw_response={}
                 )
             
-            # Log the translation request
-            logger.info(f"🌐 Google Translate Free: Translating {len(text_to_translate)} characters")
-            if source_lang != "auto":
-                logger.info(f"🔍 Google Translate Free: Detected source language: {source_lang}")
+            # (Log after translation so we can include provider)
             
             # Initialize the free translator
             translator = GoogleFreeTranslateNew(
@@ -14183,9 +14180,20 @@ class UnifiedClient:
             
             elapsed_time = time.time() - start_time
             
-            # Extract translated text and detected language
+            # Extract translated text, detected language, and provider
             translated_text = result.get('translatedText', text_to_translate)
             detected_lang = result.get('detectedSourceLanguage', source_lang)
+            provider = result.get('provider', 'google')
+            provider_label = "Argos" if provider == 'argos' else "Google"
+            provider_prefix = "Argos Translate" if provider == 'argos' else "Google Translate Free"
+
+            # Provider-aware translation log
+            logger.info(f"🌐 {provider_prefix}: Translating {len(text_to_translate)} characters")
+
+            # Provider-aware language logs
+            logger.info(f"🎯 {provider_prefix}: Target language: {target_lang} ({output_lang_name})")
+            if source_lang != "auto":
+                logger.info(f"🔍 {provider_prefix}: Detected source language: {source_lang}")
             
             # Check if there was an error
             if 'error' in result:
@@ -14217,7 +14225,7 @@ class UnifiedClient:
                 raw_response=result
             )
             
-            logger.info(f"✅ Google Translate Free: Translation completed in {elapsed_time:.2f}s")
+            logger.info(f"✅ {provider_prefix}: Translation completed in {elapsed_time:.2f}s")
             
             return response
             

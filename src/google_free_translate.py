@@ -206,6 +206,7 @@ class GoogleFreeTranslateNew:
             # Fallback to Argos Translate
             self.logger.info("🔄 All Google endpoints failed. Switching to permanent Argos Translate fallback...")
             GoogleFreeTranslateNew._use_fallback_only = True  # Set flag to skip Google endpoints for future requests
+            self.logger.info("🧩 Using Argos Translate fallback for this request")
             
             argos_result = self._translate_via_argos(text, source_lang, target_lang)
             if argos_result:
@@ -332,7 +333,8 @@ class GoogleFreeTranslateNew:
                 translated_text = translation.translate(text)
                 return {
                     'translatedText': translated_text,
-                    'detectedSourceLanguage': argos_source
+                    'detectedSourceLanguage': argos_source,
+                    'provider': 'argos'
                 }
             
             return None
@@ -419,7 +421,8 @@ class GoogleFreeTranslateNew:
                     
                     return {
                         'translatedText': translated_text,
-                        'detectedSourceLanguage': detected_lang
+                        'detectedSourceLanguage': detected_lang,
+                        'provider': 'google'
                     }
             
             # Handle standard array format
@@ -439,7 +442,8 @@ class GoogleFreeTranslateNew:
                 
                 return {
                     'translatedText': translated_text,
-                    'detectedSourceLanguage': detected_lang
+                    'detectedSourceLanguage': detected_lang,
+                    'provider': 'google'
                 }
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
             parse_error = f"Parse Error: {type(e).__name__}"
@@ -501,7 +505,8 @@ class GoogleFreeTranslateNew:
                 
                 return {
                     'translatedText': translated_text,
-                    'detectedSourceLanguage': source_lang
+                    'detectedSourceLanguage': source_lang,
+                    'provider': 'google'
                 }
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
             parse_error = f"Parse Error: {type(e).__name__}"
