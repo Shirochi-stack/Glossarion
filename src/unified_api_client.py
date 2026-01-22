@@ -5452,6 +5452,15 @@ class UnifiedClient:
                         print(f"❌ Fallback key {idx+1} unexpected result format - trying next key")
                         continue
                         
+                except UnifiedClientError as ue:
+                    # If cancelled, stop immediately and propagate the cancellation
+                    if ue.error_type == "cancelled":
+                        raise ue
+                    
+                    # For other client errors, log and continue to next key
+                    print(f"[FALLBACK DIRECT {idx+1}] ❌ UnifiedClientError: {ue}")
+                    continue
+
                 except Exception as e:
                     print(f"[FALLBACK DIRECT {idx+1}] ❌ Exception: {e}")
                     import traceback
@@ -5459,6 +5468,13 @@ class UnifiedClient:
                     continue
             
             print(f"[FALLBACK DIRECT] All fallback keys failed")
+            return None
+            
+        except UnifiedClientError as ue:
+            # Propagate cancellation up to the caller
+            if ue.error_type == "cancelled":
+                raise ue
+            print(f"[FALLBACK DIRECT] UnifiedClientError: {ue}")
             return None
             
         except Exception as e:
