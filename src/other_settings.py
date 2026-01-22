@@ -2396,7 +2396,7 @@ def _create_response_handling_section(self, parent):
 
     # Char-ratio truncation (silent truncation detector)
     if not hasattr(self, 'char_ratio_truncation_var'):
-        self.char_ratio_truncation_var = bool(self.config.get('char_ratio_truncation_enabled', True))
+        self.char_ratio_truncation_var = bool(self.config.get('char_ratio_truncation_enabled', False))
     if not hasattr(self, 'char_ratio_truncation_percent_var'):
         self.char_ratio_truncation_percent_var = str(self.config.get('char_ratio_truncation_percent', '50'))
     if not hasattr(self, 'char_ratio_truncation_attempts_var'):

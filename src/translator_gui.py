@@ -2267,7 +2267,7 @@ Recent translations to summarize:
             ('include_description_var', 'include_description', True),
             ('retry_truncated_var', 'retry_truncated', True),
             # Char-ratio truncation (silent truncation detector)
-            ('char_ratio_truncation_var', 'char_ratio_truncation_enabled', True),
+            ('char_ratio_truncation_var', 'char_ratio_truncation_enabled', False),
             ('retry_split_failed_var', 'retry_split_failed', True),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
@@ -12304,7 +12304,7 @@ Important rules:
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
                 ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
                 # Char-ratio truncation (silent truncation detector)
-                ('CHAR_RATIO_TRUNCATION_ENABLED', '1' if getattr(self, 'char_ratio_truncation_var', True) else '0'),
+                ('CHAR_RATIO_TRUNCATION_ENABLED', '1' if getattr(self, 'char_ratio_truncation_var', False) else '0'),
                 ('CHAR_RATIO_TRUNCATION_PERCENT', str(getattr(self, 'char_ratio_truncation_percent_var', '50'))),
                 ('CHAR_RATIO_TRUNCATION_ATTEMPTS', str(getattr(self, 'char_ratio_truncation_attempts_var', '1'))),
                 ('CHAR_RATIO_MIN_OUTPUT_CHARS', str(getattr(self, 'char_ratio_min_output_chars_var', '100'))),
