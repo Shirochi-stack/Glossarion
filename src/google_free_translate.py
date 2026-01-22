@@ -276,6 +276,16 @@ class GoogleFreeTranslateNew:
                 return None
 
         try:
+            # Honor global stop flags if available
+            def _stop_requested():
+                try:
+                    import unified_api_client as _uac
+                    return bool(getattr(_uac, "is_stop_requested", lambda: False)())
+                except Exception:
+                    return False
+
+            if _stop_requested():
+                raise Exception("Operation cancelled")
             # Map Google codes to Argos codes (ISO 639-1 generally)
             code_map = {
                 'zh-CN': 'zh',
