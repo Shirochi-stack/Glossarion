@@ -170,6 +170,17 @@ class GoogleFreeTranslateNew:
             error_summary = "\n".join(f"  • {err}" for err in all_errors)
             detailed_error = f"All Google Translate endpoints failed:\n{error_summary}"
             self.logger.error(detailed_error)
+            
+            # Fallback to Argos Translate
+            self.logger.info("🔄 All Google endpoints failed. Attempting fallback to Argos Translate...")
+            argos_result = self._translate_via_argos(text, source_lang, target_lang)
+            if argos_result:
+                self.logger.info("✅ Argos Translate fallback successful")
+                # Cache the result to avoid repeated fallback overhead
+                with self.cache_lock:
+                    self.cache[cache_key] = argos_result
+                return argos_result
+            
             raise Exception(detailed_error)
             
         except Exception as e:
@@ -182,6 +193,119 @@ class GoogleFreeTranslateNew:
                 'detectedSourceLanguage': self.source_language,
                 'error': str(e)
             }
+    
+    def _translate_via_argos(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
+        """Fallback to Argos Translate (offline-capable)."""
+        try:
+            import argostranslate.package
+            import argostranslate.translate
+        except ImportError:
+            self.logger.warning("⚠️ Argos Translate not installed. Installing...")
+            import subprocess
+            import sys
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "argostranslate"])
+                import argostranslate.package
+                import argostranslate.translate
+            except Exception as e:
+                self.logger.error(f"❌ Failed to install Argos Translate: {e}")
+                return None
+
+        try:
+            # Map Google codes to Argos codes (ISO 639-1 generally)
+            code_map = {
+                'zh-CN': 'zh',
+                'zh-TW': 'zh',
+                'zh': 'zh',
+                'ja': 'ja',
+                'ko': 'ko',
+                'en': 'en'
+            }
+            
+            argos_source = code_map.get(source_lang, source_lang)
+            argos_target = code_map.get(target_lang, target_lang)
+            
+            # Auto-detect source if 'auto' using improved heuristics
+            if argos_source == 'auto':
+                sample = text[:1000]  # Check first 1000 chars for better accuracy
+                
+                # 1. Check CJK ranges first (most reliable)
+                if any('\u4e00' <= char <= '\u9fff' for char in sample):
+                    argos_source = 'zh'
+                elif any('\u3040' <= char <= '\u309f' or '\u30a0' <= char <= '\u30ff' for char in sample):
+                    argos_source = 'ja'
+                elif any('\uac00' <= char <= '\ud7af' for char in sample):
+                    argos_source = 'ko'
+                # 2. Check Cyrillic (Russian, Ukrainian, etc.)
+                elif any('\u0400' <= char <= '\u04FF' for char in sample):
+                    argos_source = 'ru'
+                # 3. Check for specific language characteristics
+                else:
+                    # Simple heuristic based on common words/chars
+                    lower_sample = sample.lower()
+                    if any(x in lower_sample for x in ['the', 'and', 'is', 'it']):
+                        argos_source = 'en'
+                    elif any(x in lower_sample for x in ['le', 'la', 'les', 'et', 'est']):
+                        argos_source = 'fr'
+                    elif any(x in lower_sample for x in ['el', 'la', 'los', 'las', 'y', 'es']):
+                        argos_source = 'es'
+                    elif any(x in lower_sample for x in ['der', 'die', 'das', 'und', 'ist']):
+                        argos_source = 'de'
+                    elif any(x in lower_sample for x in ['il', 'lo', 'la', 'e', 'è']):
+                        argos_source = 'it'
+                    elif any(x in lower_sample for x in ['o', 'a', 'os', 'as', 'e', 'é']):
+                        argos_source = 'pt'
+                    elif any(x in lower_sample for x in ['bir', 've', 'bu', 'da']):
+                        argos_source = 'tr'
+                    else:
+                        # Default to English if detection fails
+                        argos_source = 'en' 
+                
+                self.logger.info(f"🔍 Argos auto-detected source: {argos_source}")
+
+            # Check installed languages
+            installed_languages = argostranslate.translate.get_installed_languages()
+            from_lang = next((l for l in installed_languages if l.code == argos_source), None)
+            to_lang = next((l for l in installed_languages if l.code == argos_target), None)
+            
+            translation_available = from_lang and to_lang and from_lang.get_translation(to_lang)
+            
+            if not translation_available:
+                self.logger.info(f"⬇️ Downloading Argos model {argos_source}->{argos_target}...")
+                try:
+                    argostranslate.package.update_package_index()
+                    available_packages = argostranslate.package.get_available_packages()
+                    package_to_install = next(
+                        filter(
+                            lambda x: x.from_code == argos_source and x.to_code == argos_target, available_packages
+                        ), None
+                    )
+                    if package_to_install:
+                        argostranslate.package.install_from_path(package_to_install.download())
+                        # Reload installed languages
+                        installed_languages = argostranslate.translate.get_installed_languages()
+                        from_lang = next((l for l in installed_languages if l.code == argos_source), None)
+                        to_lang = next((l for l in installed_languages if l.code == argos_target), None)
+                    else:
+                        self.logger.error(f"❌ No Argos model found for {argos_source}->{argos_target}")
+                        return None
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to download Argos model (machine might be offline): {e}")
+                    return None
+
+            if from_lang and to_lang:
+                translation = from_lang.get_translation(to_lang)
+                translated_text = translation.translate(text)
+                return {
+                    'translatedText': translated_text,
+                    'detectedSourceLanguage': argos_source
+                }
+            
+            return None
+
+        except Exception as e:
+            self.logger.error(f"❌ Argos fallback failed: {e}")
+            return None
     
     def _translate_via_single_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
         """Translate using the translate_a/single endpoint (older format)."""
