@@ -7537,8 +7537,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # 3. Ambiguous tags (img, area, map, canvas, source, image) -> Unescape ONLY if they have attributes (space followed by content)
                 #    This avoids false positives like "The <area> of effect" in fantasy text.
                 img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
-                if img_count > 0:
-                    print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown2)")
+                # if img_count > 0:
+                #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown2)")
                 html = re.sub(
                     r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
                     r'<\1>',
@@ -7605,8 +7605,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # 2. Container tags (svg, picture, figure, figcaption) -> Unescape even if bare
             # 3. Ambiguous tags (img, area, map, canvas, source, image) -> Unescape ONLY if they have attributes
             img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
-            if img_count > 0:
-                print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown)")
+            # if img_count > 0:
+            #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown)")
             html = re.sub(
                 r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
                 r'<\1>',
@@ -7725,8 +7725,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # 2. Container tags -> Unescape even if bare
     # 3. Ambiguous tags -> Unescape ONLY if they have attributes
     img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
-    if img_count > 0:
-        print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (fallback)")
+    # if img_count > 0:
+    #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (fallback)")
     html = re.sub(
         r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
         r'<\1>',
