@@ -2472,6 +2472,10 @@ def _create_response_handling_section(self, parent):
     char_ratio_frame_h2.setContentsMargins(40, 0, 0, 5)
 
     char_ratio_percent_label = QLabel("Trigger below (%):")
+    char_ratio_percent_label.setToolTip(
+        "Threshold ratio of Output/Input characters. "
+        "If output is less than this % of input length, it's considered truncated."
+    )
     char_ratio_frame_h.addWidget(char_ratio_percent_label)
 
     char_ratio_percent_edit = QLineEdit()
@@ -2507,6 +2511,10 @@ def _create_response_handling_section(self, parent):
     char_ratio_frame_h.addStretch()
 
     char_ratio_min_chars_label = QLabel("Skip check if output is less than N Characters:")
+    char_ratio_min_chars_label.setToolTip(
+        "Safety threshold: if the output is extremely short (less than this value), "
+        "skip the ratio check to avoid false positives on short answers."
+    )
     char_ratio_frame_h2.addWidget(char_ratio_min_chars_label)
 
     char_ratio_min_chars_edit = QLineEdit()
