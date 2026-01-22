@@ -211,6 +211,10 @@ TRANSLATION_ARTIFACTS = {
     'glossary_leakage_json': re.compile(
         r'"(?:type|raw_name|translated_name|gender|description)"\s*:\s*"[^"]+"\s*,?\s*"(?:type|raw_name|translated_name|gender|description)"',
         re.IGNORECASE
+    ),
+    'empty_attribute_tags': re.compile(
+        r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>\s*</\1>',
+        re.IGNORECASE
     )
 }
 # Cache configuration - will be updated by configure_qa_cache()
@@ -5206,8 +5210,17 @@ def process_html_file_batch(args):
                 # For text files, read directly
                 with open(full_path, 'r', encoding='utf-8') as f:
                     raw_text = f.read()
+                raw_file_content = raw_text
             else:
+                # For HTML, we need extracted text for most checks...
                 raw_text = extract_text_from_html(full_path)
+                
+                # ...AND raw content for structural/tag checks
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        raw_file_content = f.read()
+                except Exception:
+                    raw_file_content = ""
         except Exception as e:
             # Skip files that can't be read
             continue
@@ -5238,8 +5251,28 @@ def process_html_file_batch(args):
         
         # Detect translation artifacts
         artifacts = []
-        if not is_quick_scan and qa_settings.get('check_translation_artifacts', False):
+        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)
+        if qa_settings.get('check_translation_artifacts', False):
             artifacts = detect_translation_artifacts(raw_text)
+            
+            # Check for empty attribute tags in RAW content (these are tags, so stripped from raw_text)
+            # Regex allows for spaces around = (e.g. <tag attr = "">)
+            # Pattern: <tag attr=""> or <tag attr = ""> followed by </tag>
+            empty_tag_pattern = re.compile(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)\s*=\s*""\s*>\s*</\1>', re.IGNORECASE)
+            
+            # Only check if we have raw content (HTML mode)
+            if raw_file_content:
+                raw_content_matches = empty_tag_pattern.findall(raw_file_content)
+                
+                if raw_content_matches:
+                    # Format matches into readable strings
+                    formatted_examples = [f"<{tag} {attr}=\"\"></{tag}>" for tag, attr in list(set(raw_content_matches))[:3]]
+                    artifacts.append({
+                        'type': 'empty_attribute_tags',
+                        'count': len(raw_content_matches),
+                        'examples': formatted_examples,
+                        'severity': 'medium'
+                    })
             
         # Filter out encoding_issues if disabled
         if not qa_settings.get('check_encoding_issues', True):
@@ -6515,6 +6548,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         issues.append(issue_text)
                     else:
                         issues.append(f"split_indicators_{artifact['count']}_found")
+                elif artifact['type'] == 'empty_attribute_tags':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   ⚠️ LLM token issue (empty tags): '{first_example}'")
+                        issue_text = f"LLM_token_issue: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"LLM_token_issue_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
                     severity = artifact.get('severity', 'medium')
                     examples = artifact.get('examples', [])
