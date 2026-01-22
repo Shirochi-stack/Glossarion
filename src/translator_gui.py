@@ -1220,6 +1220,14 @@ Text to analyze:
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
         self.epub_use_html_method_var = self.config.get('epub_use_html_method', False)
         
+        # Initialize Fix Empty Attribute Tags variables (from Other Settings)
+        self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
+        self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
+        
+        # Set initial environment variables for these fixes
+        os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
+        os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
+        
         # Retain exact source extension and disable 'response_' prefix
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
         

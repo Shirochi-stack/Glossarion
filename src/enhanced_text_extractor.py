@@ -292,7 +292,37 @@ class EnhancedTextExtractor:
         text = text.replace('›', '&gt;')
         return text
     
-    
+    def _protect_empty_attr_tags(self, text: str) -> str:
+        """Protect tags with empty attributes from being stripped by html2text"""
+        # Known HTML tags to preserve
+        known_tags = {
+            'html','head','body','title','meta','link','style','script','noscript',
+            'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
+            'ul','ol','li','dl','dt','dd',
+            'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
+            'table','thead','tbody','tr','td','th','caption','col','colgroup',
+            'blockquote','q','cite',
+            'section','article','header','footer','nav','main','aside','details','summary',
+            'figure','figcaption',
+            'form','input','button','select','option','textarea','label','fieldset','legend',
+            'iframe','canvas','svg','math',
+            'video','audio','source','track','embed','object','param',
+            'map','area',
+            'center', 'font', 'base'
+        }
+        
+        # Transform: <Tag Attr=""></Tag>  -->  &lt;Tag Attr&gt;
+        def _repl_pair(m):
+            tagname = m.group(1)
+            if tagname.lower() in known_tags:
+                return m.group(0)
+            attrname = m.group(2)
+            return f"&lt;{tagname} {attrname}&gt;"
+        
+        # Match <Tag Attr=""></Tag> (allow whitespace)
+        text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>\s*</\1>', _repl_pair, text)
+        
+        return text
     
     def _preprocess_html_for_quotes(self, html_content: str) -> str:
         """Pre-process HTML to protect quotes from conversion"""
@@ -518,6 +548,10 @@ class EnhancedTextExtractor:
             # Protect CJK text in angle brackets using special markers
             # that html2text won't interpret as HTML
             content_to_convert = self._protect_cjk_angle_brackets(content_to_convert)
+            
+            # Apply Empty Attribute Tag Fix if enabled
+            if os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1':
+                content_to_convert = self._protect_empty_attr_tags(content_to_convert)
             
             # Convert to text with error handling
             try:

@@ -4822,6 +4822,59 @@ def _create_processing_options_section(self, parent):
     decimal_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(decimal_desc)
     
+    # Fix Empty Attribute Tags (EPUB)
+    empty_attr_epub_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (EPUB)")
+    try:
+        # Default to False
+        if not hasattr(self, 'fix_empty_attr_tags_epub_var'):
+            self.fix_empty_attr_tags_epub_var = False
+        empty_attr_epub_cb.setChecked(bool(self.fix_empty_attr_tags_epub_var))
+    except Exception:
+        pass
+    def _on_empty_attr_epub_toggle(checked):
+        try:
+            self.fix_empty_attr_tags_epub_var = bool(checked)
+            self.config['fix_empty_attr_tags_epub'] = self.fix_empty_attr_tags_epub_var
+            os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_attr_epub_cb.toggled.connect(_on_empty_attr_epub_toggle)
+    empty_attr_epub_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(empty_attr_epub_cb)
+    
+    empty_attr_epub_desc = QLabel("Escapes tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt; so they render as &lt;tag attr&gt;.")
+    empty_attr_epub_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
+    empty_attr_epub_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(empty_attr_epub_desc)
+
+    # Fix Empty Attribute Tags (Extraction)
+    empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction)")
+    try:
+        # Default to False
+        if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
+            self.fix_empty_attr_tags_extract_var = False
+        empty_attr_extract_cb.setChecked(bool(self.fix_empty_attr_tags_extract_var))
+    except Exception:
+        pass
+    def _on_empty_attr_extract_toggle(checked):
+        try:
+            self.fix_empty_attr_tags_extract_var = bool(checked)
+            self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
+            os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_attr_extract_cb.toggled.connect(_on_empty_attr_extract_toggle)
+    empty_attr_extract_cb.setContentsMargins(0, 2, 0, 0)
+    # NOTE: this toggle is now shown under Enhanced (html2text) options instead of here
+    # left_v.addWidget(empty_attr_extract_cb)
+    
+    empty_attr_extract_desc = QLabel("Preserves &lt;tag attr=\"\"&gt;&lt;/tag&gt; as &lt;tag attr&gt; during text extraction<br>(Prevents stripping of specific fake-tag patterns)")
+    empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    empty_attr_extract_desc.setContentsMargins(20, 0, 0, 5)
+    empty_attr_extract_desc.setTextFormat(Qt.RichText)
+    # left_v.addWidget(empty_attr_extract_desc)
+    
     left_v.addStretch()
     columns_h.addWidget(left_column)
     
@@ -5060,6 +5113,10 @@ def _create_processing_options_section(self, parent):
     escape_snob_desc.setStyleSheet("color: gray; font-size: 8pt;")
     escape_snob_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(escape_snob_desc)
+    
+    # Fix Empty Attribute Tags (Extraction) — html2text-specific LLM token fix
+    enhanced_opts_v.addWidget(empty_attr_extract_cb)
+    enhanced_opts_v.addWidget(empty_attr_extract_desc)
     
     # Markdown2 converter option
     markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter (Legacy)")
