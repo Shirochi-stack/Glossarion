@@ -264,16 +264,8 @@ class GoogleFreeTranslateNew:
             import argostranslate.package
             import argostranslate.translate
         except ImportError:
-            self.logger.warning("⚠️ Argos Translate not installed. Installing...")
-            import subprocess
-            import sys
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "argostranslate"])
-                import argostranslate.package
-                import argostranslate.translate
-            except Exception as e:
-                self.logger.error(f"❌ Failed to install Argos Translate: {e}")
-                return None
+            self.logger.warning("⚠️ Argos Translate not available on lite package. Skipping Argos fallback.")
+            return None
 
         try:
             # Honor global stop flags if available

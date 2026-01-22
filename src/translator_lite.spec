@@ -998,6 +998,8 @@ excludes = [
     # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
     # ============================================================================
     'modelscope', 'modelscope.*',
+    # Argos Translate (exclude from lite)
+    'argostranslate', 'argostranslate.*',
     'aistudio-sdk',
     'bce-python-sdk',
     'briefcase',
