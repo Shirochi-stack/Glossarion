@@ -2473,7 +2473,7 @@ def _create_response_handling_section(self, parent):
 
     char_ratio_percent_label = QLabel("Trigger below (%):")
     char_ratio_percent_label.setToolTip(
-        "Threshold ratio of Output/Input characters. "
+        "Threshold ratio of Output/Input characters.\n"
         "If output is less than this % of input length, it's considered truncated."
     )
     char_ratio_frame_h.addWidget(char_ratio_percent_label)
@@ -2512,7 +2512,7 @@ def _create_response_handling_section(self, parent):
 
     char_ratio_min_chars_label = QLabel("Skip check if output is less than N Characters:")
     char_ratio_min_chars_label.setToolTip(
-        "Safety threshold: if the output is extremely short (less than this value), "
+        "Safety threshold: if the output is extremely short (less than this value),\n"
         "skip the ratio check to avoid false positives on short answers."
     )
     char_ratio_frame_h2.addWidget(char_ratio_min_chars_label)
@@ -4848,8 +4848,8 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_epub_desc)
 
-    # Fix Empty Attribute Tags (Extraction)
-    empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction)")
+    # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
+    empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
     try:
         # Default to False
         if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
@@ -4866,12 +4866,10 @@ def _create_processing_options_section(self, parent):
             pass
     empty_attr_extract_cb.toggled.connect(_on_empty_attr_extract_toggle)
     empty_attr_extract_cb.setContentsMargins(0, 2, 0, 0)
-    # NOTE: this toggle is now shown under Enhanced (html2text) options instead of here
-    # left_v.addWidget(empty_attr_extract_cb)
     
-    empty_attr_extract_desc = QLabel("Preserves &lt;tag attr=\"\"&gt;&lt;/tag&gt; as &lt;tag attr&gt; during text extraction<br>(Prevents stripping of specific fake-tag patterns)")
-    empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    empty_attr_extract_desc.setContentsMargins(20, 0, 0, 5)
+    empty_attr_extract_desc = QLabel("LLM Post-Process Fix: Preserves hallucinated tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>by converting them to visible text &lt;tag attr&gt;")
+    empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    empty_attr_extract_desc.setContentsMargins(20, 0, 0, 3)
     empty_attr_extract_desc.setTextFormat(Qt.RichText)
     # left_v.addWidget(empty_attr_extract_desc)
     

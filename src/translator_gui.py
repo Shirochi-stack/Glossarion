@@ -795,7 +795,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.3.2"
+        __version__ = "7.3.3"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -868,7 +868,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.3.2')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.3.3')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1219,14 +1219,6 @@ Text to analyze:
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
         self.epub_use_html_method_var = self.config.get('epub_use_html_method', False)
-        
-        # Initialize Fix Empty Attribute Tags variables (from Other Settings)
-        self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
-        self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
-        
-        # Set initial environment variables for these fixes
-        os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
-        os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         
         # Retain exact source extension and disable 'response_' prefix
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
@@ -2530,7 +2522,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.3.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.3.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -12647,7 +12639,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.3.2...")
+    print("🚀 Starting Glossarion v7.3.3...")
     
     # Initialize splash screen
     splash_manager = None
