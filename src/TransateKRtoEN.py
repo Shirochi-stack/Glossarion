@@ -11020,7 +11020,10 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Check if we're already in a nested truncation retry (prevents infinite loops)
                 already_in_retry = c.get('__in_truncation_retry', False)
-                char_ratio_retry_count = c.get('__char_ratio_retry_count', 0)
+
+                # Track char-ratio retries per request (per chunk/merged request), not per chapter.
+                # This avoids retry budget leaking across different chunks/requests.
+                char_ratio_attempts_used = 0
                 
                 # Char-ratio truncation settings (silent truncation detector)
                 char_ratio_enabled = os.getenv("CHAR_RATIO_TRUNCATION_ENABLED", "1") == "1"
@@ -11074,7 +11077,7 @@ def main(log_callback=None, stop_callback=None):
                                     break
                                     
                                 # Check if we've hit the retry limit
-                                if char_ratio_retry_count >= char_ratio_retry_limit:
+                                if char_ratio_attempts_used >= char_ratio_retry_limit:
                                     # All retries exhausted - mark as QA_failed with TRUNCATED
                                     print(f"    ❌ All char-ratio retries ({char_ratio_retry_limit}) exhausted for Chapter {actual_num} Chunk {chunk_idx}/{total_chunks} - marking as QA_failed")
                                     fname = FileUtilities.create_chapter_filename(c, actual_num)
@@ -11088,16 +11091,15 @@ def main(log_callback=None, stop_callback=None):
                                     break
                                 
                                 # Log truncation detection on first attempt
-                                if char_ratio_retry_count == 0:
+                                if char_ratio_attempts_used == 0:
                                     print(
                                         f"    ⚠️ TRUNCATION DETECTED (char comparison) Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}: "
                                         f"Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio, threshold={char_ratio_threshold:.0%}) "
                                         f"- {char_ratio_retry_limit} retry attempt(s) available"
                                     )
                                 
-                                char_ratio_retry_count += 1
-                                c['__char_ratio_retry_count'] = char_ratio_retry_count
-                                print(f"    🔄 Character ratio retry attempt {char_ratio_retry_count}/{char_ratio_retry_limit} [Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}]")
+                                char_ratio_attempts_used += 1
+                                print(f"    🔄 Character ratio retry attempt {char_ratio_attempts_used}/{char_ratio_retry_limit} [Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}]")
                                 
                                 # Set flag to prevent nested retries at BOTH levels
                                 c['__in_truncation_retry'] = True
