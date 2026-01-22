@@ -2864,7 +2864,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             raise
         else:
             # Actual API error (timeout, etc.)
-            print(f"❌ Merged group failed: {e}")
+            print(f"❌ Merged group failed: {e} (NOTE: API Error triggered cancellation logic)")
             
             return {
                 'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}

@@ -5427,6 +5427,11 @@ class BatchTranslationProcessor:
             # Finite retry loop to avoid infinite re-requests when Split‑the‑Merge keeps failing.
             max_merge_attempts = (max(1, split_retry_limit) + 1) if split_retry_enabled else 1
             split_retry_attempts = 0
+
+            # Track char-ratio retries across the entire merged-group request sequence
+            # (don't reset per split-retry attempt)
+            char_ratio_attempts_used = 0
+
             while split_retry_attempts < max_merge_attempts:
                 # Call API for merged content
                 print(f"   🌐 Sending merged request to API...")
@@ -5507,20 +5512,25 @@ class BatchTranslationProcessor:
                                 print(f"⚠️ Merged group: Char-ratio suggests truncation but fallback key was used - accepting output")
                                 break
 
-                            if char_ratio_retry_count >= char_ratio_retry_limit:
+                            # IMPORTANT: track retries across the whole merged-group request sequence
+                            # so split-failed merge retries don't reset the char-ratio retry budget.
+                            if char_ratio_attempts_used >= char_ratio_retry_limit:
                                 print(f"❌ Merged group: All {char_ratio_retry_limit} char-ratio retries exhausted; marking as TRUNCATED")
                                 char_ratio_exhausted = True
                                 break
 
                             if char_ratio_retry_count == 0:
+                                remaining = max(0, char_ratio_retry_limit - char_ratio_attempts_used)
                                 print(
                                     f"⚠️ Merged group: Char-ratio suggests truncation "
                                     f"(Input chars: {input_char_count}, Output chars: {output_char_count}, Ratio: {char_ratio:.2f} < {char_ratio_threshold:.2f}). "
-                                    f"Attempting up to {char_ratio_retry_limit} retry(ies)..."
+                                    f"Attempting up to {remaining} retry(ies)..."
                                 )
 
+                            # Consume one attempt (global across this merged group)
+                            char_ratio_attempts_used += 1
                             char_ratio_retry_count += 1
-                            print(f"🔄 Merged group: Char-ratio retry attempt {char_ratio_retry_count}/{char_ratio_retry_limit}")
+                            print(f"🔄 Merged group: Char-ratio retry attempt {char_ratio_attempts_used}/{char_ratio_retry_limit}")
 
                             # Force higher token limit on retries
                             try:
@@ -5909,7 +5919,7 @@ class BatchTranslationProcessor:
             raise RuntimeError("Merged translation exited retry loop without returning a result")
             
         except Exception as e:
-            print(f"❌ Merged group failed: {e}")
+            print(f"❌ Merged group failed: {e} (NOTE: API Error triggered cancellation logic)")
             # Mark all chapters as failed
             results = []
             for actual_num, _, idx, chapter, content_hash in chapters_data:

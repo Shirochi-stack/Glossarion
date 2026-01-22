@@ -1678,7 +1678,7 @@ class UnifiedClient:
         # Check if cancelled before proceeding using comprehensive stop check
         if self._is_stop_requested():
             self._cancelled = True
-            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
             
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
