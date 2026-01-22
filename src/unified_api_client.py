@@ -259,7 +259,7 @@ def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, 
 
         # Abort immediately if a stop/cancel has been requested
         if getattr(self, "_is_stop_requested", None) and self._is_stop_requested():
-            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
         out_dir = out_dir or _payloads_dir()
         try:
             os.makedirs(out_dir, exist_ok=True)

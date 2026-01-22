@@ -4658,7 +4658,163 @@ class BatchTranslationProcessor:
                 #     print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
                 
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
-                
+
+                # Char-ratio truncation retry (silent truncation)
+                char_ratio_exhausted = False
+                try:
+                    retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                except Exception:
+                    retry_truncated_enabled = False
+
+                char_ratio_enabled = os.getenv("CHAR_RATIO_TRUNCATION_ENABLED", "1") == "1"
+                if retry_truncated_enabled and char_ratio_enabled:
+                    has_base64_image = ('data:image' in chunk_html) or ('base64,' in chunk_html)
+                    used_fallback = getattr(self.client, '_used_fallback_key', False)
+
+                    # Parse settings with sane bounds
+                    try:
+                        char_ratio_threshold_pct = float(os.getenv("CHAR_RATIO_TRUNCATION_PERCENT", "50"))
+                    except Exception:
+                        char_ratio_threshold_pct = 50.0
+                    try:
+                        char_ratio_retry_limit = int(os.getenv("CHAR_RATIO_TRUNCATION_ATTEMPTS", "1"))
+                    except Exception:
+                        char_ratio_retry_limit = 1
+                    try:
+                        char_ratio_min_output_chars = int(os.getenv("CHAR_RATIO_MIN_OUTPUT_CHARS", "100"))
+                    except Exception:
+                        char_ratio_min_output_chars = 100
+
+                    char_ratio_threshold_pct = max(0.0, min(100.0, char_ratio_threshold_pct))
+                    char_ratio_threshold = char_ratio_threshold_pct / 100.0
+                    if char_ratio_retry_limit < 1:
+                        char_ratio_retry_limit = 1
+                    if char_ratio_min_output_chars < 0:
+                        char_ratio_min_output_chars = 0
+
+                    char_ratio_retry_count = 0
+
+                    while not has_base64_image:
+                        # Stop before any retries
+                        if local_stop_cb():
+                            break
+
+                        input_char_count = len(chunk_html)
+                        output_char_count = len(result) if result else 0
+                        char_ratio = (output_char_count / input_char_count) if input_char_count > 0 else 0
+
+                        # Only apply the char-ratio check when we didn't already see a truncation/prohibited-content signal
+                        if finish_reason in ["length", "max_tokens", "content_filter", "prohibited_content"]:
+                            break
+
+                        if (char_ratio < char_ratio_threshold) and (output_char_count > char_ratio_min_output_chars):
+                            # If the key fallback logic triggered, accept the output to avoid burning retries on worse keys
+                            if used_fallback:
+                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio suggests truncation but fallback key was used - accepting output")
+                                break
+
+                            if char_ratio_retry_count >= char_ratio_retry_limit:
+                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: All {char_ratio_retry_limit} char-ratio retries exhausted; marking as TRUNCATED")
+                                char_ratio_exhausted = True
+                                break
+
+                            if char_ratio_retry_count == 0:
+                                print(
+                                    f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio suggests truncation "
+                                    f"(Input chars: {input_char_count}, Output chars: {output_char_count}, Ratio: {char_ratio:.2f} < {char_ratio_threshold:.2f}). "
+                                    f"Attempting up to {char_ratio_retry_limit} retry(ies)..."
+                                )
+
+                            char_ratio_retry_count += 1
+                            print(
+                                f"🔄 Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry attempt "
+                                f"{char_ratio_retry_count}/{char_ratio_retry_limit}"
+                            )
+
+                            # Force higher token limit on retries
+                            try:
+                                base_max_tokens = int(self.config.MAX_OUTPUT_TOKENS)
+                            except Exception:
+                                base_max_tokens = self.config.MAX_OUTPUT_TOKENS
+                            try:
+                                retry_cap = int(getattr(self.config, "MAX_RETRY_TOKENS", base_max_tokens))
+                            except Exception:
+                                retry_cap = base_max_tokens
+                            if retry_cap <= 0:
+                                retry_cap = base_max_tokens
+                            retry_max_tokens = max(base_max_tokens, retry_cap)
+
+                            # Prevent nested truncation retries within the unified client during our char-ratio retries
+                            try:
+                                tls_retry_client = self.client._get_thread_local_client()
+                            except Exception:
+                                tls_retry_client = None
+
+                            if tls_retry_client is not None:
+                                setattr(tls_retry_client, "_in_truncation_retry", True)
+
+                            try:
+                                result_retry, finish_reason_retry, raw_obj_retry = send_with_interrupt(
+                                    chapter_msgs,
+                                    self.client,
+                                    self.config.TEMP,
+                                    retry_max_tokens,
+                                    local_stop_cb,
+                                    chunk_timeout=chunk_timeout,
+                                    context='translation',
+                                    chapter_context=chapter_ctx,
+                                )
+                            except UnifiedClientError as e:
+                                # Treat timeout during char-ratio retry as a timeout for the chunk
+                                error_msg = str(e)
+
+                                if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
+                                    if local_stop_cb():
+                                        print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during char-ratio retry")
+                                        return None, chunk_idx, None, False, "cancelled"
+
+                                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                                    if graceful_stop_active:
+                                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping char-ratio retry")
+                                        return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+
+                                    print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry failed due to API cancellation")
+                                    return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+
+                                if "timed out" in error_msg:
+                                    print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry timed out after {chunk_timeout} seconds")
+                                    return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+
+                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry error: {e}. Accepting current output.")
+                                break
+                            finally:
+                                if tls_retry_client is not None:
+                                    try:
+                                        setattr(tls_retry_client, "_in_truncation_retry", False)
+                                    except Exception:
+                                        pass
+
+                            retry_output_chars = len(result_retry) if result_retry else 0
+                            if result_retry and retry_output_chars > output_char_count:
+                                print(
+                                    f"✅ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry improved output "
+                                    f"({output_char_count} → {retry_output_chars} chars)"
+                                )
+                                result = result_retry
+                                finish_reason = finish_reason_retry
+                                raw_obj = raw_obj_retry
+                                # Re-check ratio / decide on further retries
+                                continue
+
+                            print(
+                                f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry did not improve output "
+                                f"({output_char_count} → {retry_output_chars} chars). Trying again if attempts remain..."
+                            )
+                            continue
+
+                        # Ratio OK (or output too short to be meaningful): stop checking
+                        break
+
                 # Treat truncation retries exhaustion as truncation even if finish_reason changed
                 # In batch mode each worker has its own thread-local client; check that flag too
                 try:
@@ -4683,7 +4839,8 @@ class BatchTranslationProcessor:
                         self.client._truncation_retries_exhausted = False
                 except Exception:
                     pass
-                if finish_reason in ["length", "max_tokens"] or truncation_exhausted:
+
+                if finish_reason in ["length", "max_tokens"] or truncation_exhausted or char_ratio_exhausted:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
                     is_truncated = True
@@ -5297,9 +5454,143 @@ class BatchTranslationProcessor:
                 
                 if not merged_response:
                     raise Exception("Empty response from API for merged request")
+
+                # Char-ratio truncation retry (silent truncation)
+                char_ratio_exhausted = False
+                try:
+                    retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                except Exception:
+                    retry_truncated_enabled = False
+
+                char_ratio_enabled = os.getenv("CHAR_RATIO_TRUNCATION_ENABLED", "1") == "1"
+                if retry_truncated_enabled and char_ratio_enabled and not truncation_exhausted:
+                    has_base64_image = ('data:image' in merged_content) or ('base64,' in merged_content)
+                    used_fallback = getattr(self.client, '_used_fallback_key', False)
+
+                    # Parse settings with sane bounds
+                    try:
+                        char_ratio_threshold_pct = float(os.getenv("CHAR_RATIO_TRUNCATION_PERCENT", "50"))
+                    except Exception:
+                        char_ratio_threshold_pct = 50.0
+                    try:
+                        char_ratio_retry_limit = int(os.getenv("CHAR_RATIO_TRUNCATION_ATTEMPTS", "1"))
+                    except Exception:
+                        char_ratio_retry_limit = 1
+                    try:
+                        char_ratio_min_output_chars = int(os.getenv("CHAR_RATIO_MIN_OUTPUT_CHARS", "100"))
+                    except Exception:
+                        char_ratio_min_output_chars = 100
+
+                    char_ratio_threshold_pct = max(0.0, min(100.0, char_ratio_threshold_pct))
+                    char_ratio_threshold = char_ratio_threshold_pct / 100.0
+                    if char_ratio_retry_limit < 1:
+                        char_ratio_retry_limit = 1
+                    if char_ratio_min_output_chars < 0:
+                        char_ratio_min_output_chars = 0
+
+                    char_ratio_retry_count = 0
+
+                    while not has_base64_image:
+                        if self.check_stop_fn():
+                            break
+
+                        # Only apply the char-ratio check when we didn't already see a truncation/prohibited-content signal
+                        if merged_finish_reason in ["length", "max_tokens", "content_filter", "prohibited_content"]:
+                            break
+
+                        input_char_count = len(merged_content)
+                        output_char_count = len(merged_response) if merged_response else 0
+                        char_ratio = (output_char_count / input_char_count) if input_char_count > 0 else 0
+
+                        if (char_ratio < char_ratio_threshold) and (output_char_count > char_ratio_min_output_chars):
+                            if used_fallback:
+                                print(f"⚠️ Merged group: Char-ratio suggests truncation but fallback key was used - accepting output")
+                                break
+
+                            if char_ratio_retry_count >= char_ratio_retry_limit:
+                                print(f"❌ Merged group: All {char_ratio_retry_limit} char-ratio retries exhausted; marking as TRUNCATED")
+                                char_ratio_exhausted = True
+                                break
+
+                            if char_ratio_retry_count == 0:
+                                print(
+                                    f"⚠️ Merged group: Char-ratio suggests truncation "
+                                    f"(Input chars: {input_char_count}, Output chars: {output_char_count}, Ratio: {char_ratio:.2f} < {char_ratio_threshold:.2f}). "
+                                    f"Attempting up to {char_ratio_retry_limit} retry(ies)..."
+                                )
+
+                            char_ratio_retry_count += 1
+                            print(f"🔄 Merged group: Char-ratio retry attempt {char_ratio_retry_count}/{char_ratio_retry_limit}")
+
+                            # Force higher token limit on retries
+                            try:
+                                base_max_tokens = int(mtoks)
+                            except Exception:
+                                base_max_tokens = mtoks
+                            try:
+                                retry_cap = int(getattr(self.config, "MAX_RETRY_TOKENS", base_max_tokens))
+                            except Exception:
+                                retry_cap = base_max_tokens
+                            if retry_cap <= 0:
+                                retry_cap = base_max_tokens
+                            retry_max_tokens = max(base_max_tokens, retry_cap)
+
+                            # Prevent nested truncation retries within the unified client during our char-ratio retries
+                            try:
+                                tls_retry_client = self.client._get_thread_local_client()
+                            except Exception:
+                                tls_retry_client = None
+
+                            if tls_retry_client is not None:
+                                setattr(tls_retry_client, "_in_truncation_retry", True)
+
+                            try:
+                                merged_response_retry, finish_reason_retry, raw_obj_retry = send_with_interrupt(
+                                    msgs,
+                                    self.client,
+                                    self.config.TEMP,
+                                    retry_max_tokens,
+                                    self.check_stop_fn,
+                                    context='translation'
+                                )
+                            finally:
+                                if tls_retry_client is not None:
+                                    try:
+                                        setattr(tls_retry_client, "_in_truncation_retry", False)
+                                    except Exception:
+                                        pass
+
+                            # Capture truncation exhaustion that might have occurred during the retry
+                            try:
+                                retry_trunc_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
+                                if retry_trunc_exhausted:
+                                    truncation_exhausted = True
+                                    self.client._truncation_retries_exhausted = False
+                            except Exception:
+                                pass
+
+                            if self.check_stop_fn() and os.environ.get('GRACEFUL_STOP') != '1':
+                                raise Exception("Translation stopped by user")
+
+                            retry_output_chars = len(merged_response_retry) if merged_response_retry else 0
+                            if merged_response_retry and retry_output_chars > output_char_count:
+                                print(f"✅ Merged group: Char-ratio retry improved output ({output_char_count} → {retry_output_chars} chars)")
+                                merged_response = merged_response_retry
+                                finish_reason = finish_reason_retry
+                                raw_obj = raw_obj_retry
+                                merged_finish_reason = finish_reason_retry
+                                continue
+
+                            print(
+                                f"⚠️ Merged group: Char-ratio retry did not improve output "
+                                f"({output_char_count} → {retry_output_chars} chars). Trying again if attempts remain..."
+                            )
+                            continue
+
+                        break
                 
                 # Check for truncation (use preserved finish reason so retries/merges don't lose the flag)
-                merged_truncated = merged_finish_reason in ["length", "max_tokens"] or truncation_exhausted
+                merged_truncated = merged_finish_reason in ["length", "max_tokens"] or truncation_exhausted or char_ratio_exhausted
                 if merged_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED!")
                 
@@ -5561,14 +5852,14 @@ class BatchTranslationProcessor:
                     if merged_truncated:
                         # Truncated merged response: mark ALL chapters as qa_failed
                         # Check if we can retry this truncation failure as a general merge failure
-                        if split_retry_enabled and split_retry_attempts + 1 < max_merge_attempts:
+                        if (not char_ratio_exhausted) and split_retry_enabled and split_retry_attempts + 1 < max_merge_attempts:
                             split_retry_attempts += 1
                             print(f"   🔄 Truncated merged response — retrying request (attempt {split_retry_attempts}/{max_merge_attempts - 1})")
                             time.sleep(2)
                             continue
                         
                         # Check if we can retry this truncation failure as a general merge failure
-                        if split_retry_enabled and split_retry_attempts + 1 < max_merge_attempts:
+                        if (not char_ratio_exhausted) and split_retry_enabled and split_retry_attempts + 1 < max_merge_attempts:
                             split_retry_attempts += 1
                             print(f"   🔄 Truncated merged response — retrying request (attempt {split_retry_attempts}/{max_merge_attempts - 1})")
                             time.sleep(2)
