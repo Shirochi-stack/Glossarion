@@ -701,23 +701,48 @@ class XHTMLConverter:
                 def repl(m):
                     inner = m.group(1)
                     # If looks like a real tag (has '=' or '/') keep it
+                    # Check for start chars /!? or if it has attributes (=)
                     if '=' in inner or inner.strip().startswith(('/', '!', '?')):
                         return m.group(0)
+                    
                     # If the first token is a known HTML tag name, keep it
-                    first = inner.strip().split()[0].lower()
+                    tokens = inner.strip().split()
+                    if not tokens:
+                        return m.group(0)
+                        
+                    first = tokens[0].lower()
+                    
+                    # Handle self-closing tags like <br/> by removing trailing slash
+                    if first.endswith('/'):
+                        first = first[:-1]
+                    
                     known = {
-                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6','ul','ol','li','pre','code','em','strong',
-                        'table','thead','tbody','tr','td','th','blockquote','section','article','header','footer','nav','figure','figcaption'
+                        'html','head','body','title','meta','link','style','script','noscript',
+                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
+                        'ul','ol','li','dl','dt','dd',
+                        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
+                        'table','thead','tbody','tr','td','th','caption','col','colgroup',
+                        'blockquote','q','cite',
+                        'section','article','header','footer','nav','main','aside','details','summary',
+                        'figure','figcaption',
+                        'form','input','button','select','option','textarea','label','fieldset','legend',
+                        'iframe','canvas','svg','math',
+                        'video','audio','source','track','embed','object','param',
+                        'map','area',
+                        'center', 'font', 'base'
                     }
                     if first in known:
                         return m.group(0)
+                        
                     # Otherwise, treat as narrative text in angle brackets and escape
                     return f'&lt;{inner}&gt;'
-                # Match <...> where there's at least one space inside (indicates sentence-like content)
-                pattern = r'<([^<>]*?\s[^<>]*?)>'
+                
+                # Match <...> where content matches non-brackets.
+                # Allow single words without spaces (e.g. <luck>)
+                pattern = r'<([^<>]+)>'
                 txt = re.sub(pattern, repl, txt)
                 # Also handle cases where closing bracket is already an entity
-                pattern_gt = r'<([^<>]*?\s[^<>]*?)&gt;'
+                pattern_gt = r'<([^<>]+)&gt;'
                 txt = re.sub(pattern_gt, lambda m: f'&lt;{m.group(1)}&gt;', txt)
                 return txt
 
