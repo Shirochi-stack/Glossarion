@@ -237,7 +237,7 @@ class GoogleFreeTranslateNew:
     
     
     def _mask_html_tags(self, text: str):
-        """Replace HTML tags/entities with placeholders to avoid translation corruption."""
+        """Replace HTML tags/entities with Unicode PUA placeholders to avoid translation corruption."""
         import re
         if ('<' not in text or '>' not in text) and '&' not in text:
             return text, {}
@@ -248,33 +248,43 @@ class GoogleFreeTranslateNew:
         tag_list = []
         ent_list = []
 
+        # Private Use Area base (U+E000)
+        TAG_BASE = 0xE000
+        ENT_BASE = 0xF000  # separate block to avoid collisions
+
+        def _pua(codepoint):
+            try:
+                return chr(codepoint)
+            except Exception:
+                return ''
+
         def _tag_repl(match):
             idx = len(tag_list)
             tag_list.append(match.group(0))
-            return f"__HTML_TAG_{idx}__"
+            return _pua(TAG_BASE + idx)
 
         def _ent_repl(match):
             idx = len(ent_list)
             ent_list.append(match.group(0))
-            return f"__HTML_ENT_{idx}__"
+            return _pua(ENT_BASE + idx)
 
         # Mask tags first (protect inline attributes inside tags)
         masked = tag_pattern.sub(_tag_repl, text)
         # Mask entities in remaining text
         masked = entity_pattern.sub(_ent_repl, masked)
 
-        tag_map = {f"__HTML_TAG_{i}__": tag for i, tag in enumerate(tag_list)}
-        ent_map = {f"__HTML_ENT_{i}__": ent for i, ent in enumerate(ent_list)}
+        tag_map = {chr(TAG_BASE + i): tag for i, tag in enumerate(tag_list)}
+        ent_map = {chr(ENT_BASE + i): ent for i, ent in enumerate(ent_list)}
         tag_map.update(ent_map)
         return masked, tag_map
 
     def _unmask_html_tags(self, text: str, tag_map: dict):
-        """Restore HTML tags/entities from placeholders."""
+        """Restore HTML tags/entities from Unicode PUA placeholders."""
         if not tag_map:
             return text
-        # Replace longer placeholders first (safe) – all are same pattern length anyway
         for placeholder, tag in tag_map.items():
-            text = text.replace(placeholder, tag)
+            if placeholder in text:
+                text = text.replace(placeholder, tag)
         return text
     def _translate_via_argos(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
         """Fallback to Argos Translate (offline-capable)."""
