@@ -11777,10 +11777,7 @@ class UnifiedClient:
                                 if not self._is_stop_requested():
                                     print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
                             except Exception as retry_err:
-                                import traceback
-                                tb = traceback.format_exc()
                                 print(f"🛑 [{provider}] SDK retry failed: {retry_err}")
-                                print(f"[TRACEBACK {provider}] {tb}")
                                 raise retry_err
                         else:
                             # Catch-all for SDK errors - reduce verbosity for known errors
@@ -11799,11 +11796,8 @@ class UnifiedClient:
                                 print(f"🛑 [{provider}] SDK rate limit: {sdk_err}")
                                 raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
                             else:
-                                # Full traceback for other errors
-                                import traceback
-                                tb = traceback.format_exc()
+                                # Log the error without printing a traceback
                                 print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
-                                print(f"[TRACEBACK {provider}] {tb}")
                             raise
                     
                     # Enhanced extraction for Gemini endpoints
