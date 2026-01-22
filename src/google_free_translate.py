@@ -32,6 +32,10 @@ class GoogleFreeTranslateNew:
         self.last_request_time = 0
         self.rate_limit = 0.5  # 500ms between requests to avoid rate limiting
         
+        # Use a CLASS-LEVEL flag for permanent fallback so it persists across instances
+        if not hasattr(GoogleFreeTranslateNew, '_use_fallback_only'):
+            GoogleFreeTranslateNew._use_fallback_only = False
+        
         # Multiple user agents to rotate through (helps avoid 403)
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -112,6 +116,34 @@ class GoogleFreeTranslateNew:
                 self.logger.debug(f"Cache hit for translation: {text[:50]}...")
                 return self.cache[cache_key]
         
+        # If we've already determined Google is blocking us, skip straight to fallback
+        if GoogleFreeTranslateNew._use_fallback_only:
+            try:
+                # Prepare source lang for fallback logic (convert 'auto' if needed)
+                # Note: _translate_via_argos handles 'auto' logic internally, so just pass self.source_language
+                # but map Google codes if needed
+                source_code = self._get_source_code()
+                target_code = self._get_target_code()
+                
+                # Use fallback immediately
+                # No logging needed here as we want to be quiet about it
+                argos_result = self._translate_via_argos(text, source_code, target_code)
+                if argos_result:
+                    with self.cache_lock:
+                        self.cache[cache_key] = argos_result
+                    return argos_result
+                
+                # If fallback fails even in fallback-only mode, raise exception
+                raise Exception("Argos fallback failed in permanent fallback mode")
+            except Exception as e:
+                # If fallback fails, log error and return original text
+                self.logger.error(f"❌ Permanent fallback failed: {e}")
+                return {
+                    'translatedText': text,
+                    'detectedSourceLanguage': self.source_language,
+                    'error': str(e)
+                }
+
         # Rate limiting
         self._rate_limit_delay()
         
@@ -172,7 +204,9 @@ class GoogleFreeTranslateNew:
             self.logger.error(detailed_error)
             
             # Fallback to Argos Translate
-            self.logger.info("🔄 All Google endpoints failed. Attempting fallback to Argos Translate...")
+            self.logger.info("🔄 All Google endpoints failed. Switching to permanent Argos Translate fallback...")
+            GoogleFreeTranslateNew._use_fallback_only = True  # Set flag to skip Google endpoints for future requests
+            
             argos_result = self._translate_via_argos(text, source_lang, target_lang)
             if argos_result:
                 self.logger.info("✅ Argos Translate fallback successful")
