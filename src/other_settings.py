@@ -4823,7 +4823,7 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(decimal_desc)
     
     # Fix Empty Attribute Tags (EPUB)
-    empty_attr_epub_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (EPUB)")
+    empty_attr_epub_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (EPUB) - LLM Token Fix")
     try:
         # Default to False
         if not hasattr(self, 'fix_empty_attr_tags_epub_var'):
