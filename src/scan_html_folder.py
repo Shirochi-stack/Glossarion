@@ -3903,7 +3903,7 @@ def generate_html_report(results, output_path, duplicate_confidence):
         html += "<h2>Issues Summary</h2><ul>"
         for issue_type, count in sorted(issue_counts.items()):
             style = ' class="non-english"' if any(x in issue_type.lower() for x in ['korean', 'chinese', 'japanese']) else ''
-            html += f"<li{style}><strong>{issue_type}</strong>: {count} files</li>"
+            html += f"<li{style}><strong>{issue_type}</strong>: {count} occurrence(s)</li>"
         
         # Count duplicate groups
         duplicate_groups = set()

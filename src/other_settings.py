@@ -4825,9 +4825,9 @@ def _create_processing_options_section(self, parent):
     # Fix Empty Attribute Tags (EPUB)
     empty_attr_epub_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (EPUB) - LLM Token Fix")
     try:
-        # Default to False
+        # Default to config value (fallback False)
         if not hasattr(self, 'fix_empty_attr_tags_epub_var'):
-            self.fix_empty_attr_tags_epub_var = False
+            self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
         empty_attr_epub_cb.setChecked(bool(self.fix_empty_attr_tags_epub_var))
     except Exception:
         pass
@@ -4851,9 +4851,9 @@ def _create_processing_options_section(self, parent):
     # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
     empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
     try:
-        # Default to False
+        # Default to config value (fallback False)
         if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
-            self.fix_empty_attr_tags_extract_var = False
+            self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
         empty_attr_extract_cb.setChecked(bool(self.fix_empty_attr_tags_extract_var))
     except Exception:
         pass

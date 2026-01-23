@@ -1283,6 +1283,12 @@ Text to analyze:
         
         # Initialize extraction settings (from Other Settings)
         self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
+        # Fix Empty Attribute Tags toggles (persisted in config)
+        self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
+        self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
+        # Sync environment on startup for downstream components
+        os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
+        os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         
         # Graceful stop - wait for in-flight API calls to complete instead of aborting them
         self.graceful_stop_var = self.config.get('graceful_stop', False)
