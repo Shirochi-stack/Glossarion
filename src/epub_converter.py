@@ -691,17 +691,18 @@ class XHTMLConverter:
                         'center', 'font', 'base'
                     }
                     
-                    # Transform: <Tag Attr=""></Tag>  -->  &lt;Tag Attr&gt;
+                    # Transform: <Tag Attr="">Content</Tag>  -->  &lt;Tag Attr&gt;Content
                     # This removes the empty attribute value and the closing tag, creating a visual "token" style representation
                     def _repl_pair(m):
                         tagname = m.group(1)
                         if tagname.lower() in known_tags:
                             return m.group(0)
                         attrname = m.group(2)
-                        return f"&lt;{tagname} {attrname}&gt;"
+                        content = m.group(3)
+                        return f"&lt;{tagname} {attrname}&gt;{content}"
                     
-                    # Match <Tag Attr=""></Tag> (allow whitespace)
-                    text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>\s*</\1>', _repl_pair, text)
+                    # Match <Tag Attr=""></Tag> (allow whitespace and content)
+                    text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>(.*?)</\1>', _repl_pair, text, flags=re.DOTALL)
                     
                     return text
                 

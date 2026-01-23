@@ -213,8 +213,8 @@ TRANSLATION_ARTIFACTS = {
         re.IGNORECASE
     ),
     'empty_attribute_tags': re.compile(
-        r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>\s*</\1>',
-        re.IGNORECASE
+        r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)\s*=\s*""\s*>(.*?)</\1>',
+        re.IGNORECASE | re.DOTALL
     )
 }
 # Cache configuration - will be updated by configure_qa_cache()
@@ -5257,8 +5257,8 @@ def process_html_file_batch(args):
             
             # Check for empty attribute tags in RAW content (these are tags, so stripped from raw_text)
             # Regex allows for spaces around = (e.g. <tag attr = "">)
-            # Pattern: <tag attr=""> or <tag attr = ""> followed by </tag>
-            empty_tag_pattern = re.compile(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)\s*=\s*""\s*>\s*</\1>', re.IGNORECASE)
+            # Pattern: <tag attr=""> content </tag>
+            empty_tag_pattern = re.compile(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)\s*=\s*""\s*>(.*?)</\1>', re.IGNORECASE | re.DOTALL)
             
             # Only check if we have raw content (HTML mode)
             if raw_file_content:
@@ -5266,7 +5266,7 @@ def process_html_file_batch(args):
                 
                 if raw_content_matches:
                     # Format matches into readable strings
-                    formatted_examples = [f"<{tag} {attr}=\"\"></{tag}>" for tag, attr in list(set(raw_content_matches))[:3]]
+                    formatted_examples = [f"<{tag} {attr}=\"\">{content}</{tag}>" for tag, attr, content in list(set(raw_content_matches))]
                     artifacts.append({
                         'type': 'empty_attribute_tags',
                         'count': len(raw_content_matches),
@@ -6551,12 +6551,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 elif artifact['type'] == 'empty_attribute_tags':
                     examples = artifact.get('examples', [])
                     if examples:
-                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
-                        log(f"   ⚠️ LLM token issue (empty tags): '{first_example}'")
-                        issue_text = f"LLM_token_issue: '{first_example}'"
-                        if artifact['count'] > 1:
-                            issue_text += f" (+{artifact['count']-1} more)"
-                        issues.append(issue_text)
+                        # Report ALL examples as requested
+                        log(f"   ⚠️ LLM token issues found: {len(examples)}")
+                        for ex in examples:
+                            # Truncate very long content for display
+                            display_ex = ex[:60] + "..." if len(ex) > 60 else ex
+                            log(f"      - '{display_ex}'")
+                            # Add each one to issues list
+                            # Escape angle brackets for HTML report display
+                            html_safe_ex = display_ex.replace('<', '&lt;').replace('>', '&gt;')
+                            issues.append(f"LLM_token_issue: '{html_safe_ex}'")
                     else:
                         issues.append(f"LLM_token_issue_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
