@@ -3930,7 +3930,13 @@ def generate_html_report(results, output_path, duplicate_confidence):
         
         formatted_issues = []
         for issue in row["issues"]:
-            if issue.startswith("DUPLICATE:"):
+            # Only HTML escape LLM token issues because they contain <tags>
+            if issue.startswith("LLM_token_issue:"):
+                # The issue itself contains "LLM_token_issue: '<tag>'"
+                # We need to escape the tag part
+                escaped_issue = issue.replace("<", "&lt;").replace(">", "&gt;")
+                formatted_issues.append(escaped_issue)
+            elif issue.startswith("DUPLICATE:"):
                 formatted_issues.append(f'<span style="color: red; font-weight: bold;">{issue}</span>')
             elif issue.startswith("NEAR_DUPLICATE:"):
                 formatted_issues.append(f'<span style="color: darkorange; font-weight: bold;">{issue}</span>')
@@ -6558,9 +6564,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             display_ex = ex[:60] + "..." if len(ex) > 60 else ex
                             log(f"      - '{display_ex}'")
                             # Add each one to issues list
-                            # Escape angle brackets for HTML report display
-                            html_safe_ex = display_ex.replace('<', '&lt;').replace('>', '&gt;')
-                            issues.append(f"LLM_token_issue: '{html_safe_ex}'")
+                            # Use plain text for progress manager (no escaping needed here)
+                            # HTML escaping for the report is handled by generate_reports
+                            issues.append(f"LLM_token_issue: '{display_ex}'")
                     else:
                         issues.append(f"LLM_token_issue_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
