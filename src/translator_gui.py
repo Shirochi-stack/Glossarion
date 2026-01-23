@@ -652,6 +652,61 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         except Exception:
             return None
     
+    def _sanitize_config_prompts(self):
+        """Auto-fix known issues in user prompts from older versions."""
+        if not hasattr(self, 'config') or 'prompt_profiles' not in self.config:
+            return
+
+        # Check if already ran
+        if self.config.get('sanitization_korean_quotes_fixed', False):
+            return
+
+        updates_made = False
+        profiles = self.config['prompt_profiles']
+        
+        # The specific broken pattern (missing the double quote pair)
+        # We look for the substring where " " is missing before the comma
+        broken_fragment = "Korean quotation marks (, ' ', 「」, 『』)"
+        fixed_fragment = "Korean quotation marks (\" \", ' ', 「」, 『』)"
+        
+        for profile_name, profile_data in profiles.items():
+            # profile_data can be a string or a dict
+            prompt_text = ""
+            if isinstance(profile_data, str):
+                prompt_text = profile_data
+            elif isinstance(profile_data, dict):
+                prompt_text = profile_data.get('prompt', '')
+            
+            if broken_fragment in prompt_text:
+                fixed_text = prompt_text.replace(broken_fragment, fixed_fragment)
+                
+                if isinstance(profile_data, str):
+                    profiles[profile_name] = fixed_text
+                elif isinstance(profile_data, dict):
+                    profiles[profile_name]['prompt'] = fixed_text
+                
+                updates_made = True
+                print(f"[Sanitizer] Fixed malformed Korean quotes in profile: {profile_name}")
+
+        # Always set flag to avoid re-running
+        self.config['sanitization_korean_quotes_fixed'] = True
+        self.config['prompt_profiles'] = profiles
+
+        # Save if updates were made or just to persist the flag
+        try:
+            # Save immediately to persist the fix
+            # We must encrypt before saving to maintain security if applicable
+            from api_key_encryption import encrypt_config
+            config_to_save = encrypt_config(self.config)
+            
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+            
+            if updates_made:
+                print("[Sanitizer] Saved sanitized config.json (fixes applied)")
+        except Exception as e:
+            print(f"[Sanitizer] Failed to save config: {e}")
+
     def __init__(self, parent=None):
         # Initialize QMainWindow
         super().__init__(parent)
@@ -904,6 +959,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 self.config = json.load(f)
                 # Decrypt API keys
                 self.config = decrypt_config(self.config)
+                
+                # Auto-fix malformed prompts in config
+                self._sanitize_config_prompts()
         except: 
             self.config = {}
             
@@ -1334,7 +1392,7 @@ Text to analyze:
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
                 "{split_marker_instruction}\n"
@@ -1379,7 +1437,7 @@ Text to analyze:
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all Markdown present.\n"
@@ -1460,7 +1518,7 @@ Text to analyze:
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
                 "- Retain honorifics and onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n\\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ), 
@@ -1496,7 +1554,7 @@ Text to analyze:
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
@@ -9264,6 +9322,26 @@ Important rules:
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
 
+    def _is_any_process_running(self):
+       """Check if any background process is currently running"""
+       translation_running = (
+           (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
+           (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())
+       )
+       glossary_running = (
+           (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or
+           (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done())
+       )
+       qa_running = (
+           (hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()) or
+           (hasattr(self, 'qa_future') and self.qa_future and not self.qa_future.done())
+       )
+       epub_running = (
+           (hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()) or
+           (hasattr(self, 'epub_future') and self.epub_future and not self.epub_future.done())
+       )
+       return translation_running or glossary_running or qa_running or epub_running
+
     def update_run_button(self):
        """Switch Run↔Stop depending on whether a process is active."""
        translation_running = (
@@ -9283,7 +9361,7 @@ Important rules:
            (hasattr(self, 'epub_future') and self.epub_future and not self.epub_future.done())
        )
        
-       any_process_running = translation_running or glossary_running or qa_running or epub_running
+       any_process_running = self._is_any_process_running()
        
        # Translation button
        try:
@@ -9326,8 +9404,10 @@ Important rules:
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
            # Add delay to prevent accidental clicks after triple-click stop
-           if translation_main and not any_process_running:
-               QTimer.singleShot(500, lambda: self.run_button.setEnabled(True) if not (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) else None)
+           if hasattr(self, '_translation_main') and self._translation_main and not any_process_running:
+               QTimer.singleShot(500, lambda: self.run_button.setEnabled(True) if not self._is_any_process_running() else None)
+           elif not any_process_running:
+               self.run_button.setEnabled(True)
            else:
                self.run_button.setEnabled(False)
            # Stop spinning animation gracefully with deceleration
@@ -9400,8 +9480,10 @@ Important rules:
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
                # Add delay to prevent accidental clicks after double-click stop
-               if glossary_main and not any_process_running:
-                   QTimer.singleShot(500, lambda: self.glossary_button.setEnabled(True) if not (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) else None)
+               if hasattr(self, '_glossary_main') and self._glossary_main and not any_process_running:
+                   QTimer.singleShot(500, lambda: self.glossary_button.setEnabled(True) if not self._is_any_process_running() else None)
+               elif not any_process_running:
+                   self.glossary_button.setEnabled(True)
                else:
                    self.glossary_button.setEnabled(False)
                # Stop spinner
@@ -9449,8 +9531,10 @@ Important rules:
                """)
                self.epub_button.clicked.connect(self.epub_converter)
                # Add delay to prevent accidental clicks after double-click stop
-               if fallback_compile_epub and not any_process_running:
-                   QTimer.singleShot(500, lambda: self.epub_button.setEnabled(True) if not (hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()) else None)
+               if hasattr(self, '_fallback_compile_epub') and self._fallback_compile_epub and not any_process_running:
+                   QTimer.singleShot(500, lambda: self.epub_button.setEnabled(True) if not self._is_any_process_running() else None)
+               elif not any_process_running:
+                   self.epub_button.setEnabled(True)
                else:
                    self.epub_button.setEnabled(False)
                # Stop spinner
@@ -9497,7 +9581,7 @@ Important rules:
                    }
                """)
                self.qa_button.clicked.connect(self.run_qa_scan)
-               self.qa_button.setEnabled(bool(scan_html_folder and not any_process_running))
+               self.qa_button.setEnabled(bool(scan_html_folder and not self._is_any_process_running()))
                # Stop spinner
                if getattr(self, 'qa_spinner', None):
                    self.qa_spinner.stop()
