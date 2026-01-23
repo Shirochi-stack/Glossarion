@@ -1269,7 +1269,7 @@ class EPUBCompiler:
                             
                             # Load existing translations
                             self.log("🔍 Loading translations from file...")
-                            chapters_info, translated_headers = load_translations_from_file(translations_file, self.log)
+                            chapters_info, translated_headers, _ = load_translations_from_file(translations_file, self.log)
                             
                             if translated_headers:
                                 self.log(f"📋 Loaded {len(translated_headers)} existing translations:")
@@ -1402,7 +1402,7 @@ class EPUBCompiler:
                         from translate_headers_standalone import load_translations_from_file
                         
                         # Load existing translations
-                        _, translated_headers = load_translations_from_file(translations_file, self.log)
+                        _, translated_headers, _ = load_translations_from_file(translations_file, self.log)
                         
                         if translated_headers:
                             self.log(f"📋 Loaded {len(translated_headers)} existing translations")

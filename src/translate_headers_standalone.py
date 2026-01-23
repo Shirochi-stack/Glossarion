@@ -212,7 +212,8 @@ def match_output_to_source_chapters(
     output_dir: str,
     source_mapping: Dict[str, str],
     spine_order: List[str],
-    log_callback=None
+    log_callback=None,
+    explicit_mapping: Dict[str, str] = None
 ) -> Dict[str, Tuple[str, str, str]]:
     """
     Match output HTML files to source chapters by checking if source basename appears in output filename
@@ -222,6 +223,7 @@ def match_output_to_source_chapters(
         source_mapping: Mapping of source basename (no ext) to title
         spine_order: List of source filenames in spine order
         log_callback: Optional callback for logging
+        explicit_mapping: Optional mapping of source basename to expected output clean name
         
     Returns:
         Dict mapping output_filename to (source_title, current_title, output_filename)
@@ -262,6 +264,11 @@ def match_output_to_source_chapters(
         
         source_title = source_mapping[source_basename]
         
+        # Determine target match name (explicit or basename)
+        target_match_name = source_basename
+        if explicit_mapping and source_basename in explicit_mapping:
+            target_match_name = explicit_mapping[source_basename]
+        
         # Find matching output file
         output_file = None
         for candidate in output_files_set:
@@ -270,7 +277,7 @@ def match_output_to_source_chapters(
             if candidate_no_ext.startswith('response_'):
                 candidate_no_ext = candidate_no_ext[9:]
             
-            if candidate_no_ext == source_basename:
+            if candidate_no_ext == target_match_name:
                 output_file = candidate
                 break
         
@@ -318,7 +325,7 @@ def match_output_to_source_chapters(
     return matches
 
 
-def load_translations_from_file(translations_file: str, log_callback=None) -> Tuple[Dict[int, str], Dict[int, str]]:
+def load_translations_from_file(translations_file: str, log_callback=None) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
     """
     Load translations from the translated_headers.txt file
     
@@ -327,7 +334,10 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
         log_callback: Optional callback for logging
         
     Returns:
-        Tuple of (source_headers, translated_headers) where both are dicts mapping chapter numbers to titles
+        Tuple of (source_headers, translated_headers, output_files) where:
+        - source_headers: Maps chapter number to original title
+        - translated_headers: Maps chapter number to translated title
+        - output_files: Maps chapter number to output filename (basename/clean name)
     """
     def log(message):
         if log_callback:
@@ -337,6 +347,7 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
     
     source_headers = {}
     translated_headers = {}
+    output_files = {}
     
     try:
         with open(translations_file, 'r', encoding='utf-8') as f:
@@ -374,6 +385,11 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
             translated_match = re.search(r'Translated:\s*(.+?)(?:\n|$)', block)
             if translated_match:
                 translated_headers[chapter_num] = translated_match.group(1).strip()
+            
+            # Parse output file
+            output_match = re.search(r'Output File:\s*(.+?)(?:\n|$)', block)
+            if output_match:
+                output_files[chapter_num] = output_match.group(1).strip()
         
         log(f"📋 Loaded {len(translated_headers)} translations from file")
         
@@ -389,7 +405,7 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
         import traceback
         log(traceback.format_exc())
     
-    return source_headers, translated_headers
+    return source_headers, translated_headers, output_files
 
 
 def apply_existing_translations(
@@ -423,7 +439,7 @@ def apply_existing_translations(
     
     # Step 1: Load existing translations from file
     log("📖 Loading existing translations...")
-    source_headers, translated_headers = load_translations_from_file(translations_file, log_callback)
+    source_headers, translated_headers, output_files = load_translations_from_file(translations_file, log_callback)
     
     if not translated_headers:
         log("⚠️ No translations found in file")
@@ -433,9 +449,24 @@ def apply_existing_translations(
     log("📚 Extracting source chapter information from EPUB...")
     source_mapping, spine_order = extract_source_chapters_with_opf_mapping(epub_path, log_callback)
     
+    # Build explicit mapping if output files are available
+    explicit_mapping = {}
+    if output_files:
+        # Map source basename -> output clean name
+        # Check if chapter numbers are 0-based or 1-based in the file
+        has_chapter_zero = 0 in output_files
+        
+        for idx, source_file in enumerate(spine_order):
+            # Assume strict ordering matching spine order
+            chapter_num = idx if has_chapter_zero else idx + 1
+            
+            if chapter_num in output_files:
+                source_basename = get_basename_without_ext(os.path.basename(source_file))
+                explicit_mapping[source_basename] = output_files[chapter_num]
+    
     # Step 3: Match output files to source chapters
     log("🔗 Matching output files to source chapters...")
-    matches = match_output_to_source_chapters(output_dir, source_mapping, spine_order, log_callback)
+    matches = match_output_to_source_chapters(output_dir, source_mapping, spine_order, log_callback, explicit_mapping)
     
     if not matches:
         log("⚠️ No matching chapters found")

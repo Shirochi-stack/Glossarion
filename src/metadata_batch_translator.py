@@ -1514,7 +1514,7 @@ class BatchHeaderTranslator:
             if output_dir is None:
                 output_dir = html_dir
             translations_file = os.path.join(output_dir, "translated_headers.txt")
-            self._save_translations_to_file(headers_dict, translated_headers, translations_file)
+            self._save_translations_to_file(headers_dict, translated_headers, translations_file, current_titles)
         
         # Update HTML files if requested
         if update_html:
@@ -1806,7 +1806,8 @@ class BatchHeaderTranslator:
     def _save_translations_to_file(self, 
                                   original: Dict[int, str], 
                                   translated: Dict[int, str],
-                                  output_path: str):
+                                  output_path: str,
+                                  current_titles: Dict[int, Dict[str, str]] = None):
         """Save translations to text file"""
         try:
             with open(output_path, 'w', encoding='utf-8') as f:
@@ -1834,6 +1835,25 @@ class BatchHeaderTranslator:
                     f.write(f"Chapter {num}:\n")
                     f.write(f"  Original:   {orig_title}\n")
                     f.write(f"  Translated: {trans_title}\n")
+                    
+                    # Add output file if available
+                    if current_titles and num in current_titles:
+                        filename = current_titles[num].get('filename', '')
+                        if filename:
+                            # Strip response_ prefix and extensions to harden matching
+                            clean_filename = filename
+                            if clean_filename.startswith('response_'):
+                                clean_filename = clean_filename[9:]
+                            
+                            # Strip all extensions
+                            while True:
+                                name_without_ext, ext = os.path.splitext(clean_filename)
+                                if ext and ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                    clean_filename = name_without_ext
+                                else:
+                                    break
+                                    
+                            f.write(f"  Output File: {clean_filename}\n")
                     
                     # Mark if translation failed for this chapter
                     if num not in translated:
