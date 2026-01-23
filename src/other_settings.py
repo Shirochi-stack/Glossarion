@@ -4827,7 +4827,7 @@ def _create_processing_options_section(self, parent):
     try:
         # Default to config value (fallback False)
         if not hasattr(self, 'fix_empty_attr_tags_epub_var'):
-            self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', True)
+            self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
         empty_attr_epub_cb.setChecked(bool(self.fix_empty_attr_tags_epub_var))
     except Exception:
         pass
@@ -4853,7 +4853,7 @@ def _create_processing_options_section(self, parent):
     try:
         # Default to config value (fallback False)
         if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
-            self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', True)
+            self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
         empty_attr_extract_cb.setChecked(bool(self.fix_empty_attr_tags_extract_var))
     except Exception:
         pass
