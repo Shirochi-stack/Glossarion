@@ -10137,6 +10137,9 @@ Important rules:
                 return
         except Exception:
             pass
+        # If a stop is currently requested (or graceful stop active), don't clear yet
+        if getattr(self, 'stop_requested', False) or getattr(self, 'graceful_stop_active', False):
+            return
 
         # Local flags
         self.stop_requested = False
@@ -10174,6 +10177,9 @@ Important rules:
                 return  # still running; let the scheduled timer try again later
         except Exception:
             pass
+        # If a stop is currently requested (or graceful stop active), don't clear yet
+        if getattr(self, 'stop_requested', False) or getattr(self, 'graceful_stop_active', False):
+            return
 
         # Local flags
         self.stop_requested = False
