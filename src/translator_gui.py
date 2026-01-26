@@ -9764,10 +9764,16 @@ Important rules:
             self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
         else:
             self.append_log("🛑 Stop requested — waiting for current operation to finish")
+
+        # Schedule stop-flag reset once worker is idle
+        QTimer.singleShot(500, self._reset_glossary_stop_flags_if_idle)
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
         
         if current_file and hasattr(self, 'entry_epub'):
             QTimer.singleShot(100, lambda: self.preserve_file_path(current_file))
+
+        # Schedule stop-flag reset once the worker has halted
+        QTimer.singleShot(500, self._reset_stop_flags_if_idle)
 
     def preserve_file_path(self, file_path):
        """Helper to ensure file path stays in the entry field"""
@@ -10119,6 +10125,84 @@ Important rules:
             self._user_scrolled_up = False
         except Exception:
             self._autoscroll_delay_until = 0.0
+
+    def _reset_glossary_stop_flags_if_idle(self):
+        """Clear glossary stop flags once no glossary worker is running."""
+        try:
+            # If a thread-based run is still alive, exit
+            if getattr(self, 'glossary_thread', None) and getattr(self.glossary_thread, 'is_alive', lambda: False)():
+                return
+            # If using executor future and it's not done, exit
+            if getattr(self, 'glossary_future', None) and hasattr(self.glossary_future, 'done') and not self.glossary_future.done():
+                return
+        except Exception:
+            pass
+
+        # Local flags
+        self.stop_requested = False
+        self.graceful_stop_active = False
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        os.environ['WAIT_FOR_CHUNKS'] = '0'
+        os.environ.pop('TRANSLATION_CANCELLED', None)
+
+        # Module-level glossary stop flags
+        try:
+            if 'glossary_stop_flag' in globals() and glossary_stop_flag:
+                glossary_stop_flag(False)
+        except Exception:
+            pass
+        try:
+            import extract_glossary_from_epub
+            if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                extract_glossary_from_epub.set_stop_flag(False)
+        except Exception:
+            pass
+
+        # Clear shared stop file (best effort)
+        try:
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+            if stop_file and os.path.exists(stop_file):
+                os.remove(stop_file)
+        except Exception:
+            pass
+
+    def _reset_stop_flags_if_idle(self):
+        """Clear all stop flags once no translation thread is running."""
+        try:
+            if getattr(self, 'translation_thread', None) and getattr(self.translation_thread, 'is_alive', lambda: False)():
+                return  # still running; let the scheduled timer try again later
+        except Exception:
+            pass
+
+        # Local flags
+        self.stop_requested = False
+        self.graceful_stop_active = False
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        os.environ['WAIT_FOR_CHUNKS'] = '0'
+        os.environ.pop('TRANSLATION_CANCELLED', None)
+
+        # Module-level stop flags
+        try:
+            if 'translation_stop_flag' in globals() and translation_stop_flag:
+                translation_stop_flag(False)
+        except Exception:
+            pass
+        try:
+            import TransateKRtoEN
+            if hasattr(TransateKRtoEN, 'set_stop_flag'):
+                TransateKRtoEN.set_stop_flag(False)
+        except Exception:
+            pass
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(False)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = False
+        except Exception:
+            pass
     
     def _position_log_scroll_button(self):
         try:
