@@ -8332,7 +8332,21 @@ class UnifiedClient:
         return converted
 
     def _apply_api_call_stagger(self):
-        """Stagger API calls to prevent simultaneous requests"""
+        """Stagger API calls to prevent simultaneous requests.
+
+        IMPORTANT: If GRACEFUL_STOP is active, we must NOT start new API calls.
+        This function is called right before sending, so it's the last safe place
+        to stop queued work without interrupting already in-flight requests.
+        """
+        # If graceful stop is active, do not proceed to send new calls.
+        try:
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+        except UnifiedClientError:
+            raise
+        except Exception:
+            pass
+
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
         if api_delay <= 0:
@@ -8359,8 +8373,24 @@ class UnifiedClient:
                 if not self._is_stop_requested():
                     self._debug_log(f"⏳ [{thread_name}] Staggering API call by {api_delay:.1f}s")
                 
-                # Sleep outside lock
-                time.sleep(api_delay)
+                # Sleep outside lock (interruptible)
+                try:
+                    sleep_time = max(0.0, float(next_available - current_time))
+                except Exception:
+                    sleep_time = float(api_delay)
+
+                elapsed = 0.0
+                step = 0.1
+                while elapsed < sleep_time:
+                    # If graceful stop toggles on during stagger, do not start this call.
+                    if os.environ.get('GRACEFUL_STOP') == '1':
+                        raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+                    if self._is_stop_requested() or getattr(self, '_cancelled', False):
+                        self._cancelled = True
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                    dt = min(step, sleep_time - elapsed)
+                    time.sleep(dt)
+                    elapsed += dt
                 
                 # Immediately after stagger completes, indicate what is being sent
                 if not self._is_stop_requested():
@@ -9069,6 +9099,17 @@ class UnifiedClient:
             response_name: Name for saving response
         """
         self._apply_api_call_stagger()
+
+        # If graceful stop is active, do not transition queued work to in-flight and do not send.
+        # This prevents the "initial batch" from continuing after the user requests graceful stop.
+        try:
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+        except UnifiedClientError:
+            raise
+        except Exception:
+            pass
+
         # Mark queued watchdog entry as in-flight now that we're about to send
         try:
             tls = self._get_thread_local_client()
