@@ -280,6 +280,18 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
+def _api_watchdog_update_model(model: Optional[str], request_id: Optional[str] = None) -> None:
+    """Update watchdog's last/active model after key rotation or late binding."""
+    global _api_watchdog_last_model
+    try:
+        with _api_watchdog_lock:
+            if model:
+                _api_watchdog_last_model = model
+            if request_id and request_id in _api_watchdog_entries and model:
+                _api_watchdog_entries[request_id]['model'] = model
+        _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
 
 def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] = None, request_id: Optional[str] = None) -> None:
     """Decrement in-flight counter for API watchdog tracking."""
@@ -4211,6 +4223,8 @@ class UnifiedClient:
         if getattr(self, '_multi_key_mode', False):
             try:
                 self._ensure_thread_client()
+                # Update watchdog entry with the actual per-thread model (after key selection)
+                _api_watchdog_update_model(getattr(self, 'model', None), request_id)
             except UnifiedClientError:
                 # Propagate known client errors
                 raise
