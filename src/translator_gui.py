@@ -626,19 +626,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             return self.timer.isActive()
 
     def _create_spinner(self, label: QLabel, steps=48, interval_ms=14):
-        """Build a cached spinner for a label's current pixmap.
-
-        IMPORTANT:
-        - Keep the spinning icon the SAME visual size as the base icon.
-        - Never upscale during spin (that makes "Finishing..." look bigger).
-        - Only downscale if the source pixmap is larger than the label container.
-        """
+        """Build a cached spinner for a label's current pixmap."""
         try:
             base_pm = getattr(label, "_original_pixmap", None) or label.pixmap()
             if base_pm is None or base_pm.isNull():
                 return None
 
-            # Determine a stable logical target size even before layout
+            # Ensure we use a stable target size even before layout; prefer fixed/sizeHint or default 36
             size_hint = label.size()
             target_w = size_hint.width()
             target_h = size_hint.height()
@@ -651,7 +645,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             if target_w <= 0 or target_h <= 0:
                 target_w = target_h = 36
 
-            # HiDPI: prefer pixmap DPR, fallback to label DPR
+            # HiDPI: determine pixmap DPR (prefer pixmap DPR, fallback to label DPR)
             try:
                 dpr = base_pm.devicePixelRatioF()
             except Exception:
@@ -660,7 +654,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 except Exception:
                     dpr = 1.0
 
-            # Only scale DOWN if needed; keep base size otherwise.
+            # Match Progress Manager behavior: do NOT upscale (avoids blur + size jumps).
+            # Only downscale if the source pixmap is larger than the label container.
             try:
                 base_logical_w = float(base_pm.width()) / max(1.0, dpr)
                 base_logical_h = float(base_pm.height()) / max(1.0, dpr)
@@ -668,7 +663,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 base_logical_w = float(base_pm.width())
                 base_logical_h = float(base_pm.height())
 
-            max_allowed = int(min(target_w, target_h) * 1.2)
+            max_allowed = int(min(target_w, target_h))
             if base_logical_w > max_allowed or base_logical_h > max_allowed:
                 dev_w = int(max_allowed * max(1.0, dpr))
                 dev_h = int(max_allowed * max(1.0, dpr))
@@ -5496,10 +5491,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             from PySide6.QtCore import QSize
             icon = QIcon(icon_path)
             try:
+                # Cache icon for _create_spinner so it can request a sharp HiDPI pixmap
+                self.qa_button_icon._spinner_icon = icon
+            except Exception:
+                pass
+            try:
                 dpr = self.devicePixelRatioF()
             except Exception:
                 dpr = 1.0
-            logical_px = 16
+            logical_px = 20
             dev_px = int(logical_px * max(1.0, dpr))
             pm = icon.pixmap(QSize(dev_px, dev_px))
             if pm.isNull():
@@ -5640,10 +5640,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     from PySide6.QtCore import QSize
                     icon = QIcon(icon_path)
                     try:
+                        # Cache icon for _create_spinner so it can request a sharp HiDPI pixmap
+                        self.glossary_button_icon._spinner_icon = icon
+                    except Exception:
+                        pass
+                    try:
                         dpr = self.devicePixelRatioF()
                     except Exception:
                         dpr = 1.0
-                    logical_px = 16
+                    logical_px = 20
                     dev_px = int(logical_px * max(1.0, dpr))
                     pm = icon.pixmap(QSize(dev_px, dev_px))
                     if pm.isNull():
@@ -5730,10 +5735,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     from PySide6.QtCore import QSize
                     icon = QIcon(icon_path)
                     try:
+                        # Cache icon for _create_spinner so it can request a sharp HiDPI pixmap
+                        self.epub_button_icon._spinner_icon = icon
+                    except Exception:
+                        pass
+                    try:
                         dpr = self.devicePixelRatioF()
                     except Exception:
                         dpr = 1.0
-                    logical_px = 16
+                    logical_px = 20
                     dev_px = int(logical_px * max(1.0, dpr))
                     pm = icon.pixmap(QSize(dev_px, dev_px))
                     if pm.isNull():
@@ -5817,7 +5827,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         dpr = self.devicePixelRatioF()
                     except Exception:
                         dpr = 1.0
-                    logical_px = 16
+                    logical_px = 20
                     dev_px = int(logical_px * max(1.0, dpr))
                     pm = icon.pixmap(QSize(dev_px, dev_px))
                     if pm.isNull():
@@ -10215,7 +10225,6 @@ Important rules:
                 else:
                     self.glossary_text_label.setText("Stopping...")
             self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
-
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -10355,7 +10364,6 @@ Important rules:
                 else:
                     self.epub_text_label.setText("Stopping...")
             self.epub_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
-
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -10402,7 +10410,6 @@ Important rules:
             if hasattr(self, 'qa_text_label'):
                 self.qa_text_label.setText("Stopping...")
             self.qa_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
-
         
         self.stop_requested = True
         try:
