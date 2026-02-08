@@ -87,7 +87,7 @@ try:
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop
-    from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
+    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
 except ImportError as e:
     print(f"\n{'='*60}")
     print("ERROR: PySide6 is not installed or could not be imported.")
@@ -4536,6 +4536,32 @@ Recent translations to summarize:
         self._api_watchdog_timer.start(400)
         self._update_api_watchdog()
 
+    def _elide_watchdog_bar_text(self, text: str, *, max_chars: int = 140) -> str:
+        """Elide watchdog bar text so it doesn't clip outside the progress bar."""
+        try:
+            s = "" if text is None else str(text)
+        except Exception:
+            s = ""
+
+        # Hard cap first (keeps worst-case bounded even if width is unknown)
+        try:
+            if max_chars and len(s) > int(max_chars):
+                s = s[: int(max_chars) - 1] + "…"
+        except Exception:
+            pass
+
+        # Pixel-accurate elide using current progress bar width
+        try:
+            if not hasattr(self, 'api_watchdog_bar') or not self.api_watchdog_bar:
+                return s
+            w = int(getattr(self.api_watchdog_bar, 'width', lambda: 0)() or 0)
+            # Leave some padding for the bar frame/chunk
+            max_px = max(50, w - 28)
+            fm = QFontMetrics(self.api_watchdog_bar.font())
+            return fm.elidedText(s, Qt.ElideRight, max_px)
+        except Exception:
+            return s
+
     def _update_api_watchdog(self):
         """Update the API watchdog progress bar based on in-flight API calls."""
         try:
@@ -4618,22 +4644,66 @@ Recent translations to summarize:
             age = 0
             if last_change > 0:
                 age = max(0, int(time.time() - last_change))
-            label = f"API calls: {in_flight}"
-            if age > 0:
-                label += f" • last change {age}s ago"
-            self.api_watchdog_bar.setFormat(label)
-            tooltip = f"In-flight API calls: {in_flight}"
-            if last_context:
-                tooltip += f"\nLast context: {last_context}"
-            if last_model:
-                tooltip += f"\nLast model: {last_model}"
-            # Only show entries that are in-flight (skip queued)
+
+            # Build compact active-call labels (up to 5) for the progress bar text itself
             in_flight_entries = [e for e in entries if e.get("status") in (None, "in_flight")]
             if in_flight_entries:
                 try:
                     entries_sorted = sorted(in_flight_entries, key=lambda e: e.get("start_ts", 0))
                 except Exception:
                     entries_sorted = in_flight_entries
+            else:
+                entries_sorted = []
+
+            def _compact_entry_label(entry: dict) -> str:
+                try:
+                    chapter = entry.get("chapter")
+                    chunk = entry.get("chunk")
+                    total = entry.get("total_chunks")
+                    if chapter is not None:
+                        if chunk and total:
+                            return f"Ch {chapter} {chunk}/{total}"
+                        return f"Ch {chapter}"
+                    lab = entry.get("label") or entry.get("context") or "request"
+                    s = str(lab)
+                    # Compact common patterns
+                    s = s.replace("Chapter ", "Ch ")
+                    s = s.replace("(chunk ", "")
+                    s = s.replace(")", "")
+                    s = re.sub(r"\s+", " ", s).strip()
+                    return s or "request"
+                except Exception:
+                    return "request"
+
+            active_bits = []
+            try:
+                max_items = 5
+                for e in entries_sorted[:max_items]:
+                    active_bits.append(_compact_entry_label(e))
+                remaining = max(0, len(entries_sorted) - max_items)
+                if remaining:
+                    active_bits.append(f"+{remaining}")
+            except Exception:
+                active_bits = []
+
+            label = f"API calls: {in_flight}"
+            if age > 0:
+                label += f" • {age}s"
+            if active_bits:
+                label += " • " + " | ".join(active_bits)
+            label = self._elide_watchdog_bar_text(label, max_chars=140)
+            self.api_watchdog_bar.setFormat(label)
+
+            tooltip = f"In-flight API calls: {in_flight}"
+            if age > 0:
+                tooltip += f"\nLast change: {age}s ago"
+            if last_context:
+                tooltip += f"\nLast context: {last_context}"
+            if last_model:
+                tooltip += f"\nLast model: {last_model}"
+            # Only show entries that are in-flight (skip queued)
+            # (Tooltip shows full detail; bar text shows a compact, elided subset)
+            if entries_sorted:
                 labels = []
                 for entry in entries_sorted:
                     try:
