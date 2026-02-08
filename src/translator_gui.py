@@ -4660,16 +4660,35 @@ Recent translations to summarize:
                     chapter = entry.get("chapter")
                     chunk = entry.get("chunk")
                     total = entry.get("total_chunks")
+                    ctx = entry.get("context")
+
                     if chapter is not None:
-                        if chunk and total:
-                            return f"Ch {chapter} {chunk}/{total}"
-                        return f"Ch {chapter}"
+                        try:
+                            t = int(total) if total is not None and str(total).strip() != "" else None
+                        except Exception:
+                            t = None
+
+                        # Only show chunk info when there is more than 1 chunk total
+                        chunk_part = ""
+                        if chunk and total and t and t > 1:
+                            chunk_part = f" {chunk}/{total}"
+
+                        # Context suffix removed (redundant in this UI)
+                        return f"Chapter {chapter}{chunk_part}"
+
                     lab = entry.get("label") or entry.get("context") or "request"
                     s = str(lab)
-                    # Compact common patterns
-                    s = s.replace("Chapter ", "Ch ")
-                    s = s.replace("(chunk ", "")
-                    s = s.replace(")", "")
+
+                    # Drop redundant 1/1 chunk markers from pre-built labels
+                    s = re.sub(r"\(\s*chunk\s*1\s*/\s*1\s*\)", "", s, flags=re.IGNORECASE)
+
+                    # Normalize chunk marker to a short ratio (keep 2/4 etc.)
+                    # e.g. "Chapter 12 (chunk 2/4)" -> "Chapter 12 2/4"
+                    s = re.sub(r"\(\s*chunk\s*(\d+)\s*/\s*(\d+)\s*\)", r" \1/\2", s, flags=re.IGNORECASE)
+
+                    # Drop redundant context-only suffixes that don't add value here
+                    s = re.sub(r"\(\s*(translation|glossary)\s*\)", "", s, flags=re.IGNORECASE)
+
                     s = re.sub(r"\s+", " ", s).strip()
                     return s or "request"
                 except Exception:
@@ -4682,13 +4701,13 @@ Recent translations to summarize:
                     active_bits.append(_compact_entry_label(e))
                 remaining = max(0, len(entries_sorted) - max_items)
                 if remaining:
-                    active_bits.append(f"+{remaining}")
+                    active_bits.append(f"+{remaining} more")
             except Exception:
                 active_bits = []
 
             label = f"API calls: {in_flight}"
             if age > 0:
-                label += f" • {age}s"
+                label += f" • last change {age}s ago"
             if active_bits:
                 label += " • " + " | ".join(active_bits)
             label = self._elide_watchdog_bar_text(label, max_chars=140)
@@ -4713,7 +4732,14 @@ Recent translations to summarize:
                             chunk = entry.get("chunk")
                             total = entry.get("total_chunks")
                             if chapter is not None:
+                                show_chunk = False
                                 if chunk and total:
+                                    try:
+                                        t = int(total) if str(total).strip() != "" else None
+                                    except Exception:
+                                        t = None
+                                    show_chunk = bool(t and t > 1)
+                                if show_chunk:
                                     label = f"Chapter {chapter} (chunk {chunk}/{total})"
                                 else:
                                     label = f"Chapter {chapter}"
