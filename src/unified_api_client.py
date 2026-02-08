@@ -181,6 +181,33 @@ _api_watchdog_last_start_ts = 0.0
 _api_watchdog_last_finish_ts = 0.0
 _api_watchdog_last_context = None
 _api_watchdog_last_model = None
+_api_watchdog_entries = {}
+
+def _api_watchdog_norm_chapter(val):
+    try:
+        if val is None:
+            return None
+        return str(val)
+    except Exception:
+        return None
+
+def _api_watchdog_norm_int(val):
+    try:
+        if val is None:
+            return None
+        if isinstance(val, bool):
+            return int(val)
+        if isinstance(val, (int, float)):
+            return int(val)
+        s = str(val).strip()
+        if s == "":
+            return None
+        return int(float(s))
+    except Exception:
+        try:
+            return str(val)
+        except Exception:
+            return None
 
 def _api_watchdog_external_path() -> Optional[str]:
     """Return per-process watchdog state file path if enabled via env."""
@@ -209,12 +236,28 @@ def _api_watchdog_external_write(state: dict) -> None:
     except Exception:
         pass
 
-def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = None, request_id: Optional[str] = None) -> None:
+def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = None,
+                          request_id: Optional[str] = None,
+                          chapter: Optional[Any] = None,
+                          chunk: Optional[Any] = None,
+                          total_chunks: Optional[Any] = None,
+                          label: Optional[str] = None) -> None:
     """Increment in-flight counter for API watchdog tracking."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
     global _api_watchdog_last_start_ts, _api_watchdog_last_context, _api_watchdog_last_model
     try:
         now = time.time()
+        chap = _api_watchdog_norm_chapter(chapter)
+        ch = _api_watchdog_norm_int(chunk)
+        total = _api_watchdog_norm_int(total_chunks)
+        if not label:
+            if chap is not None:
+                if ch and total:
+                    label = f"Chapter {chap} (chunk {ch}/{total})"
+                else:
+                    label = f"Chapter {chap}"
+            elif context:
+                label = str(context)
         with _api_watchdog_lock:
             _api_watchdog_in_flight += 1
             if _api_watchdog_in_flight > _api_watchdog_peak:
@@ -223,6 +266,17 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
             _api_watchdog_last_start_ts = now
             _api_watchdog_last_context = context
             _api_watchdog_last_model = model
+            if request_id:
+                _api_watchdog_entries[request_id] = {
+                    "request_id": request_id,
+                    "context": context,
+                    "model": model,
+                    "chapter": chap,
+                    "chunk": ch,
+                    "total_chunks": total,
+                    "label": label,
+                    "start_ts": now,
+                }
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -239,6 +293,8 @@ def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] =
             _api_watchdog_last_finish_ts = now
             _api_watchdog_last_context = context or _api_watchdog_last_context
             _api_watchdog_last_model = model or _api_watchdog_last_model
+            if request_id and request_id in _api_watchdog_entries:
+                _api_watchdog_entries.pop(request_id, None)
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -247,6 +303,13 @@ def get_api_watchdog_state() -> Dict[str, Any]:
     """Return current API watchdog state for GUI polling."""
     try:
         with _api_watchdog_lock:
+            entries = []
+            try:
+                entries = list(_api_watchdog_entries.values())
+                entries = [dict(e) for e in entries if isinstance(e, dict)]
+                entries.sort(key=lambda x: x.get("start_ts", 0))
+            except Exception:
+                entries = []
             return {
                 "in_flight": _api_watchdog_in_flight,
                 "peak_in_flight": _api_watchdog_peak,
@@ -255,6 +318,7 @@ def get_api_watchdog_state() -> Dict[str, Any]:
                 "last_finish_ts": _api_watchdog_last_finish_ts,
                 "last_context": _api_watchdog_last_context,
                 "last_model": _api_watchdog_last_model,
+                "in_flight_entries": entries,
             }
     except Exception:
         return {"in_flight": 0, "peak_in_flight": 0, "last_change_ts": 0.0}
@@ -3487,7 +3551,38 @@ class UnifiedClient:
             self._log_pre_stagger(messages, watchdog_context)
             self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
-            _api_watchdog_started(watchdog_context, model=getattr(self, 'model', None), request_id=request_id)
+            # Capture chapter/chunk context for watchdog tooltip
+            chapter = None
+            chunk = None
+            total_chunks = None
+            label = None
+            try:
+                tls = self._get_thread_local_client()
+                ctx = getattr(tls, "chapter_context", None)
+                if isinstance(ctx, dict):
+                    chapter = ctx.get("chapter")
+                    chunk = ctx.get("chunk")
+                    total_chunks = ctx.get("total_chunks")
+            except Exception:
+                pass
+            try:
+                label = self._extract_chapter_label(messages)
+                if label == "request":
+                    label = None
+            except Exception:
+                label = None
+            if not label and chapter is not None:
+                try:
+                    if chunk and total_chunks:
+                        label = f"Chapter {chapter} (chunk {chunk}/{total_chunks})"
+                    else:
+                        label = f"Chapter {chapter}"
+                except Exception:
+                    pass
+            if not label and watchdog_context:
+                label = watchdog_context
+            _api_watchdog_started(watchdog_context, model=getattr(self, 'model', None), request_id=request_id,
+                                  chapter=chapter, chunk=chunk, total_chunks=total_chunks, label=label)
             watchdog_started = True
             
             # Multi-key retry wrapper

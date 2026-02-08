@@ -4555,6 +4555,15 @@ Recent translations to summarize:
 
         last_context = state.get('last_context') if isinstance(state, dict) else None
         last_model = state.get('last_model') if isinstance(state, dict) else None
+        entries = []
+        try:
+            if isinstance(state, dict):
+                entries = state.get('in_flight_entries', []) or []
+            if not isinstance(entries, list):
+                entries = []
+            entries = [e for e in entries if isinstance(e, dict)]
+        except Exception:
+            entries = []
 
         # Aggregate cross-process watchdog files (e.g., glossary subprocess)
         try:
@@ -4567,6 +4576,7 @@ Recent translations to summarize:
                     latest_change = 0.0
                     latest_ctx = None
                     latest_model = None
+                    combined_entries = []
                     now = time.time()
                     for fp in files:
                         try:
@@ -4583,6 +4593,11 @@ Recent translations to summarize:
                                 latest_change = lc
                                 latest_ctx = st.get("last_context")
                                 latest_model = st.get("last_model")
+                            file_entries = st.get("in_flight_entries", []) or []
+                            if isinstance(file_entries, list):
+                                for entry in file_entries:
+                                    if isinstance(entry, dict):
+                                        combined_entries.append(entry)
                         except Exception:
                             continue
                     # If any files are present, prefer aggregated totals
@@ -4591,6 +4606,8 @@ Recent translations to summarize:
                         last_change = latest_change or last_change
                         last_context = latest_ctx or last_context
                         last_model = latest_model or last_model
+                    if combined_entries:
+                        entries = combined_entries
         except Exception:
             pass
 
@@ -4612,6 +4629,37 @@ Recent translations to summarize:
                 tooltip += f"\nLast context: {last_context}"
             if last_model:
                 tooltip += f"\nLast model: {last_model}"
+            if entries:
+                try:
+                    entries_sorted = sorted(entries, key=lambda e: e.get("start_ts", 0))
+                except Exception:
+                    entries_sorted = entries
+                labels = []
+                for entry in entries_sorted:
+                    try:
+                        label = entry.get("label")
+                        if not label:
+                            chapter = entry.get("chapter")
+                            chunk = entry.get("chunk")
+                            total = entry.get("total_chunks")
+                            if chapter is not None:
+                                if chunk and total:
+                                    label = f"Chapter {chapter} (chunk {chunk}/{total})"
+                                else:
+                                    label = f"Chapter {chapter}"
+                        if not label:
+                            ctx = entry.get("context")
+                            if ctx:
+                                label = ctx
+                        if not label:
+                            label = "request"
+                        labels.append(str(label))
+                    except Exception:
+                        continue
+                if labels:
+                    tooltip += "\nActive calls:"
+                    for item in labels:
+                        tooltip += f"\n• {item}"
             self.api_watchdog_bar.setToolTip(tooltip)
         else:
             # Determinate idle state
