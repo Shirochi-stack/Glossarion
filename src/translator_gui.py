@@ -4466,7 +4466,8 @@ Recent translations to summarize:
         self.api_watchdog_bar.setFormat("API idle")
         self.api_watchdog_bar.setFocusPolicy(Qt.NoFocus)
         self.api_watchdog_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.api_watchdog_bar.setFixedHeight(24)
+        self.api_watchdog_bar.setFixedHeight(26)
+        self.api_watchdog_bar.setContentsMargins(0, 0, 0, 0)
         self.api_watchdog_bar.setStyleSheet("""
             QProgressBar {
                 background-color: #2d2d2d;
@@ -4474,12 +4475,14 @@ Recent translations to summarize:
                 border-radius: 3px;
                 color: white;
                 text-align: center;
-                padding: 2px;
-                margin: 2px;
+                font-weight: bold;
+                padding: 0px;
+                margin: 0px;
             }
             QProgressBar::chunk {
                 background-color: #5a9fd4;
                 border-radius: 2px;
+                margin: 0px;
             }
         """)
         self.frame.addWidget(self.api_watchdog_bar, 10, 0, 1, 5)
