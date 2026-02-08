@@ -1618,7 +1618,9 @@ Text to analyze:
         # Shared watchdog directory for cross-process API tracking (e.g., glossary subprocess)
         try:
             import tempfile
-            watchdog_dir = os.path.join(tempfile.gettempdir(), "glossarion_watchdog")
+            base_dir = os.path.join(tempfile.gettempdir(), "glossarion_watchdog")
+            unique_dir = f"{os.getpid()}_{int(time.time() * 1000)}"
+            watchdog_dir = os.path.join(base_dir, unique_dir)
             os.makedirs(watchdog_dir, exist_ok=True)
             os.environ["GLOSSARION_WATCHDOG_DIR"] = watchdog_dir
         except Exception:
