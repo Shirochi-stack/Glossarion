@@ -52,6 +52,15 @@ def cancel_all_futures(futures):
             cancelled_count += 1
     return cancelled_count
 
+
+def _is_graceful_stop_skip_error(err: Exception) -> bool:
+    """True when a queued API call was prevented from starting due to graceful stop."""
+    try:
+        s = str(err).lower()
+    except Exception:
+        return False
+    return "graceful stop active - not starting new api call" in s
+
 def create_client_with_multi_key_support(api_key, model, output_dir, config):
     """Create a UnifiedClient with multi API key support if enabled"""
     
@@ -2594,13 +2603,16 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         }
             
     except UnifiedClientError as e:
-        print(f"[Error] API call interrupted/failed for chapter {idx+1}: {e}")
+        # Graceful-stop cancellations are expected when queued calls are prevented from starting.
+        if not _is_graceful_stop_skip_error(e):
+            print(f"[Error] API call interrupted/failed for chapter {idx+1}: {e}")
         return {
             'idx': idx,
             'data': [],
             'resp': "",
             'chap': chap,  # Include chapter even on error
-            'error': str(e)
+            'error': str(e),
+            'graceful_stop_skip': _is_graceful_stop_skip_error(e),
         }
     except Exception as e:
         print(f"[Error] Unexpected error for chapter {idx+1}: {e}")
@@ -3645,6 +3657,10 @@ def main(log_callback=None, stop_callback=None):
                                 chap = result.get('chap')
                                 
                                 if error:
+                                    # Suppress expected "graceful stop" pre-send cancellations.
+                                    if isinstance(error, str) and _is_graceful_stop_skip_error(error):
+                                        stopped_early = True
+                                        return
                                     print(f"[Chapter {idx+1}] Error: {error}")
                                     completed.append(idx)
                                     return
@@ -3682,6 +3698,10 @@ def main(log_callback=None, stop_callback=None):
                             raw_obj = result.get('raw_obj')
                             
                             if error:
+                                # Suppress expected "graceful stop" pre-send cancellations.
+                                if (isinstance(error, str) and _is_graceful_stop_skip_error(error)) or result.get('graceful_stop_skip'):
+                                    stopped_early = True
+                                    return
                                 print(f"[Chapter {idx+1}] Error: {error}")
                                 completed.append(idx)
                                 return
@@ -3718,6 +3738,10 @@ def main(log_callback=None, stop_callback=None):
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         
                     except Exception as e:
+                        # Suppress expected "graceful stop" pre-send cancellations.
+                        if _is_graceful_stop_skip_error(e):
+                            stopped_early = True
+                            return
                         if is_merged_mode:
                             # For merged mode, mark all chapters in the unit as completed on error
                             for u_idx, u_chap in unit:

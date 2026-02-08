@@ -5169,16 +5169,35 @@ class BatchTranslationProcessor:
             return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
             
         except Exception as e:
+            # Graceful-stop pre-send cancellations are expected (they prevent queued calls from starting).
+            # Do not spam per-chapter "failed" logs, and do not mark these chapters as failed.
+            error_msg = str(e)
+            is_graceful_stop_skip = (
+                "graceful stop active - not starting new api call" in (error_msg or "").lower()
+                or (hasattr(e, 'error_type') and getattr(e, 'error_type', None) == 'cancelled' and os.environ.get('GRACEFUL_STOP') == '1')
+            )
+
+            if is_graceful_stop_skip:
+                try:
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    with self.progress_lock:
+                        # Reset back to pending so it can be resumed later.
+                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="pending")
+                        self.save_progress_fn()
+                except Exception:
+                    pass
+                return False, actual_num, None, None, None
+
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                 # Check if it's a timeout failure
-                error_msg = str(e)
                 if "[TIMEOUT]" in error_msg or (hasattr(e, 'error_type') and e.error_type == 'timeout'):
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=chapter)
                 else:
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
+
             # Print consolidated error message
             if total_chunks > 1:
                 print(f"❌ Chapter {actual_num} failed (chunk {chunk_idx}/{total_chunks}): {e}")

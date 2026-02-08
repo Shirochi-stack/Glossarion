@@ -10615,10 +10615,19 @@ Important rules:
        """
        def _append():
            try:
+               # Suppress expected graceful-stop pre-send cancellations (avoid noisy per-chapter lines)
+               try:
+                   msg_low_global = str(message).lower()
+                   if 'graceful stop active - not starting new api call' in msg_low_global:
+                       return
+               except Exception:
+                   msg_low_global = None
+
                # Stop-notice suppression: if user has requested stop, allow only one concise notice
                try:
                    if getattr(self, 'stop_requested', False):
-                       msg_low = str(message).lower()
+                       msg_low = msg_low_global or str(message).lower()
+
                        stop_keys = ['stop requested', 'stopped by user', 'operation cancelled', 'cancelled', 'stopping after current']
                        if any(k in msg_low for k in stop_keys):
                            if getattr(self, '_stop_notice_shown', False):
