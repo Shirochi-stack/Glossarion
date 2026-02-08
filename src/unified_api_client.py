@@ -8668,19 +8668,35 @@ class UnifiedClient:
                 # Add jitter and cap wait time
                 wait_time = min(wait_time + random.uniform(1, 5), 300)  # Max 5 minutes
                 
+                # During rate-limit waits, graceful stop should prevent any further retries from starting.
+                def _sleep_rate_limit(wait_seconds: float) -> None:
+                    # Check immediately before sleeping
+                    if os.environ.get('GRACEFUL_STOP') == '1':
+                        raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+                    slept = 0.0
+                    step = 0.5
+                    while slept < wait_seconds:
+                        # Re-check during sleep so a mid-wait graceful stop cancels promptly.
+                        if os.environ.get('GRACEFUL_STOP') == '1':
+                            raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+                        if self._is_stop_requested() or getattr(self, '_cancelled', False):
+                            self._cancelled = True
+                            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                        dt = min(step, wait_seconds - slept)
+                        time.sleep(dt)
+                        slept += dt
+
                 if indefinite_retry_enabled:
                     # For indefinite retry, don't count against max_retries
                     print(f"{provider} rate limit ({status}), indefinite retry enabled - waiting {wait_time:.1f}s")
-                    if not self._sleep_with_cancel(wait_time, 0.5):
-                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                    _sleep_rate_limit(wait_time)
                     # Don't increment attempt counter for rate limits when indefinite retry is enabled
                     attempt = max(0, attempt - 1)
                     continue
                 elif attempt < max_retries - 1:
                     # Standard retry behavior when indefinite retry is disabled
                     print(f"{provider} rate limit ({status}), waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
-                    if not self._sleep_with_cancel(wait_time, 0.5):
-                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                    _sleep_rate_limit(wait_time)
                     continue
                 
                 # If we reach here, indefinite retry is disabled and we've exhausted max_retries
