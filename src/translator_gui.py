@@ -3756,7 +3756,7 @@ Recent translations to summarize:
         # Target language label tooltip (main UI sync + placeholder note)
         try:
             if hasattr(self, 'target_lang_label'):
-                self.target_lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Used to replace {language} in AI prompts; synced across all target language dropdowns.</p></qt>")
+                self.target_lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
         except Exception:
             pass
         
@@ -4074,13 +4074,14 @@ Recent translations to summarize:
         
         # Target Language Dropdown (below output token limit)
         lang_label = QLabel("Target Language:")
+        self.target_lang_label = lang_label
         lang_label.setStyleSheet("margin-top: 10px;")
-        lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Used to replace {language} in AI prompts; synced across all target language dropdowns.</p></qt>")
+        lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
         output_layout.addWidget(lang_label)
         
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.setEditable(True)
-        self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Used to replace {language} in AI prompts; synced across all target language dropdowns.</p></qt>")
+        self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
         # Disable mouse wheel scrolling to prevent accidental changes
         self.target_lang_combo.wheelEvent = lambda event: event.ignore()
         languages = [
@@ -4124,7 +4125,7 @@ Recent translations to summarize:
         
         # Add warning label for missing placeholder
         self.target_lang_warning = QLabel()
-        self.target_lang_warning.setStyleSheet("color: orange; font-size: 9pt; margin-top: 5px;")
+        self.target_lang_warning.setStyleSheet("color: #5a9fd4; font-size: 8pt; margin-top: 5px;")
         self.target_lang_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)  # Allow copy-paste
         self.target_lang_warning.setWordWrap(True)
         self.target_lang_warning.hide()
@@ -4447,7 +4448,7 @@ Recent translations to summarize:
             # Update warning label
             if hasattr(self, 'target_lang_warning'):
                 if should_warn:
-                    self.target_lang_warning.setText("⚠️ {target_lang} missing")
+                    self.target_lang_warning.setText("Placeholder: {target_lang}")
                     self.target_lang_warning.show()
                 else:
                     self.target_lang_warning.hide()
@@ -4465,7 +4466,7 @@ Recent translations to summarize:
         self.api_watchdog_bar.setFormat("API idle")
         self.api_watchdog_bar.setFocusPolicy(Qt.NoFocus)
         self.api_watchdog_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.api_watchdog_bar.setFixedHeight(16)
+        self.api_watchdog_bar.setFixedHeight(24)
         self.api_watchdog_bar.setStyleSheet("""
             QProgressBar {
                 background-color: #2d2d2d;
@@ -4473,7 +4474,8 @@ Recent translations to summarize:
                 border-radius: 3px;
                 color: white;
                 text-align: center;
-                padding: 0px;
+                padding: 2px;
+                margin: 2px;
             }
             QProgressBar::chunk {
                 background-color: #5a9fd4;
@@ -4543,13 +4545,15 @@ Recent translations to summarize:
         last_model = state.get('last_model') if isinstance(state, dict) else None
 
         if in_flight > 0:
-            # Indeterminate mode for active calls
-            if self.api_watchdog_bar.maximum() != 0:
-                self.api_watchdog_bar.setRange(0, 0)
+            # Keep determinate mode so text is not overridden by busy animation
+            max_val = max(1, in_flight)
+            if self.api_watchdog_bar.maximum() != max_val or self.api_watchdog_bar.minimum() != 0:
+                self.api_watchdog_bar.setRange(0, max_val)
+            self.api_watchdog_bar.setValue(min(in_flight, max_val))
             age = 0
             if last_change > 0:
                 age = max(0, int(time.time() - last_change))
-            label = f"API calls in flight: {in_flight}"
+            label = f"API calls: {in_flight}"
             if age > 0:
                 label += f" • last change {age}s ago"
             self.api_watchdog_bar.setFormat(label)
