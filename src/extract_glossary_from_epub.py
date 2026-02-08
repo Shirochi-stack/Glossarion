@@ -14,7 +14,7 @@ import re
 import tempfile
 from ebooklib import epub
 from chapter_splitter import ChapterSplitter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
 from unified_api_client import UnifiedClient, UnifiedClientError
 
@@ -3570,6 +3570,7 @@ def main(log_callback=None, stop_callback=None):
                 batch_history_map = {}  # Will store (idx, user_prompt, resp, raw_obj) for each successful chapter
 
                 def _submit_unit(unit):
+                    """Submit a single work unit and return its Future."""
                     if is_merged_mode:
                         future = executor.submit(
                             process_merged_group_api_call,
@@ -3619,6 +3620,7 @@ def main(log_callback=None, stop_callback=None):
                     futures[future] = unit
                     # Small yield to keep GUI responsive
                     time.sleep(0.001)
+                    return future
 
                 def _handle_future_result(future, unit):
                     nonlocal batch_entry_count, stopped_early
@@ -3735,7 +3737,8 @@ def main(log_callback=None, stop_callback=None):
                                 completed.append(idx)
 
                 if aggressive_mode:
-                    # Aggressive mode: keep pool full, auto-refill as futures complete
+                    # Aggressive mode: keep pool full, auto-refill as futures complete.
+                    # Use wait(FIRST_COMPLETED) so newly-submitted futures are also observed promptly.
                     active_futures = {}
                     next_unit_idx = 0
 
@@ -3745,41 +3748,48 @@ def main(log_callback=None, stop_callback=None):
                             return False
                         unit = current_batch_units[next_unit_idx]
                         next_unit_idx += 1
-                        _submit_unit(unit)
-                        # Move last submitted future into active_futures
-                        last_future = list(futures.keys())[-1]
-                        active_futures[last_future] = futures[last_future]
+                        fut = _submit_unit(unit)
+                        active_futures[fut] = unit
                         return True
 
                     # Prime the executor to fill all slots
                     while len(active_futures) < batch_size and _submit_next():
                         pass
 
-                    while active_futures:
-                        for future in as_completed(list(active_futures.keys())):
-                            if check_stop():
-                                # print("🛑 Stop detected - cancelling all pending operations...")  # Redundant
-                                stopped_early = True
-                                cancelled = cancel_all_futures(list(active_futures.keys()))
-                                if cancelled > 0:
-                                    print(f"✅ Cancelled {cancelled} pending API calls")
-                                executor.shutdown(wait=False)
-                                active_futures.clear()
-                                break
+                    while active_futures or next_unit_idx < len(current_batch_units):
+                        if check_stop():
+                            stopped_early = True
+                            cancelled = cancel_all_futures(list(active_futures.keys()))
+                            if cancelled > 0:
+                                print(f"✅ Cancelled {cancelled} pending API calls")
+                            executor.shutdown(wait=False)
+                            active_futures.clear()
+                            break
 
-                            unit = active_futures.pop(future)
-                            
-                            # IMMEDIATELY refill the slot BEFORE processing result to maintain full parallelism
-                            # This ensures we always have batch_size API calls in flight
+                        # Auto-refill to maintain batch_size parallel calls (but not during graceful stop)
+                        if os.environ.get('GRACEFUL_STOP') != '1':
+                            while len(active_futures) < batch_size and _submit_next():
+                                pass
+
+                        if not active_futures:
+                            break
+
+                        done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
+
+                        for future in done:
+                            unit = active_futures.pop(future, None)
+                            if unit is None:
+                                continue
+
+                            # Refill freed slot ASAP (unless graceful stop is active)
                             if os.environ.get('GRACEFUL_STOP') != '1':
-                                _submit_next()
-                            
-                            # Now process the completed result
+                                while len(active_futures) < batch_size and _submit_next():
+                                    pass
+
                             _handle_future_result(future, unit)
                             if stopped_early:
                                 break
-                            
-                            # Check for graceful stop AFTER processing result
+
                             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
                                 print("\u2705 Graceful stop: Chapter completed and saved, stopping...")
                                 stopped_early = True
@@ -3789,6 +3799,7 @@ def main(log_callback=None, stop_callback=None):
                                 executor.shutdown(wait=False)
                                 active_futures.clear()
                                 break
+
                         if stopped_early:
                             break
                 else:
