@@ -2529,7 +2529,7 @@ Recent translations to summarize:
         # Create main layout (QGridLayout for precise control)
         self.frame = QGridLayout(central_widget)
         self.frame.setContentsMargins(10, 10, 10, 10)
-        self.frame.setVerticalSpacing(8)
+        self.frame.setVerticalSpacing(5)
         self.frame.setHorizontalSpacing(5)
         
         # Configure grid column stretches
@@ -2546,7 +2546,7 @@ Recent translations to summarize:
                 self.frame.setRowMinimumHeight(r, 180)
             elif r == 10:
                 # API watchdog row (compact)
-                self.frame.setRowMinimumHeight(r, 20)
+                self.frame.setRowMinimumHeight(r, 18)
             elif r == 11:
                 # Log row minimum; will expand aggressively due to stretch factor
                 self.frame.setRowMinimumHeight(r, 200)
@@ -4466,7 +4466,7 @@ Recent translations to summarize:
         self.api_watchdog_bar.setFormat("API idle")
         self.api_watchdog_bar.setFocusPolicy(Qt.NoFocus)
         self.api_watchdog_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.api_watchdog_bar.setFixedHeight(26)
+        self.api_watchdog_bar.setFixedHeight(19)
         self.api_watchdog_bar.setContentsMargins(0, 0, 0, 0)
         self.api_watchdog_bar.setStyleSheet("""
             QProgressBar {
@@ -4476,6 +4476,7 @@ Recent translations to summarize:
                 color: white;
                 text-align: center;
                 font-weight: bold;
+                font-size: 8pt;
                 padding: 0px;
                 margin: 0px;
             }
