@@ -172,6 +172,64 @@ logger = logging.getLogger(__name__)
 # Global stop indicator used by GUI to interrupt in-flight requests.
 global_stop_flag = False
 
+# --- API Watchdog: track in-flight API calls for GUI progress indicators ---
+_api_watchdog_lock = threading.RLock()
+_api_watchdog_in_flight = 0
+_api_watchdog_peak = 0
+_api_watchdog_last_change_ts = 0.0
+_api_watchdog_last_start_ts = 0.0
+_api_watchdog_last_finish_ts = 0.0
+_api_watchdog_last_context = None
+_api_watchdog_last_model = None
+
+def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = None, request_id: Optional[str] = None) -> None:
+    """Increment in-flight counter for API watchdog tracking."""
+    global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
+    global _api_watchdog_last_start_ts, _api_watchdog_last_context, _api_watchdog_last_model
+    try:
+        now = time.time()
+        with _api_watchdog_lock:
+            _api_watchdog_in_flight += 1
+            if _api_watchdog_in_flight > _api_watchdog_peak:
+                _api_watchdog_peak = _api_watchdog_in_flight
+            _api_watchdog_last_change_ts = now
+            _api_watchdog_last_start_ts = now
+            _api_watchdog_last_context = context
+            _api_watchdog_last_model = model
+    except Exception:
+        pass
+
+def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] = None, request_id: Optional[str] = None) -> None:
+    """Decrement in-flight counter for API watchdog tracking."""
+    global _api_watchdog_in_flight, _api_watchdog_last_change_ts, _api_watchdog_last_finish_ts
+    global _api_watchdog_last_context, _api_watchdog_last_model
+    try:
+        now = time.time()
+        with _api_watchdog_lock:
+            _api_watchdog_in_flight = max(0, _api_watchdog_in_flight - 1)
+            _api_watchdog_last_change_ts = now
+            _api_watchdog_last_finish_ts = now
+            _api_watchdog_last_context = context or _api_watchdog_last_context
+            _api_watchdog_last_model = model or _api_watchdog_last_model
+    except Exception:
+        pass
+
+def get_api_watchdog_state() -> Dict[str, Any]:
+    """Return current API watchdog state for GUI polling."""
+    try:
+        with _api_watchdog_lock:
+            return {
+                "in_flight": _api_watchdog_in_flight,
+                "peak_in_flight": _api_watchdog_peak,
+                "last_change_ts": _api_watchdog_last_change_ts,
+                "last_start_ts": _api_watchdog_last_start_ts,
+                "last_finish_ts": _api_watchdog_last_finish_ts,
+                "last_context": _api_watchdog_last_context,
+                "last_model": _api_watchdog_last_model,
+            }
+    except Exception:
+        return {"in_flight": 0, "peak_in_flight": 0, "last_change_ts": 0.0}
+
 # Enable HTTP request logging for debugging
 def setup_http_logging():
     """Enable detailed HTTP request/response logging for debugging"""
@@ -3390,14 +3448,18 @@ class UnifiedClient:
         Unified front for send and send_image. Includes multi-key retry wrapper.
         """
         batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
+        watchdog_started = False
+        watchdog_context = context or ('image_translation' if image_data else 'translation')
         if not batch_mode:
             self._sequential_send_lock.acquire()
         try:
             self.reset_cleanup_state()
             # Pre-stagger log so users see what's being sent before delay
-            self._log_pre_stagger(messages, context or ('image_translation' if image_data else 'translation'))
+            self._log_pre_stagger(messages, watchdog_context)
             self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
+            _api_watchdog_started(watchdog_context, model=getattr(self, 'model', None), request_id=request_id)
+            watchdog_started = True
             
             # Multi-key retry wrapper
             if self._multi_key_mode:
@@ -3486,6 +3548,8 @@ class UnifiedClient:
                 else:
                     return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
+            if watchdog_started:
+                _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
             if not batch_mode:
                 self._sequential_send_lock.release()
         

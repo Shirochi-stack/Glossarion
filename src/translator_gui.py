@@ -2537,23 +2537,26 @@ Recent translations to summarize:
             self.frame.setColumnStretch(i, 1 if i in [1, 3] else 0)
         
         # Configure grid row stretches and minimum heights
-        # Make the log row (row 10) greedily consume extra space on window resize
-        for r in range(12):
+        # Make the log row (row 11) greedily consume extra space on window resize
+        for r in range(13):
             # Only the log row should stretch significantly
-            self.frame.setRowStretch(r, 10 if r == 10 else (0 if r != 9 else 1))
+            self.frame.setRowStretch(r, 10 if r == 11 else (0 if r != 9 else 1))
             if r == 9:
-                # Keep a modest minimum for the prompt row but do not let it grow too much
+                # Keep a modest minimum for the prompt/output row but do not let it grow too much
                 self.frame.setRowMinimumHeight(r, 180)
             elif r == 10:
+                # API watchdog row (compact)
+                self.frame.setRowMinimumHeight(r, 20)
+            elif r == 11:
                 # Log row minimum; will expand aggressively due to stretch factor
                 self.frame.setRowMinimumHeight(r, 200)
-            elif r == 11:
+            elif r == 12:
                 # Toolbar row - ensure it stays visible with minimum height
                 self.frame.setRowMinimumHeight(r, 55)  # Ensure toolbar is always visible
                 # Keep stretch at 0 to prevent it from expanding
         
         # Store row stretch defaults for fullscreen toggle
-        self._default_row_stretches = {r: (10 if r == 10 else (1 if r == 9 else 0)) for r in range(12)}
+        self._default_row_stretches = {r: (10 if r == 11 else (1 if r == 9 else 0)) for r in range(13)}
         
         # Create UI elements using helper methods
         self.create_file_section()
@@ -2563,10 +2566,11 @@ Recent translations to summarize:
         self._create_api_section()
         self._create_prompt_section()
         self._create_log_section()
+        self._start_api_watchdog_timer()
         
         # Add bottom toolbar to layout
         bottom_toolbar = self._make_bottom_toolbar()
-        self.frame.addWidget(bottom_toolbar, 11, 0, 1, 5)  # Span all 5 columns at row 11
+        self.frame.addWidget(bottom_toolbar, 12, 0, 1, 5)  # Span all 5 columns at row 12
         
         # Apply token limit state
         if self.token_limit_disabled:
@@ -4453,14 +4457,39 @@ Recent translations to summarize:
 
     def _create_log_section(self):
         """Create log text area"""
-        # Log Text Edit (row 10, spans all 5 columns)
+        # API Watchdog Progress Bar (row 10, spans all 5 columns)
+        self.api_watchdog_bar = QProgressBar()
+        self.api_watchdog_bar.setTextVisible(True)
+        self.api_watchdog_bar.setRange(0, 1)  # idle (determinate)
+        self.api_watchdog_bar.setValue(0)
+        self.api_watchdog_bar.setFormat("API idle")
+        self.api_watchdog_bar.setFocusPolicy(Qt.NoFocus)
+        self.api_watchdog_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.api_watchdog_bar.setFixedHeight(16)
+        self.api_watchdog_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #2d2d2d;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                color: white;
+                text-align: center;
+                padding: 0px;
+            }
+            QProgressBar::chunk {
+                background-color: #5a9fd4;
+                border-radius: 2px;
+            }
+        """)
+        self.frame.addWidget(self.api_watchdog_bar, 10, 0, 1, 5)
+
+        # Log Text Edit (row 11, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
         self.log_text.setMinimumHeight(200)  # Reduced from 300 to ensure toolbar visibility on low-res screens
         # Make sure it greedily expands vertically and horizontally but respects minimum/maximum constraints
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setAcceptRichText(False)  # Plain text only
-        self.frame.addWidget(self.log_text, 10, 0, 1, 5)  # row, col, rowspan, colspan
+        self.frame.addWidget(self.log_text, 11, 0, 1, 5)  # row, col, rowspan, colspan
         
         # Setup context menu
         self.log_text.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4481,6 +4510,62 @@ Recent translations to summarize:
         self.log_text.installEventFilter(self)
         self.log_text.viewport().installEventFilter(self)
         QTimer.singleShot(0, self._update_log_scroll_button)
+
+    def _start_api_watchdog_timer(self):
+        """Start periodic polling for API in-flight tracking."""
+        if getattr(self, '_api_watchdog_timer', None):
+            return
+        self._api_watchdog_timer = QTimer(self)
+        self._api_watchdog_timer.timeout.connect(self._update_api_watchdog)
+        self._api_watchdog_timer.start(400)
+        self._update_api_watchdog()
+
+    def _update_api_watchdog(self):
+        """Update the API watchdog progress bar based on in-flight API calls."""
+        try:
+            import unified_api_client
+            state = unified_api_client.get_api_watchdog_state()
+        except Exception:
+            state = {}
+
+        in_flight = 0
+        last_change = 0.0
+        try:
+            in_flight = int(state.get('in_flight', 0))
+        except Exception:
+            in_flight = 0
+        try:
+            last_change = float(state.get('last_change_ts', 0.0) or 0.0)
+        except Exception:
+            last_change = 0.0
+
+        last_context = state.get('last_context') if isinstance(state, dict) else None
+        last_model = state.get('last_model') if isinstance(state, dict) else None
+
+        if in_flight > 0:
+            # Indeterminate mode for active calls
+            if self.api_watchdog_bar.maximum() != 0:
+                self.api_watchdog_bar.setRange(0, 0)
+            age = 0
+            if last_change > 0:
+                age = max(0, int(time.time() - last_change))
+            label = f"API calls in flight: {in_flight}"
+            if age > 0:
+                label += f" • last change {age}s ago"
+            self.api_watchdog_bar.setFormat(label)
+            tooltip = f"In-flight API calls: {in_flight}"
+            if last_context:
+                tooltip += f"\nLast context: {last_context}"
+            if last_model:
+                tooltip += f"\nLast model: {last_model}"
+            self.api_watchdog_bar.setToolTip(tooltip)
+        else:
+            # Determinate idle state
+            if self.api_watchdog_bar.maximum() == 0:
+                self.api_watchdog_bar.setRange(0, 1)
+            self.api_watchdog_bar.setValue(0)
+            self.api_watchdog_bar.setFormat("API idle")
+            self.api_watchdog_bar.setToolTip("No API calls in flight")
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
@@ -5742,12 +5827,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.is_fullscreen = True
             
             # Make log area expand more in fullscreen
-            # Set all rows to zero stretch except log (row 10)
-            for r in range(12):
-                if r == 10:
+            # Set all rows to zero stretch except log (row 11)
+            for r in range(13):
+                if r == 11:
                     self.frame.setRowStretch(r, 5)  # Log gets all the stretch
                 else:
-                    self.frame.setRowStretch(r, 0)  # All other rows including toolbar (11) don't stretch
+                    self.frame.setRowStretch(r, 0)  # All other rows including toolbar (12) don't stretch
             
             self.append_log("🖥️ Fullscreen mode enabled (Press F11 to exit)")
         else:
@@ -5756,7 +5841,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.is_fullscreen = False
             
             # Restore default stretches for all rows
-            for r in range(12):
+            for r in range(13):
                 self.frame.setRowStretch(r, self._default_row_stretches.get(r, 0))
             
             self.append_log("🖥️ Fullscreen mode disabled")
