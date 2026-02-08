@@ -4627,11 +4627,13 @@ Recent translations to summarize:
                 tooltip += f"\nLast context: {last_context}"
             if last_model:
                 tooltip += f"\nLast model: {last_model}"
-            if entries:
+            # Only show entries that are in-flight (skip queued)
+            in_flight_entries = [e for e in entries if e.get("status") in (None, "in_flight")]
+            if in_flight_entries:
                 try:
-                    entries_sorted = sorted(entries, key=lambda e: e.get("start_ts", 0))
+                    entries_sorted = sorted(in_flight_entries, key=lambda e: e.get("start_ts", 0))
                 except Exception:
-                    entries_sorted = entries
+                    entries_sorted = in_flight_entries
                 labels = []
                 for entry in entries_sorted:
                     try:
