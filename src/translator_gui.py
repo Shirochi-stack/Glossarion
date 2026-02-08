@@ -9801,10 +9801,13 @@ Important rules:
         # Remove clicks older than 1 second
         self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
         
-        # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
-        if len(self._stop_click_times) >= 2 and already_in_graceful_stop:
+        # Force stop on double-click (within 1s) regardless of current mode
+        force_stop = len(self._stop_click_times) >= 2
+        if force_stop:
             self.append_log("⚡ Double-click detected — forcing immediate stop!")
             graceful_stop = False  # Override to force immediate stop
+            # Ensure WAIT_FOR_CHUNKS is disabled when forcing stop
+            os.environ['WAIT_FOR_CHUNKS'] = '0'
             self._stop_click_times = []  # Reset click counter
         
         # During graceful stop, keep button enabled to allow triple-click force stop
