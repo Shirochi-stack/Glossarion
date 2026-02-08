@@ -4643,6 +4643,11 @@ class UnifiedClient:
                                     tls.max_retries_override = prev_override
 
                             print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
+                            # Abort retry if graceful stop or user stop is active
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            if graceful_stop_active or self._is_stop_requested():
+                                print("  ⏹️ Truncation retry skipped (graceful stop/stop requested)")
+                                return extracted_content, finish_reason
                             trunc_success_logged = False
                             for attempt_idx in range(allowed_attempts):
                                 # Check for cancellation before each retry attempt
