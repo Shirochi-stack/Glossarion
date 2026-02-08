@@ -1615,6 +1615,14 @@ Text to analyze:
         setup_other_settings_methods(self)
         
         self._setup_gui()
+        # Shared watchdog directory for cross-process API tracking (e.g., glossary subprocess)
+        try:
+            import tempfile
+            watchdog_dir = os.path.join(tempfile.gettempdir(), "glossarion_watchdog")
+            os.makedirs(watchdog_dir, exist_ok=True)
+            os.environ["GLOSSARION_WATCHDOG_DIR"] = watchdog_dir
+        except Exception:
+            pass
         
         # Initialize all environment variables after GUI setup but before first use
         self.initialize_environment_variables()
@@ -4547,6 +4555,44 @@ Recent translations to summarize:
 
         last_context = state.get('last_context') if isinstance(state, dict) else None
         last_model = state.get('last_model') if isinstance(state, dict) else None
+
+        # Aggregate cross-process watchdog files (e.g., glossary subprocess)
+        try:
+            watchdog_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
+            if watchdog_dir and os.path.isdir(watchdog_dir):
+                import glob, json as _json
+                files = glob.glob(os.path.join(watchdog_dir, "api_watchdog_*.json"))
+                if files:
+                    total_in_flight = 0
+                    latest_change = 0.0
+                    latest_ctx = None
+                    latest_model = None
+                    now = time.time()
+                    for fp in files:
+                        try:
+                            with open(fp, "r", encoding="utf-8") as f:
+                                st = _json.load(f)
+                            updated_ts = float(st.get("updated_ts", 0.0) or 0.0)
+                            # Skip stale entries (>10 minutes old)
+                            if updated_ts and now - updated_ts > 600:
+                                continue
+                            cnt = int(st.get("in_flight", 0) or 0)
+                            total_in_flight += cnt
+                            lc = float(st.get("last_change_ts", 0.0) or 0.0)
+                            if lc > latest_change:
+                                latest_change = lc
+                                latest_ctx = st.get("last_context")
+                                latest_model = st.get("last_model")
+                        except Exception:
+                            continue
+                    # If any files are present, prefer aggregated totals
+                    if total_in_flight or latest_change:
+                        in_flight = total_in_flight
+                        last_change = latest_change or last_change
+                        last_context = latest_ctx or last_context
+                        last_model = latest_model or last_model
+        except Exception:
+            pass
 
         if in_flight > 0:
             # Keep determinate mode so text is not overridden by busy animation

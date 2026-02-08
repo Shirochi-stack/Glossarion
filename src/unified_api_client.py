@@ -182,6 +182,33 @@ _api_watchdog_last_finish_ts = 0.0
 _api_watchdog_last_context = None
 _api_watchdog_last_model = None
 
+def _api_watchdog_external_path() -> Optional[str]:
+    """Return per-process watchdog state file path if enabled via env."""
+    try:
+        base_dir = os.getenv("GLOSSARION_WATCHDOG_DIR", "")
+        if not base_dir:
+            return None
+        os.makedirs(base_dir, exist_ok=True)
+        return os.path.join(base_dir, f"api_watchdog_{os.getpid()}.json")
+    except Exception:
+        return None
+
+def _api_watchdog_external_write(state: dict) -> None:
+    """Write watchdog state to a per-process JSON file."""
+    try:
+        path = _api_watchdog_external_path()
+        if not path:
+            return
+        tmp_path = f"{path}.tmp"
+        state = dict(state or {})
+        state["pid"] = os.getpid()
+        state["updated_ts"] = time.time()
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except Exception:
+        pass
+
 def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = None, request_id: Optional[str] = None) -> None:
     """Increment in-flight counter for API watchdog tracking."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
@@ -196,6 +223,7 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
             _api_watchdog_last_start_ts = now
             _api_watchdog_last_context = context
             _api_watchdog_last_model = model
+        _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
 
@@ -211,6 +239,7 @@ def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] =
             _api_watchdog_last_finish_ts = now
             _api_watchdog_last_context = context or _api_watchdog_last_context
             _api_watchdog_last_model = model or _api_watchdog_last_model
+        _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
 
