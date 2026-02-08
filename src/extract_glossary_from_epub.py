@@ -116,7 +116,7 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None):
     """Send API request with interrupt capability and optional timeout retry"""
     # Mark that an API call is now active (for graceful stop logic)
     os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
@@ -126,7 +126,16 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     timeout_retry_count = 0
     
     # Format chapter context for logs
-    chapter_label = f"Chapter {chapter_idx+1}" if chapter_idx is not None else "API call"
+    chapter_label = "API call"
+    if chapter_idx is not None:
+        try:
+            chap_num = int(chapter_idx) + 1
+        except Exception:
+            chap_num = chapter_idx
+        if chunk_idx and total_chunks:
+            chapter_label = f"Chapter {chap_num} (chunk {chunk_idx}/{total_chunks})"
+        else:
+            chapter_label = f"Chapter {chap_num}"
     
     result_queue = queue.Queue()
 
@@ -153,6 +162,20 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
         def api_call():
             try:
+                # Apply chapter/chunk context in THIS thread so UnifiedClient's
+                # thread-local metadata is visible to watchdog/payloads.
+                try:
+                    if hasattr(client, 'set_chapter_context'):
+                        chap_val = (chapter_idx + 1) if isinstance(chapter_idx, int) else (
+                            int(chapter_idx) + 1 if chapter_idx is not None and str(chapter_idx).isdigit() else chapter_idx
+                        )
+                        client.set_chapter_context(
+                            chapter=chap_val if chapter_idx is not None else None,
+                            chunk=chunk_idx,
+                            total_chunks=total_chunks,
+                        )
+                except Exception:
+                    pass
                 # Reinitialize client if needed (check correct client based on type)
                 client_type = getattr(client, 'client_type', 'unknown')
                 needs_reinit = False
@@ -2430,7 +2453,8 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
 
 def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict], 
                                   client: UnifiedClient, temp: float, mtoks: int,
-                                  stop_check_fn, chunk_timeout: int = None) -> Dict:
+                                  stop_check_fn, chunk_timeout: int = None,
+                                  chunk_idx: int = None, total_chunks: int = None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
     
     # Ensure the request always contains a user message and no non-serializable blobs
@@ -2503,7 +2527,9 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             max_tokens=mtoks,
             stop_check_fn=stop_check_fn,
             chunk_timeout=chunk_timeout,
-            chapter_idx=idx
+            chapter_idx=idx,
+            chunk_idx=chunk_idx,
+            total_chunks=total_chunks
         )
 
         # Handle the response - it might be a tuple or a string
@@ -2678,7 +2704,10 @@ def process_single_chapter_with_split(idx: int,
         print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
         # Sanitize before delegating (guarantees user + no raw blobs in payload)
         msgs = _sanitize_messages_for_api(msgs, chunk_text)
-        result = process_single_chapter_api_call(idx, chunk_text, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
+        result = process_single_chapter_api_call(
+            idx, chunk_text, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout,
+            chunk_idx=chunk_idx, total_chunks=total_chunks
+        )
         if result.get("data"):
             aggregated_data.extend(result["data"])
         last_resp = result.get("resp", last_resp)
@@ -4259,7 +4288,9 @@ def main(log_callback=None, stop_callback=None):
                                 max_tokens=mtoks,
                                 stop_check_fn=check_stop,
                                 chunk_timeout=chunk_timeout,
-                                chapter_idx=idx
+                                chapter_idx=idx,
+                                chunk_idx=chunk_idx,
+                                total_chunks=total_chunks
                             )
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
