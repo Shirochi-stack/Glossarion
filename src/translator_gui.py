@@ -2549,7 +2549,7 @@ Recent translations to summarize:
                 self.frame.setRowMinimumHeight(r, 18)
             elif r == 11:
                 # Log row minimum; will expand aggressively due to stretch factor
-                self.frame.setRowMinimumHeight(r, 200)
+                self.frame.setRowMinimumHeight(r, 260)
             elif r == 12:
                 # Toolbar row - ensure it stays visible with minimum height
                 self.frame.setRowMinimumHeight(r, 55)  # Ensure toolbar is always visible
@@ -4170,7 +4170,7 @@ Recent translations to summarize:
                 border: 1px solid #4a5568;
                 border-radius: 4px;
                 padding: 6px 12px;
-                margin-top: 8px;
+                margin-top: 2px;
                 font-weight: bold;
                 text-align: left;
                 padding-left: 10px;
@@ -4491,7 +4491,7 @@ Recent translations to summarize:
         # Log Text Edit (row 11, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        self.log_text.setMinimumHeight(200)  # Reduced from 300 to ensure toolbar visibility on low-res screens
+        self.log_text.setMinimumHeight(260)  # Increased for taller log area
         # Make sure it greedily expands vertically and horizontally but respects minimum/maximum constraints
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setAcceptRichText(False)  # Plain text only
