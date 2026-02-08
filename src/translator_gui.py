@@ -4584,10 +4584,6 @@ Recent translations to summarize:
                         try:
                             with open(fp, "r", encoding="utf-8") as f:
                                 st = _json.load(f)
-                            updated_ts = float(st.get("updated_ts", 0.0) or 0.0)
-                            # Skip stale entries (>10 minutes old)
-                            if updated_ts and now - updated_ts > 600:
-                                continue
                             cnt = int(st.get("in_flight", 0) or 0)
                             total_in_flight += cnt
                             lc = float(st.get("last_change_ts", 0.0) or 0.0)
