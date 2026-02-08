@@ -2604,8 +2604,15 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             
     except UnifiedClientError as e:
         # Graceful-stop cancellations are expected when queued calls are prevented from starting.
-        if not _is_graceful_stop_skip_error(e):
+        # Keep a concise log so it's clear why extraction stopped/skipped without spamming the full error.
+        if _is_graceful_stop_skip_error(e):
+            if chunk_idx and total_chunks and int(total_chunks) > 1:
+                print(f"⏭️ Chapter {idx+1} chunk {chunk_idx}/{total_chunks} skipped (graceful stop)")
+            else:
+                print(f"⏭️ Chapter {idx+1} skipped (graceful stop)")
+        else:
             print(f"[Error] API call interrupted/failed for chapter {idx+1}: {e}")
+
         return {
             'idx': idx,
             'data': [],

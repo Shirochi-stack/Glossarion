@@ -5178,6 +5178,9 @@ class BatchTranslationProcessor:
             )
 
             if is_graceful_stop_skip:
+                # Keep a concise log so the user understands why the chapter didn't run.
+                # (Do NOT include the original error text, since it is noisy and is suppressed in the GUI logger.)
+                print(f"⏭️ Chapter {actual_num} skipped (graceful stop)")
                 try:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
