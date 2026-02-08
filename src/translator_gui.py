@@ -4697,8 +4697,37 @@ Recent translations to summarize:
             active_bits = []
             try:
                 max_items = 5
-                for e in entries_sorted[:max_items]:
-                    active_bits.append(_compact_entry_label(e))
+                subset = entries_sorted[:max_items]
+
+                chapter_items = []
+                other_items = []
+
+                for e in subset:
+                    try:
+                        chapter = e.get("chapter")
+                        if chapter is not None:
+                            # Build a compact per-chapter token (keep chunk ratio only when total > 1)
+                            token = str(chapter)
+                            try:
+                                chunk = e.get("chunk")
+                                total = e.get("total_chunks")
+                                t = int(total) if total is not None and str(total).strip() != "" else None
+                                if chunk and total and t and t > 1:
+                                    token = f"{token} ({chunk}/{total})"
+                            except Exception:
+                                pass
+
+                            if token not in chapter_items:
+                                chapter_items.append(token)
+                        else:
+                            other_items.append(_compact_entry_label(e))
+                    except Exception:
+                        continue
+
+                if chapter_items:
+                    active_bits.append("Chapter(s) " + ", ".join(chapter_items))
+                active_bits.extend(other_items)
+
                 remaining = max(0, len(entries_sorted) - max_items)
                 if remaining:
                     active_bits.append(f"+{remaining} more")
