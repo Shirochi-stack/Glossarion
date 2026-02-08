@@ -410,6 +410,29 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
     
+    # Clear any stale stop flags before starting a new glossary run
+    try:
+        set_stop_flag(False)
+    except Exception:
+        try:
+            os.environ["TRANSLATION_CANCELLED"] = "0"
+        except Exception:
+            pass
+        try:
+            stop_path = _get_stop_file_path()
+            if stop_path and os.path.exists(stop_path):
+                os.remove(stop_path)
+        except Exception:
+            pass
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, "UnifiedClient"):
+                unified_api_client.UnifiedClient._global_cancelled = False
+            if hasattr(unified_api_client, "global_stop_flag"):
+                unified_api_client.global_stop_flag = False
+        except Exception:
+            pass
+    
     print("📱 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
     
     # CRITICAL: Reload ALL glossary settings from environment variables at the START
@@ -4012,15 +4035,63 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 print(f"📑 Preparing API request (text size: {len(text_sample):,} chars)...")
                 print(f"📑 ⏳ Processing {len(text_sample):,} characters... Please wait, this may take 5-10 minutes")
 
-                response, finish_reason, raw_obj = send_with_interrupt(
-                    messages=messages,
-                    client=client,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stop_check_fn=is_stop_requested,
-                    chunk_timeout=chunk_timeout,
-                    context='glossary'
-                )
+                # Timeout retry logic (matches translation behavior)
+                try:
+                    max_timeout_retries = int(os.getenv("TIMEOUT_RETRY_ATTEMPTS", "2"))
+                except Exception:
+                    max_timeout_retries = 2
+                timeout_retry_count = 0
+                while True:
+                    try:
+                        response, finish_reason, raw_obj = send_with_interrupt(
+                            messages=messages,
+                            client=client,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stop_check_fn=is_stop_requested,
+                            chunk_timeout=chunk_timeout,
+                            context='glossary'
+                        )
+                        break
+                    except UnifiedClientError as e:
+                        error_msg = str(e)
+                        lower_msg = error_msg.lower()
+                        if is_stop_requested():
+                            print(f"📑 ❌ AI extraction interrupted by user")
+                            return {}
+                        # Treat cancelled / client init errors as timeout retries
+                        is_timeout = ("timed out" in lower_msg) or ("timeout" in lower_msg) or ("cancelled" in lower_msg) or ("client not initialized" in lower_msg)
+                        if is_timeout and timeout_retry_count < max_timeout_retries:
+                            timeout_retry_count += 1
+                            if chunk_timeout:
+                                print(f"⚠️ AI extraction timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                            else:
+                                print(f"⚠️ AI extraction timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                            # Reinitialize client if needed
+                            client_type = getattr(client, 'client_type', 'unknown')
+                            needs_reinit = False
+                            if client_type == 'gemini':
+                                needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                            elif client_type == 'openai':
+                                needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                            if needs_reinit:
+                                try:
+                                    print(f"   🔄 Reinitializing {client_type} client...")
+                                    client._setup_client()
+                                except Exception as reinit_err:
+                                    print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                            # Stagger retries to avoid simultaneous API calls
+                            try:
+                                import random
+                                base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                                retry_delay = random.uniform(base_delay / 2, base_delay)
+                                print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
+                                time.sleep(retry_delay)
+                            except Exception:
+                                time.sleep(1.0)
+                            continue
+                        else:
+                            raise
                 api_time = time.time() - api_start
                 print(f"📑 API call completed in {api_time:.1f}s")
 
@@ -5404,14 +5475,60 @@ Provide translations in the same numbered format."""
                 # Use send_with_interrupt for interruptible API call
                 print(f"📑 Sending translation request for batch {batch_num} (interruptible)...")
                 
-                response, finish_reason, raw_obj = send_with_interrupt(
-                    messages=messages,
-                    client=client,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stop_check_fn=is_stop_requested,
-                    chunk_timeout=chunk_timeout
-                )
+                # Timeout retry logic (matches translation behavior)
+                try:
+                    max_timeout_retries = int(os.getenv("TIMEOUT_RETRY_ATTEMPTS", "2"))
+                except Exception:
+                    max_timeout_retries = 2
+                timeout_retry_count = 0
+                while True:
+                    try:
+                        response, finish_reason, raw_obj = send_with_interrupt(
+                            messages=messages,
+                            client=client,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stop_check_fn=is_stop_requested,
+                            chunk_timeout=chunk_timeout
+                        )
+                        break
+                    except UnifiedClientError as e:
+                        error_msg = str(e)
+                        lower_msg = error_msg.lower()
+                        if "stopped by user" in lower_msg or is_stop_requested():
+                            raise
+                        is_timeout = ("timed out" in lower_msg) or ("timeout" in lower_msg) or ("cancelled" in lower_msg) or ("client not initialized" in lower_msg)
+                        if is_timeout and timeout_retry_count < max_timeout_retries:
+                            timeout_retry_count += 1
+                            if chunk_timeout:
+                                print(f"⚠️ Glossary translation batch {batch_num} timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                            else:
+                                print(f"⚠️ Glossary translation batch {batch_num} timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                            # Reinitialize client if needed
+                            client_type = getattr(client, 'client_type', 'unknown')
+                            needs_reinit = False
+                            if client_type == 'gemini':
+                                needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                            elif client_type == 'openai':
+                                needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                            if needs_reinit:
+                                try:
+                                    print(f"   🔄 Reinitializing {client_type} client...")
+                                    client._setup_client()
+                                except Exception as reinit_err:
+                                    print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                            # Stagger retries
+                            try:
+                                import random
+                                base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                                retry_delay = random.uniform(base_delay / 2, base_delay)
+                                print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
+                                time.sleep(retry_delay)
+                            except Exception:
+                                time.sleep(1.0)
+                            continue
+                        else:
+                            raise
                 
                 # Handle response properly
                 if hasattr(response, 'content'):
