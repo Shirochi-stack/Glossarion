@@ -626,12 +626,19 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             return self.timer.isActive()
 
     def _create_spinner(self, label: QLabel, steps=48, interval_ms=14):
-        """Build a cached spinner for a label's current pixmap."""
+        """Build a cached spinner for a label's current pixmap.
+
+        IMPORTANT:
+        - Keep the spinning icon the SAME visual size as the base icon.
+        - Never upscale during spin (that makes "Finishing..." look bigger).
+        - Only downscale if the source pixmap is larger than the label container.
+        """
         try:
             base_pm = getattr(label, "_original_pixmap", None) or label.pixmap()
             if base_pm is None or base_pm.isNull():
                 return None
-            # Ensure we use a stable target size even before layout; prefer fixed/sizeHint or default 36
+
+            # Determine a stable logical target size even before layout
             size_hint = label.size()
             target_w = size_hint.width()
             target_h = size_hint.height()
@@ -643,11 +650,35 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 target_w = target_h = max(label.minimumWidth(), label.minimumHeight(), label.maximumWidth(), label.maximumHeight(), 36)
             if target_w <= 0 or target_h <= 0:
                 target_w = target_h = 36
-            # Scale to 115% of container size for larger icon
-            inner_size = int(min(target_w, target_h) * 1.15)
-            base_pm = base_pm.scaled(inner_size, inner_size,
-                                     Qt.KeepAspectRatio,
-                                     Qt.SmoothTransformation)
+
+            # HiDPI: prefer pixmap DPR, fallback to label DPR
+            try:
+                dpr = base_pm.devicePixelRatioF()
+            except Exception:
+                try:
+                    dpr = label.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+
+            # Only scale DOWN if needed; keep base size otherwise.
+            try:
+                base_logical_w = float(base_pm.width()) / max(1.0, dpr)
+                base_logical_h = float(base_pm.height()) / max(1.0, dpr)
+            except Exception:
+                base_logical_w = float(base_pm.width())
+                base_logical_h = float(base_pm.height())
+
+            max_allowed = int(min(target_w, target_h) * 1.2)
+            if base_logical_w > max_allowed or base_logical_h > max_allowed:
+                dev_w = int(max_allowed * max(1.0, dpr))
+                dev_h = int(max_allowed * max(1.0, dpr))
+                scaled = base_pm.scaled(dev_w, dev_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                try:
+                    scaled.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                base_pm = scaled
+
             return TranslatorGUI._CachedSpinner(label, base_pm, interval_ms=interval_ms, steps=steps, parent=self)
         except Exception:
             return None
@@ -10184,6 +10215,7 @@ Important rules:
                 else:
                     self.glossary_text_label.setText("Stopping...")
             self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -10323,6 +10355,7 @@ Important rules:
                 else:
                     self.epub_text_label.setText("Stopping...")
             self.epub_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -10369,6 +10402,7 @@ Important rules:
             if hasattr(self, 'qa_text_label'):
                 self.qa_text_label.setText("Stopping...")
             self.qa_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+
         
         self.stop_requested = True
         try:
