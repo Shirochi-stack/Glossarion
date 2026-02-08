@@ -4056,9 +4056,15 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     except UnifiedClientError as e:
                         error_msg = str(e)
                         lower_msg = error_msg.lower()
-                        if is_stop_requested():
+
+                        # Only treat an explicit user stop as an interrupt; timeouts/cancellations should retry
+                        user_stopped = ("stopped by user" in lower_msg) or (
+                            is_stop_requested() and not any(k in lower_msg for k in ("timeout", "timed out", "cancelled"))
+                        )
+                        if user_stopped:
                             print(f"📑 ❌ AI extraction interrupted by user")
                             return {}
+
                         # Treat cancelled / client init errors as timeout retries
                         is_timeout = ("timed out" in lower_msg) or ("timeout" in lower_msg) or ("cancelled" in lower_msg) or ("client not initialized" in lower_msg)
                         if is_timeout and timeout_retry_count < max_timeout_retries:
@@ -4067,6 +4073,18 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                                 print(f"⚠️ AI extraction timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                             else:
                                 print(f"⚠️ AI extraction timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+
+                            # Clear cancellation flags that timeouts may have set
+                            try:
+                                client.reset_cleanup_state()
+                            except Exception:
+                                pass
+                            try:
+                                # Also clear class-level global cancellation for all clients
+                                client.__class__.set_global_cancellation(False)
+                            except Exception:
+                                pass
+
                             # Reinitialize client if needed
                             client_type = getattr(client, 'client_type', 'unknown')
                             needs_reinit = False
