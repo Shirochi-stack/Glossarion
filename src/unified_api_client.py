@@ -241,8 +241,9 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                           chapter: Optional[Any] = None,
                           chunk: Optional[Any] = None,
                           total_chunks: Optional[Any] = None,
-                          label: Optional[str] = None) -> None:
-    """Increment in-flight counter for API watchdog tracking."""
+                          label: Optional[str] = None,
+                          queued: bool = False) -> None:
+    """Track queued requests; only count in-flight after mark_in_flight."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
     global _api_watchdog_last_start_ts, _api_watchdog_last_context, _api_watchdog_last_model
     try:
@@ -259,13 +260,14 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
             elif context:
                 label = str(context)
         with _api_watchdog_lock:
-            _api_watchdog_in_flight += 1
-            if _api_watchdog_in_flight > _api_watchdog_peak:
-                _api_watchdog_peak = _api_watchdog_in_flight
-            _api_watchdog_last_change_ts = now
-            _api_watchdog_last_start_ts = now
-            _api_watchdog_last_context = context
-            _api_watchdog_last_model = model
+            if not queued:
+                _api_watchdog_in_flight += 1
+                if _api_watchdog_in_flight > _api_watchdog_peak:
+                    _api_watchdog_peak = _api_watchdog_in_flight
+                _api_watchdog_last_change_ts = now
+                _api_watchdog_last_start_ts = now
+                _api_watchdog_last_context = context
+                _api_watchdog_last_model = model
             if request_id:
                 _api_watchdog_entries[request_id] = {
                     "request_id": request_id,
@@ -276,7 +278,55 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     "total_chunks": total,
                     "label": label,
                     "start_ts": now,
+                    "status": "queued" if queued else "in_flight",
                 }
+        _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
+def _api_watchdog_reset():
+    """Hard reset watchdog state (used on force-cancel)."""
+    global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
+    global _api_watchdog_last_start_ts, _api_watchdog_last_finish_ts
+    global _api_watchdog_last_context, _api_watchdog_last_model, _api_watchdog_entries
+    try:
+        with _api_watchdog_lock:
+            _api_watchdog_in_flight = 0
+            _api_watchdog_peak = 0
+            _api_watchdog_last_change_ts = time.time()
+            _api_watchdog_last_start_ts = 0.0
+            _api_watchdog_last_finish_ts = 0.0
+            _api_watchdog_last_context = None
+            _api_watchdog_last_model = None
+            _api_watchdog_entries.clear()
+        _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
+def _api_watchdog_mark_in_flight(request_id: Optional[str], model: Optional[str] = None) -> None:
+    """Transition a queued entry to in-flight and increment counter once."""
+    global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
+    global _api_watchdog_last_start_ts, _api_watchdog_last_model
+    if not request_id:
+        return
+    try:
+        now = time.time()
+        with _api_watchdog_lock:
+            entry = _api_watchdog_entries.get(request_id)
+            if not entry:
+                return
+            if entry.get("status") == "in_flight":
+                return  # already counted
+            entry["status"] = "in_flight"
+            if model:
+                entry["model"] = model
+            _api_watchdog_in_flight += 1
+            if _api_watchdog_in_flight > _api_watchdog_peak:
+                _api_watchdog_peak = _api_watchdog_in_flight
+            _api_watchdog_last_change_ts = now
+            _api_watchdog_last_start_ts = now
+            if model:
+                _api_watchdog_last_model = model
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -300,13 +350,18 @@ def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] =
     try:
         now = time.time()
         with _api_watchdog_lock:
-            _api_watchdog_in_flight = max(0, _api_watchdog_in_flight - 1)
+            # Only decrement if this entry was counted as in-flight
+            counted = True
+            if request_id and request_id in _api_watchdog_entries:
+                if _api_watchdog_entries[request_id].get("status") != "in_flight":
+                    counted = False
+                _api_watchdog_entries.pop(request_id, None)
+            if counted:
+                _api_watchdog_in_flight = max(0, _api_watchdog_in_flight - 1)
             _api_watchdog_last_change_ts = now
             _api_watchdog_last_finish_ts = now
             _api_watchdog_last_context = context or _api_watchdog_last_context
             _api_watchdog_last_model = model or _api_watchdog_last_model
-            if request_id and request_id in _api_watchdog_entries:
-                _api_watchdog_entries.pop(request_id, None)
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -1465,6 +1520,11 @@ class UnifiedClient:
         """Force-cancel all in-flight requests by closing HTTP sessions and streaming responses."""
         try:
             cls.set_global_cancellation(True)
+        except Exception:
+            pass
+        # Reset watchdog so UI clears counts immediately
+        try:
+            _api_watchdog_reset()
         except Exception:
             pass
         # Close all active streaming responses
@@ -3593,8 +3653,9 @@ class UnifiedClient:
                     pass
             if not label and watchdog_context:
                 label = watchdog_context
+            # Queue the request; it'll flip to in-flight right before HTTP send
             _api_watchdog_started(watchdog_context, model=getattr(self, 'model', None), request_id=request_id,
-                                  chapter=chapter, chunk=chunk, total_chunks=total_chunks, label=label)
+                                  chapter=chapter, chunk=chunk, total_chunks=total_chunks, label=label, queued=True)
             watchdog_started = True
             
             # Multi-key retry wrapper
@@ -4302,6 +4363,13 @@ class UnifiedClient:
         if os.environ.get('GRACEFUL_STOP') == '1':
             self._suppress_http_logs()
         
+        # Make request_id available to downstream helpers (e.g., watchdog in _get_response)
+        try:
+            tls = self._get_thread_local_client()
+            tls.current_request_id = request_id
+        except Exception:
+            pass
+
         # Generate request hash WITH request ID if provided
         if image_data:
             image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
@@ -9001,6 +9069,13 @@ class UnifiedClient:
             response_name: Name for saving response
         """
         self._apply_api_call_stagger()
+        # Mark queued watchdog entry as in-flight now that we're about to send
+        try:
+            tls = self._get_thread_local_client()
+            rid = getattr(tls, 'current_request_id', None)
+            _api_watchdog_mark_in_flight(rid, getattr(self, 'model', None))
+        except Exception:
+            pass
         # Ensure client_type is initialized before routing (important for multi-key mode)
         try:
             if not hasattr(self, 'client_type') or self.client_type is None:

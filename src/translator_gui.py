@@ -9884,6 +9884,9 @@ Important rules:
                 # Hard cancel: close active HTTP sessions to abort in-flight requests
                 if hasattr(unified_api_client, 'hard_cancel_all'):
                     unified_api_client.hard_cancel_all()
+                # Also reset watchdog counts so progress bar clears immediately
+                if hasattr(unified_api_client, '_api_watchdog_reset'):
+                    unified_api_client._api_watchdog_reset()
                     
             except Exception as e:
                 print(f"Error setting stop flags: {e}")
