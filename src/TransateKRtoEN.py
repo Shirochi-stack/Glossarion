@@ -4866,8 +4866,84 @@ class BatchTranslationProcessor:
             chunk_abort_event = threading.Event()
 
             # Stop callback that also checks the per-chapter abort flag
-            def local_stop_cb():
-                return (self.check_stop_fn() if hasattr(self, "check_stop_fn") else False) or chunk_abort_event.is_set()
+            def _user_stop_requested() -> bool:
+                try:
+                    return (self.check_stop_fn() if hasattr(self, "check_stop_fn") else False)
+                except Exception:
+                    return False
+
+            def local_stop_cb() -> bool:
+                return _user_stop_requested() or chunk_abort_event.is_set()
+
+            # WAIT_FOR_CHUNKS semantics (batch translation):
+            # - WAIT_FOR_CHUNKS=1: always wait for remaining chunks of this chapter
+            # - WAIT_FOR_CHUNKS=0: ONLY wait if all chunks have already been *sent to the API* (post-stagger)
+            #   Otherwise, cancel this chapter (do not write partial output).
+            sent_or_done_chunks = set()  # chunk indices (1-based) that were in-flight or completed
+
+            def _update_sent_or_done_from_watchdog() -> None:
+                try:
+                    import unified_api_client
+                    st = unified_api_client.get_api_watchdog_state() if hasattr(unified_api_client, 'get_api_watchdog_state') else {}
+                    entries = st.get('in_flight_entries', []) if isinstance(st, dict) else []
+                    if not isinstance(entries, list):
+                        return
+                    chap_key = str(actual_num)
+                    for e in entries:
+                        if not isinstance(e, dict):
+                            continue
+                        if e.get('status') != 'in_flight':
+                            continue
+                        if str(e.get('chapter')) != chap_key:
+                            continue
+                        try:
+                            tot = int(e.get('total_chunks') or 0)
+                        except Exception:
+                            tot = 0
+                        if tot and int(total_chunks or 0) and tot != int(total_chunks or 0):
+                            continue
+                        try:
+                            ch = int(e.get('chunk') or 0)
+                        except Exception:
+                            ch = 0
+                        if ch:
+                            sent_or_done_chunks.add(ch)
+                except Exception:
+                    return
+
+            def _all_chunks_sent_or_done() -> bool:
+                try:
+                    _update_sent_or_done_from_watchdog()
+                except Exception:
+                    pass
+                return int(total_chunks or 0) > 0 and len(sent_or_done_chunks) >= int(total_chunks or 0)
+
+            def _cancel_chapter_due_to_stop(reason: str):
+                # Ensure remaining chunk workers abort quickly
+                try:
+                    chunk_abort_event.set()
+                except Exception:
+                    pass
+                try:
+                    print(f"🛑 Chapter {actual_num}: cancelling chapter (WAIT_FOR_CHUNKS=0) — {reason}")
+                except Exception:
+                    pass
+                # Force a real cancel so in-flight requests stop too (user asked for full-stop for this chapter)
+                try:
+                    from unified_api_client import UnifiedClientError
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'set_stop_flag'):
+                        unified_api_client.set_stop_flag(True)
+                    if hasattr(unified_api_client, 'global_stop_flag'):
+                        unified_api_client.global_stop_flag = True
+                    if hasattr(unified_api_client, 'UnifiedClient'):
+                        unified_api_client.UnifiedClient._global_cancelled = True
+                    if hasattr(unified_api_client, 'hard_cancel_all'):
+                        unified_api_client.hard_cancel_all()
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                except Exception as e:
+                    # If UnifiedClientError isn't available for some reason, raise a normal cancellation
+                    raise
 
             last_chunk_raw_obj = None
             chapter_truncated = False  # Track if any chunk was truncated
@@ -4891,9 +4967,27 @@ class BatchTranslationProcessor:
                             # Read env vars INSIDE loop to catch stop pressed mid-delay
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                            if local_stop_cb() and not (graceful_stop_active and wait_for_chunks):
-                                print(f"🛑 Chunk submission delay interrupted")
-                                raise Exception("Translation stopped by user during chunk submission delay")
+                            user_stop = _user_stop_requested()
+
+                            if user_stop:
+                                if graceful_stop_active and wait_for_chunks:
+                                    # Explicit wait-for-chunks: keep going (we will still submit remaining chunks)
+                                    pass
+                                elif graceful_stop_active and (not wait_for_chunks):
+                                    # WAIT_FOR_CHUNKS disabled: only wait if every chunk is already sent.
+                                    if _all_chunks_sent_or_done():
+                                        # Should be rare here (we're still about to submit), but keep consistent.
+                                        pass
+                                    else:
+                                        _cancel_chapter_due_to_stop("stop requested before all chunks were sent")
+                                else:
+                                    # Immediate stop
+                                    print(f"🛑 Chunk submission delay interrupted")
+                                    raise Exception("Translation stopped by user during chunk submission delay")
+
+                            if chunk_abort_event.is_set():
+                                raise Exception("Translation stopped (chapter abort)")
+
                             sleep_chunk = min(check_interval, thread_delay - elapsed)
                             time.sleep(sleep_chunk)
                             elapsed += sleep_chunk
@@ -4988,35 +5082,49 @@ class BatchTranslationProcessor:
                             # Log redundant with "Received Chapter X, Chunk Y" above
                             # print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
                             
-                            # AFTER storing result: check if we should stop (for multi-chunk without wait_for_chunks)
-                            # For single-chunk chapters, just continue to save
+                            # Mark this chunk as done (if we got a real result)
+                            try:
+                                if isinstance(chunk_idx, int) and chunk_idx > 0:
+                                    sent_or_done_chunks.add(int(chunk_idx))
+                            except Exception:
+                                pass
+
+                            # AFTER storing result: check if we should stop
                             if stop_requested and total_chunks > 1:
-                                if graceful_stop_active and wait_for_chunks:
-                                    # Wait for all chunks - continue processing
+                                if graceful_stop_active and (wait_for_chunks or _all_chunks_sent_or_done()):
+                                    # Wait for remaining chunks - continue processing
                                     print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {actual_num}...")
                                 else:
-                                    # Graceful stop but NOT wait_for_chunks: cancel remaining, save what we have
-                                    print(f"⏳ Graceful stop — saving {completed_chunks} completed chunk(s), cancelling remaining...")
-                                    chunk_executor.shutdown(wait=False, cancel_futures=True)
-                                    break  # Exit loop to save partial results
+                                    # WAIT_FOR_CHUNKS disabled and not all chunks were actually sent:
+                                    # cancel this chapter entirely (no partial output).
+                                    try:
+                                        chunk_executor.shutdown(wait=False, cancel_futures=True)
+                                    except Exception:
+                                        pass
+                                    _cancel_chapter_due_to_stop("stop requested before all chunks were sent")
                     except Exception as e:
                         chunk_idx = future_to_chunk[future]
                         # Don't print chunk error - will be printed at chapter level
                         raise
             
-            # Verify chunks - handle partial completion gracefully
+            # Verify chunks - handle partial completion
             is_partial_result = False
             if None in translated_chunks:
                 missing = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is None]
                 completed = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is not None]
-                
-                # If graceful stop was active and we have at least some chunks, that's expected
+
                 graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+
                 if graceful_stop_active and completed:
-                    print(f"⚠️ Chapter {actual_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
-                    # Filter out None values and continue with partial result
-                    translated_chunks = [c for c in translated_chunks if c is not None]
-                    is_partial_result = True
+                    # Only allow partial output when WAIT_FOR_CHUNKS is explicitly enabled.
+                    # When WAIT_FOR_CHUNKS is disabled, we cancel the whole chapter instead.
+                    if wait_for_chunks:
+                        print(f"⚠️ Chapter {actual_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
+                        translated_chunks = [c for c in translated_chunks if c is not None]
+                        is_partial_result = True
+                    else:
+                        _cancel_chapter_due_to_stop(f"missing chunks {missing} (WAIT_FOR_CHUNKS=0)")
                 else:
                     raise Exception(f"Failed to translate chunks: {missing}")
             
@@ -8813,14 +8921,151 @@ def main(log_callback=None, stop_callback=None):
                                 if check_stop():
                                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                                     wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                                    if graceful_stop_active and wait_for_chunks:
-                                        # Graceful stop: don't cancel glossary generation; just wait for it to finish.
+
+                                    def _glossary_all_chunks_submitted() -> bool:
+                                        """Best-effort check via GlossaryManager status file.
+
+                                        Allows graceful stop to "wait" even when WAIT_FOR_CHUNKS is disabled,
+                                        but only if all chunks were already submitted.
+                                        """
+                                        try:
+                                            import json as _json
+                                            import tempfile as _tempfile
+
+                                            stop_fp = os.environ.get('GLOSSARY_STOP_FILE') or os.path.join(_tempfile.gettempdir(), 'glossarion_glossary.stop')
+                                            status_fp = os.environ.get('GLOSSARY_STATUS_FILE') or f"{stop_fp}.status.json"
+                                            if not status_fp or not os.path.exists(status_fp):
+                                                return False
+                                            with open(status_fp, 'r', encoding='utf-8') as f:
+                                                st = _json.load(f)
+                                            if not isinstance(st, dict):
+                                                return False
+                                            # Prefer the "all_sent" flag written by GlossaryManager.
+                                            if st.get('all_sent') is True:
+                                                return True
+                                            # Backward compat fallback
+                                            if st.get('all_submitted') is True and st.get('all_sent') is None:
+                                                return True
+                                            total = int(st.get('total_chunks', 0) or 0)
+                                            sent = int(st.get('sent_chunks', 0) or 0)
+                                            return total > 0 and sent >= total
+                                        except Exception:
+                                            return False
+
+                                    should_wait = False
+                                    if graceful_stop_active:
+                                        if wait_for_chunks:
+                                            should_wait = True
+                                        else:
+                                            # WAIT_FOR_CHUNKS disabled: only wait if all chunks were already submitted.
+                                            should_wait = _glossary_all_chunks_submitted()
+
+                                    if should_wait:
                                         if not graceful_stop_notice_shown:
-                                            print("⏳ Graceful stop — waiting for glossary generation to finish...")
+                                            if wait_for_chunks:
+                                                print("⏳ Graceful stop — waiting for glossary generation to finish...")
+                                            else:
+                                                print("⏳ Graceful stop — waiting (all glossary chunks already submitted)...")
                                             graceful_stop_notice_shown = True
                                         continue
+
                                     print("📑 ❌ Glossary generation cancelled")
-                                    executor.shutdown(wait=False, cancel_futures=True)
+
+                                    # Escalate to FULL STOP for glossary cancellation:
+                                    # 1) Touch the shared stop file so the glossary subprocess stops starting new work.
+                                    try:
+                                        import tempfile as _tempfile
+                                        stop_fp = os.environ.get('GLOSSARY_STOP_FILE') or os.path.join(_tempfile.gettempdir(), 'glossarion_glossary.stop')
+                                        os.environ['GLOSSARY_STOP_FILE'] = stop_fp
+                                        with open(stop_fp, 'w', encoding='utf-8') as f:
+                                            f.write('stop')
+                                    except Exception:
+                                        pass
+
+                                    # 2) Hard-cancel HTTP sessions in THIS process (best-effort).
+                                    try:
+                                        import unified_api_client
+                                        if hasattr(unified_api_client, 'set_stop_flag'):
+                                            unified_api_client.set_stop_flag(True)
+                                        if hasattr(unified_api_client, 'global_stop_flag'):
+                                            unified_api_client.global_stop_flag = True
+                                        if hasattr(unified_api_client, 'UnifiedClient'):
+                                            unified_api_client.UnifiedClient._global_cancelled = True
+                                        if hasattr(unified_api_client, 'hard_cancel_all'):
+                                            unified_api_client.hard_cancel_all()
+                                    except Exception:
+                                        pass
+
+                                    # 3) Terminate glossary subprocess(es) if they are still running.
+                                    # ProcessPoolExecutor cancellation does NOT reliably kill a running worker.
+                                    try:
+                                        import psutil
+                                        wd_dir = os.environ.get('GLOSSARION_WATCHDOG_DIR')
+                                        if wd_dir and os.path.isdir(wd_dir):
+                                            import glob as _glob
+                                            import re as _re
+                                            for fp in _glob.glob(os.path.join(wd_dir, 'api_watchdog_*.json')):
+                                                try:
+                                                    base = os.path.basename(fp)
+                                                    m = _re.search(r"api_watchdog_(\d+)\.json$", base)
+                                                    if not m:
+                                                        continue
+                                                    pid = int(m.group(1))
+                                                    if pid == os.getpid():
+                                                        continue
+                                                    p = psutil.Process(pid)
+                                                    # Best-effort terminate, then kill if needed.
+                                                    try:
+                                                        p.terminate()
+                                                    except Exception:
+                                                        pass
+                                                except Exception:
+                                                    continue
+                                        # Give processes a brief moment to exit, then kill any remaining.
+                                        try:
+                                            time.sleep(0.2)
+                                        except Exception:
+                                            pass
+                                        if wd_dir and os.path.isdir(wd_dir):
+                                            import glob as _glob
+                                            import re as _re
+                                            for fp in _glob.glob(os.path.join(wd_dir, 'api_watchdog_*.json')):
+                                                try:
+                                                    base = os.path.basename(fp)
+                                                    m = _re.search(r"api_watchdog_(\d+)\.json$", base)
+                                                    if not m:
+                                                        continue
+                                                    pid = int(m.group(1))
+                                                    if pid == os.getpid():
+                                                        continue
+                                                    p = psutil.Process(pid)
+                                                    try:
+                                                        if p.is_running():
+                                                            p.kill()
+                                                    except Exception:
+                                                        pass
+                                                except Exception:
+                                                    continue
+                                    except Exception:
+                                        pass
+
+                                    # 4) Best-effort: clear watchdog files so the GUI progress bar doesn't stick.
+                                    try:
+                                        wd_dir = os.environ.get('GLOSSARION_WATCHDOG_DIR')
+                                        if wd_dir and os.path.isdir(wd_dir):
+                                            import glob as _glob
+                                            for fp in _glob.glob(os.path.join(wd_dir, 'api_watchdog_*.json*')):
+                                                try:
+                                                    os.remove(fp)
+                                                except Exception:
+                                                    pass
+                                    except Exception:
+                                        pass
+
+                                    try:
+                                        executor.shutdown(wait=False, cancel_futures=True)
+                                    except Exception:
+                                        pass
                                     return
                         
                         # Get any remaining logs from queue

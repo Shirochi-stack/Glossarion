@@ -4725,6 +4725,47 @@ Recent translations to summarize:
                 max_items = 5
                 subset = entries_sorted[:max_items]
 
+                def _compress_redundant_labels(labels: list[str]) -> list[str]:
+                    """Compress labels like:
+                    - "auto glossary (1/6)", "auto glossary (2/6)" -> "auto glossary (1/6), (2/6)"
+
+                    Only applies when the base text is identical and the suffix is a simple (n/N) marker.
+                    """
+                    try:
+                        from collections import OrderedDict
+                    except Exception:
+                        OrderedDict = dict  # type: ignore
+
+                    groups = OrderedDict()
+                    for raw in labels or []:
+                        try:
+                            s = ("" if raw is None else str(raw)).strip()
+                        except Exception:
+                            continue
+                        if not s:
+                            continue
+
+                        m = re.match(r"^(.*?)(\s*\(\s*\d+\s*/\s*\d+\s*\)\s*)$", s)
+                        if m:
+                            base = (m.group(1) or "").strip()
+                            suf = (m.group(2) or "").strip()
+                            if base:
+                                groups.setdefault(base, [])
+                                if suf and suf not in groups[base]:
+                                    groups[base].append(suf)
+                                continue
+
+                        # Fallback: keep the whole label as-is
+                        groups.setdefault(s, [])
+
+                    out = []
+                    for base, sufs in groups.items():
+                        if sufs:
+                            out.append(base + " " + ", ".join(sufs))
+                        else:
+                            out.append(base)
+                    return out
+
                 chapter_items = []
                 other_items = []
 
@@ -4752,7 +4793,9 @@ Recent translations to summarize:
 
                 if chapter_items:
                     active_bits.append("Chapter(s) " + ", ".join(chapter_items))
-                active_bits.extend(other_items)
+
+                if other_items:
+                    active_bits.extend(_compress_redundant_labels(other_items))
 
                 remaining = max(0, len(entries_sorted) - max_items)
                 if remaining:

@@ -49,6 +49,8 @@ _last_api_submission_time = 0
 _results_lock = threading.Lock()
 _file_write_lock = threading.Lock()
 _stop_requested = False
+# Register watchdog cleanup once per process (best-effort)
+_watchdog_atexit_registered = False
 BOOK_TITLE_RAW = None
 BOOK_TITLE_TRANSLATED = None
 BOOK_TITLE_VALUE = None  # Legacy support if needed, or remove? Keeping for safety but won't use.
@@ -249,6 +251,44 @@ def _get_stop_file_path():
     return os.environ.get("GLOSSARY_STOP_FILE") or os.path.join(tempfile.gettempdir(), "glossarion_glossary.stop")
 
 
+def _get_glossary_status_file_path() -> str:
+    """File path for cross-process status about chunk submission/completion.
+
+    This lets the parent process decide whether it's safe to "wait for chunks" even when
+    WAIT_FOR_CHUNKS is disabled.
+    """
+    try:
+        explicit = os.environ.get("GLOSSARY_STATUS_FILE")
+        if explicit:
+            return explicit
+    except Exception:
+        pass
+
+    # Default: colocate next to the stop file so both processes can find it deterministically.
+    try:
+        stop_fp = _get_stop_file_path()
+        if stop_fp:
+            return f"{stop_fp}.status.json"
+    except Exception:
+        pass
+
+    return os.path.join(tempfile.gettempdir(), "glossarion_glossary.status.json")
+
+
+def _write_glossary_status(payload: dict) -> None:
+    """Best-effort atomic write of glossary chunk status."""
+    try:
+        fp = _get_glossary_status_file_path()
+        os.makedirs(os.path.dirname(fp) or ".", exist_ok=True)
+        tmp = f"{fp}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, fp)
+    except Exception:
+        # Status is best-effort only.
+        pass
+
+
 def _clear_api_watchdog_state(*, remove_watchdog_file: bool = True) -> None:
     """Best-effort reset of unified_api_client watchdog state.
 
@@ -441,6 +481,26 @@ def _atomic_write_file(filepath, content, encoding='utf-8'):
 
 def save_glossary(output_dir, chapters, instructions, language="korean", log_callback=None):
     """Targeted glossary generator with true CSV format output and parallel processing"""
+
+    # If the user stops translation while glossary runs in a subprocess, we must ensure the
+    # per-process watchdog file doesn't stick around and keep the GUI progress bar "busy".
+    # We only clear on stop (not on normal completion).
+    global _watchdog_atexit_registered
+    if not _watchdog_atexit_registered:
+        try:
+            import atexit
+
+            def _cleanup_watchdog_on_exit():
+                try:
+                    if is_stop_requested():
+                        _clear_api_watchdog_state(remove_watchdog_file=True)
+                except Exception:
+                    pass
+
+            atexit.register(_cleanup_watchdog_on_exit)
+            _watchdog_atexit_registered = True
+        except Exception:
+            pass
     # Note: Don't redirect stdout here if log_callback is provided by subprocess worker
     # The worker already captures stdout and sends to queue
     # Only redirect if we're NOT in a subprocess (i.e., log_callback is a real GUI callback)
@@ -1495,6 +1555,13 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
     """
     
     print(f"📑 Using batch API mode with {api_batch_size} chunks per batch")
+
+    # Graceful stop semantics:
+    # - If GRACEFUL_STOP=1 and WAIT_FOR_CHUNKS=1: stop submitting *new* work, but do NOT cancel in-flight.
+    # - If WAIT_FOR_CHUNKS=0: we will only "wait for in-flight" if ALL chunks were already submitted.
+    #   If any chunk is still pending/not-submitted when stop is raised, escalate to full-stop.
+    graceful_stop = (os.getenv('GRACEFUL_STOP') == '1')
+    wait_for_chunks = (os.getenv('WAIT_FOR_CHUNKS') == '1')
     
     # Ensure we defer saving and heavy merging when processing chunks
     _prev_defer = os.getenv("GLOSSARY_DEFER_SAVE")
@@ -1544,6 +1611,84 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
     pending = list(chunks_to_process)
     next_pos = 1
 
+    # Track work in three stages:
+    # - executor_submitted: submitted to our ThreadPoolExecutor (NOT what the user means by "sent")
+    # - sent_chunks: requests that actually transitioned to in-flight (i.e., after api stagger/delay)
+    # - completed_chunks_local: futures that completed (success or failure)
+    executor_submitted = 0
+    completed_chunks_local = 0
+    sent_chunks = set()  # set[int] of chunk_pos that have actually been sent (in-flight)
+
+    def _status_snapshot(*, in_flight_count: int) -> dict:
+        total = int(total_chunks or 0)
+        pend = int(len(pending))
+        # "all_sent" means every chunk call has actually begun sending (post-delay) at least once.
+        all_sent = (total > 0 and len(sent_chunks) >= total)
+        # Keep legacy fields for compatibility/debugging, but note "submitted" here is executor-submitted.
+        all_submitted = (executor_submitted >= total and pend == 0)
+        return {
+            "pid": os.getpid(),
+            "ts": time.time(),
+            "total_chunks": total,
+            "executor_submitted": int(executor_submitted),
+            "submitted_chunks": int(executor_submitted),
+            "sent_chunks": int(len(sent_chunks)),
+            "all_sent": bool(all_sent),
+            "completed_chunks": int(completed_chunks_local),
+            "in_flight": int(in_flight_count),
+            "pending": pend,
+            "all_submitted": bool(all_submitted),
+            "graceful_stop": bool(graceful_stop),
+            "wait_for_chunks": bool(wait_for_chunks),
+            "stop_requested": bool(is_stop_requested()),
+        }
+
+    # Monitor watchdog entries to detect when requests actually transition to "in_flight" (sent).
+    # This matches the user's definition of "submitted" (after API delay/stagger).
+    _sent_monitor_stop = threading.Event()
+
+    def _sent_monitor():
+        try:
+            import unified_api_client as _uac
+        except Exception:
+            return
+        # Regex for the context we set in _extract_with_custom_prompt: "auto glossary (i/N)"
+        rx = re.compile(r"auto\s+glossary\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)", re.IGNORECASE)
+        while not _sent_monitor_stop.is_set():
+            try:
+                st = _uac.get_api_watchdog_state() if hasattr(_uac, 'get_api_watchdog_state') else {}
+                entries = st.get('in_flight_entries', []) if isinstance(st, dict) else []
+                if not isinstance(entries, list):
+                    entries = []
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    if e.get('status') != 'in_flight':
+                        continue
+                    ctx = e.get('context') or e.get('label') or ''
+                    m = rx.search(str(ctx))
+                    if not m:
+                        continue
+                    pos = int(m.group(1))
+                    tot = int(m.group(2))
+                    if tot == int(total_chunks or 0) and 1 <= pos <= tot:
+                        if pos not in sent_chunks:
+                            sent_chunks.add(pos)
+                # Update status file periodically
+                _write_glossary_status(_status_snapshot(in_flight_count=int(st.get('in_flight', 0) or 0) if isinstance(st, dict) else 0))
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+    try:
+        t_mon = threading.Thread(target=_sent_monitor, name="GlossarySentMonitor", daemon=True)
+        t_mon.start()
+    except Exception:
+        t_mon = None
+
+    # Initialize status file early
+    _write_glossary_status(_status_snapshot(in_flight_count=0))
+
     def _submit_one(executor, pos, chunk_idx, chunk_text, *, last_submission_time: float):
         if is_stop_requested():
             return None
@@ -1579,17 +1724,73 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
             if fut is False or fut is None:
                 break
             futures[fut] = chunk_idx
+            executor_submitted += 1
             next_pos += 1
             last_submission_time = time.time()
+            _write_glossary_status(_status_snapshot(in_flight_count=len(futures)))
+
+        escalated_full_stop = False
+
+        def _escalate_to_full_stop(reason: str) -> None:
+            nonlocal escalated_full_stop
+            if escalated_full_stop:
+                return
+            escalated_full_stop = True
+            try:
+                print(f"🛑 Escalating to FULL STOP (glossary batch): {reason}")
+            except Exception:
+                pass
+            # Disable graceful semantics locally so unified_api_client cancels quickly.
+            try:
+                os.environ['GRACEFUL_STOP'] = '0'
+                os.environ['WAIT_FOR_CHUNKS'] = '0'
+            except Exception:
+                pass
+            # Force unified_api_client cancellation if available.
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                if hasattr(unified_api_client, 'global_stop_flag'):
+                    unified_api_client.global_stop_flag = True
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = True
+            except Exception:
+                pass
 
         while futures:
-            # If stop requested, do not submit anything else; try to cancel not-yet-started work.
+            # On stop:
+            # - If not graceful: immediate stop (cancel queued work).
+            # - If graceful + WAIT_FOR_CHUNKS=1: stop submitting new but keep waiting for in-flight.
+            # - If graceful + WAIT_FOR_CHUNKS=0: ONLY keep waiting if all chunks were already submitted;
+            #   otherwise escalate to full stop.
             if is_stop_requested():
-                try:
-                    for fut in list(futures.keys()):
-                        fut.cancel()
-                except Exception:
+                # IMPORTANT: "all sent" means every chunk call has transitioned to in-flight (post delay/stagger).
+                all_sent_now = (int(total_chunks or 0) > 0 and len(sent_chunks) >= int(total_chunks or 0))
+                if graceful_stop and (not wait_for_chunks) and (not all_sent_now):
+                    _escalate_to_full_stop("stop requested before all chunks were sent to API")
+
+                if (not graceful_stop) or escalated_full_stop:
+                    try:
+                        for fut in list(futures.keys()):
+                            fut.cancel()
+                    except Exception:
+                        pass
+                    # Do not keep waiting if we're full-stopping.
+                    break
+
+                # Graceful stop: keep waiting only if WAIT_FOR_CHUNKS=1 OR all chunks already sent.
+                if graceful_stop and (wait_for_chunks or all_sent_now):
+                    # no-op: just continue waiting for done futures
                     pass
+                else:
+                    # Graceful stop without waiting semantics -> treat as immediate stop.
+                    try:
+                        for fut in list(futures.keys()):
+                            fut.cancel()
+                    except Exception:
+                        pass
+                    break
 
             done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
             for fut in done:
@@ -1624,6 +1825,7 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                         print(f"⚠️ Incremental write failed: {e2}")
 
                     completed_chunks += 1
+                    completed_chunks_local += 1
                     progress_percent = (completed_chunks / total_chunks) * 100 if total_chunks else 100
                     print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
                     print(f"📑 Chunk {chunk_idx} completed and aggregated")
@@ -1642,11 +1844,22 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                         pending.clear()
                         break
                     futures[fut2] = next_chunk_idx
+                    executor_submitted += 1
                     next_pos += 1
                     last_submission_time = time.time()
+                    _write_glossary_status(_status_snapshot(in_flight_count=len(futures)))
+
+                # Update status after processing completions
+                _write_glossary_status(_status_snapshot(in_flight_count=len(futures)))
     
     # CHANGE: Return CSV lines instead of dictionary
     
+    # Stop sent-monitor thread
+    try:
+        _sent_monitor_stop.set()
+    except Exception:
+        pass
+
     # Restore per-chunk filter disabling envs
     if _prev_filtered is None:
         os.environ.pop("_CHUNK_ALREADY_FILTERED", None)
@@ -1664,6 +1877,13 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
             del os.environ["GLOSSARY_DEFER_SAVE"]
     else:
         os.environ["GLOSSARY_DEFER_SAVE"] = _prev_defer
+
+    # If we are exiting due to a stop request, clear watchdog state/file so GUI doesn't stay "busy".
+    if is_stop_requested():
+        try:
+            _clear_api_watchdog_state(remove_watchdog_file=True)
+        except Exception:
+            pass
     
     return all_csv_lines
 
