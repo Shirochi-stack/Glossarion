@@ -9945,10 +9945,68 @@ Important rules:
                if getattr(self, 'qa_spinner', None):
                    self.qa_spinner.stop()
 
+    def _reset_api_watchdog_progress(self, *, clear_stale_external_files: bool = True) -> None:
+        """Reset the API watchdog (and the UI bar) immediately.
+
+        This is used when the user clicks Stop so the progress bar doesn't remain stuck
+        due to stale watchdog counts/files.
+        """
+        # 1) Reset watchdog counters in unified_api_client (best effort)
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, '_api_watchdog_reset'):
+                unified_api_client._api_watchdog_reset()
+        except Exception:
+            pass
+
+        # 2) Clear stale cross-process watchdog files so aggregation can't keep the bar "busy"
+        if clear_stale_external_files:
+            try:
+                watchdog_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
+                if watchdog_dir and os.path.isdir(watchdog_dir):
+                    import glob
+                    try:
+                        import psutil
+                        pid_exists = psutil.pid_exists
+                    except Exception:
+                        psutil = None
+                        pid_exists = None
+
+                    for fp in glob.glob(os.path.join(watchdog_dir, "api_watchdog_*.json")):
+                        try:
+                            base = os.path.basename(fp)
+                            m = re.search(r"api_watchdog_(\d+)\.json$", base)
+                            if m:
+                                pid = int(m.group(1))
+                                # Always clear current pid; also clear stale pids.
+                                # If psutil isn't available, clear all watchdog files (best effort).
+                                if pid == os.getpid() or (pid_exists and not pid_exists(pid)) or (pid_exists is None):
+                                    os.remove(fp)
+                            else:
+                                # Unexpected name format - best effort cleanup
+                                os.remove(fp)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+        # 3) Reset the UI bar immediately (timer will keep it consistent going forward)
+        try:
+            if hasattr(self, 'api_watchdog_bar') and self.api_watchdog_bar:
+                self.api_watchdog_bar.setRange(0, 1)
+                self.api_watchdog_bar.setValue(0)
+                self.api_watchdog_bar.setFormat("API idle")
+                self.api_watchdog_bar.setToolTip("No API calls in flight")
+        except Exception:
+            pass
+
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
         
+        # Reset the API watchdog bar immediately on any Stop click (graceful or force).
+        self._reset_api_watchdog_progress(clear_stale_external_files=True)
+
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
         
