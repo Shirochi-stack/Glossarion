@@ -4180,7 +4180,52 @@ class UnifiedClient:
                 tls.cohere_client = self.cohere_client
         
         # Log retry feature support
-        logger.info(f"✅ Initialized {self.client_type} client for model: {self.model}")
+        # In multi-key mode, self.model may still be the GUI-selected model until a key is assigned.
+        # Prefer logging the effective per-key model to avoid misleading output.
+        log_model = self.model
+        try:
+            if getattr(self, '_multi_key_mode', False):
+                # Prefer thread-local model (most accurate)
+                try:
+                    tls = self._get_thread_local_client()
+                    if getattr(tls, 'model', None):
+                        log_model = tls.model
+                except Exception:
+                    pass
+
+                # Next, prefer the currently selected key index
+                try:
+                    pool = getattr(self.__class__, '_api_key_pool', None)
+                    idx = getattr(self, 'current_key_index', None)
+                    if pool is not None and idx is not None and 0 <= int(idx) < len(getattr(pool, 'keys', [])):
+                        km = getattr(pool.keys[int(idx)], 'model', None)
+                        if km:
+                            log_model = km
+                except Exception:
+                    pass
+
+                # Finally, if all enabled keys share one model, log that
+                try:
+                    pool = getattr(self.__class__, '_api_key_pool', None)
+                    keys = list(getattr(pool, 'keys', []) or []) if pool is not None else []
+                    models = [getattr(k, 'model', None) for k in keys if getattr(k, 'enabled', True)]
+                    uniq = sorted({m for m in models if m})
+                    if len(uniq) == 1:
+                        log_model = uniq[0]
+                except Exception:
+                    pass
+        except Exception:
+            log_model = self.model
+
+        try:
+            if getattr(self, '_multi_key_mode', False):
+                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model} (multi-key)")
+            else:
+                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
+        except Exception:
+            # Last-resort: never fail client init due to logging
+            pass
+
         logger.debug("✅ GUI retry features supported: truncation detection, timeout handling, duplicate detection")
     
     def _check_for_refusal_patterns(self, content: str) -> bool:
