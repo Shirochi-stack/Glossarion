@@ -6847,11 +6847,25 @@ class UnifiedClient:
         
         # Generate request hash for the filename (to make it unique)
         request_hash = self._get_request_hash(messages)
-        
+
+        # Sanitize filename to avoid accidental path separators (e.g. "auto glossary (3/6)")
+        # which would otherwise create nested directories and fail to save.
+        try:
+            safe_filename = os.path.basename(str(filename or "payload.json"))
+        except Exception:
+            safe_filename = "payload.json"
+        try:
+            # Replace invalid Windows filename characters + both path separators
+            safe_filename = re.sub(r'[<>:"/\\|?*\n\r\t]', '_', safe_filename)
+        except Exception:
+            safe_filename = safe_filename.replace('/', '_').replace('\\', '_')
+
         # Add hash and retry info to filename
-        base_name, ext = os.path.splitext(filename)
+        base_name, ext = os.path.splitext(safe_filename)
+        if not ext:
+            ext = ".json"
         timestamp = datetime.now().strftime("%H%M%S")
-        
+
         # Include retry reason in filename if provided
         if retry_reason:
             # Sanitize retry reason for filename
@@ -6859,9 +6873,15 @@ class UnifiedClient:
             unique_filename = f"{base_name}_{timestamp}_{safe_reason}_{request_hash[:6]}{ext}"
         else:
             unique_filename = f"{base_name}_{timestamp}_{request_hash[:6]}{ext}"
-        
+
+        # Belt-and-suspenders: ensure directory exists even if caller bypassed _get_thread_directory
+        try:
+            os.makedirs(thread_dir, exist_ok=True)
+        except Exception:
+            pass
+
         filepath = os.path.join(thread_dir, unique_filename)
-        
+
         try:
             # Thread-safe file writing
             with self._file_write_lock:

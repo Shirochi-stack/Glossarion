@@ -619,7 +619,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
     max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
     max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
-    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
+
+    # Batch sizing:
+    # - GUI uses BATCH_SIZE for concurrency/batching.
+    # - Keep GLOSSARY_BATCH_SIZE for backward compatibility, but default to GUI's value.
+    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", os.getenv("BATCH_SIZE", "50")))
     strip_honorifics = os.getenv("GLOSSARY_STRIP_HONORIFICS", "1") == "1"
     fuzzy_threshold = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
     max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "0"))
@@ -668,7 +672,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Check if parallel extraction is enabled for automatic glossary
     extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
     batch_translation = os.getenv("BATCH_TRANSLATION", "0") == "1"
-    api_batch_size = int(os.getenv("BATCH_SIZE", "5"))
+    # Prefer GUI's batch size; fall back to glossary batch size if needed.
+    api_batch_size = int(os.getenv("BATCH_SIZE", os.getenv("GLOSSARY_BATCH_SIZE", "5")))
     batching_mode = os.getenv("BATCHING_MODE", "direct")
     batch_group_size = int(os.getenv("BATCH_GROUP_SIZE", "3"))
     # Backward compatibility
@@ -1482,7 +1487,12 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                               min_frequency, max_names, max_titles, 
                               output_dir, strip_honorifics, fuzzy_threshold, 
                               filter_mode, api_batch_size, extraction_workers, max_sentences=200):
-    """Process chunks using batch API calls for AI extraction with thread delay"""
+    """Process chunks using batch API calls for AI extraction with thread delay.
+
+    IMPORTANT: when a stop is requested, we must stop *submitting* new API work immediately.
+    Any already in-flight requests may finish (graceful stop) or be aborted by unified_api_client
+    cancellation (immediate stop).
+    """
     
     print(f"📑 Using batch API mode with {api_batch_size} chunks per batch")
     
@@ -1506,84 +1516,134 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
     os.environ["_CHUNK_ALREADY_FILTERED"] = "1"
     os.environ["GLOSSARY_FORCE_DISABLE_SMART_FILTER"] = "1"
 
-    # Process all chunks in parallel (no batching)
-    # Use extraction_workers setting (already passed as parameter)
-    max_workers = min(extraction_workers, len(chunks_to_process))
-    print(f"📑 Processing all {len(chunks_to_process)} chunks with {max_workers} parallel workers...")
-    
-    # Use ThreadPoolExecutor for all chunks at once
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        last_submission_time = 0
-        
-        for pos, (chunk_idx, chunk_text) in enumerate(chunks_to_process, start=1):
-            if is_stop_requested():
-                break
-            
-            # Apply thread submission delay
-            if thread_delay > 0 and last_submission_time > 0:
-                time_since_last = time.time() - last_submission_time
-                if time_since_last < thread_delay:
-                    sleep_time = thread_delay - time_since_last
-                    print(f"🧵 Thread delay: {sleep_time:.1f}s for chunk {chunk_idx}")
-                    time.sleep(sleep_time)
-            
-            future = executor.submit(
-                _extract_with_custom_prompt,
-                custom_prompt, chunk_text, language,
-                min_frequency, max_names, max_titles,
-                None, output_dir, strip_honorifics,
-                fuzzy_threshold, filter_mode, max_sentences,
-                log_callback=None,
-                chunk_pos=pos,
-                total_chunks=total_chunks,
-            )
-            futures[future] = chunk_idx
-            last_submission_time = time.time()
-        
-        # Collect results
-        for future in as_completed(futures):
-            if is_stop_requested():
-                break
-            
-            try:
-                chunk_glossary = future.result()
-                print(f"📑 DEBUG: Chunk {futures[future]} returned type={type(chunk_glossary)}, len={len(chunk_glossary)}")
+    # Concurrency: follow GUI batch size (BATCH_SIZE).
+    # NOTE: EXTRACTION_WORKERS is used for *chapter extraction*/CPU work; it should not cap API concurrency.
+    # If you want to throttle API concurrency, use BATCH_SIZE (and/or SEND_INTERVAL_SECONDS).
+    try:
+        api_batch_size = int(api_batch_size)
+    except Exception:
+        api_batch_size = 1
+    api_batch_size = max(1, api_batch_size)
 
-                # Normalize to CSV lines (without header)
-                chunk_lines = []
-                if isinstance(chunk_glossary, dict):
-                    for raw_name, translated_name in chunk_glossary.items():
-                        entry_type = "character" if _has_honorific(raw_name) else "term"
-                        chunk_lines.append(f"{entry_type},{raw_name},{translated_name}")
-                elif isinstance(chunk_glossary, list):
-                    for line in chunk_glossary:
-                        if line and not line.startswith('type,'):
-                            chunk_lines.append(line)
-                
-                # Aggregate for end-of-run
-                all_csv_lines.extend(chunk_lines)
-                
-                # RE-ENABLED: Do incremental writes in batch mode
-                # Since we have proper file locking and unique chunk filenames, this is safe
+    max_workers = min(api_batch_size, len(chunks_to_process))
+    max_workers = max(1, max_workers)
+
+    # Useful debug when users think batching isn't applying
+    try:
+        send_interval = os.getenv("SEND_INTERVAL_SECONDS", "")
+        thread_delay_env = os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "")
+        print(f"📑 DEBUG: BATCH_SIZE={api_batch_size}, EXTRACTION_WORKERS={extraction_workers}, SEND_INTERVAL_SECONDS={send_interval}, THREAD_SUBMISSION_DELAY_SECONDS={thread_delay_env}")
+    except Exception:
+        pass
+
+    print(f"📑 Processing {len(chunks_to_process)} chunks with up to {max_workers} concurrent API calls...")
+
+    # Submit incrementally so Stop can prevent queued work from ever starting.
+    from concurrent.futures import wait, FIRST_COMPLETED
+
+    pending = list(chunks_to_process)
+    next_pos = 1
+
+    def _submit_one(executor, pos, chunk_idx, chunk_text, *, last_submission_time: float):
+        if is_stop_requested():
+            return None
+
+        # Apply thread submission delay
+        if thread_delay > 0 and last_submission_time > 0:
+            time_since_last = time.time() - last_submission_time
+            if time_since_last < thread_delay:
+                sleep_time = thread_delay - time_since_last
+                print(f"🧵 Thread delay: {sleep_time:.1f}s for chunk {chunk_idx}")
+                time.sleep(sleep_time)
+
+        fut = executor.submit(
+            _extract_with_custom_prompt,
+            custom_prompt, chunk_text, language,
+            min_frequency, max_names, max_titles,
+            None, output_dir, strip_honorifics,
+            fuzzy_threshold, filter_mode, max_sentences,
+            log_callback=None,
+            chunk_pos=pos,
+            total_chunks=total_chunks,
+        )
+        return fut
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}  # future -> chunk_idx
+        last_submission_time = 0.0
+
+        # Prime the worker pool
+        while pending and len(futures) < max_workers and not is_stop_requested():
+            chunk_idx, chunk_text = pending.pop(0)
+            fut = _submit_one(executor, next_pos, chunk_idx, chunk_text, last_submission_time=last_submission_time)
+            if fut is False or fut is None:
+                break
+            futures[fut] = chunk_idx
+            next_pos += 1
+            last_submission_time = time.time()
+
+        while futures:
+            # If stop requested, do not submit anything else; try to cancel not-yet-started work.
+            if is_stop_requested():
                 try:
-                    _incremental_update_glossary(output_dir, futures[future], chunk_lines, strip_honorifics, language, filter_mode)
-                    print(f"📑 Incremental write: chunk {futures[future]} (+{len(chunk_lines)} entries)")
-                except Exception as e2:
-                    print(f"⚠️ Incremental write failed: {e2}")
-                
-                completed_chunks += 1
-                
-                # Print progress for GUI
-                progress_percent = (completed_chunks / total_chunks) * 100
-                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
-                print(f"📑 Chunk {futures[future]} completed and aggregated")
-                
-            except Exception as e:
-                print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
-                completed_chunks += 1
-                progress_percent = (completed_chunks / total_chunks) * 100
-                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+                    for fut in list(futures.keys()):
+                        fut.cancel()
+                except Exception:
+                    pass
+
+            done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+            for fut in done:
+                chunk_idx = futures.pop(fut, None)
+                if chunk_idx is None:
+                    continue
+
+                # Collect result (even if stop was requested; it may have completed before cancellation)
+                try:
+                    chunk_glossary = fut.result()
+                    print(f"📑 DEBUG: Chunk {chunk_idx} returned type={type(chunk_glossary)}, len={len(chunk_glossary)}")
+
+                    # Normalize to CSV lines (without header)
+                    chunk_lines = []
+                    if isinstance(chunk_glossary, dict):
+                        for raw_name, translated_name in chunk_glossary.items():
+                            entry_type = "character" if _has_honorific(raw_name) else "term"
+                            chunk_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                    elif isinstance(chunk_glossary, list):
+                        for line in chunk_glossary:
+                            if line and not line.startswith('type,'):
+                                chunk_lines.append(line)
+
+                    # Aggregate for end-of-run
+                    all_csv_lines.extend(chunk_lines)
+
+                    # Incremental writes (best-effort)
+                    try:
+                        _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode)
+                        print(f"📑 Incremental write: chunk {chunk_idx} (+{len(chunk_lines)} entries)")
+                    except Exception as e2:
+                        print(f"⚠️ Incremental write failed: {e2}")
+
+                    completed_chunks += 1
+                    progress_percent = (completed_chunks / total_chunks) * 100 if total_chunks else 100
+                    print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+                    print(f"📑 Chunk {chunk_idx} completed and aggregated")
+
+                except Exception as e:
+                    print(f"⚠️ API call for chunk {chunk_idx} failed: {e}")
+                    completed_chunks += 1
+                    progress_percent = (completed_chunks / total_chunks) * 100 if total_chunks else 100
+                    print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+
+                # Submit next work only if not stopping
+                while pending and len(futures) < max_workers and not is_stop_requested():
+                    next_chunk_idx, next_chunk_text = pending.pop(0)
+                    fut2 = _submit_one(executor, next_pos, next_chunk_idx, next_chunk_text, last_submission_time=last_submission_time)
+                    if fut2 is False or fut2 is None:
+                        pending.clear()
+                        break
+                    futures[fut2] = next_chunk_idx
+                    next_pos += 1
+                    last_submission_time = time.time()
     
     # CHANGE: Return CSV lines instead of dictionary
     

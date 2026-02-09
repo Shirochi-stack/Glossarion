@@ -8763,7 +8763,11 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
                         'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
                         'GLOSSARY_DUPLICATE_ALGORITHM', 'GLOSSARY_INCLUDE_GENDER_CONTEXT', 'GLOSSARY_CONTEXT_WINDOW',
-                        'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH'
+                        'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH',
+                        # Match GUI batching settings
+                        'BATCH_TRANSLATION', 'BATCH_SIZE', 'BATCHING_MODE', 'BATCH_GROUP_SIZE',
+                        # Keep submission staggering consistent with GUI
+                        'THREAD_SUBMISSION_DELAY_SECONDS',
                     ]
                     
                     for var in important_vars:
