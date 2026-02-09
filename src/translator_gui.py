@@ -4673,10 +4673,56 @@ Recent translations to summarize:
 
             # Build compact active-call labels (up to 5) for the progress bar text itself
             in_flight_entries = [e for e in entries if e.get("status") in (None, "in_flight")]
+
+            def _safe_int(v, default=None):
+                try:
+                    if v is None:
+                        return default
+                    if isinstance(v, bool):
+                        return int(v)
+                    if isinstance(v, (int, float)):
+                        return int(v)
+                    s = str(v).strip()
+                    if not s:
+                        return default
+                    return int(float(s))
+                except Exception:
+                    return default
+
+            def _entry_sort_key(e: dict):
+                """Prefer numeric sort by Chapter/Chunk when present; otherwise sort auto-glossary by (pos/total)."""
+                try:
+                    chap = e.get("chapter")
+                    chunk = e.get("chunk")
+                    total = e.get("total_chunks")
+                    start = e.get("start_ts", 0) or 0
+
+                    chap_i = _safe_int(chap, default=None)
+                    chunk_i = _safe_int(chunk, default=None)
+                    total_i = _safe_int(total, default=None)
+
+                    if chap_i is not None:
+                        # Chapters first, then chunk order (if chunked)
+                        return (0, chap_i, chunk_i if chunk_i is not None else 0, total_i if total_i is not None else 0, float(start))
+
+                    # Auto glossary: "auto glossary (3/6)"
+                    ctx = (e.get("context") or e.get("label") or "")
+                    m = re.search(r"auto\s*glossary\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)", str(ctx), flags=re.IGNORECASE)
+                    if m:
+                        pos = _safe_int(m.group(1), default=0) or 0
+                        tot = _safe_int(m.group(2), default=0) or 0
+                        return (1, tot, pos, float(start))
+
+                    # Fallback: preserve time order
+                    return (2, float(start))
+                except Exception:
+                    return (9, 0)
+
             if in_flight_entries:
                 try:
-                    entries_sorted = sorted(in_flight_entries, key=lambda e: e.get("start_ts", 0))
+                    entries_sorted = sorted(in_flight_entries, key=_entry_sort_key)
                 except Exception:
+                    # Last resort: keep whatever order we got
                     entries_sorted = in_flight_entries
             else:
                 entries_sorted = []
@@ -4751,7 +4797,7 @@ Recent translations to summarize:
                             suf = (m.group(2) or "").strip()
                             if base:
                                 groups.setdefault(base, [])
-                                if suf and suf not in groups[base]:
+                                if suf:
                                     groups[base].append(suf)
                                 continue
 
@@ -4763,20 +4809,30 @@ Recent translations to summarize:
                         if sufs:
                             # Prefer compact grouping: "X (1/2, 2/2)" instead of "X (1/2), (2/2)"
                             try:
-                                inner = []
+                                parsed = []
+                                raw_sufs = []
                                 ok = True
                                 for s in sufs:
-                                    m2 = re.match(r"^\(\s*(\d+\s*/\s*\d+)\s*\)$", str(s).strip())
+                                    ss = str(s).strip()
+                                    raw_sufs.append(ss)
+                                    m2 = re.match(r"^\(\s*(\d+)\s*/\s*(\d+)\s*\)$", ss)
                                     if not m2:
                                         ok = False
                                         break
-                                    inner.append(m2.group(1).replace(" ", ""))
-                                if ok and inner:
+                                    n = int(m2.group(1))
+                                    d = int(m2.group(2))
+                                    parsed.append((n, d))
+
+                                if ok and parsed:
+                                    # Dedupe and sort numerically
+                                    parsed = sorted(set(parsed), key=lambda t: (t[1], t[0]))
+                                    inner = [f"{n}/{d}" for (n, d) in parsed]
                                     out.append(base + " (" + ", ".join(inner) + ")")
                                 else:
-                                    out.append(base + " " + ", ".join(sufs))
+                                    # Fallback: still try to keep deterministic order
+                                    out.append(base + " " + ", ".join(raw_sufs))
                             except Exception:
-                                out.append(base + " " + ", ".join(sufs))
+                                out.append(base + " " + ", ".join([str(s).strip() for s in sufs]))
                         else:
                             out.append(base)
                     return out
