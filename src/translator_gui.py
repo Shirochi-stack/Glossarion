@@ -4761,7 +4761,22 @@ Recent translations to summarize:
                     out = []
                     for base, sufs in groups.items():
                         if sufs:
-                            out.append(base + " " + ", ".join(sufs))
+                            # Prefer compact grouping: "X (1/2, 2/2)" instead of "X (1/2), (2/2)"
+                            try:
+                                inner = []
+                                ok = True
+                                for s in sufs:
+                                    m2 = re.match(r"^\(\s*(\d+\s*/\s*\d+)\s*\)$", str(s).strip())
+                                    if not m2:
+                                        ok = False
+                                        break
+                                    inner.append(m2.group(1).replace(" ", ""))
+                                if ok and inner:
+                                    out.append(base + " (" + ", ".join(inner) + ")")
+                                else:
+                                    out.append(base + " " + ", ".join(sufs))
+                            except Exception:
+                                out.append(base + " " + ", ".join(sufs))
                         else:
                             out.append(base)
                     return out
@@ -4792,7 +4807,7 @@ Recent translations to summarize:
                         continue
 
                 if chapter_items:
-                    active_bits.append("Chapter(s) " + ", ".join(chapter_items))
+                    active_bits.append("Chapter(s) " + ", ".join(_compress_redundant_labels(chapter_items)))
 
                 if other_items:
                     active_bits.extend(_compress_redundant_labels(other_items))
