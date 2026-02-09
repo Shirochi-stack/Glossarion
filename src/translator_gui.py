@@ -10018,9 +10018,6 @@ Important rules:
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
         
-        # Reset the API watchdog bar immediately on any Stop click (graceful or force).
-        self._reset_api_watchdog_progress(clear_stale_external_files=True)
-
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
         
@@ -10049,6 +10046,14 @@ Important rules:
             # Ensure WAIT_FOR_CHUNKS is disabled when forcing stop
             os.environ['WAIT_FOR_CHUNKS'] = '0'
             self._stop_click_times = []  # Reset click counter
+
+        # Only on FULL stop (non-graceful): clear watchdog state/files so the bar can't stick "busy".
+        # For graceful stop we keep watchdog files intact so the UI can continue tracking in-flight calls.
+        if not graceful_stop:
+            try:
+                self._reset_api_watchdog_progress(clear_stale_external_files=True)
+            except Exception:
+                pass
         
         # During graceful stop, keep button enabled to allow triple-click force stop
         # Otherwise disable it immediately
