@@ -249,6 +249,41 @@ def _get_stop_file_path():
     return os.environ.get("GLOSSARY_STOP_FILE") or os.path.join(tempfile.gettempdir(), "glossarion_glossary.stop")
 
 
+def _clear_api_watchdog_state(*, remove_watchdog_file: bool = True) -> None:
+    """Best-effort reset of unified_api_client watchdog state.
+
+    GlossaryManager often runs in a separate process; if it exits mid-stream or is force-stopped,
+    its watchdog JSON file can keep the GUI progress bar "busy" until manually cleared.
+    """
+    # Reset in-memory counters
+    try:
+        import unified_api_client
+        if hasattr(unified_api_client, '_api_watchdog_reset'):
+            unified_api_client._api_watchdog_reset()
+    except Exception:
+        pass
+
+    # Remove the per-process watchdog file (if enabled)
+    if remove_watchdog_file:
+        try:
+            wd_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
+            if wd_dir and os.path.isdir(wd_dir):
+                fp = os.path.join(wd_dir, f"api_watchdog_{os.getpid()}.json")
+                tmp = f"{fp}.tmp"
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                try:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 def set_stop_flag(value: bool):
     """Set the module-level stop flag and propagate to shared channels."""
     global _stop_requested
@@ -256,6 +291,11 @@ def set_stop_flag(value: bool):
 
     # Mirror to environment for other components
     os.environ["TRANSLATION_CANCELLED"] = "1" if value else "0"
+
+    # If we're stopping, clear watchdog immediately so the GUI bar doesn't stick.
+    # (If graceful-stop semantics are needed, the caller should avoid setting stop until ready.)
+    if value:
+        _clear_api_watchdog_state(remove_watchdog_file=True)
 
     # Touch/remove stop file for cross-process signalling
     stop_path = _get_stop_file_path()
@@ -460,6 +500,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print(f"⚠️ Could not ensure output directory exists: {output_dir} ({_e})")
     if is_stop_requested():
         print("📁 ❌ Glossary generation stopped by user")
+        _clear_api_watchdog_state(remove_watchdog_file=True)
         return {}
         
     # CLEAR incremental history UNCONDITIONALLY at the start of any run
@@ -516,6 +557,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Check stop flag before processing
     if is_stop_requested():
         print("📁 ❌ Glossary generation stopped by user")
+        _clear_api_watchdog_state(remove_watchdog_file=True)
         return {}
     
     # Check if automatic glossary generation is enabled
@@ -615,6 +657,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Check stop before processing chapters
     if is_stop_requested():
         print("📑 ❌ Glossary generation stopped by user")
+        _clear_api_watchdog_state(remove_watchdog_file=True)
         return {}
     
     # Get chapter split threshold, toggle, and filter mode

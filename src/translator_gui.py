@@ -8752,8 +8752,10 @@ Important rules:
                         client, messages, image_base64, temperature, max_tokens
                     )
                     
-                    # Check if stopped after API call
-                    if self.stop_requested:
+                    # If the user requested stop *after* this API call returned:
+                    # - Immediate stop: mark cancelled and exit
+                    # - Graceful stop: keep and process this response, then stop before the next image
+                    if self.stop_requested and not (bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')):
                         self.append_log("⏹️ Glossary extraction stopped after API call")
                         self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
                         return False
@@ -9150,7 +9152,12 @@ Important rules:
             self.append_log(f"      ⚠️ Could not save intermediate glossary: {e}")
 
     def _call_api_with_interrupt(self, client, messages, image_base64, temperature, max_tokens):
-        """Make API call with interrupt support and thread safety"""
+        """Make API call with interrupt support and thread safety.
+
+        IMPORTANT:
+        - If graceful stop is active, we must NOT cancel an in-flight API call.
+          We simply stop scheduling new work elsewhere.
+        """
         import threading
         import queue
         from unified_api_client import UnifiedClientError
@@ -9171,10 +9178,13 @@ Important rules:
         # Check for stop every 0.5 seconds
         while api_thread.is_alive():
             if self.stop_requested:
-                # Cancel the operation
-                if hasattr(client, 'cancel_current_operation'):
-                    client.cancel_current_operation()
-                raise UnifiedClientError("Glossary extraction stopped by user")
+                graceful = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
+                if not graceful:
+                    # Immediate stop: cancel the operation
+                    if hasattr(client, 'cancel_current_operation'):
+                        client.cancel_current_operation()
+                    raise UnifiedClientError("Glossary extraction stopped by user")
+                # Graceful stop: do NOT cancel; just keep waiting for the API thread to finish.
             
             try:
                 status, result = result_queue.get(timeout=0.5)
@@ -9385,8 +9395,25 @@ Important rules:
                 
                 # Enhanced stop callback that checks both flags
                 def enhanced_stop_callback():
+                    """Stop callback for glossary extraction.
+
+                    Immediate stop: abort quickly.
+                    Graceful stop: do NOT abort an in-flight API call; stop only once in-flight is idle.
+                    """
                     # Check GUI stop flag
                     if self.stop_requested:
+                        graceful = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
+                        if graceful:
+                            # If any API calls are currently in flight, keep going so they can finish.
+                            try:
+                                import unified_api_client
+                                st = unified_api_client.get_api_watchdog_state() or {}
+                                if int(st.get('in_flight', 0) or 0) > 0:
+                                    return False
+                            except Exception:
+                                return False
+                            # No in-flight calls: safe to stop before starting a new one.
+                            return True
                         return True
                         
                     # Also check if the glossary extraction module has its own stop flag
@@ -9415,8 +9442,10 @@ Important rules:
                     self.append_log(f"❌ Error extracting glossary from {os.path.basename(file_path)}: {e}")
                     return False
                 
-                # Check if stopped
-                if self.stop_requested:
+                # If stopped:
+                # - Immediate stop: treat as cancelled
+                # - Graceful stop: allow partial output detection below
+                if self.stop_requested and not (bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')):
                     self.append_log("⏹️ Glossary extraction was stopped")
                     return False
                 

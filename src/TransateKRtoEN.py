@@ -8789,6 +8789,7 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Poll for completion and stream logs in real-time
                         poll_count = 0
+                        graceful_stop_notice_shown = False
                         while not future.done():
                             poll_count += 1
                             
@@ -8806,6 +8807,14 @@ def main(log_callback=None, stop_callback=None):
                             # Check for stop every 100 polls
                             if poll_count % 100 == 0:
                                 if check_stop():
+                                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                                    if graceful_stop_active and wait_for_chunks:
+                                        # Graceful stop: don't cancel glossary generation; just wait for it to finish.
+                                        if not graceful_stop_notice_shown:
+                                            print("⏳ Graceful stop — waiting for glossary generation to finish...")
+                                            graceful_stop_notice_shown = True
+                                        continue
                                     print("📑 ❌ Glossary generation cancelled")
                                     executor.shutdown(wait=False, cancel_futures=True)
                                     return
@@ -8833,6 +8842,16 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"📑 ❌ Error retrieving glossary result: {e}")
                     
                     print("✅ Automatic glossary generation COMPLETED")
+                    
+                    # If the user requested graceful stop (wait_for_chunks), stop here after glossary is done.
+                    try:
+                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                        if graceful_stop_active and wait_for_chunks and check_stop():
+                            print("✅ Glossary generation finished. Stopping as requested (wait for chunks).")
+                            return
+                    except Exception:
+                        pass
                     
                     # Copy glossary extension if configured (after auto-glossary generation)
                     if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
