@@ -915,7 +915,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             os.environ["_CHUNK_ALREADY_FILTERED"] = "1"
             os.environ["GLOSSARY_FORCE_DISABLE_SMART_FILTER"] = "1"
             try:
-                for chunk_idx, chunk_text in chunks_to_process:
+                for pos, (chunk_idx, chunk_text) in enumerate(chunks_to_process, start=1):
                     if is_stop_requested():
                         break
                     
@@ -926,7 +926,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                             custom_prompt, chunk_text, language, 
                             min_frequency, max_names, max_titles, 
                             None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback
+                            strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback,
+                            chunk_pos=pos,
+                            total_chunks=len(chunks_to_process),
                         )
                     else:
                         # Pattern fallback disabled
@@ -1471,7 +1473,7 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
         futures = {}
         last_submission_time = 0
         
-        for chunk_idx, chunk_text in chunks_to_process:
+        for pos, (chunk_idx, chunk_text) in enumerate(chunks_to_process, start=1):
             if is_stop_requested():
                 break
             
@@ -1488,7 +1490,10 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                 custom_prompt, chunk_text, language,
                 min_frequency, max_names, max_titles,
                 None, output_dir, strip_honorifics,
-                fuzzy_threshold, filter_mode, max_sentences
+                fuzzy_threshold, filter_mode, max_sentences,
+                log_callback=None,
+                chunk_pos=pos,
+                total_chunks=total_chunks,
             )
             futures[future] = chunk_idx
             last_submission_time = time.time()
@@ -3901,7 +3906,8 @@ def _normalize_filtered_text(text: str) -> str:
 def _extract_with_custom_prompt(custom_prompt, all_text, language, 
                               min_frequency, max_names, max_titles, 
                               existing_glossary, output_dir, 
-                              strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200, log_callback=None):
+                              strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200, log_callback=None,
+                              chunk_pos=None, total_chunks=None):
     """Extract glossary using custom AI prompt with proper filtering"""
     # Redirect stdout to GUI log if callback provided (but not in subprocess - worker handles it)
     import sys
@@ -3941,7 +3947,17 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             
             from unified_api_client import UnifiedClient, UnifiedClientError
             client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
-            client.context = 'glossary'
+
+            # Progress-bar labeling: when running chunked auto-glossary, give each in-flight call a unique name.
+            # This drives the GUI watchdog tooltip "Active calls" list.
+            progress_context = 'glossary'
+            try:
+                if chunk_pos is not None and total_chunks is not None:
+                    progress_context = f"auto glossary ({int(chunk_pos)}/{int(total_chunks)})"
+            except Exception:
+                progress_context = 'glossary'
+
+            client.context = progress_context
             if hasattr(client, 'reset_cleanup_state'):
                 client.reset_cleanup_state()
             
@@ -4050,7 +4066,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                             max_tokens=max_tokens,
                             stop_check_fn=is_stop_requested,
                             chunk_timeout=chunk_timeout,
-                            context='glossary'
+                            context=progress_context
                         )
                         break
                     except UnifiedClientError as e:
