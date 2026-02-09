@@ -9988,32 +9988,17 @@ Important rules:
         except Exception:
             pass
 
-        # 2) Clear stale cross-process watchdog files so aggregation can't keep the bar "busy"
+        # 2) Clear cross-process watchdog files so aggregation can't keep the bar "busy".
+        # On Stop clicks we intentionally delete ALL watchdog files (including .tmp), even if the
+        # originating process is still alive, because the user explicitly requested a hard reset.
         if clear_stale_external_files:
             try:
                 watchdog_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
                 if watchdog_dir and os.path.isdir(watchdog_dir):
                     import glob
-                    try:
-                        import psutil
-                        pid_exists = psutil.pid_exists
-                    except Exception:
-                        psutil = None
-                        pid_exists = None
-
-                    for fp in glob.glob(os.path.join(watchdog_dir, "api_watchdog_*.json")):
+                    for fp in glob.glob(os.path.join(watchdog_dir, "api_watchdog_*.json*")):
                         try:
-                            base = os.path.basename(fp)
-                            m = re.search(r"api_watchdog_(\d+)\.json$", base)
-                            if m:
-                                pid = int(m.group(1))
-                                # Always clear current pid; also clear stale pids.
-                                # If psutil isn't available, clear all watchdog files (best effort).
-                                if pid == os.getpid() or (pid_exists and not pid_exists(pid)) or (pid_exists is None):
-                                    os.remove(fp)
-                            else:
-                                # Unexpected name format - best effort cleanup
-                                os.remove(fp)
+                            os.remove(fp)
                         except Exception:
                             continue
             except Exception:
@@ -10142,6 +10127,13 @@ Important rules:
                 # Also reset watchdog counts so progress bar clears immediately
                 if hasattr(unified_api_client, '_api_watchdog_reset'):
                     unified_api_client._api_watchdog_reset()
+
+                # Delete watchdog files again after stop flags/hard-cancel, in case something
+                # wrote a fresh watchdog snapshot during shutdown.
+                try:
+                    self._reset_api_watchdog_progress(clear_stale_external_files=True)
+                except Exception:
+                    pass
                     
             except Exception as e:
                 print(f"Error setting stop flags: {e}")
