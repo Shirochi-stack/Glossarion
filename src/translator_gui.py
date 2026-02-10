@@ -10383,12 +10383,6 @@ Important rules:
         """Stop glossary extraction specifically"""
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
-
-        # Ensure post-stop cleanup (hard-cancel) can run once the glossary worker is truly idle
-        try:
-            self._glossary_post_stop_hard_cancel_done = False
-        except Exception:
-            pass
         
         # Double-click detection for force stop during graceful stop
         # Check if we're already in graceful stop mode by looking at button text
@@ -10412,14 +10406,6 @@ Important rules:
             self.append_log("⚡ Double-click detected — forcing immediate stop!")
             graceful_stop = False  # Override to force immediate stop
             self._glossary_stop_click_times = []  # Reset click counter
-
-        # Mirror Stop Translation behavior: on FULL stop (non-graceful), clear watchdog state/files so
-        # the API progress bar cannot remain "busy" due to stale cross-process watchdog JSON.
-        if not graceful_stop:
-            try:
-                self._reset_api_watchdog_progress(clear_stale_external_files=True)
-            except Exception:
-                pass
         
         # During graceful stop, keep button enabled to allow double-click force stop
         # Otherwise disable it immediately
@@ -10475,13 +10461,6 @@ Important rules:
                 # Hard cancel: close active HTTP sessions to abort in-flight requests
                 if hasattr(unified_api_client, 'hard_cancel_all'):
                     unified_api_client.hard_cancel_all()
-
-                # Delete watchdog files again after hard-cancel, in case something wrote
-                # a fresh watchdog snapshot during shutdown.
-                try:
-                    self._reset_api_watchdog_progress(clear_stale_external_files=True)
-                except Exception:
-                    pass
             except Exception:
                 pass
             
@@ -10537,64 +10516,6 @@ Important rules:
             self.append_log("❌ Glossary extraction stop requested.")
             self.append_log("⏳ Please wait... stopping after current API call completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
-
-        # After glossary fully stops, hard-cancel HTTP sessions once as a safety net (prevents any
-        # lingering background streaming sessions). We only do this when translation is also idle.
-        try:
-            QTimer.singleShot(700, self._post_glossary_stop_hard_cancel_if_idle)
-        except Exception:
-            pass
-
-
-    def _post_glossary_stop_hard_cancel_if_idle(self):
-        """Once glossary (and translation) are idle, hard-cancel HTTP sessions exactly once."""
-        try:
-            if getattr(self, '_glossary_post_stop_hard_cancel_done', False):
-                return
-        except Exception:
-            return
-
-        # Wait until glossary work is fully stopped
-        try:
-            if getattr(self, 'glossary_thread', None) and getattr(self.glossary_thread, 'is_alive', lambda: False)():
-                QTimer.singleShot(700, self._post_glossary_stop_hard_cancel_if_idle)
-                return
-            if getattr(self, 'glossary_future', None) and hasattr(self.glossary_future, 'done') and not self.glossary_future.done():
-                QTimer.singleShot(700, self._post_glossary_stop_hard_cancel_if_idle)
-                return
-        except Exception:
-            pass
-
-        # Do NOT hard-cancel if translation is still running (would disrupt it)
-        try:
-            if getattr(self, 'translation_thread', None) and getattr(self.translation_thread, 'is_alive', lambda: False)():
-                QTimer.singleShot(700, self._post_glossary_stop_hard_cancel_if_idle)
-                return
-            if getattr(self, 'translation_future', None) and hasattr(self.translation_future, 'done') and not self.translation_future.done():
-                QTimer.singleShot(700, self._post_glossary_stop_hard_cancel_if_idle)
-                return
-        except Exception:
-            pass
-
-        # Best-effort hard-cancel
-        try:
-            import unified_api_client
-            if hasattr(unified_api_client, 'hard_cancel_all'):
-                unified_api_client.hard_cancel_all()
-        except Exception:
-            pass
-
-        # If this was a FULL stop, also clear watchdog files one last time (belt-and-suspenders)
-        try:
-            if os.environ.get('GRACEFUL_STOP') != '1':
-                self._reset_api_watchdog_progress(clear_stale_external_files=True)
-        except Exception:
-            pass
-
-        try:
-            self._glossary_post_stop_hard_cancel_done = True
-        except Exception:
-            pass
 
 
     def stop_epub_converter(self):
@@ -10773,8 +10694,9 @@ Important rules:
                 return
         except Exception:
             pass
-        # If glossary has stopped, we can clear flags even if stop_requested/graceful_stop_active was set.
-        # (The "still running" cases are already handled by the thread/future checks above.)
+        # If a stop is currently requested (or graceful stop active), don't clear yet
+        if getattr(self, 'stop_requested', False) or getattr(self, 'graceful_stop_active', False):
+            return
 
         # Local flags
         self.stop_requested = False
