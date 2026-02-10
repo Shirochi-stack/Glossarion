@@ -11938,6 +11938,13 @@ Important rules:
         self.manual_glossary_file_extension = file_extension
         
         self.append_glossary_var = True
+        self.config['append_glossary'] = True
+        os.environ['APPEND_GLOSSARY'] = '1'
+        if hasattr(self, 'append_glossary_checkbox'):
+            try:
+                self.append_glossary_checkbox.setChecked(True)
+            except Exception:
+                pass
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
 
     def _comprehensive_json_fix(self, content):
