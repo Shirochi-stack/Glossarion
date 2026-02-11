@@ -5690,13 +5690,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Keep Profiles compact
             if lbl in ["Profiles"]:
-                btn.setMinimumWidth(65)
-                btn.setMaximumWidth(100)
+                btn.setMinimumWidth(60)
+                btn.setMaximumWidth(95)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Keep Async compact
             if lbl in ["Async"]:
-                btn.setMinimumWidth(70)
-                btn.setMaximumWidth(100)
+                btn.setMinimumWidth(60)
+                btn.setMaximumWidth(95)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             
             color = style_colors.get(style, "#95a5a6")
