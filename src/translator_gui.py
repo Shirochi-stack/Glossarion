@@ -4070,8 +4070,8 @@ Recent translations to summarize:
         # System Prompt Text Edit (row 9, spans 3 columns)
         self.prompt_text = QTextEdit()
         # Keep prompt flexible; we dynamically adjust its max height on resize to preserve log space.
-        self.prompt_text.setMinimumHeight(80)
-        self.prompt_text.setMaximumHeight(260)
+        self.prompt_text.setMinimumHeight(60)
+        self.prompt_text.setMaximumHeight(220)
         self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.prompt_text.setAcceptRichText(False)  # Plain text only
         
@@ -4233,12 +4233,14 @@ Recent translations to summarize:
         else:
             print(f"[WARNING] Halgakos.ico not found at {ico_path}")
             
-        output_layout.addWidget(self.open_folder_btn)
+        # Let the button consume any extra vertical space in this column on high-res/full-screen displays
+        self.open_folder_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        output_layout.addWidget(self.open_folder_btn, 1)
         
-        output_layout.addStretch()
         # Keep a handle so resize logic can measure this column's natural height
         self._prompt_side_container = output_container
-        self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
+        # Do NOT force top alignment; allow the container to fill the grid cell so the button can expand
+        self.frame.addWidget(output_container, 9, 0)
         
         # Run Translation button (row 9, column 4) - Fill the space
         from PySide6.QtCore import QSize
@@ -10934,9 +10936,10 @@ Important rules:
             if total_h <= 0:
                 return
 
-            # Base target: prompt takes ~20% of vertical space (clamped)
-            desired_prompt_max = int(total_h * 0.20)
-            prompt_max = max(120, min(280, desired_prompt_max))
+            # Base target: prompt takes ~16% of vertical space (clamped)
+            # (smaller prompt so the log stays larger, especially on high-res displays)
+            desired_prompt_max = int(total_h * 0.16)
+            prompt_max = max(100, min(240, desired_prompt_max))
 
             # If the prompt column is shorter than the other widgets in row 9 (left controls / run button),
             # it can leave a visible empty gap under the prompt. Allow the prompt to grow to match that
@@ -10958,7 +10961,7 @@ Important rules:
             except Exception:
                 pass
             if neighbor_h > 0:
-                prompt_max = max(prompt_max, min(420, neighbor_h))
+                prompt_max = max(prompt_max, min(240, neighbor_h))
 
             # Ensure the toolbar is allowed to claim its required height
             try:
