@@ -4117,13 +4117,7 @@ Recent translations to summarize:
         output_layout.addWidget(prompt_label_container)
         output_layout.addWidget(self.output_btn)
         
-        # Target Language Dropdown (below output token limit)
-        lang_label = QLabel("Target Language:")
-        self.target_lang_label = lang_label
-        lang_label.setStyleSheet("margin-top: 10px;")
-        lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
-        output_layout.addWidget(lang_label)
-        
+        # Target Language dropdown (label removed to save vertical space)
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.setEditable(True)
         self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
@@ -4168,12 +4162,12 @@ Recent translations to summarize:
         # This will sync all variables: lang_var, output_language, glossary_target_language, and environment vars
         self.update_target_language(final_lang)
         
-        # Add warning label for missing placeholder
-        self.target_lang_warning = QLabel()
-        self.target_lang_warning.setStyleSheet("color: #5a9fd4; font-size: 8pt; margin-top: 5px;")
+        # Placeholder hint label (always visible)
+        self.target_lang_warning = QLabel("Targe Language Placeholder {target_lang}")
+        self.target_lang_warning.setStyleSheet("color: #5a9fd4; font-size: 7pt; margin-top: 6px;")
         self.target_lang_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)  # Allow copy-paste
         self.target_lang_warning.setWordWrap(True)
-        self.target_lang_warning.hide()
+        self.target_lang_warning.show()
         output_layout.addWidget(self.target_lang_warning)
         
         # Use Halgakos icon in dropdown arrow (consistent with other dropdowns)
@@ -4471,37 +4465,13 @@ Recent translations to summarize:
                 self.config['ai_hunter_config']['language_detection']['target_language'] = text
 
     def _update_target_lang_state(self):
-        """Update target language dropdown state based on prompt and model"""
+        """Keep the target-language placeholder hint label present."""
         try:
-            # Safely get prompt text
-            if not hasattr(self, 'prompt_text'):
-                return
-            prompt = self.prompt_text.toPlainText()
-            
-            # Safely get model
-            model = getattr(self, 'model_var', '')
-            
-            # Check conditions
-            has_placeholder = '{target_lang}' in prompt
-            is_traditional = is_traditional_translation_api(model)
-            
-            # Condition: Show warning if placeholder missing AND not traditional API
-            # If traditional API, we don't show warning because it handles language internally
-            should_warn = not has_placeholder and not is_traditional
-            
-            # Keep combobox always enabled - just show warning
-            # (Disabling was causing issues, so we just warn the user instead)
-            
-            # Update warning label
-            if hasattr(self, 'target_lang_warning'):
-                if should_warn:
-                    self.target_lang_warning.setText("Placeholder: {target_lang}")
-                    self.target_lang_warning.show()
-                else:
-                    self.target_lang_warning.hide()
-                    
-        except Exception as e:
-            print(f"Error updating target lang state: {e}")
+            if hasattr(self, 'target_lang_warning') and self.target_lang_warning:
+                self.target_lang_warning.setText("Targe Language Placeholder {target_lang}")
+                self.target_lang_warning.show()
+        except Exception:
+            pass
 
     def _create_log_section(self):
         """Create log text area"""
