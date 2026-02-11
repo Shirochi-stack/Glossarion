@@ -398,7 +398,7 @@ class QAScannerMixin:
             screen = QApplication.primaryScreen().geometry()
             screen_width = screen.width()
             screen_height = screen.height()
-            dialog_width = int(screen_width * 0.47)  # 50% of screen width
+            dialog_width = int(screen_width * 0.51)  # 50% of screen width
             dialog_height = int(screen_height * 0.43)  # 45% of screen height
             
             mode_dialog = QDialog(self)
@@ -440,7 +440,7 @@ class QAScannerMixin:
         if selected_mode_value is None:
             # Set minimum size to prevent dialog from being too small (using ratios)
             # 35% width, 35% height for better content fit
-            min_width = int(screen_width * 0.37)
+            min_width = int(screen_width * 0.45)
             min_height = int(screen_height * 0.35)
             mode_dialog.setMinimumSize(min_width, min_height)
             
@@ -596,6 +596,19 @@ class QAScannerMixin:
         
         # Restore original single-row layout (four cards across)
         if selected_mode_value is None:
+            # Scale down the card contents on small screens while keeping the same 4-card row.
+            try:
+                ui_scale = min(1.0, max(0.75, min(screen_width / 1600.0, screen_height / 900.0)))
+            except Exception:
+                ui_scale = 1.0
+
+            emoji_px = max(28, int(38 * ui_scale))
+            title_pt = max(12, int(16 * ui_scale))
+            subtitle_pt = max(8, int(10 * ui_scale))
+            feature_pt = max(7, int(9 * ui_scale))
+            icon_logical = max(40, int(56 * ui_scale))
+            icon_h = max(44, int(60 * ui_scale))
+
             # Make each column share space evenly
             for col in range(len(mode_data)):
                 modes_layout.setColumnStretch(col, 1)
@@ -619,11 +632,13 @@ class QAScannerMixin:
                 
                 # Content layout
                 card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(10, 10, 10, 5)
+                m = max(6, int(10 * ui_scale))
+                mb = max(3, int(5 * ui_scale))
+                card_layout.setContentsMargins(m, m, m, mb)
                 
                 # Icon/Emoji container with fixed height for alignment
                 icon_container = QWidget()
-                icon_container.setFixedHeight(60)
+                icon_container.setFixedHeight(icon_h)
                 icon_container.setStyleSheet("background-color: transparent;")
                 icon_container_layout = QVBoxLayout(icon_container)
                 icon_container_layout.setContentsMargins(0, 0, 0, 0)
@@ -651,7 +666,7 @@ class QAScannerMixin:
                                 dpr = self.devicePixelRatioF()
                             except Exception:
                                 dpr = 1.0
-                            target_logical = 56  # requested logical size of label
+                            target_logical = icon_logical  # requested logical size of label
                             dev_px = int(target_logical * max(1.0, dpr))
                             # Prefer largest available size to reduce scaling blur
                             avail = icon.availableSizes()
@@ -688,14 +703,14 @@ class QAScannerMixin:
                         icon_label = None
                     if icon_label is None:
                         emoji_label = QLabel(mi["emoji"])
-                        emoji_label.setFont(QFont("Arial", 38))
+                        emoji_label.setFont(QFont("Arial", emoji_px))
                         emoji_label.setAlignment(Qt.AlignCenter)
                         emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
                         icon_container_layout.addWidget(emoji_label)
                 else:
                     # Use emoji for other cards
                     emoji_label = QLabel(mi["emoji"])
-                    emoji_label.setFont(QFont("Arial", 38))
+                    emoji_label.setFont(QFont("Arial", emoji_px))
                     emoji_label.setAlignment(Qt.AlignCenter)
                     emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
                     icon_container_layout.addWidget(emoji_label)
@@ -704,14 +719,16 @@ class QAScannerMixin:
                 
                 # Title
                 title_label = QLabel(mi["title"])
-                title_label.setFont(QFont("Arial", 16, QFont.Bold))
+                title_label.setFont(QFont("Arial", title_pt, QFont.Bold))
+                title_label.setWordWrap(True)
                 title_label.setAlignment(Qt.AlignCenter)
                 title_label.setStyleSheet(f"background-color: transparent; color: white; border: none;")
                 card_layout.addWidget(title_label)
                 
                 # Subtitle
                 subtitle_label = QLabel(mi["subtitle"])
-                subtitle_label.setFont(QFont("Arial", 10))
+                subtitle_label.setFont(QFont("Arial", subtitle_pt))
+                subtitle_label.setWordWrap(True)
                 subtitle_label.setAlignment(Qt.AlignCenter)
                 subtitle_label.setStyleSheet(f"background-color: transparent; color: {mi['accent_color']}; border: none;")
                 card_layout.addWidget(subtitle_label)
@@ -720,7 +737,8 @@ class QAScannerMixin:
                 # Features
                 for feature in mi["features"]:
                     feature_label = QLabel(feature)
-                    feature_label.setFont(QFont("Arial", 9))
+                    feature_label.setFont(QFont("Arial", feature_pt))
+                    feature_label.setWordWrap(True)
                     feature_label.setStyleSheet(f"background-color: transparent; color: #e0e0e0; border: none;")
                     card_layout.addWidget(feature_label)
                 
@@ -728,7 +746,8 @@ class QAScannerMixin:
                 if mi["recommendation"]:
                     card_layout.addSpacing(6)
                     rec_label = QLabel(mi["recommendation"])
-                    rec_label.setFont(QFont("Arial", 9, QFont.Bold))
+                    rec_label.setFont(QFont("Arial", feature_pt, QFont.Bold))
+                    rec_label.setWordWrap(True)
                     rec_label.setStyleSheet(f"""
                         background-color: {mi['accent_color']};
                         color: white;
@@ -941,7 +960,7 @@ class QAScannerMixin:
             custom_dialog.setModal(True)
             # Use screen ratios: 20% width, 50% height for better content fit
             screen = QApplication.primaryScreen().geometry()
-            custom_width = int(screen.width() * 0.45)
+            custom_width = int(screen.width() * 0.51)
             custom_height = int(screen.height() * 0.60)
             custom_dialog.resize(custom_width, custom_height)
             # Set window icon
@@ -2118,7 +2137,7 @@ class QAScannerMixin:
         dialog.setModal(True)
         # Use screen ratios: 40% width, 85% height (decreased from 100%)
         screen = QApplication.primaryScreen().geometry()
-        settings_width = int(screen.width() * 0.43)
+        settings_width = int(screen.width() * 0.52)
         settings_height = int(screen.height() * 0.85)
         dialog.resize(settings_width, settings_height)
         
@@ -3622,7 +3641,7 @@ def show_custom_detection_dialog(parent=None):
     
     # Set dialog size
     screen = QApplication.primaryScreen().geometry()
-    custom_width = int(screen.width() * 0.42)
+    custom_width = int(screen.width() * 0.51)
     custom_height = int(screen.height() * 0.60)
     custom_dialog.resize(custom_width, custom_height)
     
