@@ -2575,20 +2575,22 @@ Recent translations to summarize:
         # Configure grid row stretches and minimum heights
         # Make the log row (row 11) greedily consume extra space on window resize
         for r in range(13):
-            # Only the log row should stretch significantly
-            self.frame.setRowStretch(r, 10 if r == 11 else (0 if r != 9 else 1))
+            # Only the log row should stretch significantly.
+            # IMPORTANT: do not stretch the prompt row (row 9). If it stretches while the prompt_text is max-height
+            # capped, Qt will allocate extra row space that turns into visible empty gaps under the prompt.
+            self.frame.setRowStretch(r, 14 if r == 11 else 0)
             if r == 9:
-                # Keep a modest minimum for the prompt/output row but do not let it grow too much
-                self.frame.setRowMinimumHeight(r, 180)
+                # Keep prompt row flexible so the log can stay large on small/HiDPI displays
+                self.frame.setRowMinimumHeight(r, 120)
             elif r == 10:
                 # API watchdog row (compact)
                 self.frame.setRowMinimumHeight(r, 18)
             elif r == 11:
-                # Log row minimum; will expand aggressively due to stretch factor
-                self.frame.setRowMinimumHeight(r, 260)
+                # Log row minimum; keep this small so the toolbar can always claim its needed height.
+                self.frame.setRowMinimumHeight(r, 80)
             elif r == 12:
-                # Toolbar row - ensure it stays visible with minimum height
-                self.frame.setRowMinimumHeight(r, 55)  # Ensure toolbar is always visible
+                # Toolbar row - let it size to its contents (important for low-res / high-DPI)
+                self.frame.setRowMinimumHeight(r, 0)
                 # Keep stretch at 0 to prevent it from expanding
         
         # Store row stretch defaults for fullscreen toggle
@@ -2606,7 +2608,14 @@ Recent translations to summarize:
         
         # Add bottom toolbar to layout
         bottom_toolbar = self._make_bottom_toolbar()
+        self.bottom_toolbar = bottom_toolbar
         self.frame.addWidget(bottom_toolbar, 12, 0, 1, 5)  # Span all 5 columns at row 12
+
+        # Apply initial dynamic sizing for prompt/log split
+        try:
+            QTimer.singleShot(0, self._adjust_prompt_and_log_sizes)
+        except Exception:
+            pass
         
         # Apply token limit state
         if self.token_limit_disabled:
@@ -4060,10 +4069,10 @@ Recent translations to summarize:
         
         # System Prompt Text Edit (row 9, spans 3 columns)
         self.prompt_text = QTextEdit()
-        self.prompt_text.setMinimumHeight(100)
-        # Cap its vertical growth so the log gets most of the extra space
-        self.prompt_text.setMaximumHeight(220)
-        self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        # Keep prompt flexible; we dynamically adjust its max height on resize to preserve log space.
+        self.prompt_text.setMinimumHeight(80)
+        self.prompt_text.setMaximumHeight(260)
+        self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.prompt_text.setAcceptRichText(False)  # Plain text only
         
         # Auto-save system prompt as user types
@@ -4233,6 +4242,8 @@ Recent translations to summarize:
         output_layout.addWidget(self.open_folder_btn)
         
         output_layout.addStretch()
+        # Keep a handle so resize logic can measure this column's natural height
+        self._prompt_side_container = output_container
         self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
         
         # Run Translation button (row 9, column 4) - Fill the space
@@ -4527,8 +4538,10 @@ Recent translations to summarize:
         # Log Text Edit (row 11, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        self.log_text.setMinimumHeight(260)  # Increased for taller log area
-        # Make sure it greedily expands vertically and horizontally but respects minimum/maximum constraints
+        # IMPORTANT: keep the log flexible so the bottom toolbar never overlaps it on small/HiDPI displays.
+        # A large minimum height here can force Qt layouts to place toolbar children outside their parent.
+        self.log_text.setMinimumHeight(80)
+        # Make sure it greedily expands vertically and horizontally but can also shrink.
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.log_text, 11, 0, 1, 5)  # row, col, rowspan, colspan
@@ -5549,19 +5562,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
         from PySide6.QtCore import Qt
         
         btn_frame = QWidget()
-        btn_frame.setMinimumHeight(50)  # Increased for taller buttons
-        btn_frame.setMaximumHeight(60)  # Increased for taller buttons
-        # Ensure toolbar never overlaps with log by using MinimumExpanding policy
-        btn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        # IMPORTANT: do NOT cap the toolbar height. On HiDPI / small displays the buttons' sizeHint can
+        # exceed a fixed max, and Qt layouts may place child widgets outside this frame (visually overlapping the log).
+        btn_frame.setMinimumHeight(50)
+        btn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
         btn_layout = QHBoxLayout(btn_frame)
-        btn_layout.setContentsMargins(0, 5, 0, 5)
-        btn_layout.setSpacing(2)
+        # Compact spacing so the toolbar fits better on smaller displays
+        btn_layout.setContentsMargins(0, 3, 0, 3)
+        btn_layout.setSpacing(1)
         
         # QA Scan button with mini icon
         from PySide6.QtGui import QPixmap, QIcon
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(120)  # Wider button
+        self.qa_button.setMinimumWidth(95)
         self.qa_button.setMinimumHeight(40)  # Increased button height
         self.qa_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
         
@@ -5644,7 +5659,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QPushButton {
                 background-color: #e67e22;
                 color: white;
-                padding: 6px;
+                padding: 4px 6px;
                 font-weight: bold;
             }
             QPushButton:disabled {
@@ -5674,15 +5689,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if MANGA_SUPPORT:
             toolbar_items.append(("Manga Translator", self.open_manga_translator, "primary"))
          
-        # Async Processing 
-        toolbar_items.append(("Async Translation", self.open_async_processing, "success"))
+        # Async Processing
+        toolbar_items.append(("Async", self.open_async_processing, "success"))
         
         toolbar_items.extend([
             ("Progress Manager", self.open_progress_manager, "progress"),
             ("Save Config", self.save_config, "secondary"),
             ("Load Glossary", self.load_glossary, "glossary"),
-            ("Import Profiles", self.import_profiles, "secondary"),
-            ("Export Profiles", self.export_profiles, "secondary"),
+            ("Profiles", self._profiles_button_clicked, "secondary"),
         ])
         
         # Create buttons
@@ -5701,15 +5715,22 @@ If you see multiple p-b cookies, use the one with the longest value."""
             elif lbl not in ["Extract Glossary", "EPUB Converter"]:  # Don't connect yet for these buttons
                 btn.clicked.connect(cmd)
             
-            btn.setMinimumHeight(40)  # Increased button height for all toolbar buttons
+            btn.setMinimumHeight(40)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
             
-            # Set maximum width for Import/Export Profile buttons to make them narrower
-            if lbl in ["Import Profiles", "Export Profiles"]:
-                btn.setMaximumWidth(130)  # Constrain width for these buttons
+            # Keep Profiles compact
+            if lbl in ["Profiles"]:
+                btn.setMinimumWidth(65)
+                btn.setMaximumWidth(100)
+
+            # Keep Async compact
+            if lbl in ["Async"]:
+                btn.setMinimumWidth(70)
+                btn.setMaximumWidth(100)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             
             color = style_colors.get(style, "#95a5a6")
-            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 4px 6px; font-weight: bold;")
             btn_layout.addWidget(btn)
             
             if lbl == "Extract Glossary":
@@ -5794,12 +5815,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(150)  # Wider button
+                btn.setMinimumWidth(150)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
                         color: white;
-                        padding: 6px;
+                        padding: 4px 6px;
                         font-weight: bold;
                     }}
                     QPushButton:disabled {{
@@ -5889,12 +5910,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.epub_button = btn
                 # Add disabled state styling for EPUB Converter button
-                btn.setMinimumWidth(150)  # Wider button
+                btn.setMinimumWidth(150)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
                         color: white;
-                        padding: 6px;
+                        padding: 4px 6px;
                         font-weight: bold;
                     }}
                     QPushButton:disabled {{
@@ -5902,14 +5923,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         color: #888888;
                     }}
                 """)
-            elif lbl == "Async Processing (50% Off)":
+            elif lbl == "Async":
+                # Track for enable/disable updates
                 self.async_button = btn
             elif lbl == "Progress Manager":
                 # Build a custom button with spinning Halgakos icon and label
                 pm_widget = QWidget()
                 pm_layout = QHBoxLayout(pm_widget)
                 pm_layout.setContentsMargins(0, 0, 0, 0)
-                pm_layout.setSpacing(6)
+                pm_layout.setSpacing(3)
                 pm_layout.setAlignment(Qt.AlignCenter)
 
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
@@ -5968,13 +5990,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 pm_layout.addWidget(self.pm_text_label)
                 btn.setText("")
                 btn.setLayout(pm_layout)
+
+                # Make the Progress Manager button a bit wider for readability
                 btn.setMinimumWidth(170)
+                btn.setMaximumWidth(220)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
                 # Dark pink color from style_colors
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
                         color: white;
-                        padding: 6px;
+                        padding: 4px 8px;
                         font-weight: bold;
                     }}
                     QPushButton:disabled {{
@@ -5988,11 +6015,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 except Exception:
                     pass
                 btn.clicked.connect(self.open_progress_manager)
+                btn.setToolTip("Open Progress Manager")
                 self.pm_button = btn
         
         # Add QA button at the end
         btn_layout.addWidget(self.qa_button)
         
+        # Ensure the toolbar's minimum height matches its content (helps on small/HiDPI displays)
+        try:
+            btn_frame.setMinimumHeight(max(btn_frame.minimumHeight(), btn_frame.sizeHint().height()))
+        except Exception:
+            pass
+
         # Add toolbar to main layout
         # Note: This will need to be integrated into the main GUI layout in _setup_gui
         return btn_frame
@@ -6071,6 +6105,32 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
         return False
+
+    def _profiles_button_clicked(self):
+        """Single entry point for profile import/export."""
+        try:
+            from PySide6.QtWidgets import QMessageBox
+
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Profiles")
+            msg.setIcon(QMessageBox.Question)
+            msg.setText("Choose what you want to do with profiles:")
+
+            import_btn = msg.addButton("Import", QMessageBox.AcceptRole)
+            export_btn = msg.addButton("Export", QMessageBox.AcceptRole)
+            msg.addButton("Cancel", QMessageBox.RejectRole)
+
+            msg.exec()
+            clicked = msg.clickedButton()
+
+            if clicked == import_btn:
+                return self.import_profiles()
+            if clicked == export_btn:
+                return self.export_profiles()
+            return
+        except Exception:
+            # Fallback: do nothing (avoid crashing the GUI)
+            return
 
     def _stop_pm_spin(self):
         if hasattr(self, 'pm_spinner') and self.pm_spinner:
@@ -10873,6 +10933,74 @@ Important rules:
         except Exception:
             pass
         return False
+
+    def resizeEvent(self, event):
+        """Keep prompt/log sizing stable across different DPI + small displays."""
+        try:
+            super().resizeEvent(event)
+        except Exception:
+            pass
+        try:
+            self._adjust_prompt_and_log_sizes()
+        except Exception:
+            pass
+
+    def _adjust_prompt_and_log_sizes(self):
+        """Dynamically cap the system prompt editor so the log stays larger.
+
+        This avoids the bottom toolbar visually overlapping/clipping into the log on small/HiDPI screens
+        and keeps the log area as the primary resizable region.
+        """
+        try:
+            if not hasattr(self, 'prompt_text') or not hasattr(self, 'log_text'):
+                return
+            if not self.prompt_text or not self.log_text:
+                return
+
+            # Use central widget height as the layout basis
+            cw = self.centralWidget()
+            total_h = int(cw.height() if cw else self.height())
+            if total_h <= 0:
+                return
+
+            # Base target: prompt takes ~20% of vertical space (clamped)
+            desired_prompt_max = int(total_h * 0.20)
+            prompt_max = max(120, min(280, desired_prompt_max))
+
+            # If the prompt column is shorter than the other widgets in row 9 (left controls / run button),
+            # it can leave a visible empty gap under the prompt. Allow the prompt to grow to match that
+            # row's natural content height (within a safe cap) without stealing from the log.
+            try:
+                neighbor_h = 0
+                oc = locals().get('output_container')  # not available here
+            except Exception:
+                neighbor_h = 0
+            try:
+                if hasattr(self, 'run_button') and self.run_button:
+                    neighbor_h = max(neighbor_h, int(self.run_button.sizeHint().height() or 0))
+            except Exception:
+                pass
+            try:
+                # output_container is a local in _create_prompt_section; store it if present
+                if hasattr(self, '_prompt_side_container') and self._prompt_side_container:
+                    neighbor_h = max(neighbor_h, int(self._prompt_side_container.sizeHint().height() or 0))
+            except Exception:
+                pass
+            if neighbor_h > 0:
+                prompt_max = max(prompt_max, min(420, neighbor_h))
+
+            # Ensure the toolbar is allowed to claim its required height
+            try:
+                tb = getattr(self, 'bottom_toolbar', None)
+                if tb:
+                    tb.setMinimumHeight(max(tb.minimumHeight(), tb.sizeHint().height()))
+            except Exception:
+                pass
+
+            # Apply cap
+            self.prompt_text.setMaximumHeight(prompt_max)
+        except Exception:
+            return
     
     def append_log_direct(self, message):
         """Direct append - MUST be called from main thread only"""
