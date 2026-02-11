@@ -5678,15 +5678,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
         toolbar_items = [
             ("EPUB Converter", self.epub_converter, "info"),
             ("Extract Glossary", self.run_glossary_extraction_thread, "warning"),
-            ("Glossary Manager", self.glossary_manager, "glossary"),
+            ("⚙️ Glossary Settings", self.glossary_manager, "glossary"),
         ]
         
-        # Add Manga Translator if available
-        if MANGA_SUPPORT:
-            toolbar_items.append(("Manga Translator", self.open_manga_translator, "primary"))
-         
         toolbar_items.extend([
             ("Progress Manager", self.open_progress_manager, "progress"),
+        ])
+
+        # Place Manga Translator immediately to the right of Progress Manager
+        if MANGA_SUPPORT:
+            toolbar_items.append(("🖼️ Manga Translator", self.open_manga_translator, "primary"))
+
+        toolbar_items.extend([
             ("Async", self.open_async_processing, "success"),
             ("Save Config", self.save_config, "secondary"),
             ("Load Glossary", self.load_glossary, "glossary"),
@@ -5730,6 +5733,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setMaximumWidth(130)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
+            # Keep Glossary Settings from eating horizontal space
+            if lbl in ["⚙️ Glossary Settings"]:
+                btn.setMinimumWidth(140)
+                btn.setMaximumWidth(180)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+            # Keep Manga Translator from eating horizontal space (but add emoji)
+            if lbl in ["🖼️ Manga Translator"]:
+                btn.setMinimumWidth(130)
+                btn.setMaximumWidth(170)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
             # Make Progress Manager wider than the others.
             # Using stretch works better than a fixed width when the toolbar has many buttons.
             if lbl in ["Progress Manager"]:
@@ -5743,7 +5758,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 if lbl == "Progress Manager":
                     btn_layout.addWidget(btn, 4)
-                elif lbl in ("Async", "Save Config", "Load Glossary", "Profiles"):
+                elif lbl in ("Async", "Save Config", "Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator"):
                     btn_layout.addWidget(btn, 0)
                 else:
                     btn_layout.addWidget(btn, 1)
