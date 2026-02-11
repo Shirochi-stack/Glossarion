@@ -5733,7 +5733,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Make Progress Manager wider than the others.
             # Using stretch works better than a fixed width when the toolbar has many buttons.
             if lbl in ["Progress Manager"]:
-                btn.setMinimumWidth(260)
+                btn.setMinimumWidth(180)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             
             color = style_colors.get(style, "#95a5a6")
@@ -5832,8 +5832,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                # Keep the same minimum width as Progress Manager for consistent sizing.
-                btn.setMinimumWidth(260)
+                btn.setMinimumWidth(180)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
