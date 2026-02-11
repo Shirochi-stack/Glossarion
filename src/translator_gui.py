@@ -4262,8 +4262,9 @@ Recent translations to summarize:
         # Create a container widget for custom layout
         button_container = QWidget()
         button_layout = QVBoxLayout(button_container)
-        button_layout.setContentsMargins(0, 8, 0, 0)
-        button_layout.setSpacing(2)  # Minimal spacing between icon and text
+        # Center the icon+text vertically inside the button (no top bias)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(6)
         
         # Icon label with rotation support - wrapped in its own container
         # This allows the icon to rotate independently without affecting the label
@@ -4343,6 +4344,9 @@ Recent translations to summarize:
         self.run_button_icon.setAlignment(Qt.AlignCenter)
         icon_layout.addWidget(self.run_button_icon)
         
+        # Add vertical stretch ABOVE so the content can sit centered even when the button grows
+        button_layout.addStretch(1)
+
         # Add icon container to button layout
         button_layout.addWidget(icon_container, alignment=Qt.AlignCenter)
         
@@ -4363,8 +4367,10 @@ Recent translations to summarize:
         self.run_button_text = QLabel("Run Translation")
         self.run_button_text.setAlignment(Qt.AlignCenter)
         self.run_button_text.setStyleSheet("color: white; font-size: 14pt; font-weight: bold;")
-        button_layout.addWidget(self.run_button_text)
-        button_layout.addStretch()
+        button_layout.addWidget(self.run_button_text, alignment=Qt.AlignCenter)
+
+        # Add matching stretch BELOW to keep icon+text vertically centered
+        button_layout.addStretch(1)
         
         # Set the container as the button's layout
         self.run_button.setLayout(button_layout)
