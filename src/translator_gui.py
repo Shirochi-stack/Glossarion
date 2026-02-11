@@ -5690,7 +5690,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             toolbar_items.append(("🖼️ Manga Translator", self.open_manga_translator, "primary"))
 
         toolbar_items.extend([
-            ("Async", self.open_async_processing, "success"),
+            ("📦 Async Translator", self.open_async_processing, "success"),
             ("Save Config", self.save_config, "secondary"),
             ("Load Glossary", self.load_glossary, "glossary"),
             ("Profiles", self._profiles_button_clicked, "secondary"),
@@ -5721,10 +5721,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setMaximumWidth(110)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-            # Keep Async compact (but slightly wider)
-            if lbl in ["Async"]:
-                btn.setMinimumWidth(70)
-                btn.setMaximumWidth(110)
+            # Keep Async Translator compact (but slightly wider)
+            if lbl in ["📦 Async Translator"]:
+                btn.setMinimumWidth(90)
+                btn.setMaximumWidth(145)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Keep Save/Load buttons from eating horizontal space (but slightly wider)
@@ -5745,8 +5745,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setMaximumWidth(170)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-            # Make Progress Manager wider than the others.
-            # Using stretch works better than a fixed width when the toolbar has many buttons.
+            # Prevent these icon+label buttons from stretching excessively in fullscreen.
+            if lbl in ["Extract Glossary", "EPUB Converter"]:
+                btn.setMinimumWidth(160)
+                btn.setMaximumWidth(220)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+            # Make Progress Manager absorb extra width instead.
             if lbl in ["Progress Manager"]:
                 btn.setMinimumWidth(180)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -5758,7 +5763,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 if lbl == "Progress Manager":
                     btn_layout.addWidget(btn, 4)
-                elif lbl in ("Async", "Save Config", "Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator"):
+                elif lbl in ("📦 Async Translator", "Save Config", "Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator", "Extract Glossary", "EPUB Converter"):
                     btn_layout.addWidget(btn, 0)
                 else:
                     btn_layout.addWidget(btn, 1)
@@ -5848,6 +5853,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
                 btn.setMinimumWidth(180)
+                btn.setMaximumWidth(220)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -5943,6 +5950,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.epub_button = btn
                 # Add disabled state styling for EPUB Converter button
                 btn.setMinimumWidth(150)
+                btn.setMaximumWidth(220)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -5955,7 +5964,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         color: #888888;
                     }}
                 """)
-            elif lbl == "Async":
+            elif lbl == "📦 Async Translator":
                 # Track for enable/disable updates
                 self.async_button = btn
             elif lbl == "Progress Manager":
@@ -6023,10 +6032,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setText("")
                 btn.setLayout(pm_layout)
 
-                # Make the Progress Manager button a bit wider for readability
-                btn.setMinimumWidth(170)
-                btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                # Let Progress Manager take the extra toolbar width (others are constrained)
+                btn.setMinimumWidth(180)
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
                 # Dark pink color from style_colors
                 btn.setStyleSheet(f"""
