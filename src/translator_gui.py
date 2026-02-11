@@ -6523,6 +6523,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
 
+        # Create a watchdog snapshot immediately when starting translation
+        try:
+            self._create_watchdog_snapshot(context="translation", model=getattr(self, 'model_var', None))
+        except Exception:
+            pass
+
         # Prepare shared stop-file for glossary/translation workers
         try:
             import tempfile, os as _os
@@ -8377,6 +8383,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except:
             pass
 
+        # Create a watchdog snapshot immediately when starting glossary extraction
+        try:
+            self._create_watchdog_snapshot(context="glossary", model=getattr(self, 'model_var', None))
+        except Exception:
+            pass
+
         # Clear shared stop file before starting extraction
         try:
             import tempfile, os as _os
@@ -10128,6 +10140,40 @@ Important rules:
                 self.api_watchdog_bar.setValue(0)
                 self.api_watchdog_bar.setFormat("API idle")
                 self.api_watchdog_bar.setToolTip("No API calls in flight")
+        except Exception:
+            pass
+
+    def _create_watchdog_snapshot(self, context: str = None, model: str = None) -> None:
+        """Create/update a watchdog state file immediately when a run starts."""
+        try:
+            watchdog_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
+            if not watchdog_dir:
+                return
+            os.makedirs(watchdog_dir, exist_ok=True)
+            state = {}
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'get_api_watchdog_state'):
+                    state = unified_api_client.get_api_watchdog_state() or {}
+            except Exception:
+                state = {}
+            if not isinstance(state, dict):
+                state = {}
+            now = time.time()
+            if context:
+                state["last_context"] = context
+            if model:
+                state["last_model"] = model
+            state.setdefault("in_flight", 0)
+            state.setdefault("peak_in_flight", 0)
+            state.setdefault("last_change_ts", now)
+            state["updated_ts"] = now
+            state["pid"] = os.getpid()
+            path = os.path.join(watchdog_dir, f"api_watchdog_{os.getpid()}.json")
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            os.replace(tmp_path, path)
         except Exception:
             pass
 
