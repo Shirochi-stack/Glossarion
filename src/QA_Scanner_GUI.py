@@ -1192,12 +1192,16 @@ class QAScannerMixin:
             sample_layout.addWidget(sample_label)
             
             # Sample size spinbox with larger range
+            # -1 = use all characters (no downsampling)
+            #  0 = disable duplicate detection
             sample_spinbox = QSpinBox()
-            sample_spinbox.setMinimum(1000)
-            sample_spinbox.setMaximum(10000)
+            sample_spinbox.setMinimum(-1)
+            # QSpinBox requires a maximum; set it extremely high to be effectively "no maximum"
+            sample_spinbox.setMaximum(2000000000)
             sample_spinbox.setSingleStep(500)
             sample_spinbox.setValue(custom_settings['sample_size'])
             sample_spinbox.setMinimumWidth(100)
+            sample_spinbox.setToolTip("-1 = use all characters, 0 = disable duplicate detection")
             # Disable mousewheel scrolling
             sample_spinbox.wheelEvent = lambda event: event.ignore()
             sample_layout.addWidget(sample_spinbox)
@@ -3810,11 +3814,13 @@ def show_custom_detection_dialog(parent=None):
     sample_layout.addWidget(sample_label)
     
     sample_spinbox = QSpinBox()
-    sample_spinbox.setMinimum(1000)
-    sample_spinbox.setMaximum(10000)
+    sample_spinbox.setMinimum(-1)
+    # QSpinBox requires a maximum; set it extremely high to be effectively "no maximum"
+    sample_spinbox.setMaximum(2000000000)
     sample_spinbox.setSingleStep(500)
     sample_spinbox.setValue(custom_settings['sample_size'])
     sample_spinbox.setMinimumWidth(100)
+    sample_spinbox.setToolTip("-1 = use all characters, 0 = disable duplicate detection")
     sample_spinbox.wheelEvent = lambda event: event.ignore()
     sample_layout.addWidget(sample_spinbox)
     sample_layout.addStretch()

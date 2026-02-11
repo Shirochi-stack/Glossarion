@@ -2399,7 +2399,10 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     
     for i, result in enumerate(results):
         # Text data (first 5000 chars)
-        text = result.get('raw_text', '')[:5000]
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        text = base_text[:5000]
         text_data[i] = {
             'text': text,
             'hash': hashlib.sha256(text.encode()).hexdigest() if text else None,
@@ -2408,7 +2411,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
         }
         
         # Preview data (first 1000 chars)
-        preview = result.get('raw_text', '')[:1000].strip()
+        preview = base_text[:1000].strip()
         preview_data[i] = {
             'text': preview,
             'hash': hashlib.sha256(preview.encode()).hexdigest() if preview else None
@@ -2611,9 +2614,14 @@ def detect_duplicates(results, log, should_stop, config):
     near_duplicate_groups = {}
     duplicate_confidence = defaultdict(float)
 
-    # Allow quick-scan users to disable duplicate detection explicitly
-    if config.mode == 'quick-scan' and config.thresholds.get('quick-scan', {}).get('disable_duplicate_check'):
-        log("⚡ Quick Scan: duplicate detection disabled (sample size set to 0)")
+    # Allow modes to disable duplicate detection explicitly
+    if config.thresholds.get(config.mode, {}).get('disable_duplicate_check'):
+        if config.mode == 'quick-scan':
+            log("⚡ Quick Scan: duplicate detection disabled (sample size set to 0)")
+        elif config.mode == 'custom':
+            log("⚙️ Custom: duplicate detection disabled (sample size set to 0)")
+        else:
+            log(f"⚡ Duplicate detection disabled for mode: {config.mode}")
         return duplicate_groups, near_duplicate_groups, duplicate_confidence
     
     total_files = len(results)
@@ -2655,7 +2663,10 @@ def detect_duplicates(results, log, should_stop, config):
         # Find texts by hash
         text1, text2 = None, None
         for result in results_for_dup_check:
-            text = result.get('raw_text', '')[:max_length]
+            base_text = result.get('dup_text') if isinstance(result, dict) else None
+            if not isinstance(base_text, str):
+                base_text = result.get('raw_text', '')
+            text = base_text[:max_length]
             text_hash = hashlib.sha256(text.encode()).hexdigest()
             if text_hash == text1_hash:
                 text1 = text
@@ -2669,11 +2680,13 @@ def detect_duplicates(results, log, should_stop, config):
     # Pre-compute text hashes for caching
     text_hashes = {}
     for idx, result in enumerate(results_for_dup_check):
-        text = result.get('raw_text', '')
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
         text_hashes[idx] = {
-            'hash_2k': hashlib.sha256(text[:2000].encode()).hexdigest() if len(text) >= 2000 else None,
-            'hash_5k': hashlib.sha256(text[:5000].encode()).hexdigest() if len(text) >= 5000 else None,
-            'full_text': text
+            'hash_2k': hashlib.sha256(base_text[:2000].encode()).hexdigest() if len(base_text) >= 2000 else None,
+            'hash_5k': hashlib.sha256(base_text[:5000].encode()).hexdigest() if len(base_text) >= 5000 else None,
+            'full_text': base_text
         }
     
     # Extract additional signatures for filtered results
@@ -2687,12 +2700,14 @@ def detect_duplicates(results, log, should_stop, config):
             progress = int((idx / total_files) * 100)
             log(f"   📊 Progress: {idx}/{total_files} files ({progress}%)")
             
-        text = result.get('raw_text', '')
-        _, semantic_sig = extract_semantic_fingerprint(text)
-        structural_sig = extract_structural_signature(text)
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        _, semantic_sig = extract_semantic_fingerprint(base_text)
+        structural_sig = extract_structural_signature(base_text)
         result['semantic_sig'] = semantic_sig
         result['structural_sig'] = structural_sig
-        result['normalized_text'] = normalize_text(text)
+        result['normalized_text'] = normalize_text(base_text)
     
     # Create MinHash index if available
     lsh, minhashes = None, None
@@ -3092,13 +3107,15 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     # Pre-cache text samples for all results
     text_samples = {}
     for idx, result in enumerate(results):
-        text = result.get('raw_text', '')
-        if len(text) >= 500:
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        if len(base_text) >= 500:
             text_samples[idx] = {
-                'sample_5k': text[:5000],
-                'sample_10k': text[:10000],
-                'hash_5k': hashlib.sha256(text[:5000].encode()).hexdigest(),
-                'hash_10k': hashlib.sha256(text[:10000].encode()).hexdigest()
+                'sample_5k': base_text[:5000],
+                'sample_10k': base_text[:10000],
+                'hash_5k': hashlib.sha256(base_text[:5000].encode()).hexdigest(),
+                'hash_10k': hashlib.sha256(base_text[:10000].encode()).hexdigest()
             }
     
     # Determine number of workers
@@ -5207,6 +5224,18 @@ def process_html_file_batch(args):
     import hashlib
     
     is_quick_scan = (mode == 'quick-scan')
+    disable_dup = (mode == 'custom' and custom_sample_size == 0)
+
+    # Custom mode: allow sample_size to limit duplicate comparison work
+    # Sentinel: -1 = use all characters
+    custom_sample_size = None
+    try:
+        if mode == 'custom' and isinstance(qa_settings, dict):
+            cms = qa_settings.get('custom_mode_settings')
+            if isinstance(cms, dict) and 'sample_size' in cms:
+                custom_sample_size = int(cms.get('sample_size'))
+    except Exception:
+        custom_sample_size = None
     
     for idx, filename in file_batch:
         full_path = os.path.join(folder_path, filename)
@@ -5230,6 +5259,18 @@ def process_html_file_batch(args):
         except Exception as e:
             # Skip files that can't be read
             continue
+
+        # Text used for duplicate detection (may be downsampled in custom mode)
+        dup_text = raw_text
+        try:
+            if mode == 'custom' and custom_sample_size is not None:
+                if custom_sample_size == -1:
+                    dup_text = raw_text
+                elif custom_sample_size > 0:
+                    dup_text = raw_text[:custom_sample_size]
+        except Exception:
+            dup_text = raw_text
+
         # Quick per-file word-count hint for downstream checks
         translated_wc_hint = _count_words_cached(raw_text) if isinstance(raw_text, str) else 0
         
@@ -5240,12 +5281,12 @@ def process_html_file_batch(args):
         
         chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
         
-        # Quick scan optimizations
-        if is_quick_scan:
-            hashes = {}  # Empty dict for quick scan
+        # Quick scan optimizations (and allow custom sample_size=0 to skip duplicate detection work)
+        if is_quick_scan or disable_dup:
+            hashes = {}  # Empty dict for quick scan / disabled duplicate detection
             preview_size = min(300, len(raw_text))
         else:
-            hashes = generate_content_hashes(raw_text)
+            hashes = generate_content_hashes(dup_text)
             preview_size = 500
         
         preview = raw_text[:preview_size].replace('\n', ' ')
@@ -5738,6 +5779,7 @@ def process_html_file_batch(args):
             "chapter_num": chapter_num,
             "hashes": hashes,
             "raw_text": raw_text,
+            "dup_text": dup_text,
             "translation_artifacts": artifacts
         }
         
@@ -6113,6 +6155,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if mode == 'custom' and qa_settings and 'custom_mode_settings' in qa_settings:
         custom_settings = qa_settings['custom_mode_settings']
     config = DuplicateDetectionConfig(mode, custom_settings)
+
+    # Custom mode: sample_size sentinel values
+    #   0  => disable duplicate detection
+    #  -1  => use all characters
+    if mode == 'custom' and isinstance(custom_settings, dict):
+        try:
+            ss = int(custom_settings.get('sample_size', config.thresholds.get('custom', {}).get('sample_size', 3000)))
+            if ss == 0:
+                config.thresholds['custom']['disable_duplicate_check'] = True
+        except Exception:
+            pass
 
     # Allow configurable sample size for quick-scan
     if mode == 'quick-scan' and qa_settings:
