@@ -123,8 +123,8 @@ class DuplicateDetectionConfig:
             },
             'ai-hunter': {
                 'similarity': 0.30, 
-                'semantic': 0.85,
-                'structural': 0.85,
+                'semantic': 0.65,
+                'structural': 0.80,
                 'consecutive_chapters': 5,
                 'word_overlap': 0.50,
                 'minhash_threshold': 0.60,

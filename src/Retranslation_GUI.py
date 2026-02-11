@@ -1077,8 +1077,8 @@ class RetranslationMixin:
             # Keep above the translator window but allow interaction with it
             dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             dialog.setWindowModality(Qt.NonModal)
-            # Use 38% width, 36% height for 1920x1080
-            width, height = self._get_dialog_size(0.38, 0.36)
+            # Use 38% width, 40% height for 1920x1080
+            width, height = self._get_dialog_size(0.38, 0.4)
             dialog.resize(width, height)
             
             # Set icon
