@@ -101,7 +101,7 @@ class GlossaryManagerMixin:
         
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
-        min_width = int(self._screen.width() * 0.5)   # 50% of screen width
+        min_width = int(self._screen.width() * 0.6)   # 50% of screen width
         min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
         dialog.setMinimumSize(min_width, min_height)
         
