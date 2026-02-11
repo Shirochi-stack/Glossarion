@@ -7945,9 +7945,21 @@ def run_standalone_translate_headers(self):
                         if self.config.get('use_multi_api_keys', False):
                             multi_keys = self.config.get('multi_api_keys', [])
                             os.environ['USE_MULTI_API_KEYS'] = '1'
-                            os.environ['MULTI_API_KEYS'] = json.dumps(multi_keys)
+                            os.environ['USE_MULTI_KEYS'] = '1'
                             os.environ['FORCE_KEY_ROTATION'] = '1' if self.config.get('force_key_rotation', True) else '0'
                             os.environ['ROTATION_FREQUENCY'] = str(self.config.get('rotation_frequency', 1))
+
+                            # Avoid Windows env var length limit by keeping keys in memory
+                            try:
+                                from unified_api_client import UnifiedClient
+                                UnifiedClient.set_in_memory_multi_keys(
+                                    multi_keys,
+                                    force_rotation=self.config.get('force_key_rotation', True),
+                                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                                )
+                            except Exception:
+                                pass
+
                             self.append_log(f"🔑 Multi-key mode enabled ({len(multi_keys)} keys)")
                     
                     api_client = UnifiedClient(

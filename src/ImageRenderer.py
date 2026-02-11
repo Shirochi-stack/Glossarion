@@ -4393,12 +4393,25 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
                 if use_mk and mk_list:
                     os.environ['USE_MULTI_API_KEYS'] = '1'
                     os.environ['USE_MULTI_KEYS'] = '1'
-                    os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
                     os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
                     os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+
+                    # Avoid Windows env var length limit by keeping keys in memory
+                    try:
+                        UnifiedClient.set_in_memory_multi_keys(
+                            mk_list,
+                            force_rotation=force_rotation,
+                            rotation_frequency=rotation_frequency,
+                        )
+                    except Exception:
+                        pass
                 else:
                     os.environ['USE_MULTI_API_KEYS'] = '0'
                     os.environ['USE_MULTI_KEYS'] = '0'
+                    try:
+                        UnifiedClient.clear_in_memory_multi_keys()
+                    except Exception:
+                        pass
             except Exception as _mk_err:
                 print(f"[DEBUG] Failed to apply multi-key env: {_mk_err}")
             
@@ -4640,12 +4653,25 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
             if use_mk and mk_list:
                 os.environ['USE_MULTI_API_KEYS'] = '1'
                 os.environ['USE_MULTI_KEYS'] = '1'
-                os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
                 os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
                 os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+
+                # Avoid Windows env var length limit by keeping keys in memory
+                try:
+                    UnifiedClient.set_in_memory_multi_keys(
+                        mk_list,
+                        force_rotation=force_rotation,
+                        rotation_frequency=rotation_frequency,
+                    )
+                except Exception:
+                    pass
             else:
                 os.environ['USE_MULTI_API_KEYS'] = '0'
                 os.environ['USE_MULTI_KEYS'] = '0'
+                try:
+                    UnifiedClient.clear_in_memory_multi_keys()
+                except Exception:
+                    pass
         except Exception as _mk_err:
             print(f"[DEBUG] Failed to apply multi-key env: {_mk_err}")
         

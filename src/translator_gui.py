@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.4.4"
+        __version__ = "7.4.5"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.4.4')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.4.5')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2626,7 +2626,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.4.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.4.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -8107,6 +8107,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
 
+        # Configure multi-key list in memory (avoid Windows env var size limit for MULTI_API_KEYS)
+        try:
+            from unified_api_client import UnifiedClient
+            if self.config.get('use_multi_api_keys', False) and self.config.get('multi_api_keys', []):
+                UnifiedClient.set_in_memory_multi_keys(
+                    self.config.get('multi_api_keys', []),
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+            else:
+                UnifiedClient.clear_in_memory_multi_keys()
+        except Exception:
+            pass
+
         # CRITICAL: Use current GUI value for max_output_tokens, not the initial value
         # This ensures user changes via the button are reflected in image translation
         current_max_tokens = self.max_output_tokens
@@ -8334,8 +8348,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'AZURE_API_VERSION': str(self.config.get('azure_api_version', '2024-08-01-preview')),
             
            # Multi API Key support
+            # NOTE: Do NOT put the full multi-key JSON into MULTI_API_KEYS env var (Windows 32767-char limit).
             'USE_MULTI_API_KEYS': "1" if self.config.get('use_multi_api_keys', False) else "0",
-            'MULTI_API_KEYS': json.dumps(self.config.get('multi_api_keys', [])) if self.config.get('use_multi_api_keys', False) else '[]',
             'FORCE_KEY_ROTATION': '1' if self.config.get('force_key_rotation', True) else '0',
             'ROTATION_FREQUENCY': str(self.config.get('rotation_frequency', 1)),
            
@@ -13441,7 +13455,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.4.4...")
+    print("🚀 Starting Glossarion v7.4.5...")
     
     # Initialize splash screen
     splash_manager = None

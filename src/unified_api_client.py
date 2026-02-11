@@ -1478,6 +1478,31 @@ class UnifiedClient:
                 print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded")
             
             return True
+
+    # In-memory multi-key configuration (avoids Windows env var length limit for MULTI_API_KEYS)
+    _in_memory_multi_keys = None
+    _in_memory_multi_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_multi_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure multi-key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_multi_keys_lock:
+                cls._in_memory_multi_keys = keys_list
+        except Exception:
+            pass
+        try:
+            cls.setup_multi_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+        except Exception:
+            # Pool setup failure should not crash callers; __init__ will fall back to single-key mode.
+            return False
+        return True
+
+    @classmethod
+    def clear_in_memory_multi_keys(cls):
+        """Clear in-memory multi-key configuration."""
+        with cls._in_memory_multi_keys_lock:
+            cls._in_memory_multi_keys = None
     
     @classmethod
     def initialize_key_pool(cls, key_list: list):
@@ -1699,14 +1724,29 @@ class UnifiedClient:
         print(f"[DEBUG] Creating new instance - multi-key mode from env: {use_multi_keys_env}")
         
         if use_multi_keys_env:
-            # Initialize from environment
+            # Initialize from environment OR from in-memory config (avoids Windows env var length limit)
             multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
             print(f"[DEBUG] Loading multi-keys config...")
             force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
             rotation_frequency = int(os.getenv('ROTATION_FREQUENCY', '1'))
             
+            multi_keys = []
             try:
-                multi_keys = json.loads(multi_keys_json)
+                if multi_keys_json and str(multi_keys_json).strip() not in ('', '[]', 'null', 'None'):
+                    multi_keys = json.loads(multi_keys_json)
+            except Exception as e:
+                print(f"Failed to load multi-key config from env: {e}")
+                multi_keys = []
+
+            # Fallback: in-memory multi-key list (set by GUI/bot code) when env var is absent/empty
+            if not multi_keys:
+                try:
+                    with self.__class__._in_memory_multi_keys_lock:
+                        multi_keys = self.__class__._in_memory_multi_keys or []
+                except Exception:
+                    multi_keys = []
+
+            try:
                 if multi_keys:
                     # Setup the shared pool
                     self.setup_multi_key_pool(multi_keys, force_rotation, rotation_frequency)

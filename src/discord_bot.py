@@ -1132,10 +1132,21 @@ async def translate(
     use_multi_keys = bool(saved_creds and saved_creds.get("use_multi_api_keys") and saved_creds.get("multi_api_keys"))
     if use_multi_keys:
         os.environ['USE_MULTI_API_KEYS'] = '1'
-        os.environ['MULTI_API_KEYS'] = json.dumps(saved_creds.get("multi_api_keys", []))
+        os.environ['USE_MULTI_KEYS'] = '1'
+        try:
+            from unified_api_client import UnifiedClient
+            mk_list = saved_creds.get("multi_api_keys", [])
+            UnifiedClient.set_in_memory_multi_keys(mk_list)
+        except Exception:
+            pass
     else:
         os.environ['USE_MULTI_API_KEYS'] = '0'
-        os.environ.pop('MULTI_API_KEYS', None)
+        os.environ['USE_MULTI_KEYS'] = '0'
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.clear_in_memory_multi_keys()
+        except Exception:
+            pass
 
     use_fallback_keys = bool(saved_creds and saved_creds.get("use_fallback_keys") and saved_creds.get("fallback_keys"))
     if use_fallback_keys:
@@ -2153,10 +2164,21 @@ async def extract(
     use_multi_keys = bool(saved_creds and saved_creds.get("use_multi_api_keys") and saved_creds.get("multi_api_keys"))
     if use_multi_keys:
         os.environ['USE_MULTI_API_KEYS'] = '1'
-        os.environ['MULTI_API_KEYS'] = json.dumps(saved_creds.get("multi_api_keys", []))
+        os.environ['USE_MULTI_KEYS'] = '1'
+        try:
+            from unified_api_client import UnifiedClient
+            mk_list = saved_creds.get("multi_api_keys", [])
+            UnifiedClient.set_in_memory_multi_keys(mk_list)
+        except Exception:
+            pass
     else:
         os.environ['USE_MULTI_API_KEYS'] = '0'
-        os.environ.pop('MULTI_API_KEYS', None)
+        os.environ['USE_MULTI_KEYS'] = '0'
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.clear_in_memory_multi_keys()
+        except Exception:
+            pass
 
     use_fallback_keys = bool(saved_creds and saved_creds.get("use_fallback_keys") and saved_creds.get("fallback_keys"))
     if use_fallback_keys:

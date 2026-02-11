@@ -11053,9 +11053,20 @@ class MangaTranslationTab(QObject):
                         
                         os.environ['USE_MULTI_API_KEYS'] = '1'
                         os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
-                        os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
                         os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
                         os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
+
+                        # Avoid Windows env var length limit by keeping keys in memory
+                        try:
+                            from unified_api_client import UnifiedClient
+                            UnifiedClient.set_in_memory_multi_keys(
+                                mk_list,
+                                force_rotation=self.main_gui.config.get('force_key_rotation', True),
+                                rotation_frequency=self.main_gui.config.get('rotation_frequency', 1),
+                            )
+                        except Exception:
+                            pass
+
                         self._log(f"🔑 Multi-key mode ENABLED for manga translator ({valid_keys} valid keys)", "info")
                     else:
                         # Explicitly disable if not configured

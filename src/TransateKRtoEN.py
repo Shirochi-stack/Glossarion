@@ -586,8 +586,19 @@ class TranslationConfig:
         if self.use_multi_api_keys:
             multi_keys_json = os.environ.get('MULTI_API_KEYS', '[]')
             try:
-                self.multi_api_keys = json.loads(multi_keys_json)
+                if multi_keys_json and str(multi_keys_json).strip() not in ('', '[]', 'null', 'None'):
+                    self.multi_api_keys = json.loads(multi_keys_json)
+                else:
+                    # Fallback: UnifiedClient may have the keys stored in-memory to avoid Windows env var limits
+                    try:
+                        from unified_api_client import UnifiedClient
+                        with UnifiedClient._in_memory_multi_keys_lock:
+                            self.multi_api_keys = UnifiedClient._in_memory_multi_keys or []
+                    except Exception:
+                        self.multi_api_keys = []
                 print(f"Loaded {len(self.multi_api_keys)} API keys for multi-key mode")
+                if not self.multi_api_keys:
+                    self.use_multi_api_keys = False
             except Exception as e:
                 print(f"Failed to load multi API keys: {e}")
                 self.use_multi_api_keys = False

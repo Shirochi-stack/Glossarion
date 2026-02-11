@@ -71,11 +71,21 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
     if use_multi_keys and 'multi_api_keys' in config and config['multi_api_keys']:
         print("🔑 Multi API Key mode enabled for glossary extraction")
         
-        # Set environment variables that UnifiedClient will read
+        # Enable multi-key mode without putting the full key list into a single env var (Windows limit)
         os.environ['USE_MULTI_API_KEYS'] = '1'
-        os.environ['MULTI_API_KEYS'] = json.dumps(config['multi_api_keys'])
+        os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat
         os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
         os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
+
+        # Store the actual keys in-memory and initialize the shared pool
+        try:
+            UnifiedClient.set_in_memory_multi_keys(
+                config['multi_api_keys'],
+                force_rotation=config.get('force_key_rotation', True),
+                rotation_frequency=config.get('rotation_frequency', 1),
+            )
+        except Exception:
+            pass
         
         print(f"   • Keys configured: {len(config['multi_api_keys'])}")
         print(f"   • Force rotation: {config.get('force_key_rotation', True)}")
