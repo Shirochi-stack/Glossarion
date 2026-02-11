@@ -5572,7 +5572,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         from PySide6.QtGui import QPixmap, QIcon
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(95)
+        self.qa_button.setMinimumWidth(110)
         self.qa_button.setMinimumHeight(40)  # Increased button height
         self.qa_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
         
@@ -5685,11 +5685,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if MANGA_SUPPORT:
             toolbar_items.append(("Manga Translator", self.open_manga_translator, "primary"))
          
-        # Async Processing
-        toolbar_items.append(("Async", self.open_async_processing, "success"))
-        
         toolbar_items.extend([
             ("Progress Manager", self.open_progress_manager, "progress"),
+            ("Async", self.open_async_processing, "success"),
             ("Save Config", self.save_config, "secondary"),
             ("Load Glossary", self.load_glossary, "glossary"),
             ("Profiles", self._profiles_button_clicked, "secondary"),
@@ -5714,21 +5712,43 @@ If you see multiple p-b cookies, use the one with the longest value."""
             btn.setMinimumHeight(40)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
             
-            # Keep Profiles compact
+            # Keep Profiles compact (but slightly wider)
             if lbl in ["Profiles"]:
-                btn.setMinimumWidth(60)
-                btn.setMaximumWidth(95)
+                btn.setMinimumWidth(70)
+                btn.setMaximumWidth(110)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-            # Keep Async compact
+            # Keep Async compact (but slightly wider)
             if lbl in ["Async"]:
-                btn.setMinimumWidth(60)
-                btn.setMaximumWidth(95)
+                btn.setMinimumWidth(70)
+                btn.setMaximumWidth(110)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+            # Keep Save/Load buttons from eating horizontal space (but slightly wider)
+            if lbl in ["Save Config", "Load Glossary"]:
+                btn.setMinimumWidth(95)
+                btn.setMaximumWidth(130)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+            # Make Progress Manager wider than the others.
+            # Using stretch works better than a fixed width when the toolbar has many buttons.
+            if lbl in ["Progress Manager"]:
+                btn.setMinimumWidth(260)
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             
             color = style_colors.get(style, "#95a5a6")
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 4px 6px; font-weight: bold;")
-            btn_layout.addWidget(btn)
+
+            # Give Progress Manager extra horizontal stretch so it actually grows.
+            try:
+                if lbl == "Progress Manager":
+                    btn_layout.addWidget(btn, 4)
+                elif lbl in ("Async", "Save Config", "Load Glossary", "Profiles"):
+                    btn_layout.addWidget(btn, 0)
+                else:
+                    btn_layout.addWidget(btn, 1)
+            except Exception:
+                btn_layout.addWidget(btn)
             
             if lbl == "Extract Glossary":
                 # Create Extract Glossary button with mini icon
@@ -5812,7 +5832,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(150)
+                # Keep the same minimum width as Progress Manager for consistent sizing.
+                btn.setMinimumWidth(260)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
