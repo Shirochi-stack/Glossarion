@@ -4,7 +4,7 @@ import time
 import atexit
 from PySide6.QtWidgets import QApplication, QWidget, QLabel, QProgressBar, QVBoxLayout
 from PySide6.QtCore import Qt, QTimer, QEventLoop
-from PySide6.QtGui import QFont, QPalette, QColor, QPixmap
+from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QFontMetrics
 
 class SplashManager:
     """PySide6 splash screen manager - shows faster than Tkinter"""
@@ -18,6 +18,9 @@ class SplashManager:
         self.status_label = None
         self.progress_bar = None
         self.progress_label = None
+        # Scale factor for low-res/HiDPI displays (computed in start_splash)
+        self._ui_scale = 1.0
+        self._icon_logical_px = 110
     
     def _set_windows_taskbar_icon(self):
         """Set Windows taskbar icon early, before any windows are created"""
@@ -97,11 +100,21 @@ class SplashManager:
             self.splash_window = QWidget()
             self.splash_window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
             self.splash_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            # Use screen ratios for sizing
-            screen = self.app.primaryScreen().geometry()
-            width = int(screen.width() * 0.24)  # 24% of screen width
-            height = int(screen.height() * 0.27)  # 30% of screen height (reduced from 36%)
-            self.splash_window.setFixedSize(width, height)
+
+            # Screen geometry and responsive UI scale
+            screen = self.app.primaryScreen().availableGeometry()
+            try:
+                # Scale down on low-res displays so text + icon don't collide.
+                # Clamp so normal screens keep current sizes.
+                self._ui_scale = max(0.72, min(1.0, screen.height() / 900.0, screen.width() / 900.0))
+            except Exception:
+                self._ui_scale = 1.0
+            self._icon_logical_px = int(max(72, min(110, 110 * self._ui_scale)))
+
+            # Initial target size (we'll finalize after building widgets using sizeHint)
+            width = int(screen.width() * 0.24)
+            height = int(screen.height() * 0.27)
+            self.splash_window.resize(max(320, width), max(240, height))
             
             # Set dark background with border
             palette = self.splash_window.palette()
@@ -121,8 +134,9 @@ class SplashManager:
             
             # Main layout with tighter spacing
             layout = QVBoxLayout()
-            layout.setContentsMargins(15, 15, 15, 15)  # Reduced margins from 20 to 15
-            layout.setSpacing(8)  # Reduced spacing from 10 to 8
+            m = int(max(10, 15 * self._ui_scale))
+            layout.setContentsMargins(m, m, m, m)
+            layout.setSpacing(int(max(4, 8 * self._ui_scale)))
             
             # Get icon path early
             import os
@@ -138,7 +152,7 @@ class SplashManager:
             # Title
             title_label = QLabel("Glossarion v7.4.5")
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            title_font = QFont("Arial", 20, QFont.Weight.Bold)
+            title_font = QFont("Arial", int(max(14, 20 * self._ui_scale)), QFont.Weight.Bold)
             title_label.setFont(title_font)
             title_label.setStyleSheet("color: #4a9eff; background: transparent;")
             layout.addWidget(title_label)
@@ -146,19 +160,20 @@ class SplashManager:
             # Subtitle
             subtitle_label = QLabel("Advanced AI Translation Suite")
             subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            subtitle_font = QFont("Arial", 12)
+            subtitle_font = QFont("Arial", int(max(9, 12 * self._ui_scale)))
             subtitle_label.setFont(subtitle_font)
             subtitle_label.setStyleSheet("color: #cccccc; background: transparent;")
             layout.addWidget(subtitle_label)
             
-            layout.addSpacing(6)  # Reduced from 10 to 6
+            layout.addSpacing(int(max(2, 6 * self._ui_scale)))
             
-            # Status label with fixed height to prevent shaking
+            # Status label: keep single line and elide to fit width (prevents overlap on small screens)
             self.status_label = QLabel(self._status_text)
             self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_font = QFont("Arial", 11)
+            status_font = QFont("Arial", int(max(9, 11 * self._ui_scale)))
             self.status_label.setFont(status_font)
-            self.status_label.setFixedHeight(30)  # Fixed height to prevent layout shifts
+            self.status_label.setWordWrap(False)
+            self.status_label.setFixedHeight(int(max(22, 30 * self._ui_scale)))
             self.status_label.setStyleSheet("color: #ffffff; background: transparent;")
             layout.addWidget(self.status_label)
             
@@ -168,7 +183,7 @@ class SplashManager:
             self.progress_bar.setMaximum(100)
             self.progress_bar.setValue(0)
             self.progress_bar.setTextVisible(False)
-            self.progress_bar.setFixedHeight(36)
+            self.progress_bar.setFixedHeight(int(max(26, 36 * self._ui_scale)))
             self.progress_bar.setStyleSheet("""
                 QProgressBar {
                     border: 2px solid #666666;
@@ -187,7 +202,7 @@ class SplashManager:
             # Progress percentage label (overlaid on progress bar)
             self.progress_label = QLabel("0%", self.progress_bar)
             self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            progress_font = QFont("Montserrat", 12, QFont.Weight.Bold)
+            progress_font = QFont("Montserrat", int(max(10, 12 * self._ui_scale)), QFont.Weight.Bold)
             self.progress_label.setFont(progress_font)
             self.progress_label.setStyleSheet("""
                 color: #ffffff;
@@ -209,7 +224,7 @@ class SplashManager:
             # Version info
             version_label = QLabel("Starting up...")
             version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            version_font = QFont("Arial", 9)
+            version_font = QFont("Arial", int(max(8, 9 * self._ui_scale)))
             version_label.setFont(version_font)
             version_label.setStyleSheet("color: #888888; background: transparent;")
             layout.addWidget(version_label)
@@ -217,9 +232,21 @@ class SplashManager:
             layout.addStretch()
             
             self.splash_window.setLayout(layout)
+
+            # Finalize splash size: never smaller than its content's sizeHint.
+            try:
+                layout.activate()
+                hint = self.splash_window.sizeHint()
+                target_w = max(self.splash_window.width(), hint.width())
+                target_h = max(self.splash_window.height(), hint.height())
+                # Clamp to screen to avoid going off-screen
+                target_w = min(target_w, int(screen.width() * 0.92))
+                target_h = min(target_h, int(screen.height() * 0.92))
+                self.splash_window.setFixedSize(int(target_w), int(target_h))
+            except Exception:
+                pass
             
             # Center the window
-            screen = self.app.primaryScreen().geometry()
             x = (screen.width() - self.splash_window.width()) // 2
             y = (screen.height() - self.splash_window.height()) // 2
             self.splash_window.move(x, y)
@@ -305,7 +332,7 @@ class SplashManager:
                     dpr = 1.0
                 
                 # Logical size (how big it appears on screen)
-                target_logical = 110
+                target_logical = int(getattr(self, '_icon_logical_px', 110) or 110)
                 # Physical pixels (actual pixels in the image for HiDPI)
                 target_dev_px = int(target_logical * dpr)
                 
@@ -340,10 +367,11 @@ class SplashManager:
         # Fallback emoji if icon loading fails
         icon_label = QLabel("📚")
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_font = QFont("Arial", 56)  # Reduced from 64
+        icon_font = QFont("Arial", int(max(36, 56 * getattr(self, '_ui_scale', 1.0))))
         icon_label.setFont(icon_font)
         icon_label.setStyleSheet("background: #4a9eff; color: white; border-radius: 10px;")
-        icon_label.setFixedSize(110, 110)  # Reduced from 128x128
+        sz = int(getattr(self, '_icon_logical_px', 110) or 110)
+        icon_label.setFixedSize(sz, sz)
         layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _animate_progress(self):
@@ -389,12 +417,25 @@ class SplashManager:
         except Exception:
             pass
     
+    def _elide_status(self, message: str) -> str:
+        try:
+            if not self.status_label:
+                return message
+            w = int(self.status_label.width() or 0)
+            if w <= 20:
+                return message
+            fm = QFontMetrics(self.status_label.font())
+            # Keep a little padding
+            return fm.elidedText(str(message), Qt.TextElideMode.ElideRight, max(20, w - 10))
+        except Exception:
+            return message
+
     def update_status(self, message):
         """Update splash status and progress"""
         self._status_text = message
         try:
             if self.splash_window and self.status_label:
-                self.status_label.setText(message)
+                self.status_label.setText(self._elide_status(message))
                 
                 # Enhanced progress mapping
                 progress_map = {
