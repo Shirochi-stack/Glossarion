@@ -87,7 +87,7 @@ try:
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop
-    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
+    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
 except ImportError as e:
     print(f"\n{'='*60}")
     print("ERROR: PySide6 is not installed or could not be imported.")
@@ -2604,6 +2604,7 @@ Recent translations to summarize:
         self._create_api_section()
         self._create_prompt_section()
         self._create_log_section()
+        self._setup_text_editor_zoom_controls()
         self._start_api_watchdog_timer()
         
         # Add bottom toolbar to layout
@@ -4074,6 +4075,13 @@ Recent translations to summarize:
         self.prompt_text.setMaximumHeight(220)
         self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.prompt_text.setAcceptRichText(False)  # Plain text only
+        
+        # Enable Ctrl+wheel zoom (handled in TranslatorGUI.eventFilter)
+        try:
+            self.prompt_text.installEventFilter(self)
+            self.prompt_text.viewport().installEventFilter(self)
+        except Exception:
+            pass
         
         # Auto-save system prompt as user types
         self.prompt_text.textChanged.connect(self._auto_save_system_prompt)
@@ -10897,12 +10905,152 @@ Important rules:
         except Exception:
             pass
 
+    def _setup_text_editor_zoom_controls(self):
+        """Enable Ctrl+wheel + Ctrl+/Ctrl- zoom for log and prompt editors."""
+        try:
+            # Track zoom as integer "point-size steps" so Ctrl+0 can reset.
+            self._prompt_zoom_steps = int(getattr(self, '_prompt_zoom_steps', 0) or 0)
+            self._log_zoom_steps = int(getattr(self, '_log_zoom_steps', 0) or 0)
+        except Exception:
+            self._prompt_zoom_steps = 0
+            self._log_zoom_steps = 0
+
+        def _mk_shortcut(seq, callback):
+            try:
+                sc = QShortcut(seq, self)
+                sc.setContext(Qt.WidgetWithChildrenShortcut)
+                sc.activated.connect(callback)
+                return sc
+            except Exception:
+                return None
+
+        # Zoom in/out (apply to whichever editor currently has focus)
+        self._zoom_shortcuts = []
+        for seq in (QKeySequence.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")):
+            sc = _mk_shortcut(seq, lambda: self._zoom_focused_editor(+1))
+            if sc:
+                self._zoom_shortcuts.append(sc)
+        for seq in (QKeySequence.ZoomOut, QKeySequence("Ctrl+-")):
+            sc = _mk_shortcut(seq, lambda: self._zoom_focused_editor(-1))
+            if sc:
+                self._zoom_shortcuts.append(sc)
+        # Reset zoom
+        sc = _mk_shortcut(QKeySequence("Ctrl+0"), self._reset_focused_editor_zoom)
+        if sc:
+            self._zoom_shortcuts.append(sc)
+
+    def _get_zoom_target_from_focus(self):
+        """Return (editor_widget, attr_prefix) based on current focus, or (None, None)."""
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        w = fw
+        try:
+            while w is not None:
+                if hasattr(self, 'prompt_text') and self.prompt_text and w is self.prompt_text:
+                    return self.prompt_text, 'prompt'
+                if hasattr(self, 'log_text') and self.log_text and w is self.log_text:
+                    return self.log_text, 'log'
+                try:
+                    w = w.parentWidget()
+                except Exception:
+                    w = None
+        except Exception:
+            pass
+        return None, None
+
+    def _zoom_editor(self, editor, prefix: str, delta_steps: int):
+        try:
+            if not editor or not prefix or not delta_steps:
+                return
+            steps_attr = f"_{prefix}_zoom_steps"
+            cur = int(getattr(self, steps_attr, 0) or 0)
+
+            # Keep it bounded so we can't accidentally make text unreadably tiny/huge.
+            new = max(-20, min(60, cur + int(delta_steps)))
+            actual = new - cur
+            if actual > 0:
+                editor.zoomIn(actual)
+            elif actual < 0:
+                editor.zoomOut(-actual)
+            setattr(self, steps_attr, new)
+        except Exception:
+            pass
+
+    def _reset_editor_zoom(self, editor, prefix: str):
+        try:
+            if not editor or not prefix:
+                return
+            steps_attr = f"_{prefix}_zoom_steps"
+            cur = int(getattr(self, steps_attr, 0) or 0)
+            if cur > 0:
+                editor.zoomOut(cur)
+            elif cur < 0:
+                editor.zoomIn(-cur)
+            setattr(self, steps_attr, 0)
+        except Exception:
+            pass
+
+    def _zoom_focused_editor(self, delta_steps: int):
+        editor, prefix = self._get_zoom_target_from_focus()
+        if editor is None:
+            return
+        self._zoom_editor(editor, prefix, delta_steps)
+
+    def _reset_focused_editor_zoom(self):
+        editor, prefix = self._get_zoom_target_from_focus()
+        if editor is None:
+            return
+        self._reset_editor_zoom(editor, prefix)
+
     def eventFilter(self, obj, event):
         try:
-            if hasattr(self, 'log_text') and obj in (self.log_text, self.log_text.viewport()):
-                from PySide6.QtCore import QEvent
-                if event.type() in (QEvent.Resize, QEvent.Show):
-                    QTimer.singleShot(0, self._position_log_scroll_button)
+            from PySide6.QtCore import QEvent
+
+            # Ctrl+wheel zoom for log + prompt editors
+            if event.type() == QEvent.Wheel:
+                try:
+                    is_ctrl = bool(event.modifiers() & Qt.ControlModifier)
+                except Exception:
+                    is_ctrl = False
+
+                if is_ctrl:
+                    # Determine which editor this wheel event belongs to
+                    target_editor = None
+                    target_prefix = None
+                    try:
+                        if hasattr(self, 'prompt_text') and self.prompt_text and obj in (self.prompt_text, self.prompt_text.viewport()):
+                            target_editor, target_prefix = self.prompt_text, 'prompt'
+                        elif hasattr(self, 'log_text') and self.log_text and obj in (self.log_text, self.log_text.viewport()):
+                            target_editor, target_prefix = self.log_text, 'log'
+                    except Exception:
+                        target_editor = None
+
+                    if target_editor is not None:
+                        try:
+                            dy = int(event.angleDelta().y() or 0)
+                            if dy == 0:
+                                dy = int(event.pixelDelta().y() or 0)
+                        except Exception:
+                            dy = 0
+
+                        if dy != 0:
+                            step = 1 if dy > 0 else -1
+                            self._zoom_editor(target_editor, target_prefix, step)
+                            try:
+                                event.accept()
+                            except Exception:
+                                pass
+                            return True
+
+            # Existing log scroll-button anchoring
+            try:
+                if hasattr(self, 'log_text') and obj in (self.log_text, self.log_text.viewport()):
+                    if event.type() in (QEvent.Resize, QEvent.Show):
+                        QTimer.singleShot(0, self._position_log_scroll_button)
+            except Exception:
+                pass
         except Exception:
             pass
         return False
