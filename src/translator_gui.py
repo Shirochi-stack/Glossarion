@@ -9561,8 +9561,11 @@ Important rules:
                 # - Graceful stop: allow partial output detection below
                 if self.stop_requested and not (bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')):
                     self.append_log("⏹️ Glossary extraction was stopped")
+                    try:
+                        self._reset_api_watchdog_progress(clear_stale_external_files=True)
+                    except Exception:
+                        pass
                     return False
-                
                 # Check if output file exists - check both JSON and CSV
                 # Even if stopped, we consider it a partial success if the file exists and has content
                 
