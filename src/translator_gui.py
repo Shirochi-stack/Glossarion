@@ -5572,7 +5572,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         from PySide6.QtGui import QPixmap, QIcon
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(110)
+        self.qa_button.setMinimumWidth(120)
         self.qa_button.setMinimumHeight(40)  # Increased button height
         self.qa_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
         
@@ -5691,8 +5691,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         toolbar_items.extend([
             ("📦 Async Translator", self.open_async_processing, "success"),
-            ("Save Config", self.save_config, "secondary"),
-            ("Load Glossary", self.load_glossary, "glossary"),
+            ("💾 Save Config", self.save_config, "secondary"),
+            ("📄 Load Glossary", self.load_glossary, "glossary"),
             ("Profiles", self._profiles_button_clicked, "secondary"),
         ])
         
@@ -5705,7 +5705,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn = QPushButton(lbl)
             
             # Special-case Save Config for inline feedback
-            if lbl == "Save Config":
+            if lbl == "💾 Save Config":
                 self.save_config_button = btn
                 btn.clicked.connect(self._on_save_config_clicked)
                 btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Save all settings to config.json.</p></qt>")
@@ -5717,32 +5717,32 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Keep Profiles compact (but slightly wider)
             if lbl in ["Profiles"]:
-                btn.setMinimumWidth(70)
-                btn.setMaximumWidth(110)
+                btn.setMinimumWidth(80)
+                btn.setMaximumWidth(120)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Keep Async Translator compact (but slightly wider)
             if lbl in ["📦 Async Translator"]:
-                btn.setMinimumWidth(90)
-                btn.setMaximumWidth(145)
+                btn.setMinimumWidth(100)
+                btn.setMaximumWidth(155)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Keep Save/Load buttons from eating horizontal space (but slightly wider)
-            if lbl in ["Save Config", "Load Glossary"]:
-                btn.setMinimumWidth(95)
-                btn.setMaximumWidth(130)
+            if lbl in ["💾 Save Config", "📄 Load Glossary"]:
+                btn.setMinimumWidth(105)
+                btn.setMaximumWidth(140)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Keep Glossary Settings from eating horizontal space
             if lbl in ["⚙️ Glossary Settings"]:
-                btn.setMinimumWidth(140)
-                btn.setMaximumWidth(180)
+                btn.setMinimumWidth(150)
+                btn.setMaximumWidth(190)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Keep Manga Translator from eating horizontal space (but add emoji)
             if lbl in ["🖼️ Manga Translator"]:
-                btn.setMinimumWidth(130)
-                btn.setMaximumWidth(170)
+                btn.setMinimumWidth(140)
+                btn.setMaximumWidth(180)
                 btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             # Prevent these icon+label buttons from stretching excessively in fullscreen.
@@ -5763,7 +5763,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 if lbl == "Progress Manager":
                     btn_layout.addWidget(btn, 4)
-                elif lbl in ("📦 Async Translator", "Save Config", "Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator", "Extract Glossary", "EPUB Converter"):
+                elif lbl in ("📦 Async Translator", "💾 Save Config", "📄 Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator", "Extract Glossary", "EPUB Converter"):
                     btn_layout.addWidget(btn, 0)
                 else:
                     btn_layout.addWidget(btn, 1)
