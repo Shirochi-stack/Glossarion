@@ -2587,7 +2587,8 @@ Recent translations to summarize:
                 self.frame.setRowMinimumHeight(r, 18)
             elif r == 11:
                 # Log row minimum; keep this small so the toolbar can always claim its needed height.
-                self.frame.setRowMinimumHeight(r, 80)
+                # Lower this so the prompt can grow more when using the drag-resize handle.
+                self.frame.setRowMinimumHeight(r, 40)
             elif r == 12:
                 # Toolbar row - let it size to its contents (important for low-res / high-DPI)
                 self.frame.setRowMinimumHeight(r, 0)
@@ -4088,7 +4089,7 @@ Recent translations to summarize:
         self.prompt_text.textChanged.connect(self._update_target_lang_state)
         
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
-        
+
         # Output Token Limit button (row 9, column 0 - below label)
         self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens}")
         self.output_btn.clicked.connect(self.prompt_custom_token_limit)
@@ -4513,6 +4514,14 @@ Recent translations to summarize:
                 margin: 0px;
             }
         """)
+        # Enable a hidden drag handle on the TOP edge of the progress bar.
+        # Hover near the top to get a split cursor; drag DOWN to increase prompt height (log shrinks).
+        try:
+            self.api_watchdog_bar.setMouseTracking(True)
+            self.api_watchdog_bar.installEventFilter(self)
+        except Exception:
+            pass
+
         self.frame.addWidget(self.api_watchdog_bar, 10, 0, 1, 5)
 
         # Log Text Edit (row 11, spans all 5 columns)
@@ -4520,7 +4529,8 @@ Recent translations to summarize:
         self.log_text.setReadOnly(True)  # Make it read-only
         # IMPORTANT: keep the log flexible so the bottom toolbar never overlaps it on small/HiDPI displays.
         # A large minimum height here can force Qt layouts to place toolbar children outside their parent.
-        self.log_text.setMinimumHeight(80)
+        # Keep this low so the prompt can steal vertical space when the user drags the resize handle.
+        self.log_text.setMinimumHeight(40)
         # Make sure it greedily expands vertically and horizontally but can also shrink.
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setAcceptRichText(False)  # Plain text only
@@ -11008,6 +11018,116 @@ Important rules:
         try:
             from PySide6.QtCore import QEvent
 
+            # --- Hidden drag handle on the top edge of the API watchdog bar ---
+            try:
+                if hasattr(self, 'api_watchdog_bar') and self.api_watchdog_bar and obj is self.api_watchdog_bar:
+                    hit_px = 8
+
+                    def _local_y(ev):
+                        try:
+                            return float(ev.position().y())
+                        except Exception:
+                            try:
+                                return float(ev.pos().y())
+                            except Exception:
+                                return 9999.0
+
+                    def _global_y(ev):
+                        try:
+                            return float(ev.globalPosition().y())
+                        except Exception:
+                            try:
+                                return float(ev.globalPos().y())
+                            except Exception:
+                                return 0.0
+
+                    et = event.type()
+
+                    if et == QEvent.MouseMove:
+                        try:
+                            if getattr(self, '_prompt_resize_drag_active', False):
+                                y = _global_y(event)
+                                dy = y - float(getattr(self, '_prompt_resize_start_y', y) or y)
+                                # Allow dragging both directions, but _set_prompt_user_max_height clamps to the auto baseline
+                                start_h = int(getattr(self, '_prompt_resize_start_h', self.prompt_text.maximumHeight()) or 0)
+                                self._set_prompt_user_max_height(int(start_h + dy))
+                                try:
+                                    event.accept()
+                                except Exception:
+                                    pass
+                                return True
+
+                            # Hover cursor when near the top edge
+                            ly = _local_y(event)
+                            if ly <= hit_px:
+                                self.api_watchdog_bar.setCursor(Qt.SplitVCursor)
+                            else:
+                                self.api_watchdog_bar.unsetCursor()
+                        except Exception:
+                            pass
+
+                    elif et == QEvent.Leave:
+                        try:
+                            if not getattr(self, '_prompt_resize_drag_active', False):
+                                self.api_watchdog_bar.unsetCursor()
+                        except Exception:
+                            pass
+
+                    elif et == QEvent.MouseButtonPress:
+                        try:
+                            if event.button() == Qt.LeftButton and _local_y(event) <= hit_px:
+                                # Start drag: baseline is current auto; we never allow shrinking below it
+                                cw = self.centralWidget()
+                                total_h = int(cw.height() if cw else self.height())
+                                baseline = self._compute_auto_prompt_max_height(total_h)
+
+                                self._prompt_resize_drag_active = True
+                                self._prompt_resize_start_y = _global_y(event)
+
+                                cur_max = int(self.prompt_text.maximumHeight() or 0)
+                                if cur_max <= 0:
+                                    cur_max = int(self.prompt_text.sizeHint().height() or baseline)
+
+                                start_h = max(int(baseline), int(cur_max))
+                                self._prompt_resize_start_h = start_h
+                                self._prompt_user_max_height = start_h
+
+                                try:
+                                    event.accept()
+                                except Exception:
+                                    pass
+                                return True
+                        except Exception:
+                            pass
+
+                    elif et == QEvent.MouseButtonRelease:
+                        try:
+                            if event.button() == Qt.LeftButton and getattr(self, '_prompt_resize_drag_active', False):
+                                self._prompt_resize_drag_active = False
+                                try:
+                                    event.accept()
+                                except Exception:
+                                    pass
+                                return True
+                        except Exception:
+                            pass
+
+                    elif et == QEvent.MouseButtonDblClick:
+                        # Double-click near the top edge resets back to default/auto sizing
+                        try:
+                            if event.button() == Qt.LeftButton and _local_y(event) <= hit_px:
+                                self._prompt_resize_drag_active = False
+                                self._clear_prompt_user_max_height()
+                                try:
+                                    event.accept()
+                                except Exception:
+                                    pass
+                                return True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # Ctrl+wheel zoom for log + prompt editors
             if event.type() == QEvent.Wheel:
                 try:
@@ -11066,6 +11186,102 @@ Important rules:
         except Exception:
             pass
 
+    def _compute_auto_prompt_max_height(self, total_h: int) -> int:
+        """Compute the automatic (non-user-overridden) prompt max height."""
+        try:
+            total_h = int(total_h)
+        except Exception:
+            total_h = 0
+        if total_h <= 0:
+            return 220
+
+        # Base target: prompt takes ~16% of vertical space (clamped)
+        desired_prompt_max = int(total_h * 0.16)
+        prompt_max = max(100, min(240, desired_prompt_max))
+
+        # Allow the prompt to grow to match row-9 neighbor content height (within cap)
+        try:
+            neighbor_h = 0
+        except Exception:
+            neighbor_h = 0
+        try:
+            if hasattr(self, 'run_button') and self.run_button:
+                neighbor_h = max(neighbor_h, int(self.run_button.sizeHint().height() or 0))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_prompt_side_container') and self._prompt_side_container:
+                neighbor_h = max(neighbor_h, int(self._prompt_side_container.sizeHint().height() or 0))
+        except Exception:
+            pass
+        if neighbor_h > 0:
+            prompt_max = max(prompt_max, min(240, neighbor_h))
+
+        return int(prompt_max)
+
+    def _set_prompt_user_max_height(self, height: int):
+        """Set a user override for prompt max-height.
+
+        IMPORTANT: never allow lowering below the automatic baseline (user can only increase).
+        """
+        try:
+            h = int(height)
+        except Exception:
+            return
+
+        # Determine baseline and a generous upper bound (shrinks log as needed)
+        try:
+            cw = self.centralWidget()
+            total_h = int(cw.height() if cw else self.height())
+        except Exception:
+            total_h = 0
+
+        baseline = self._compute_auto_prompt_max_height(total_h)
+
+        # Keep some space for watchdog/log/toolbar; still allow large increases
+        try:
+            max_allow = int(total_h * 0.92) if total_h > 0 else 1600
+        except Exception:
+            max_allow = 1600
+
+        # Never decrease below baseline
+        h = max(int(baseline), min(int(max_allow), h))
+
+        # Store override
+        self._prompt_user_max_height = h
+
+        # Apply cap to the editor itself
+        try:
+            self.prompt_text.setMaximumHeight(h)
+        except Exception:
+            pass
+
+        # IMPORTANT: In a QGridLayout, row 9 won't grow unless we raise its minimum height.
+        # This is what actually steals space from the log row.
+        try:
+            if hasattr(self, 'frame') and self.frame:
+                self.frame.setRowMinimumHeight(9, max(120, int(h)))
+        except Exception:
+            pass
+
+    def _clear_prompt_user_max_height(self):
+        """Clear the user override and return prompt sizing to automatic behavior."""
+        try:
+            if hasattr(self, '_prompt_user_max_height'):
+                self._prompt_user_max_height = None
+        except Exception:
+            pass
+        # Restore default row-9 minimum height so we don't keep forcing the prompt tall.
+        try:
+            if hasattr(self, 'frame') and self.frame:
+                self.frame.setRowMinimumHeight(9, 120)
+        except Exception:
+            pass
+        try:
+            self._adjust_prompt_and_log_sizes()
+        except Exception:
+            pass
+
     def _adjust_prompt_and_log_sizes(self):
         """Dynamically cap the system prompt editor so the log stays larger.
 
@@ -11084,32 +11300,24 @@ Important rules:
             if total_h <= 0:
                 return
 
-            # Base target: prompt takes ~16% of vertical space (clamped)
-            # (smaller prompt so the log stays larger, especially on high-res displays)
-            desired_prompt_max = int(total_h * 0.16)
-            prompt_max = max(100, min(240, desired_prompt_max))
+            baseline = self._compute_auto_prompt_max_height(total_h)
 
-            # If the prompt column is shorter than the other widgets in row 9 (left controls / run button),
-            # it can leave a visible empty gap under the prompt. Allow the prompt to grow to match that
-            # row's natural content height (within a safe cap) without stealing from the log.
-            try:
-                neighbor_h = 0
-                oc = locals().get('output_container')  # not available here
-            except Exception:
-                neighbor_h = 0
-            try:
-                if hasattr(self, 'run_button') and self.run_button:
-                    neighbor_h = max(neighbor_h, int(self.run_button.sizeHint().height() or 0))
-            except Exception:
-                pass
-            try:
-                # output_container is a local in _create_prompt_section; store it if present
-                if hasattr(self, '_prompt_side_container') and self._prompt_side_container:
-                    neighbor_h = max(neighbor_h, int(self._prompt_side_container.sizeHint().height() or 0))
-            except Exception:
-                pass
-            if neighbor_h > 0:
-                prompt_max = max(prompt_max, min(240, neighbor_h))
+            # If the user dragged the handle, respect their setting (but never below baseline)
+            user_h = getattr(self, '_prompt_user_max_height', None)
+            if user_h is not None:
+                try:
+                    user_h = int(user_h)
+                except Exception:
+                    user_h = None
+
+            if user_h is not None:
+                try:
+                    max_allow = int(total_h * 0.92)
+                except Exception:
+                    max_allow = 1600
+                prompt_max = max(int(baseline), min(int(max_allow), int(user_h)))
+            else:
+                prompt_max = int(baseline)
 
             # Ensure the toolbar is allowed to claim its required height
             try:
@@ -11120,7 +11328,17 @@ Important rules:
                 pass
 
             # Apply cap
-            self.prompt_text.setMaximumHeight(prompt_max)
+            self.prompt_text.setMaximumHeight(int(prompt_max))
+
+            # When user override is active, enforce the grid row height so the prompt can actually grow.
+            try:
+                if hasattr(self, 'frame') and self.frame:
+                    if user_h is not None:
+                        self.frame.setRowMinimumHeight(9, max(120, int(prompt_max)))
+                    else:
+                        self.frame.setRowMinimumHeight(9, 120)
+            except Exception:
+                pass
         except Exception:
             return
     
