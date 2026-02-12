@@ -92,7 +92,7 @@ class GlossaryManagerMixin:
         # Create standalone PySide6 dialog (no Tkinter parent)
         # Note: self.master is a Tkinter window, so we use None as parent for PySide6
         dialog = QDialog(None)
-        dialog.setWindowTitle("Glossary Manager")
+        dialog.setWindowTitle("Glossary Settings")
         dialog.setFont(QFont("Segoe UI", 10))
         
         # Make non-modal but stay on top
