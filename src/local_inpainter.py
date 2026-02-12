@@ -967,6 +967,14 @@ class LocalInpainter:
                         pass
                     raise InterruptedError(f"Stop requested while waiting for {expect_type}")
                 
+                # FAST FAIL: If worker process died, don't wait for the full timeout
+                if not self._check_worker_health():
+                    try:
+                        del self._mp_pending[call_id]
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"Worker process died while waiting for {expect_type}")
+                
                 # Try to get response with short timeout
                 try:
                     remaining = min(poll_interval, total_timeout - elapsed)
@@ -1102,6 +1110,23 @@ class LocalInpainter:
         if not self.model_loaded:
             self._log("No model loaded (worker)", "error")
             return image
+        
+        # PRE-FLIGHT: Check if worker is alive before sending work.
+        # After stop+resume the worker process is typically dead (killed by psutil cleanup).
+        # Detect this immediately instead of waiting for a 120s+ timeout.
+        if not self._check_worker_health():
+            logger.warning("💀 Worker process is dead at start of inpaint — restarting before first attempt")
+            if not self._ensure_worker_healthy():
+                logger.error("Failed to restart worker — returning original image")
+                return image
+            # Reload model in the freshly restarted worker
+            if hasattr(self, 'current_method') and self.current_method:
+                model_path = getattr(self, '_last_model_path', None)
+                if model_path:
+                    logger.info(f"🔄 Reloading model in restarted worker: {self.current_method}")
+                    if not self._mp_load_model(self.current_method, model_path, force_reload=True):
+                        logger.error("Failed to reload model after worker restart")
+                        return image
         
         # Compute a reasonable base timeout from image size.
         # ONNX/PyTorch inference can legitimately take 30-120s+ on CPU for large images.

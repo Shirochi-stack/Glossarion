@@ -278,6 +278,33 @@ def _reset_cancellation_flags(self):
             
             if inpainter_reset_count > 0:
                 print(f"[CANCEL_RESET] Reset {inpainter_reset_count} inpainter _stopped flag(s)")
+            
+            # Silently restart dead inpainter workers so they're ready for the next operation.
+            # After stop+resume the worker is typically dead (killed by psutil child-process cleanup).
+            try:
+                from manga_translator import MangaTranslator
+                if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                    for key, rec in MangaTranslator._inpaint_pool.items():
+                        if rec and 'spares' in rec:
+                            for inpainter in rec['spares']:
+                                if inpainter is not None and getattr(inpainter, '_mp_enabled', False):
+                                    if not inpainter._check_worker_health():
+                                        print(f"[CANCEL_RESET] Inpainter worker dead for '{key}' — restarting silently")
+                                        try:
+                                            inpainter._stop_worker()
+                                            inpainter._start_worker()
+                                            # Reload model so it's ready to go
+                                            method = getattr(inpainter, 'current_method', None)
+                                            model_path = getattr(inpainter, '_last_model_path', None)
+                                            if method and model_path:
+                                                inpainter._mp_load_model(method, model_path, force_reload=True)
+                                                print(f"[CANCEL_RESET] Worker restarted and model reloaded for '{key}'")
+                                            else:
+                                                print(f"[CANCEL_RESET] Worker restarted (no model to reload)")
+                                        except Exception as restart_err:
+                                            print(f"[CANCEL_RESET] Worker restart failed for '{key}': {restart_err}")
+            except Exception as pool_restart_err:
+                print(f"[CANCEL_RESET] Inpainter pool worker restart error: {pool_restart_err}")
         except Exception as e:
             print(f"[CANCEL_RESET] Local inpainter reset failed: {e}")
         
