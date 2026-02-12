@@ -3,7 +3,7 @@
 pyinstaller
 pyinstaller-hooks-contrib
 ttkbootstrap
-pillow
+pillow<12.0
 beautifulsoup4
 lxml
 html5lib
@@ -15,7 +15,7 @@ PySide6
 # discord
 
 # AI/API Clients
-openai==1.94.0
+openai==2.17.0
 anthropic
 mistralai
 cohere
@@ -23,13 +23,13 @@ tiktoken
 poe-api-wrapper
 #ballyregan
 google-genai
-google-cloud-aiplatform>=1.60.0
+google-cloud-aiplatform==1.136.0
 deepl
 vertexai
 
 # Data processing
 datasketch
-numpy
+numpy<2.3
 scipy
 
 # HTTP/Networking
@@ -40,7 +40,7 @@ sniffio
 websocket-client
 websockets
 aiohttp
-aiofiles
+aiofiles<25.0
 multidict
 yarl
 async-timeout
@@ -80,7 +80,7 @@ googleapis-common-protos
 grpcio
 grpcio-status
 proto-plus
-protobuf
+protobuf<6.0.0dev
 
 # Azure Vision APIs
 azure-ai-vision-imageanalysis>=1.0.0b1  # New Image Analysis API (replaces old Computer Vision)
@@ -104,6 +104,7 @@ torchvision
 onnxruntime
 safetensors
 transformers
+huggingface-hub<1.0.0
 
 # Encryption/Decryption
 cryptography
