@@ -73,6 +73,7 @@ typing-extensions
 # Google Cloud Services
 google-cloud-vision
 google-cloud-translate
+google-cloud-storage>=3.0.0
 google-auth
 google-auth-httplib2
 google-api-core
