@@ -1294,6 +1294,13 @@ class UnifiedClient:
     # Track all HTTP sessions so we can close them on cancellation
     _all_sessions = set()
     _all_sessions_lock = threading.Lock()
+
+    # Track OpenAI SDK clients and their underlying HTTP transports (httpx)
+    # so we can force-close them on cancellation/timeouts.
+    _all_openai_clients = set()
+    _all_openai_clients_lock = threading.Lock()
+    _all_httpx_clients = set()
+    _all_httpx_clients_lock = threading.Lock()
     
     # Track all active streaming responses so we can close them on cancellation
     _active_streams = set()
@@ -7438,6 +7445,56 @@ class UnifiedClient:
                     pass
         except Exception:
             pass
+
+        # Force-close any underlying httpx clients (OpenAI SDK and others)
+        try:
+            with self._all_httpx_clients_lock:
+                httpx_clients = list(self._all_httpx_clients)
+            for hc in httpx_clients:
+                try:
+                    if hasattr(hc, 'close'):
+                        hc.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Also close any OpenAI SDK client objects (best-effort)
+        try:
+            with self._all_openai_clients_lock:
+                oai_clients = list(self._all_openai_clients)
+            for oc in oai_clients:
+                try:
+                    if hasattr(oc, 'close'):
+                        oc.close()
+                    # Some versions expose underlying client at _client
+                    elif hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                        oc._client.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Close thread-local OpenAI clients for THIS thread as well
+        try:
+            tls = self._get_thread_local_client()
+            oai_map = getattr(tls, 'openai_clients', None)
+            if isinstance(oai_map, dict):
+                for oc in list(oai_map.values()):
+                    try:
+                        if hasattr(oc, 'close'):
+                            oc.close()
+                        elif hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                            oc._client.close()
+                    except Exception:
+                        pass
+                try:
+                    oai_map.clear()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Close Gemini client to abort in-flight native API requests
         try:
             if hasattr(self, 'gemini_client') and self.gemini_client is not None:
@@ -9206,6 +9263,20 @@ class UnifiedClient:
                 timeout=timeout_obj
             )
             tls.openai_clients[map_key] = client
+
+            # Track for hard-cancel/timeout cleanup (cross-thread)
+            try:
+                with self._all_openai_clients_lock:
+                    self._all_openai_clients.add(client)
+            except Exception:
+                pass
+            try:
+                underlying = getattr(client, '_client', None)
+                if underlying is not None:
+                    with self._all_httpx_clients_lock:
+                        self._all_httpx_clients.add(underlying)
+            except Exception:
+                pass
         return client
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:

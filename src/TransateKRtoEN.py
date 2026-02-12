@@ -6934,6 +6934,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     # The client.send() call will handle multi-key rotation automatically
     
     result_queue = queue.Queue()
+    cancel_event = threading.Event()
 
     # Honor RETRY_TIMEOUT toggle: when off, disable chunk timeout entirely
     retry_env = os.getenv("RETRY_TIMEOUT")
@@ -6969,6 +6970,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 send_params['context'] = context
             
             result = client.send(**send_params)
+
+            # If the caller has already timed out/cancelled, do not publish a stale result.
+            if cancel_event.is_set():
+                return
             
             # Capture raw response object for thought signatures (if available)
             raw_obj = None
@@ -6982,6 +6987,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             # Include raw_obj in the result tuple
             result_queue.put((result, elapsed, raw_obj))
         except Exception as e:
+            # If already cancelled, suppress late exceptions from the abandoned call.
+            if cancel_event.is_set():
+                return
             result_queue.put(e)
     
     api_thread = threading.Thread(target=api_call)
@@ -7024,8 +7032,13 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # Set cleanup flag when chunk timeout occurs
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
+                    cancel_event.set()
                     if hasattr(client, 'cancel_current_operation'):
                         client.cancel_current_operation()
+                    try:
+                        api_thread.join(timeout=2.0)
+                    except Exception:
+                        pass
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                 # If graceful stop was requested, mark that an API call completed
                 if os.environ.get('GRACEFUL_STOP') == '1':
@@ -7038,15 +7051,26 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
+                cancel_event.set()
                 if hasattr(client, 'cancel_current_operation'):
                     client.cancel_current_operation()
+                try:
+                    api_thread.join(timeout=2.0)
+                except Exception:
+                    pass
                 raise UnifiedClientError("Translation stopped by user")
             elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
+                cancel_event.set()
                 if hasattr(client, 'cancel_current_operation'):
                     client.cancel_current_operation()
+                # Give the background thread a brief chance to unwind after transport closure
+                try:
+                    api_thread.join(timeout=2.0)
+                except Exception:
+                    pass
                 raise UnifiedClientError(f"API call timed out after {chunk_timeout} seconds")
 
 def handle_api_error(processor, error, chunk_info=""):
