@@ -137,6 +137,14 @@ def _reset_cancellation_flags(self):
     """
     print("[CANCEL_RESET] Starting flag reset...")
     try:
+        # Reset environment-level stop flags first — these survive across operations
+        was_graceful = os.environ.get('GRACEFUL_STOP', '0')
+        was_cancelled = os.environ.get('TRANSLATION_CANCELLED', '0')
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['TRANSLATION_CANCELLED'] = '0'
+        os.environ['WAIT_FOR_CHUNKS'] = '0'
+        print(f"[CANCEL_RESET] GRACEFUL_STOP was {was_graceful}, TRANSLATION_CANCELLED was {was_cancelled}, now '0'")
+        
         # Reset stop_flag (threading.Event)
         if hasattr(self, 'stop_flag') and self.stop_flag:
             was_set = self.stop_flag.is_set()

@@ -10630,7 +10630,7 @@ class MangaTranslationTab(QObject):
             
     def _toggle_translation(self):
         """Toggle between start and stop translation"""
-        if self.is_running:
+        if self.is_running or getattr(self, '_graceful_stop_pending', False):
             self._stop_translation()
         else:
             self._start_translation()
@@ -12924,7 +12924,7 @@ class MangaTranslationTab(QObject):
     
     def _stop_translation(self):
         """Stop the translation process"""
-        if self.is_running:
+        if self.is_running or getattr(self, '_graceful_stop_pending', False):
             # Check if graceful stop is enabled (from main GUI settings)
             graceful_stop = False
             try:
@@ -12932,6 +12932,23 @@ class MangaTranslationTab(QObject):
                     graceful_stop = getattr(self.main_gui, 'graceful_stop_var', False)
             except Exception:
                 pass
+            
+            # Double-click detection for force stop during graceful stop
+            import time as _time
+            current_time = _time.time()
+            if not hasattr(self, '_stop_click_times'):
+                self._stop_click_times = []
+            
+            # Add current click and remove clicks older than 1 second
+            self._stop_click_times.append(current_time)
+            self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
+            
+            # Force stop on double-click (2+ clicks within 1s) while graceful stop is pending
+            if len(self._stop_click_times) >= 2 and getattr(self, '_graceful_stop_pending', False):
+                self._log("⚡ Double-click detected — forcing immediate stop!", "warning")
+                graceful_stop = False  # Override to force immediate stop
+                self._stop_click_times = []  # Reset click counter
+                self._graceful_stop_pending = False
             
             # Set graceful stop mode in environment so API client knows to show logs
             os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -12943,8 +12960,13 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # CRITICAL: Set is_running to False IMMEDIATELY so button works correctly on next click
-            self.is_running = False
+            # For graceful stop: keep is_running True so the toggle routes back here on next click
+            # For immediate/force stop: set is_running False immediately
+            if graceful_stop:
+                self._graceful_stop_pending = True
+            else:
+                self.is_running = False
+                self._graceful_stop_pending = False
             
             # For graceful stop, don't set stop_flag yet - let current image complete
             # The GRACEFUL_STOP_COMPLETED flag will be set when the API call finishes
@@ -12962,13 +12984,18 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Update button to show "Stopping..." or "Finishing..." state (gray, disabled)
+            # Update button to show "Stopping..." or "Finishing..." state
             try:
                 if hasattr(self, 'start_button') and self.start_button:
                     # Clear focus from button to prevent scroll
                     self.start_button.clearFocus()
                     
-                    self.start_button.setEnabled(False)
+                    if graceful_stop:
+                        # Graceful stop — keep button enabled so user can double-click to force stop
+                        self.start_button.setEnabled(True)
+                    else:
+                        # Immediate/force stop — disable button
+                        self.start_button.setEnabled(False)
                     # Update text label instead of button text
                     if hasattr(self, 'start_button_text'):
                         if graceful_stop:
@@ -13164,8 +13191,10 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         try:
-            # Reset running flag
+            # Reset running flag and graceful stop state
             self.is_running = False
+            self._graceful_stop_pending = False
+            self._stop_click_times = []
             
             # Reset start button to original Start state (green)
             if hasattr(self, 'start_button') and self.start_button:
