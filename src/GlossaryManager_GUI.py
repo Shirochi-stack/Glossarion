@@ -2411,7 +2411,24 @@ CRITICAL EXTRACTION RULES:
         help_widget = QWidget()
         help_layout = QVBoxLayout(help_widget)
         help_layout.setContentsMargins(10, 10, 0, 0)
-        extraction_tab_layout.addWidget(help_widget)
+        
+        # Make the Settings Guide taller by default, but add a scrollbar if it still clips
+        help_scroll = QScrollArea()
+        help_scroll.setWidgetResizable(True)
+        help_scroll.setFrameShape(QFrame.NoFrame)
+        help_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        help_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        help_scroll.setWidget(help_widget)
+        
+        try:
+            guide_h = int(self._screen.height() * 0.30)
+            guide_h = max(200, min(320, guide_h))
+            help_scroll.setMinimumHeight(guide_h)
+        except Exception:
+            help_scroll.setMinimumHeight(240)
+        help_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        
+        extraction_tab_layout.addWidget(help_scroll)
         
         help_title = QLabel("💡 Settings Guide:")
         help_title.setStyleSheet("font-size: 12pt; font-weight: bold;")
