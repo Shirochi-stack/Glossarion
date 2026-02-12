@@ -9286,9 +9286,12 @@ class MangaTranslationTab(QObject):
                 self._current_image_path = None
                 return
             
-            # Get the first selected item
-            first_item = selected_items[0]
-            row = self.file_listbox.row(first_item)
+            # Prefer current row (important when ExtendedSelection keeps multiple items selected)
+            row = self.file_listbox.currentRow()
+            if row < 0 and selected_items:
+                # Fallback to any selected item
+                first_item = selected_items[0]
+                row = self.file_listbox.row(first_item)
             
             # Track the selected row for preventing empty selection
             self._last_selected_row = row

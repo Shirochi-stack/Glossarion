@@ -1695,6 +1695,9 @@ class MangaImagePreviewWidget(QWidget):
         self.thumbnail_list.setWrapping(False)
         self.thumbnail_list.setSpacing(5)
         self.thumbnail_list.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        # Enforce single selection so clicking a new thumbnail always deselects the previous
+        self.thumbnail_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.thumbnail_list.setSelectionBehavior(QListWidget.SelectionBehavior.SelectItems)
         self.thumbnail_list.setStyleSheet("""
             QListWidget {
                 background-color: #1e1e1e;
