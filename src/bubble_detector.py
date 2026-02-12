@@ -162,17 +162,12 @@ except ImportError:
     if _is_main_process():
         logger.warning("ONNX Runtime not available")
 
-# C++ ONNX Backend - significantly faster for RT-DETR
-ONNX_CPP_AVAILABLE = False
-try:
-    from onnx_cpp_backend import ONNXCppBackend, is_cpp_backend_available
-    ONNX_CPP_AVAILABLE = is_cpp_backend_available()
-    if ONNX_CPP_AVAILABLE and _is_main_process():
-        logger.info("✓ C++ ONNX Runtime available (2x faster for RT-DETR)")
-except Exception as e:
-    ONNX_CPP_AVAILABLE = False
-    if _is_main_process():
-        logger.debug(f"C++ ONNX backend not available: {e}")
+# C++ ONNX Backend - loaded lazily to avoid DLL load at module import time.
+# Previously, is_cpp_backend_available() was called here which loaded the DLL
+# in every process that imported this module (parent + each spawn worker), even
+# though only the parent's load_rtdetr_onnx_model() actually needs it.
+# Now the DLL is loaded once, on first use inside load_rtdetr_onnx_model().
+ONNX_CPP_AVAILABLE = False  # Kept for backward compat; real check is lazy
 
 # PIL
 try:
@@ -1820,34 +1815,37 @@ class BubbleDetector:
                 pass
 
             # ALWAYS try C++ backend first - if it fails, error out (no Python fallback)
-            if ONNX_CPP_AVAILABLE:
-                with BubbleDetector._rtdetr_onnx_init_lock:
-                    # Check if C++ backend already loaded
-                    if BubbleDetector._rtdetr_onnx_use_cpp and BubbleDetector._rtdetr_onnx_cpp_backend is not None and not force_reload:
-                        self.rtdetr_onnx_loaded = True
-                        logger.info("✅ RT-DETR C++ backend attached from shared (Python ONNX never loaded)")
-                        return True
-                    
-                    # Load C++ backend - NO FALLBACK
-                    logger.info("🚀 Loading RT-DETR with C++ ONNX backend (Python fallback disabled)...")
-                    cpp_backend = ONNXCppBackend()
-                    if cpp_backend.load_model(onnx_fp, use_gpu=self.use_gpu):
-                        BubbleDetector._rtdetr_onnx_cpp_backend = cpp_backend
-                        BubbleDetector._rtdetr_onnx_use_cpp = True
-                        BubbleDetector._rtdetr_onnx_loaded = True
-                        BubbleDetector._rtdetr_onnx_model_path = onnx_fp
-                        self.rtdetr_onnx_loaded = True
-                        # Skip Python session entirely
-                        self.rtdetr_onnx_session = None
-                        BubbleDetector._rtdetr_onnx_shared_session = None
-                        logger.info("✅ RT-DETR C++ backend loaded successfully (Python ONNX never loaded, memory saved)")
-                        return True
-                    else:
-                        logger.error("C++ backend load failed - RT-DETR unavailable (Python fallback disabled)")
-                        return False
-            else:
-                logger.error("C++ backend not available - RT-DETR unavailable (Python fallback disabled)")
+            # Lazy import — DLL is loaded here, not at module import time
+            try:
+                from onnx_cpp_backend import ONNXCppBackend
+            except Exception as _imp_err:
+                logger.error(f"C++ backend not importable - RT-DETR unavailable: {_imp_err}")
                 return False
+
+            with BubbleDetector._rtdetr_onnx_init_lock:
+                # Check if C++ backend already loaded
+                if BubbleDetector._rtdetr_onnx_use_cpp and BubbleDetector._rtdetr_onnx_cpp_backend is not None and not force_reload:
+                    self.rtdetr_onnx_loaded = True
+                    logger.info("✅ RT-DETR C++ backend attached from shared (Python ONNX never loaded)")
+                    return True
+                
+                # Load C++ backend - NO FALLBACK
+                logger.info("🚀 Loading RT-DETR with C++ ONNX backend (Python fallback disabled)...")
+                cpp_backend = ONNXCppBackend()
+                if cpp_backend.load_model(onnx_fp, use_gpu=self.use_gpu):
+                    BubbleDetector._rtdetr_onnx_cpp_backend = cpp_backend
+                    BubbleDetector._rtdetr_onnx_use_cpp = True
+                    BubbleDetector._rtdetr_onnx_loaded = True
+                    BubbleDetector._rtdetr_onnx_model_path = onnx_fp
+                    self.rtdetr_onnx_loaded = True
+                    # Skip Python session entirely
+                    self.rtdetr_onnx_session = None
+                    BubbleDetector._rtdetr_onnx_shared_session = None
+                    logger.info("✅ RT-DETR C++ backend loaded successfully (Python ONNX never loaded, memory saved)")
+                    return True
+                else:
+                    logger.error("C++ backend load failed - RT-DETR unavailable (Python fallback disabled)")
+                    return False
         except Exception as e:
             logger.error(f"Failed to load RT-DETR ONNX: {e}")
             self.rtdetr_onnx_session = None

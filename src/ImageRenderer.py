@@ -279,8 +279,8 @@ def _reset_cancellation_flags(self):
             if inpainter_reset_count > 0:
                 print(f"[CANCEL_RESET] Reset {inpainter_reset_count} inpainter _stopped flag(s)")
             
-            # Silently restart dead inpainter workers so they're ready for the next operation.
-            # After stop+resume the worker is typically dead (killed by psutil child-process cleanup).
+            # Restart dead inpainter workers if any (workers are now protected from
+            # psutil kill during stop, so this is only a safety net for unexpected crashes).
             try:
                 from manga_translator import MangaTranslator
                 if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:

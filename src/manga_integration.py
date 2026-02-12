@@ -13086,6 +13086,26 @@ class MangaTranslationTab(QObject):
                     current_process = psutil.Process(os.getpid())
                     children = current_process.children(recursive=True)
                     
+                    # Collect inpainter worker PIDs to protect from kill.
+                    # These workers are expensive to restart (DLL + model reload);
+                    # they survive stop/resume and are reused on next translation.
+                    _protected_pids = set()
+                    try:
+                        from manga_translator import MangaTranslator
+                        if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                            for _key, _rec in MangaTranslator._inpaint_pool.items():
+                                if _rec and 'spares' in _rec:
+                                    for _inp in _rec['spares']:
+                                        if _inp and getattr(_inp, '_mp_worker', None):
+                                            try:
+                                                _pid = _inp._mp_worker.pid
+                                                if _pid:
+                                                    _protected_pids.add(_pid)
+                                            except Exception:
+                                                pass
+                    except Exception:
+                        pass
+                    
                     # Filter out important GUI processes we should keep
                     processes_to_terminate = []
                     for child in children:
@@ -13093,7 +13113,8 @@ class MangaTranslationTab(QObject):
                             # Get process name to avoid killing important processes
                             name = child.name().lower()
                             # Only terminate Python/script processes, not system processes
-                            if 'python' in name or 'glossarion' in name:
+                            # Skip inpainter workers — they survive stop and are reused
+                            if ('python' in name or 'glossarion' in name) and child.pid not in _protected_pids:
                                 processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             continue

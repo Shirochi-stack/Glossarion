@@ -92,16 +92,12 @@ except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
 
-# C++ ONNX Backend - significantly faster than Python
-ONNX_CPP_AVAILABLE = False
-try:
-    from onnx_cpp_backend import ONNXCppBackend, is_cpp_backend_available
-    ONNX_CPP_AVAILABLE = is_cpp_backend_available()
-    if ONNX_CPP_AVAILABLE:
-        logger.info("✓ C++ ONNX Runtime available (2x faster)")
-except Exception as e:
-    ONNX_CPP_AVAILABLE = False
-    logger.debug(f"C++ ONNX backend not available: {e}")
+# C++ ONNX Backend - loaded lazily to avoid DLL load at module import time.
+# Previously, is_cpp_backend_available() was called here which loaded the DLL
+# in every process that imported this module (parent + worker), even though only
+# the worker's load_onnx_model() actually needs it. Now the DLL is loaded once,
+# on first use inside load_onnx_model().
+ONNX_CPP_AVAILABLE = False  # Kept for backward compat; real check is lazy in load_onnx_model
 
 # Bubble detector - optional
 BUBBLE_DETECTOR_AVAILABLE = False
@@ -1430,26 +1426,26 @@ class LocalInpainter:
 
     def load_onnx_model(self, onnx_path: str) -> bool:
         """Load an ONNX model with C++ backend support for 2x performance"""
-        # Try C++ backend first for better performance
-        if ONNX_CPP_AVAILABLE:
-            try:
-                logger.info("🚀 Loading ONNX model with C++ backend...")
-                self.onnx_cpp_backend = ONNXCppBackend()
-                if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
-                    self.use_onnx = True
-                    self.use_onnx_cpp = True
-                    self.model_loaded = True
-                    self.current_onnx_path = onnx_path
-                    logger.info("✅ ONNX C++ backend loaded successfully (Python fallback disabled)")
-                    return True
-                else:
-                    logger.warning("C++ backend load failed, falling back to Python")
-                    self.onnx_cpp_backend = None
-                    self.use_onnx_cpp = False
-            except Exception as cpp_err:
-                logger.warning(f"C++ backend error: {cpp_err}, using Python fallback")
+        # Try C++ backend first (lazy import — DLL is loaded here, not at module import)
+        try:
+            from onnx_cpp_backend import ONNXCppBackend
+            logger.info("🚀 Loading ONNX model with C++ backend...")
+            self.onnx_cpp_backend = ONNXCppBackend()
+            if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
+                self.use_onnx = True
+                self.use_onnx_cpp = True
+                self.model_loaded = True
+                self.current_onnx_path = onnx_path
+                logger.info("✅ ONNX C++ backend loaded successfully (Python fallback disabled)")
+                return True
+            else:
+                logger.warning("C++ backend load failed, falling back to Python")
                 self.onnx_cpp_backend = None
                 self.use_onnx_cpp = False
+        except Exception as cpp_err:
+            logger.warning(f"C++ backend not available: {cpp_err}, using Python fallback")
+            self.onnx_cpp_backend = None
+            self.use_onnx_cpp = False
         
         # Load Python ONNX Runtime if C++ backend not available or failed
         if not ONNX_AVAILABLE:
