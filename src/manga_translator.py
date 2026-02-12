@@ -14293,6 +14293,23 @@ class MangaTranslator:
             self.batch_current = batch_index
             self.batch_size = batch_total
             self.batch_mode = True
+        # If graceful stop was requested before this image, abort immediately
+        try:
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self.set_global_cancellation(True)
+                result = {
+                    'success': False,
+                    'input_path': image_path,
+                    'output_path': output_path,
+                    'regions': [],
+                    'errors': [],
+                    'interrupted': True,
+                    'format_info': {}
+                }
+                self._log("⏹️ Graceful stop active - skipping image", "warning")
+                return result
+        except Exception:
+            pass
         
         # Simplified header for batch mode
         if not self.batch_mode:
