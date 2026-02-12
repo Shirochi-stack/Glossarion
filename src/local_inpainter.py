@@ -1280,6 +1280,13 @@ class LocalInpainter:
     
     def _check_stop(self) -> bool:
         """Check if stop has been requested"""
+        # Highest-priority: global graceful stop flag propagated via environment
+        try:
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self._stopped = True
+                return True
+        except Exception:
+            pass
         if self._stopped:
             return True
         if self.stop_flag and self.stop_flag.is_set():

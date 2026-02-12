@@ -5901,6 +5901,13 @@ class MangaTranslator:
             image_path: Path to the image
             inpainter: Optional pre-checked-out inpainter instance to reuse
         """
+        # Do not start new inpainting work during graceful stop
+        try:
+            if os.environ.get('GRACEFUL_STOP') == '1' or self._check_stop():
+                self._log("⏹️ Graceful stop active - skipping early inpainting", "warning")
+                return None
+        except Exception:
+            pass
         if getattr(self, 'skip_inpainting', False) or not rtdetr_detections:
             return None
             
@@ -14492,6 +14499,13 @@ class MangaTranslator:
             
             def _task_inpaint():
                 try:
+                    # If graceful stop is active, skip all inpainting work immediately
+                    try:
+                        if os.environ.get('GRACEFUL_STOP') == '1':
+                            self._log("⏹️ Graceful stop active - skipping inpainting task", "warning")
+                            return image.copy()
+                    except Exception:
+                        pass
                     # Check if inpainting was already started early (after RT-DETR)
                     if hasattr(self, '_inpainting_future') and self._inpainting_future:
                         # Early inpainting is running - just return the future
@@ -14684,7 +14698,7 @@ class MangaTranslator:
                                     break
                                 
                                 # Check stop flag during wait
-                                if self._check_stop() or self.is_globally_cancelled():
+                                if os.environ.get('GRACEFUL_STOP') == '1' or self._check_stop() or self.is_globally_cancelled():
                                     self._log("⏹️ Early inpainting interrupted by stop request", "warning")
                                     # Cancel the future if possible
                                     try:
