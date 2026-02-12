@@ -249,30 +249,50 @@ class RetranslationMixin:
             # Reuse existing dialog - just show it and refresh data
             cached_data = self._retranslation_dialog_cache[file_key]
             if cached_data and cached_data.get('dialog'):
-                # Check if output folder still exists before trying to refresh
+                # Recompute output directory (override path can change, or cache can be stale)
+                epub_base = os.path.splitext(os.path.basename(input_path))[0]
+                override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
+                if not override_dir and hasattr(self, 'config'):
+                    try:
+                        override_dir = self.config.get('output_directory')
+                    except Exception:
+                        override_dir = None
+                expected_output_dir = os.path.join(override_dir, epub_base) if override_dir else epub_base
+
                 output_dir = cached_data.get('output_dir')
                 progress_file = cached_data.get('progress_file')
-                
-                if not output_dir or not os.path.exists(output_dir):
-                    # Output folder was deleted - show message and remove from cache
-                    self._show_message('info', "Info", "No translation output found for this file.")
-                    del self._retranslation_dialog_cache[file_key]
-                    return
-                
-                if not progress_file or not os.path.exists(progress_file):
-                    # Progress file was deleted - show message and remove from cache,
-                    # but DO NOT return. Fall through so we rebuild the dialog and
-                    # auto-discover completed chapters in a single click.
-                    self._show_message('info', "Info", "No progress tracking found. Existing translations will be auto-discovered.")
+
+                # If cache points at a different location than current override, force a rebuild.
+                if output_dir and expected_output_dir and os.path.abspath(output_dir) != os.path.abspath(expected_output_dir):
                     del self._retranslation_dialog_cache[file_key]
                 else:
-                    dialog = cached_data['dialog']
-                    # Refresh the data before showing
-                    self._refresh_retranslation_data(cached_data)
-                    dialog.show()
-                    dialog.raise_()
-                    dialog.activateWindow()
-                    return
+                    # Check if output folder still exists before trying to refresh
+                    if not output_dir:
+                        output_dir = expected_output_dir
+                        cached_data['output_dir'] = output_dir
+                        cached_data['progress_file'] = os.path.join(output_dir, "translation_progress.json")
+                        progress_file = cached_data['progress_file']
+
+                    if not os.path.exists(output_dir):
+                        # Output folder was deleted - show message and remove from cache
+                        self._show_message('info', "Info", "No translation output found for this file.")
+                        del self._retranslation_dialog_cache[file_key]
+                        return
+
+                    if not progress_file or not os.path.exists(progress_file):
+                        # Progress file was deleted - show message and remove from cache,
+                        # but DO NOT return. Fall through so we rebuild the dialog and
+                        # auto-discover completed chapters in a single click.
+                        self._show_message('info', "Info", "No progress tracking found. Existing translations will be auto-discovered.")
+                        del self._retranslation_dialog_cache[file_key]
+                    else:
+                        dialog = cached_data['dialog']
+                        # Refresh the data before showing
+                        self._refresh_retranslation_data(cached_data)
+                        dialog.show()
+                        dialog.raise_()
+                        dialog.activateWindow()
+                        return
         
         # For EPUB/text files, use the shared logic
         # Get current toggle state if it exists, or default based on file type
@@ -306,7 +326,7 @@ class RetranslationMixin:
         epub_base = os.path.splitext(os.path.basename(file_path))[0]
         
         # Check for output directory override
-        override_dir = os.environ.get('OUTPUT_DIRECTORY')
+        override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
         if not override_dir and hasattr(self, 'config'):
             override_dir = self.config.get('output_directory')
             
@@ -1881,13 +1901,101 @@ class RetranslationMixin:
         # Create refresh handler with animation
         def animated_refresh():
             import time
+
             btn_refresh.start_animation()
             btn_refresh.setEnabled(False)
-            
+
             # Track start time for minimum animation duration
             start_time = time.time()
             min_animation_duration = 0.8  # 800ms minimum
-            
+
+            # A token to prevent older timers from firing after a newer refresh click
+            refresh_token = time.time()
+            data['_last_refresh_token'] = refresh_token
+
+            def _rebuild_gui_from_refresh():
+                """Recreate the retranslation GUI if refresh appears to have failed to render."""
+                try:
+                    dlg = data.get('dialog')
+
+                    # Best-effort capture current toggle state
+                    show_special = data.get('show_special_files_state', False)
+                    cb = data.get('show_special_files_cb')
+                    if cb:
+                        try:
+                            show_special = cb.isChecked()
+                        except RuntimeError:
+                            pass
+
+                    # Multi-file dialog: destroy and recreate the whole multi-tab window
+                    if dlg and hasattr(dlg, '_tab_data'):
+                        selection = None
+                        if hasattr(self, '_multi_file_selection_key') and self._multi_file_selection_key:
+                            try:
+                                selection = list(self._multi_file_selection_key)
+                            except Exception:
+                                selection = None
+
+                        def do_multi_rebuild():
+                            try:
+                                # Clear cached multi-file dialog so the recreate path is taken
+                                if hasattr(self, '_multi_file_retranslation_dialog'):
+                                    self._multi_file_retranslation_dialog = None
+                                if hasattr(self, '_multi_file_selection_key'):
+                                    self._multi_file_selection_key = None
+
+                                try:
+                                    dlg.hide()
+                                except Exception:
+                                    pass
+                                try:
+                                    dlg.deleteLater()
+                                except Exception:
+                                    pass
+
+                                if selection is not None:
+                                    self.selected_files = selection
+                                    self._force_retranslation_multiple_files()
+                            except Exception as e:
+                                print(f"Error during multi-file rebuild: {e}")
+
+                        QTimer.singleShot(0, do_multi_rebuild)
+                        return
+
+                    # Single-file dialog: remove cached entry and recreate
+                    file_path = data.get('file_path')
+                    if not file_path:
+                        return
+
+                    file_key = os.path.abspath(file_path)
+                    if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
+                        try:
+                            del self._retranslation_dialog_cache[file_key]
+                        except Exception:
+                            pass
+
+                    old_dlg = dlg
+
+                    def do_single_rebuild():
+                        try:
+                            if old_dlg:
+                                try:
+                                    old_dlg.hide()
+                                except Exception:
+                                    pass
+                                try:
+                                    old_dlg.deleteLater()
+                                except Exception:
+                                    pass
+                            self._force_retranslation_epub_or_text(file_path, show_special_files_state=show_special)
+                        except Exception as e:
+                            print(f"Error during rebuild: {e}")
+
+                    QTimer.singleShot(0, do_single_rebuild)
+
+                except Exception as e:
+                    print(f"Error during rebuild: {e}")
+
             # Use QTimer to run refresh after animation starts
             def do_refresh():
                 try:
@@ -1896,26 +2004,80 @@ class RetranslationMixin:
                         self._refresh_all_tabs(data['dialog']._tab_data)
                     else:
                         self._refresh_retranslation_data(data)
-                    
+
+                    # Schedule watchdog: if after 3 seconds there are still no visible entries,
+                    # but our data says there should be, rebuild the GUI.
+                    def watchdog_check():
+                        try:
+                            if data.get('_last_refresh_token') != refresh_token:
+                                return  # superseded by a newer refresh
+
+                            expected_total = len(data.get('chapter_display_info', []) or [])
+                            if expected_total <= 0:
+                                return
+
+                            listbox = data.get('listbox')
+                            if not listbox:
+                                _rebuild_gui_from_refresh()
+                                return
+
+                            try:
+                                count = listbox.count()
+                            except RuntimeError:
+                                _rebuild_gui_from_refresh()
+                                return
+
+                            visible = 0
+                            try:
+                                for i in range(count):
+                                    item = listbox.item(i)
+                                    if item is not None and not item.isHidden():
+                                        visible += 1
+                            except RuntimeError:
+                                _rebuild_gui_from_refresh()
+                                return
+
+                            if visible > 0:
+                                return
+
+                            # Don't rebuild if everything is hidden purely due to the special-files filter.
+                            try:
+                                show_special = data.get('show_special_files_state', False)
+                                cb = data.get('show_special_files_cb')
+                                if cb:
+                                    show_special = cb.isChecked()
+                                if not show_special:
+                                    infos = data.get('chapter_display_info', []) or []
+                                    if infos and all(bool(info.get('is_special', False)) for info in infos):
+                                        return
+                            except Exception:
+                                pass
+
+                            _rebuild_gui_from_refresh()
+                        except Exception as e:
+                            print(f"Watchdog check error: {e}")
+
+                    QTimer.singleShot(3000, watchdog_check)
+
                     # Calculate remaining time to meet minimum animation duration
                     elapsed = time.time() - start_time
                     remaining = max(0, min_animation_duration - elapsed)
-                    
+
                     # Schedule animation stop after remaining time
                     def finish_animation():
                         btn_refresh.stop_animation()
                         btn_refresh.setEnabled(True)
-                    
+
                     if remaining > 0:
                         QTimer.singleShot(int(remaining * 1000), finish_animation)
                     else:
                         finish_animation()
-                        
+
                 except Exception as e:
                     print(f"Error during refresh: {e}")
                     btn_refresh.stop_animation()
                     btn_refresh.setEnabled(True)
-            
+
             QTimer.singleShot(50, do_refresh)  # Small delay to let animation start
         
         btn_refresh.clicked.connect(animated_refresh)
@@ -3515,15 +3677,24 @@ class RetranslationMixin:
                         global_show_special = cached_data['show_special_files_state']
                         break  # Use the first one we find
             
+            # Determine output directory override (matches single-file logic)
+            override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
+            if not override_dir and hasattr(self, 'config'):
+                try:
+                    override_dir = self.config.get('output_directory')
+                except Exception:
+                    override_dir = None
+
             # Create tabs for EPUB/text files using shared logic
             for file_path in epub_files + text_files:
                 file_base = os.path.splitext(os.path.basename(file_path))[0]
                 
                 print(f"[DEBUG] Checking EPUB/text: {file_base}")
                 
-                # Quick check if output exists
-                if not os.path.exists(file_base):
-                    print(f"[DEBUG] Skipping {file_base} - output folder doesn't exist")
+                # Quick check if output exists (respect override output directory)
+                output_dir = os.path.join(override_dir, file_base) if override_dir else file_base
+                if not os.path.exists(output_dir):
+                    print(f"[DEBUG] Skipping {file_base} - output folder doesn't exist: {output_dir}")
                     continue
                 
                 print(f"[DEBUG] Creating tab for {file_base}")

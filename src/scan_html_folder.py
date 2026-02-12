@@ -131,7 +131,7 @@ class DuplicateDetectionConfig:
                 'check_all_pairs': True,
                 # Guardrail: don't flag AI/structural duplicates if the raw text overlap is essentially zero
                 # (prevents false positives where structure/semantics match but actual text does not)
-                'min_text_similarity': 0.03
+                'min_text_similarity': 0.06
             }
         }
         
@@ -7121,7 +7121,7 @@ def process_comparison_batch_fast(args):
     
     all_data = data['all_data']
     thresholds = data['thresholds']
-    min_text_sim = thresholds.get('min_text_similarity', 0.03)
+    min_text_sim = thresholds.get('min_text_similarity', 0.06)
     
     # Import what we need inside the worker
     from difflib import SequenceMatcher
