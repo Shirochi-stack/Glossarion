@@ -635,6 +635,14 @@ class LocalInpainter:
     }
     
     def __init__(self, config_path="config.json", enable_worker_process=None):
+        # Normalize config_path (prevent non-path objects like dict/credentials)
+        try:
+            if isinstance(config_path, (str, os.PathLike)):
+                config_path = str(config_path)
+            else:
+                config_path = "config.json"
+        except Exception:
+            config_path = "config.json"
         # Load config first to check parallel_panel_translation setting
         self.config_path = config_path
         self.config = self._load_config()
@@ -1177,26 +1185,57 @@ class LocalInpainter:
         return image
 
     def _load_config(self):
+        cfg = {}
         try:
             if self.config_path and os.path.exists(self.config_path):
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     if not content:
-                        return {}
-                    try:
-                        return json.loads(content)
-                    except json.JSONDecodeError:
-                        # Likely a concurrent write; retry once after a short delay
+                        cfg = {}
+                    else:
                         try:
-                            import time
-                            time.sleep(0.05)
-                            with open(self.config_path, 'r', encoding='utf-8') as f2:
-                                return json.load(f2)
-                        except Exception:
-                            return {}
+                            cfg = json.loads(content)
+                        except json.JSONDecodeError:
+                            # Likely a concurrent write; retry once after a short delay
+                            try:
+                                import time
+                                time.sleep(0.05)
+                                with open(self.config_path, 'r', encoding='utf-8') as f2:
+                                    cfg = json.load(f2)
+                            except Exception:
+                                # If config_path isn't the default, fall back to config.json
+                                try:
+                                    if str(self.config_path).lower() != "config.json":
+                                        self.config_path = "config.json"
+                                        if os.path.exists(self.config_path):
+                                            with open(self.config_path, 'r', encoding='utf-8') as f3:
+                                                cfg = json.load(f3)
+                                except Exception:
+                                    cfg = {}
         except Exception:
-            return {}
-        return {}
+            cfg = {}
+        # Sanitize any JSON credential paths accidentally stored as model paths
+        try:
+            if isinstance(cfg, dict):
+                google_creds = cfg.get('google_vision_credentials', '') or cfg.get('google_cloud_credentials', '')
+                # Top-level keys
+                for k, v in list(cfg.items()):
+                    if isinstance(k, str) and k.endswith('_model_path') and isinstance(v, str):
+                        if v.lower().endswith('.json') or (google_creds and v == google_creds):
+                            cfg[k] = ''
+                # Nested inpainting paths
+                ms = cfg.get('manga_settings', {}) if isinstance(cfg.get('manga_settings', {}), dict) else {}
+                inpaint = ms.get('inpainting', {}) if isinstance(ms.get('inpainting', {}), dict) else {}
+                for k, v in list(inpaint.items()):
+                    if isinstance(k, str) and k.endswith('_model_path') and isinstance(v, str):
+                        if v.lower().endswith('.json') or (google_creds and v == google_creds):
+                            inpaint[k] = ''
+                if ms is not None:
+                    ms['inpainting'] = inpaint
+                    cfg['manga_settings'] = ms
+        except Exception:
+            pass
+        return cfg
     
     def _save_config(self):
         # Don't save if config is empty (prevents purging)
@@ -2264,6 +2303,13 @@ class LocalInpainter:
     def load_model(self, method, model_path, force_reload=False):
         """Load model - supports both JIT and checkpoint files with ONNX conversion"""
         try:
+            # Guard: ignore invalid JSON paths (e.g., glossary files)
+            try:
+                if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                    logger.warning(f"Ignoring invalid model path (JSON): {model_path}")
+                    model_path = ''
+            except Exception:
+                pass
             # Offload to worker process if enabled
             if getattr(self, '_mp_enabled', False):
                 return self._mp_load_model(method, model_path, force_reload=force_reload)
@@ -2289,7 +2335,7 @@ class LocalInpainter:
                 logger.info(f"   New: {model_path}")
                 force_reload = True
             
-            if not os.path.exists(model_path):
+            if not model_path or not os.path.exists(model_path):
                 # Try to auto-download JIT model if path doesn't exist
                 logger.warning(f"Model not found: {model_path}")
                 logger.info("Attempting to download JIT model...")

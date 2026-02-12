@@ -4340,7 +4340,7 @@ class GlossarionWeb:
                                 try:
                                     from local_inpainter import LocalInpainter, LAMA_JIT_MODELS
                                     
-                                    inpainter = LocalInpainter({})
+                                    inpainter = LocalInpainter()
                                     
                                     # Map method names to download keys
                                     method_map = {

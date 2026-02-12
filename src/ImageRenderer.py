@@ -2298,6 +2298,11 @@ def _run_clean_background(self, image_path: str, regions: list):
             
             # Get model path from config (same way as manga_translator)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+            try:
+                if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                    model_path = ''
+            except Exception:
+                pass
             
             # Ensure we have a model path (download if needed)
             resolved_model_path = model_path
@@ -2543,10 +2548,20 @@ def _get_detection_config(self) -> dict:
     """Get detection configuration from settings"""
     manga_settings = self.main_gui.config.get('manga_settings', {})
     ocr_settings = manga_settings.get('ocr', {})
+    model_path = ocr_settings.get('bubble_model_path', '')
+    model_url = ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector')
+    # Sanitize JSON paths
+    try:
+        if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+            model_path = ''
+        if isinstance(model_url, str) and model_url.lower().endswith('.json'):
+            model_url = 'ogkalu/comic-text-and-bubble-detector'
+    except Exception:
+        pass
     detection_config = {
         'detector_type': ocr_settings.get('detector_type', 'rtdetr_onnx'),
-        'model_path': ocr_settings.get('bubble_model_path', ''),
-        'model_url': ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector'),
+        'model_path': model_path,
+        'model_url': model_url,
         'confidence': ocr_settings.get('bubble_confidence', 0.3),
         'detect_free_text': ocr_settings.get('detect_free_text', True),  # Free text checkbox setting
         'detect_empty_bubbles': ocr_settings.get('detect_empty_bubbles', True),
@@ -6013,6 +6028,11 @@ def _preload_shared_inpainter(self):
         
         # Get model path
         model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+        try:
+            if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                model_path = ''
+        except Exception:
+            pass
         
         # Normalize path
         if model_path:
@@ -6105,6 +6125,11 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
         if inpaint_method == 'local':
             # Get model path from config (same way as _run_clean_background)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+            try:
+                if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                    model_path = ''
+            except Exception:
+                pass
             
             # Ensure we have a model path (download if needed)
             resolved_model_path = model_path

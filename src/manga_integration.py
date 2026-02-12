@@ -1224,7 +1224,9 @@ class MangaTranslationTab(QObject):
             # Check provider-specific credentials
             saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
             if saved_provider == 'google':
-                return os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
+                google_path = self.main_gui.config.get('google_vision_credentials', '')
+                ok, _ = self._validate_google_credentials(google_path)
+                return ok
             elif saved_provider == 'azure':
                 return bool(self.main_gui.config.get('azure_vision_key', ''))
             else:
@@ -1321,6 +1323,15 @@ class MangaTranslationTab(QObject):
                 return False
             det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
             model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+            # Sanitize model_id to avoid unrelated JSON paths
+            try:
+                import os
+                if model_id and model_id.lower().endswith('.json'):
+                    model_id = ''
+                if det_type in ('rtdetr', 'rtdetr_onnx') and model_id and os.path.isfile(model_id):
+                    model_id = ''
+            except Exception:
+                pass
 
             # 1) If translator already has a ready detector, report success
             try:
@@ -1379,16 +1390,32 @@ class MangaTranslationTab(QObject):
             if bubble_detection_enabled:
                 detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
                 model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
-                key = (detector_type, model_url)
-                model_id = f"detector_{detector_type}_{model_url}"
+                # Sanitize model_url to avoid unrelated JSON paths
+                try:
+                    if model_url and model_url.lower().endswith('.json'):
+                        model_url = ''
+                except Exception:
+                    pass
+                # If no valid model reference, skip preloading (do not auto-download)
+                if detector_type in ('rtdetr', 'rtdetr_onnx') and not model_url:
+                    model_url = ''
+                # If no valid model reference, skip preloading
+                if detector_type in ('rtdetr', 'rtdetr_onnx') and not model_url:
+                    pass
+                else:
+                    key = (detector_type, model_url)
+                    model_id = f"detector_{detector_type}_{model_url}"
                 
                 # Skip if already loaded in this session
-                if model_id not in MangaTranslationTab._preload_completed_models:
-                    with MangaTranslator._detector_pool_lock:
-                        rec = MangaTranslator._detector_pool.get(key)
-                        if not rec or not rec.get('spares'):
-                            detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
-                            models_to_load.append(('detector', detector_type, detector_name, model_url))
+                if detector_type in ('rtdetr', 'rtdetr_onnx') and not model_url:
+                    pass
+                else:
+                    if model_id not in MangaTranslationTab._preload_completed_models:
+                        with MangaTranslator._detector_pool_lock:
+                            rec = MangaTranslator._detector_pool.get(key)
+                            if not rec or not rec.get('spares'):
+                                detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
+                                models_to_load.append(('detector', detector_type, detector_name, model_url))
             
             if inpainting_enabled:
                 # Check top-level config first (manga_local_inpaint_model), then nested config
@@ -1440,6 +1467,13 @@ class MangaTranslationTab(QObject):
                 
                 for model_type, model_key, model_name, model_path in models_to_load:
                     try:
+                        
+                        # Guard: ignore JSON paths (credentials) for inpainter models
+                        try:
+                            if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                                model_path = ''
+                        except Exception:
+                            pass
                         
                         if model_type == 'detector':
                             key = (model_key, model_path or '')
@@ -2367,6 +2401,32 @@ class MangaTranslationTab(QObject):
         # Show dialog (non-modal)
         download_dialog.show()
     
+    def _validate_google_credentials(self, creds_path: str):
+        """Validate Google Cloud Vision credentials JSON file.
+        Returns (ok: bool, message: str).
+        """
+        try:
+            if not creds_path:
+                return False, "❌ Credentials needed"
+            if not os.path.exists(creds_path):
+                return False, "❌ Credentials file not found"
+            # Basic JSON validation
+            try:
+                with open(creds_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception:
+                return False, "❌ Invalid credentials JSON"
+            # Required keys for service account
+            required = ['type', 'project_id', 'private_key', 'client_email']
+            missing = [k for k in required if k not in data]
+            if missing:
+                return False, "❌ Invalid credentials JSON"
+            if str(data.get('type', '')).lower() != 'service_account':
+                return False, "❌ Invalid credentials JSON"
+            return True, ""
+        except Exception:
+            return False, "❌ Invalid credentials JSON"
+    
     def _check_provider_status(self):
         """Check and display OCR provider status"""
         # Skip during initialization to prevent lag
@@ -2391,11 +2451,12 @@ class MangaTranslationTab(QObject):
         if provider == 'google':
             # Google - check for credentials file
             google_creds = self.main_gui.config.get('google_vision_credentials', '')
-            if google_creds and os.path.exists(google_creds):
+            ok, msg = self._validate_google_credentials(google_creds)
+            if ok:
                 self.provider_status_label.setText("✅ Ready")
                 self.provider_status_label.setStyleSheet("color: green;")
             else:
-                self.provider_status_label.setText("❌ Credentials needed")
+                self.provider_status_label.setText(msg or "❌ Credentials needed")
                 self.provider_status_label.setStyleSheet("color: red;")
             
         elif provider == 'azure':
@@ -6074,10 +6135,26 @@ class MangaTranslationTab(QObject):
         
         # Load model paths
         self.local_model_path_value = ''
+        _cleared_invalid_inpaint_paths = False
         for model_type in  ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
+            try:
+                if isinstance(path, str) and path.lower().endswith('.json'):
+                    path = ''
+                    inpaint_settings[f'{model_type}_model_path'] = ''
+                    # Also clear any top-level mirror if present
+                    if hasattr(self, 'main_gui') and getattr(self, 'main_gui', None) and hasattr(self.main_gui, 'config'):
+                        self.main_gui.config[f'manga_{model_type}_model_path'] = ''
+                    _cleared_invalid_inpaint_paths = True
+            except Exception:
+                pass
             if model_type == self.local_model_type_value:
                 self.local_model_path_value = path
+        if _cleared_invalid_inpaint_paths and hasattr(self, 'main_gui') and hasattr(self.main_gui, 'save_config'):
+            try:
+                self.main_gui.save_config(show_message=False)
+            except Exception:
+                pass
         
         # Initialize with defaults (plain Python values, no Tkinter variables)
         self.bg_opacity_value = config.get('manga_bg_opacity', 0)
@@ -8015,16 +8092,18 @@ class MangaTranslationTab(QObject):
                         normalized_path = os.path.abspath(os.path.normpath(model_path))
                     except Exception:
                         pass
+                # Guard: ignore JSON paths (credentials, etc.)
+                try:
+                    if isinstance(normalized_path, str) and normalized_path.lower().endswith('.json'):
+                        normalized_path = ''
+                except Exception:
+                    normalized_path = ''
                 
                 # Create a minimal translator to access the preload system
                 from manga_translator import MangaTranslator
                 
-                # Get OCR config
-                try:
-                    from ImageRenderer import _get_ocr_config
-                    ocr_config = _get_ocr_config(self)
-                except Exception:
-                    ocr_config = {}
+                # IMPORTANT: Do NOT touch OCR/google credentials when loading inpainting models
+                ocr_config = {'provider': 'local'}
                 
                 # Get unified client
                 try:
@@ -8049,6 +8128,17 @@ class MangaTranslationTab(QObject):
                     log_callback=log_cb,
                     skip_inpainter_init=True
                 )
+
+                # If path missing, try to download a valid model before preloading
+                if not normalized_path or not os.path.exists(normalized_path):
+                    try:
+                        from local_inpainter import LocalInpainter
+                        tmp_inp = LocalInpainter()
+                        dl_path = tmp_inp.download_jit_model(method)
+                        if dl_path and os.path.exists(dl_path):
+                            normalized_path = os.path.abspath(os.path.normpath(dl_path))
+                    except Exception:
+                        pass
                 
                 # Preload 1 inpainter into the pool (concurrent for faster loading)
                 created = mt.preload_local_inpainters_concurrent(method, normalized_path, 1)
@@ -8255,6 +8345,31 @@ class MangaTranslationTab(QObject):
         from PySide6.QtCore import QTimer
         
         model_type = self.local_model_type_value
+        
+        # Guard: if config has a .json path (e.g., credentials), clear it before downloading
+        try:
+            bad_path = self.main_gui.config.get(f'manga_{model_type}_model_path', '')
+            if isinstance(bad_path, str) and bad_path.lower().endswith('.json'):
+                self.main_gui.config[f'manga_{model_type}_model_path'] = ''
+                try:
+                    # Also clear nested inpainting setting if present
+                    ms = self.main_gui.config.get('manga_settings', {}) or {}
+                    inpaint = ms.get('inpainting', {}) or {}
+                    inpaint[f'{model_type}_model_path'] = ''
+                    ms['inpainting'] = inpaint
+                    self.main_gui.config['manga_settings'] = ms
+                except Exception:
+                    pass
+                # Clear UI state to avoid loading the wrong path
+                self.local_model_entry.setText("")
+                self.local_model_path_value = ""
+                if hasattr(self, 'local_model_status_label'):
+                    self.local_model_status_label.setText("No model loaded")
+                    self.local_model_status_label.setStyleSheet("color: gray;")
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+        except Exception:
+            pass
         
         try:
             from local_inpainter import LocalInpainter

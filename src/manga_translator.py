@@ -2468,14 +2468,23 @@ class MangaTranslator:
         try:
             bd = self._get_thread_bubble_detector()
             detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            # Sanitize model reference (ignore JSON paths)
+            try:
+                model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
+                if isinstance(model_id, str) and model_id.lower().endswith('.json'):
+                    model_id = ''
+            except Exception:
+                model_id = None
             if detector_type == 'rtdetr_onnx':
                 if not getattr(bd, 'rtdetr_onnx_loaded', False):
-                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
+                    if not model_id:
+                        return None
                     if not bd.load_rtdetr_onnx_model(model_id=model_id):
                         return None
             elif detector_type == 'rtdetr':
                 if not getattr(bd, 'rtdetr_loaded', False):
-                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
+                    if not model_id:
+                        return None
                     if not bd.load_rtdetr_model(model_id=model_id):
                         return None
             elif detector_type == 'yolo':
@@ -3155,6 +3164,13 @@ class MangaTranslator:
         detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
         model_path = ocr_settings.get('bubble_model_path', '')
         confidence = ocr_settings.get('bubble_confidence', 0.3)
+        # Sanitize RT-DETR model id (ignore JSON paths)
+        model_id = ocr_settings.get('rtdetr_model_url') or model_path
+        try:
+            if isinstance(model_id, str) and model_id.lower().endswith('.json'):
+                model_id = ''
+        except Exception:
+            model_id = None
         
         max_attempts = 2
         retry_delay = 0.5
@@ -3181,7 +3197,9 @@ class MangaTranslator:
                     if not already_loaded:
                         # Load RT-DETR ONNX model
                         self._log(f"📥 Loading RT-DETR ONNX model (attempt {attempt}/{max_attempts})", "info")
-                        if not bd.load_rtdetr_onnx_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                        if not model_id:
+                            raise RuntimeError("Invalid RT-DETR model id (empty or JSON)")
+                        if not bd.load_rtdetr_onnx_model(model_id=model_id):
                             raise RuntimeError("load_rtdetr_onnx_model returned False")
                     # Model is loaded (either from pool or just loaded), run detection
                     return bd.detect_with_rtdetr_onnx(
@@ -3195,7 +3213,9 @@ class MangaTranslator:
                     if not already_loaded:
                         # Load RT-DETR (PyTorch) model
                         self._log(f"📥 Loading RT-DETR model (attempt {attempt}/{max_attempts})", "info")
-                        if not bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                        if not model_id:
+                            raise RuntimeError("Invalid RT-DETR model id (empty or JSON)")
+                        if not bd.load_rtdetr_model(model_id=model_id):
                             raise RuntimeError("load_rtdetr_model returned False")
                     # Model is loaded, run detection
                     return bd.detect_with_rtdetr(
@@ -9490,6 +9510,13 @@ class MangaTranslator:
         except Exception:
             pass
         
+        # Guard: ignore JSON credential paths
+        try:
+            if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                model_path = ''
+        except Exception:
+            pass
+        
         # Normalize model path to match _get_or_init_shared_local_inpainter
         if model_path:
             try:
@@ -9686,6 +9713,13 @@ class MangaTranslator:
                 if hasattr(self, 'main_gui'):
                     model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') or \
                                  self.main_gui.config.get(f'{local_method}_model_path', '')
+        except Exception:
+            pass
+        
+        # Guard: ignore JSON credential paths
+        try:
+            if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                model_path = ''
         except Exception:
             pass
         
