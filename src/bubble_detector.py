@@ -124,22 +124,27 @@ else:
         # Test if cuda attribute exists
         _ = torch.cuda
         TORCH_AVAILABLE = True
-    except (ImportError, AttributeError):
+    except (ImportError, AttributeError, OSError, RuntimeError, Exception) as e:
         TORCH_AVAILABLE = False
         torch = None
         if _is_main_process():
-            logger.warning("PyTorch not available or incomplete")
+            logger.warning(f"PyTorch not available or failed to load: {e}")
 
-    try:
-        from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
-        RTDetrForObjectDetection = RTDetrV2ForObjectDetection
-        TRANSFORMERS_AVAILABLE = True
-        if _is_main_process():
-            logger.info("✓ Transformers RT-DETR v2 loaded")
-    except ImportError as e:
+    if TORCH_AVAILABLE:
+        try:
+            from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
+            RTDetrForObjectDetection = RTDetrV2ForObjectDetection
+            TRANSFORMERS_AVAILABLE = True
+            if _is_main_process():
+                logger.info("✓ Transformers RT-DETR v2 loaded")
+        except (ImportError, OSError, RuntimeError, Exception) as e:
+            TRANSFORMERS_AVAILABLE = False
+            if _is_main_process():
+                logger.warning(f"Transformers RT-DETR v2 not available: {e}")
+    else:
         TRANSFORMERS_AVAILABLE = False
         if _is_main_process():
-            logger.warning(f"Transformers RT-DETR v2 not available: {e}")
+            logger.warning("Transformers RT-DETR v2 skipped because PyTorch is unavailable")
 
 # Configure ORT memory behavior before importing
 try:

@@ -99,8 +99,10 @@ lap>=0.5.12
 replicate
 
 # heavy imports (increases .exe file size by 1.5gb)
-torch
-torchvision
+# CPU-only PyTorch wheels (avoid CUDA DLL load errors on Windows)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
 onnxruntime
 safetensors
 transformers
