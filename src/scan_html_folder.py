@@ -128,7 +128,10 @@ class DuplicateDetectionConfig:
                 'consecutive_chapters': 5,
                 'word_overlap': 0.50,
                 'minhash_threshold': 0.60,
-                'check_all_pairs': True
+                'check_all_pairs': True,
+                # Guardrail: don't flag AI/structural duplicates if the raw text overlap is essentially zero
+                # (prevents false positives where structure/semantics match but actual text does not)
+                'min_text_similarity': 0.02
             }
         }
         
@@ -2921,8 +2924,11 @@ def detect_duplicates(results, log, should_stop, config):
                         
                         # For AI Hunter, use a combination approach
                         if config.mode == 'ai-hunter':
+                            min_text_sim = config.get_threshold('min_text_similarity')
                             # High semantic + high structural = likely same content
-                            if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
+                            # Guardrail: require >2% raw text similarity before flagging as duplicate/retranslation
+                            if (sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural')
+                                    and text_sim > min_text_sim):
                                 # If text similarity is low but semantic/structural is high, it's likely a retranslation
                                 if text_sim < 0.6:  # Different enough text
                                     log(f"   🎯 AI Hunter: Found potential retranslation")
@@ -7115,6 +7121,7 @@ def process_comparison_batch_fast(args):
     
     all_data = data['all_data']
     thresholds = data['thresholds']
+    min_text_sim = thresholds.get('min_text_similarity', 0.02)
     
     # Import what we need inside the worker
     from difflib import SequenceMatcher
@@ -7160,7 +7167,9 @@ def process_comparison_batch_fast(args):
         confidence = 0.0
         
         # AI Hunter logic: High semantic + high structural = likely duplicate
-        if sem_sim >= thresholds['semantic'] and struct_sim >= thresholds['structural']:
+        # Guardrail: require at least a tiny amount of text overlap to avoid zero-overlap false positives
+        if (sem_sim >= thresholds['semantic'] and struct_sim >= thresholds['structural']
+                and text_sim > min_text_sim):
             is_duplicate = True
             is_retranslation = text_sim < 0.6
             confidence = (sem_sim + struct_sim) / 2
