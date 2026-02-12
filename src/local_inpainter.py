@@ -1103,19 +1103,33 @@ class LocalInpainter:
             self._log("No model loaded (worker)", "error")
             return image
         
-        # CRITICAL: Retry with exponential backoff for timeouts
-        max_retries = 3
-        timeout_values = [10.0, 20.0, 30.0, 60.0]  # Progressive timeouts: faster initial detection
+        # Compute a reasonable base timeout from image size.
+        # ONNX/PyTorch inference can legitimately take 30-120s+ on CPU for large images.
+        try:
+            h, w = image.shape[:2]
+            pixels = h * w
+            # ~60s base for small images (<1MP), scale up for larger ones
+            base_timeout = max(60.0, 60.0 * (pixels / 1_000_000))
+            # Cap at 5 minutes per attempt
+            base_timeout = min(base_timeout, 300.0)
+        except Exception:
+            base_timeout = 120.0
+        
+        # Retry with conservative timeouts: only restart if worker is actually dead
+        max_retries = 2
         
         for attempt in range(max_retries + 1):
             # CRITICAL: Check stop flag at start of each retry iteration
-            # This ensures we abort quickly when user clicks stop during retries
             if self._check_stop():
                 self._log("⏹️ Inpainting aborted during retry - stop requested", "warning")
                 return image
             
             try:
-                timeout = timeout_values[min(attempt, len(timeout_values) - 1)]
+                # Give more time on retries (1x, 1.5x, 2x base timeout)
+                timeout = base_timeout * (1.0 + attempt * 0.5)
+                if attempt > 0:
+                    logger.info(f"🔄 Retrying inpaint (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s)...")
+                
                 resp = self._mp_call(
                     {'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 
                     'inpaint_result', 
@@ -1129,11 +1143,9 @@ class LocalInpainter:
                     error_msg = resp.get('error', 'Unknown error')
                     logger.error(f"Worker inpaint failed: {error_msg}")
                     if attempt < max_retries:
-                        # Check stop before retry
                         if self._check_stop():
                             self._log("⏹️ Inpainting aborted - stop requested", "warning")
                             return image
-                        logger.warning(f"🔄 Retrying inpaint (attempt {attempt + 1}/{max_retries})...")
                         continue
                     return image
             except InterruptedError as e:
@@ -1142,40 +1154,46 @@ class LocalInpainter:
                 return image
                 
             except TimeoutError as e:
-                logger.error(f"❌ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
-                # CRITICAL: Check stop flag before attempting retry/restart
+                logger.warning(f"⚠️ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s): {e}")
+                # Check stop flag before attempting retry/restart
                 if self._check_stop():
                     self._log("⏹️ Inpainting aborted on timeout - stop requested", "warning")
                     return image
                 if attempt < max_retries:
-                    logger.warning(f"🔄 Restarting worker and retrying...")
-                    # CRITICAL: Restart the worker process on timeout
-                    try:
-                        self._stop_worker()
-                        import time
-                        time.sleep(1)  # Brief pause
-                        # Check stop again before starting new worker
-                        if self._check_stop():
-                            self._log("⏹️ Inpainting aborted - stop requested during restart", "warning")
+                    # CRITICAL: Check if worker is still alive before killing it.
+                    # If it's alive, it's probably just slow — don't restart, just retry with more time.
+                    worker_alive = self._check_worker_health()
+                    if worker_alive:
+                        logger.info(f"⏳ Worker is still alive — will retry with longer timeout (not restarting)")
+                        # Worker is processing; skip restart, just loop to retry with a larger timeout
+                        continue
+                    else:
+                        # Worker is actually dead — restart it
+                        logger.warning(f"💀 Worker process is dead — restarting before retry")
+                        try:
+                            self._stop_worker()
+                            import time
+                            time.sleep(1)
+                            if self._check_stop():
+                                self._log("⏹️ Inpainting aborted - stop requested during restart", "warning")
+                                return image
+                            self._start_worker()
+                            # Reload the model only because we had to restart a dead worker
+                            if hasattr(self, 'current_method') and self.current_method:
+                                model_path = getattr(self, '_last_model_path', None)
+                                if model_path:
+                                    logger.info(f"🔄 Reloading model in new worker: {self.current_method}")
+                                    self._mp_load_model(self.current_method, model_path, force_reload=True)
+                        except Exception as restart_error:
+                            logger.error(f"Failed to restart worker: {restart_error}")
                             return image
-                        self._start_worker()
-                        # Reload the model in the new worker
-                        if hasattr(self, 'current_method') and self.current_method:
-                            model_path = getattr(self, '_last_model_path', None)
-                            if model_path:
-                                logger.info(f"🔄 Reloading model in new worker: {self.current_method}")
-                                self._mp_load_model(self.current_method, model_path, force_reload=True)
-                    except Exception as restart_error:
-                        logger.error(f"Failed to restart worker: {restart_error}")
-                        return image
                     continue
                 else:
-                    logger.error(f"❌ All retry attempts exhausted. Returning original image.")
+                    logger.error(f"❌ All retry attempts exhausted (timeout={timeout:.0f}s). Returning original image.")
                     return image
             except Exception as e:
                 logger.error(f"Worker inpaint exception (attempt {attempt + 1}): {e}")
                 if attempt < max_retries:
-                    # Check stop before retry
                     if self._check_stop():
                         self._log("⏹️ Inpainting aborted on exception - stop requested", "warning")
                         return image
