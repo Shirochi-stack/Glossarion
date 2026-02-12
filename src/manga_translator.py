@@ -7549,6 +7549,12 @@ class MangaTranslator:
                 # Never let logging break translation
                 pass
             
+            # If graceful stop is active, do NOT start a new API call.
+            # (Let any already in-flight call finish elsewhere; this prevents endless cancelled attempts.)
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self._log(f"{prefix} ⏹️ Graceful stop active - skipping new API call", "warning")
+                return ""
+
             start_time = time.time()
             api_time = 0  # Initialize to avoid NameError
             raw_obj = None  # Initialize outside try block for history usage
@@ -7612,6 +7618,17 @@ class MangaTranslator:
                 
             except Exception as api_error:
                 api_time = time.time() - start_time
+
+                # If graceful stop prevented starting a call, treat as a clean stop (no retries/log spam).
+                try:
+                    from unified_api_client import UnifiedClientError
+                    if isinstance(api_error, UnifiedClientError) and getattr(api_error, 'error_type', None) == 'cancelled':
+                        if 'graceful stop' in str(api_error).lower() or os.environ.get('GRACEFUL_STOP') == '1':
+                            self._log(f"{prefix} ⏹️ Graceful stop active - not starting new API call", "warning")
+                            return ""
+                except Exception:
+                    pass
+
                 error_str = str(api_error).lower()
                 error_type = type(api_error).__name__
                 
@@ -8123,6 +8140,11 @@ class MangaTranslator:
             self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
             self._log(f"   Temperature: {self.temperature}")
             self._log(f"   Max Output Tokens: {self.max_tokens}")
+
+            # If graceful stop is active, do NOT start a new API call.
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self._log("⏹️ Graceful stop active - skipping new full-page API call", "warning")
+                return {}
             
             start_time = time.time()
             api_time = 0  # Initialize to avoid NameError
@@ -8190,6 +8212,16 @@ class MangaTranslator:
                 
             except Exception as api_error:
                 api_time = time.time() - start_time
+
+                # If graceful stop prevented starting a call, treat as a clean stop.
+                try:
+                    from unified_api_client import UnifiedClientError
+                    if isinstance(api_error, UnifiedClientError) and getattr(api_error, 'error_type', None) == 'cancelled':
+                        if 'graceful stop' in str(api_error).lower() or os.environ.get('GRACEFUL_STOP') == '1':
+                            self._log("⏹️ Graceful stop active - not starting new API call", "warning")
+                            return {}
+                except Exception:
+                    pass
                 
                 # CHECK 7: After API error
                 if self._check_stop():
@@ -13819,6 +13851,10 @@ class MangaTranslator:
         else:
             # SEQUENTIAL CODE
             for i, region in enumerate(regions):
+                # During graceful stop, do not start additional API calls.
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    self._log(f"\n⏹️ Graceful stop active - stopping before region {i+1}/{len(regions)}", "warning")
+                    break
                 if self._check_stop():
                     self._log(f"\n⏹️ Translation stopped by user after {i}/{len(regions)} regions", "warning")
                     break            
@@ -13880,6 +13916,9 @@ class MangaTranslator:
             self._api_next_allowed = 0.0  # monotonic seconds
 
         while True:
+            # During graceful stop, do not wait for / schedule new API calls.
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                return
             now = time.monotonic()
             with self._api_rl_lock:
                 # If we're allowed now, book the next slot and proceed
@@ -13941,6 +13980,9 @@ class MangaTranslator:
             
             for i, region in valid_regions:
                 # Check for stop signal before submitting
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    self._log(f"\n⏹️ Graceful stop active - not submitting additional regions", "warning")
+                    break
                 if self._check_stop():
                     self._log(f"\n⏹️ Translation stopped before submitting region {i+1}", "warning")
                     break
@@ -13961,6 +14003,11 @@ class MangaTranslator:
                 i, region = future_to_data[future]
                 
                 # Check for stop signal
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    self._log(f"\n⏹️ Graceful stop active - cancelling remaining region tasks", "warning")
+                    for f in future_to_data:
+                        f.cancel()
+                    break
                 if self._check_stop():
                     self._log(f"\n⏹️ Translation stopped at {completed}/{len(valid_regions)} completed", "warning")
                     # Cancel remaining futures
