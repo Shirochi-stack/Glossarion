@@ -10910,6 +10910,15 @@ class MangaTranslationTab(QObject):
                 _lower_current_thread_priority_and_affinity('MANGA_RESERVE_CORES')
             except Exception:
                 pass
+            
+            # CRITICAL: Reset ALL cancellation flags including inpainter worker restart.
+            # After stop+resume the inpainter worker is dead (killed by psutil cleanup).
+            # This proactively restarts it and reloads the model so inpainting doesn't stall.
+            try:
+                import ImageRenderer
+                ImageRenderer._reset_cancellation_flags(self)
+            except Exception as e:
+                print(f"[START_HEAVY] _reset_cancellation_flags failed: {e}")
             # Set thread limits based on parallel processing settings
             try:
                 advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
