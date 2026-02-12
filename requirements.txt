@@ -84,8 +84,8 @@ proto-plus
 protobuf<6.0.0dev
 
 # Azure Vision APIs
-azure-ai-vision-imageanalysis>=1.0.0b1  # New Image Analysis API (replaces old Computer Vision)
-azure-ai-documentintelligence>=1.0.0  # Document Intelligence for OCR
+azure-ai-vision-imageanalysis==1.0.0  # New Image Analysis API (replaces old Computer Vision)
+azure-ai-documentintelligence==1.0.2  # Document Intelligence for OCR
 isodate
 azure-core
 azure-identity
