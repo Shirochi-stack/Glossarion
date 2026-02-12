@@ -2397,6 +2397,41 @@ class RetranslationMixin:
             if not self._is_data_valid(data):
                 print("⚠️ Cannot refresh - widgets have been deleted")
                 return
+
+            # If the output override directory changed while the dialog is open,
+            # re-resolve output_dir/progress_file so we don't keep reading the old progress JSON.
+            try:
+                file_path = data.get('file_path')
+                if file_path:
+                    epub_base = os.path.splitext(os.path.basename(file_path))[0]
+                    override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
+                    if not override_dir and hasattr(self, 'config'):
+                        try:
+                            override_dir = self.config.get('output_directory')
+                        except Exception:
+                            override_dir = None
+
+                    expected_output_dir = os.path.join(override_dir, epub_base) if override_dir else epub_base
+                    expected_progress_file = os.path.join(expected_output_dir, "translation_progress.json")
+
+                    # Update in-place if changed
+                    if expected_output_dir and data.get('output_dir') != expected_output_dir:
+                        data['output_dir'] = expected_output_dir
+                    if expected_progress_file and data.get('progress_file') != expected_progress_file:
+                        data['progress_file'] = expected_progress_file
+
+                    # Keep cache consistent too (if present)
+                    try:
+                        file_key = os.path.abspath(file_path)
+                        if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
+                            cached = self._retranslation_dialog_cache[file_key]
+                            if isinstance(cached, dict):
+                                cached['output_dir'] = data.get('output_dir')
+                                cached['progress_file'] = data.get('progress_file')
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[WARN] Could not re-resolve output override on refresh: {e}")
             
             # Save current scroll position (and first visible row/offset) to restore after refresh
             saved_scroll = None
