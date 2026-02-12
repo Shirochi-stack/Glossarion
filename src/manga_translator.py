@@ -9950,6 +9950,23 @@ class MangaTranslator:
             return 0
         det_type = (ocr_settings or {}).get('detector_type', 'rtdetr_onnx')
         model_id = (ocr_settings or {}).get('rtdetr_model_url') or (ocr_settings or {}).get('bubble_model_path') or ''
+        # Sanitize model_id based on detector type to avoid unrelated files (e.g., glossary JSON)
+        try:
+            import os
+            if det_type in ('rtdetr', 'rtdetr_onnx'):
+                # RT-DETR expects a HF repo id, not a local JSON file
+                if model_id and (model_id.lower().endswith('.json') or os.path.isfile(model_id)):
+                    self._log(f"⚠️ Ignoring invalid RT-DETR model id (looks like a local file): {model_id}", "warning")
+                    model_id = ''
+                if not model_id:
+                    model_id = 'ogkalu/comic-text-and-bubble-detector'
+            elif det_type in ('yolo', 'custom'):
+                # YOLO/custom expect local model files (.pt/.onnx/.torchscript/.safetensors)
+                if model_id and model_id.lower().endswith('.json'):
+                    self._log(f"⚠️ Ignoring invalid YOLO/custom model path (JSON): {model_id}", "warning")
+                    model_id = ''
+        except Exception:
+            pass
         key = (det_type, model_id)
         created = 0
         

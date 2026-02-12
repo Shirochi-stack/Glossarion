@@ -4895,13 +4895,12 @@ class MangaSettingsDialog(QDialog):
             # New toggles
             self.settings['ocr']['skip_rtdetr_merging'] = self.skip_rtdetr_merging_checkbox.isChecked()
             self.settings['ocr']['preserve_empty_blocks'] = self.preserve_empty_blocks_checkbox.isChecked()
-            self.settings['ocr']['bubble_model_path'] = self.bubble_model_entry.text()
+            model_text = self.bubble_model_entry.text().strip()
             self.settings['ocr']['bubble_confidence'] = self.bubble_conf_slider.value() / 100.0
             self.settings['ocr']['rtdetr_confidence'] = self.bubble_conf_slider.value() / 100.0
             self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles_checkbox.isChecked()
             self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles_checkbox.isChecked()
             self.settings['ocr']['detect_free_text'] = self.detect_free_text_checkbox.isChecked()
-            self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_entry.text()
             self.settings['ocr']['bubble_max_detections_yolo'] = int(self.bubble_max_det_yolo_spinbox.value())
             self.settings['ocr']['rtdetr_max_concurrency'] = int(self.rtdetr_max_concurrency_spinbox.value())
             
@@ -4915,9 +4914,18 @@ class MangaSettingsDialog(QDialog):
                 self.settings['ocr']['detector_type'] = 'yolo'
             elif detector_display == 'Custom Model':
                 self.settings['ocr']['detector_type'] = 'custom'
-                self.settings['ocr']['custom_model_path'] = self.bubble_model_entry.text()
+                self.settings['ocr']['custom_model_path'] = model_text
             else:
                 self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
+
+            # Persist model fields based on detector type to avoid stale/incorrect paths
+            detector_type = self.settings['ocr'].get('detector_type', 'rtdetr_onnx')
+            if detector_type in ('rtdetr', 'rtdetr_onnx'):
+                self.settings['ocr']['rtdetr_model_url'] = model_text
+                self.settings['ocr']['bubble_model_path'] = ''
+            else:
+                self.settings['ocr']['bubble_model_path'] = model_text
+                self.settings['ocr']['rtdetr_model_url'] = ''
             
             # Inpainting settings
             if 'inpainting' not in self.settings:
