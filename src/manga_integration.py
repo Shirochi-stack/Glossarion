@@ -10167,6 +10167,24 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         print(f"[POOL_TRACKER] Failed to update: {e}")
                 
+                elif update[0] == 'parallel_button_state':
+                    # Update parallel save button on main thread (marshalled from background)
+                    _, active_count = update
+                    try:
+                        ImageRenderer._update_parallel_save_button_state(self, active_count)
+                    except Exception as e:
+                        print(f"[PARALLEL] Failed to update button state: {e}")
+                
+                elif update[0] == 'parallel_gui_update':
+                    # Execute parallel save GUI update on main thread (marshalled from ThreadPoolExecutor)
+                    _, data = update
+                    try:
+                        region_index = data['region_index']
+                        trans_text = data['trans_text']
+                        ImageRenderer._update_single_text_overlay(self, region_index, trans_text)
+                    except Exception as e:
+                        print(f"[PARALLEL] GUI update failed for region {data.get('region_index')}: {e}")
+                
                 elif update[0] == 'recognize_results':
                     _, results = update
                     # Process recognition results

@@ -7609,6 +7609,9 @@ def _handle_translate_this_text(self, region_index: int, prompt: str):
 def _translate_this_text_background(self, message: str, region_index: int):
     """Send text for translation using MangaTranslator in background"""
     try:
+        # CRITICAL: Reset stale cancellation flags from previous stop operations
+        _reset_cancellation_flags(self)
+        
         # Get API configuration from main GUI
         api_key = None
         if hasattr(self.main_gui, 'api_key_entry'):
@@ -8202,14 +8205,15 @@ def _init_parallel_save_system(self):
                         print(f"[PARALLEL] Coordinator error: {e}")
             
             def _execute_save_task(self, region_index, trans_text):
-                """Execute save task in worker thread (instant - no process startup)."""
+                """Execute save task — marshal GUI update to main thread via update_queue."""
                 try:
-                    print(f"[PARALLEL] Thread worker processing region {region_index}")
-                    # Do the actual GUI update (thread-safe via _update_single_text_overlay_parallel)
-                    success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
-                    if success:
-                        print(f"[PARALLEL] Successfully updated region {region_index}")
-                    return {'success': success, 'region_index': region_index}
+                    print(f"[PARALLEL] Queuing GUI update for region {region_index} to main thread")
+                    # CRITICAL: Do NOT call Qt from this thread. Route through update_queue.
+                    self.parent.update_queue.put(('parallel_gui_update', {
+                        'region_index': region_index,
+                        'trans_text': trans_text
+                    }))
+                    return {'success': True, 'region_index': region_index}
                 except Exception as e:
                     print(f"[PARALLEL] Thread worker error for region {region_index}: {e}")
                     return {'success': False, 'region_index': region_index}
