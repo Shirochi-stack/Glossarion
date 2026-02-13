@@ -943,6 +943,13 @@ def _clear_cross_image_state(self):
             if old_path:
                 print(f"[STATE_ISOLATION] Cleared state image path tracking (was: {os.path.basename(old_path)})")
         
+        # Clear cleaned image path to prevent using previous image's cleaned base for rendering
+        if hasattr(self, '_cleaned_image_path'):
+            old_cleaned = getattr(self, '_cleaned_image_path', None)
+            self._cleaned_image_path = None
+            if old_cleaned:
+                print(f"[STATE_ISOLATION] Cleared cleaned image path (was: {os.path.basename(old_cleaned)})")
+        
         # Clear detection tracking to prevent results from appearing on wrong image
         if hasattr(self, '_detection_started_for_image'):
             old_detection = getattr(self, '_detection_started_for_image', None)
@@ -996,10 +1003,18 @@ def _persist_current_image_state(self):
             if partial['overlay_rects']:
                 print(f"[STATE] Persisting {len(partial['overlay_rects'])} overlay rects for {os.path.basename(image_path)}")
         
-        # Store cleaned image path
+        # Store cleaned image path (only if it belongs to this image)
         if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path:
-            partial['cleaned_image_path'] = self._cleaned_image_path
-            print(f"[STATE] Persisting cleaned image path: {os.path.basename(self._cleaned_image_path)}")
+            try:
+                cleaned_base = os.path.splitext(os.path.basename(self._cleaned_image_path))[0].replace('_cleaned', '')
+                current_base = os.path.splitext(os.path.basename(image_path))[0].replace('_cleaned', '')
+                if cleaned_base == current_base:
+                    partial['cleaned_image_path'] = self._cleaned_image_path
+                    print(f"[STATE] Persisting cleaned image path: {os.path.basename(self._cleaned_image_path)}")
+                else:
+                    print(f"[STATE] Skipping stale cleaned_image_path: {os.path.basename(self._cleaned_image_path)} (current: {os.path.basename(image_path)})")
+            except Exception:
+                pass
         
         # Store rendered image path (if exists)
         if hasattr(self, '_rendered_images_map') and image_path in self._rendered_images_map:
@@ -1387,10 +1402,13 @@ def _restore_image_state(self, image_path: str):
                 self.image_preview_widget.viewer.overlay_rects = state['overlay_rects'].copy()
                 print(f"[STATE] Restored {len(state['overlay_rects'])} overlay rects")
         
-        # Restore cleaned image path
-        if 'cleaned_image_path' in state:
-            self._cleaned_image_path = state['cleaned_image_path']
+        # Restore cleaned image path (with validation + filesystem discovery)
+        resolved_cleaned = _resolve_cleaned_image_for_render(self, image_path)
+        if resolved_cleaned:
+            self._cleaned_image_path = resolved_cleaned
             print(f"[STATE] Restored cleaned image path: {os.path.basename(self._cleaned_image_path)}")
+        elif 'cleaned_image_path' in state:
+            print(f"[STATE] Skipped corrupted cleaned_image_path: {os.path.basename(state['cleaned_image_path'])}")
         
         # Restore rendered image path mapping if available
         if 'rendered_image_path' in state:
@@ -1683,10 +1701,13 @@ def _restore_image_state_overlays_only(self, image_path: str):
                 self.image_preview_widget.viewer.overlay_rects = state['overlay_rects'].copy()
                 print(f"[STATE] Restored {len(state['overlay_rects'])} overlay rects")
         
-        # Restore cleaned image path reference
-        if 'cleaned_image_path' in state:
-            self._cleaned_image_path = state['cleaned_image_path']
+        # Restore cleaned image path reference (with validation + filesystem discovery)
+        resolved_cleaned = _resolve_cleaned_image_for_render(self, image_path)
+        if resolved_cleaned:
+            self._cleaned_image_path = resolved_cleaned
             print(f"[STATE] Restored cleaned image path: {os.path.basename(self._cleaned_image_path)}")
+        elif 'cleaned_image_path' in state:
+            print(f"[STATE] Skipped corrupted cleaned_image_path: {os.path.basename(state['cleaned_image_path'])}")
         
         # Restore recognition_data from persisted recognized_texts so Edit OCR menu works after reload
         try:
@@ -8472,6 +8493,80 @@ def _get_translation_text_for_region(self, region_index: int) -> str:
         print(f"[DEBUG] Failed to get translation text: {e}")
     return ""
 
+def _resolve_cleaned_image_for_render(self, current_image: str):
+    """Resolve the correct cleaned image path for rendering.
+    
+    Checks state, in-memory cache, and falls back to filesystem discovery.
+    Also repairs corrupted state if a correct cleaned image is found by discovery.
+    Returns the cleaned image path or None.
+    """
+    try:
+        current_base = os.path.splitext(os.path.basename(current_image))[0].replace('_cleaned', '')
+        
+        # 1. Check state manager
+        try:
+            if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                st = self.image_state_manager.get_state(current_image) or {}
+                cand = st.get('cleaned_image_path')
+                if cand and os.path.exists(cand):
+                    cand_base = os.path.splitext(os.path.basename(cand))[0].replace('_cleaned', '')
+                    if cand_base == current_base:
+                        return cand
+                    else:
+                        print(f"[CLEAN_RESOLVE] Rejecting corrupted cleaned_image_path from state: {os.path.basename(cand)} (expected base: {current_base})")
+        except Exception:
+            pass
+        
+        # 2. Check in-memory _cleaned_image_path
+        try:
+            cand = getattr(self, '_cleaned_image_path', None)
+            if cand and os.path.exists(cand):
+                cand_base = os.path.splitext(os.path.basename(cand))[0].replace('_cleaned', '')
+                if cand_base == current_base:
+                    return cand
+                else:
+                    print(f"[CLEAN_RESOLVE] Rejecting stale _cleaned_image_path: {os.path.basename(cand)} (expected base: {current_base})")
+        except Exception:
+            pass
+        
+        # 3. Filesystem discovery fallback: look in expected folder
+        try:
+            ext = os.path.splitext(current_image)[1]
+            parent_dir = os.path.dirname(current_image)
+            
+            # Check for OUTPUT_DIRECTORY override
+            override_dir = None
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '')
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+            
+            search_dirs = []
+            if override_dir:
+                search_dirs.append(os.path.join(override_dir, f"{current_base}_translated"))
+            search_dirs.append(os.path.join(parent_dir, f"{current_base}_translated"))
+            
+            for search_dir in search_dirs:
+                expected_cleaned = os.path.join(search_dir, f"{current_base}_cleaned{ext}")
+                if os.path.exists(expected_cleaned):
+                    print(f"[CLEAN_RESOLVE] Discovered cleaned image via filesystem: {os.path.basename(expected_cleaned)}")
+                    # Repair corrupted state and cache
+                    self._cleaned_image_path = expected_cleaned
+                    try:
+                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                            self.image_state_manager.update_state(current_image, {'cleaned_image_path': expected_cleaned})
+                            print(f"[CLEAN_RESOLVE] Repaired state with correct cleaned_image_path")
+                    except Exception:
+                        pass
+                    return expected_cleaned
+        except Exception:
+            pass
+        
+        return None
+    except Exception as e:
+        print(f"[CLEAN_RESOLVE] Error: {e}")
+        return None
+
 def _extract_render_data_for_region(self, region_index: int) -> dict:
     """Extract all GUI data needed for rendering (main thread only)"""
     try:
@@ -8545,24 +8640,8 @@ def _extract_render_data_for_region(self, region_index: int) -> dict:
             print(f"[DEBUG] No regions to render")
             return None
         
-        # Choose base image (same logic as _update_single_text_overlay)
-        base_image = None
-        try:
-            if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                st = self.image_state_manager.get_state(current_image) or {}
-                cand = st.get('cleaned_image_path')
-                if cand and os.path.exists(cand):
-                    base_image = cand
-        except Exception:
-            pass
-        if base_image is None:
-            try:
-                cand = getattr(self, '_cleaned_image_path', None)
-                if cand and os.path.exists(cand):
-                    base_image = cand
-            except Exception:
-                pass
-        # For source tab incremental previews, prefer original over translated base
+        # Choose base image (state -> memory -> filesystem discovery)
+        base_image = _resolve_cleaned_image_for_render(self, current_image)
         if base_image is None:
             base_image = current_image
             print(f"[DEBUG] Using original image as base (no cleaned image available)")
@@ -8968,26 +9047,8 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
             
             if regions:
                 print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
-                # Choose base image for CONSISTENT re-render (prefer cleaned base for source tab previews)
-                base_image = None
-                try:
-                    if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                        st = self.image_state_manager.get_state(current_image) or {}
-                        cand = st.get('cleaned_image_path')
-                        if cand and os.path.exists(cand):
-                            base_image = cand
-                except Exception:
-                    pass
-                if base_image is None:
-                    try:
-                        cand = getattr(self, '_cleaned_image_path', None)
-                        if cand and os.path.exists(cand):
-                            base_image = cand
-                    except Exception:
-                        pass
-                
-                # For source tab incremental previews, always prefer original over translated base
-                # to avoid showing translated text behind overlays
+                # Choose base image (state -> memory -> filesystem discovery)
+                base_image = _resolve_cleaned_image_for_render(self, current_image)
                 if base_image is None:
                     base_image = current_image
                     print(f"[DEBUG] Using original image as base (no cleaned image available)")
@@ -9162,28 +9223,8 @@ def save_positions_and_rerender(self):
             print("[SAVE_POS] No regions built; aborting")
             return
         
-        # Choose base image
-        base_image = None
-        try:
-            st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
-            cand = (st or {}).get('cleaned_image_path')
-            if cand and os.path.exists(cand):
-                base_image = cand
-        except Exception as e:
-            print(f"[SAVE_POS] Error getting cleaned_image_path: {e}")
-            import traceback
-            print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
-            base_image = None
-        if base_image is None:
-            try:
-                cand = getattr(self, '_cleaned_image_path', None)
-                if cand and os.path.exists(cand):
-                    base_image = cand
-            except Exception as e:
-                print(f"[SAVE_POS] Error getting _cleaned_image_path: {e}")
-                import traceback
-                print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
-        # For consistency, prefer original image over translated base to avoid artifacts
+        # Choose base image (state -> memory -> filesystem discovery)
+        base_image = _resolve_cleaned_image_for_render(self, current_image)
         if base_image is None:
             base_image = current_image
             print(f"[SAVE_POS] Using original image as base (no cleaned image available)")
