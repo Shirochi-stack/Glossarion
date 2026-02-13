@@ -1407,6 +1407,9 @@ class RetranslationMixin:
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
         listbox_font = QFont('Courier', 10)  # Fixed-width font for better alignment
         listbox.setFont(listbox_font)
+        listbox.setSpacing(0)
+        listbox.setUniformItemSizes(True)
+        listbox.setStyleSheet("QListWidget::item { padding: 1px 2px; margin: 0px; }")
         # Use 36% of screen width
         min_width, _ = self._get_dialog_size(0.36, 0)
         listbox.setMinimumWidth(min_width)

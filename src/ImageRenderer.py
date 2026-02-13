@@ -1178,38 +1178,22 @@ def _validate_and_clean_stale_state(self, image_path: str):
                 state.pop('rendered_image_path', None)
                 state_changed = True
         
-        # If NEITHER cleaned nor rendered output exists, clear ALL processing state
-        # This is orphaned data from a previous session
+        # If NEITHER cleaned nor rendered output exists, clear only TRANSLATION output state.
+        # Detection regions, viewer rectangles, and recognized texts are NOT orphaned —
+        # they are created by Detect/Recognize steps BEFORE any output files exist.
         if not cleaned_exists and not rendered_exists:
             orphaned_keys = []
             
-            # Check for orphaned translation data
+            # Only clear translated_texts — these genuinely require a rendered output
             if state.get('translated_texts'):
                 orphaned_keys.append('translated_texts')
                 state.pop('translated_texts', None)
             
-            # Check for orphaned recognition data
-            if state.get('recognized_texts'):
-                orphaned_keys.append('recognized_texts')
-                state.pop('recognized_texts', None)
-            
-            # Check for orphaned detection regions
-            if state.get('detection_regions'):
-                orphaned_keys.append('detection_regions')
-                state.pop('detection_regions', None)
-            
-            # Check for orphaned viewer rectangles
-            if state.get('viewer_rectangles'):
-                orphaned_keys.append('viewer_rectangles')
-                state.pop('viewer_rectangles', None)
-            
-            # Check for orphaned overlay rects
-            if state.get('overlay_rects'):
-                orphaned_keys.append('overlay_rects')
-                state.pop('overlay_rects', None)
+            # Keep recognized_texts, detection_regions, viewer_rectangles, overlay_rects
+            # — they are valid intermediate state from Detect/Recognize steps
             
             if orphaned_keys:
-                print(f"[STATE_CLEAN] No output files exist - clearing orphaned state: {', '.join(orphaned_keys)}")
+                print(f"[STATE_CLEAN] No output files exist - clearing orphaned translation state: {', '.join(orphaned_keys)}")
                 state_changed = True
         
         # If only translated output is missing but cleaned exists, just clear translation data
@@ -2033,6 +2017,12 @@ def _process_detect_results(self, results: dict):
             print(f"[DETECT_RESULTS] Preserving {rectangle_count} existing rectangles during detection update")
         
         _draw_detection_boxes_on_preview(self, )
+        
+        # PERSIST: Save viewer_rectangles to state so they survive panel/session switches
+        try:
+            _persist_current_image_state(self)
+        except Exception:
+            pass
         
     except Exception as e:
         self._log(f"❌ Failed to process detection results: {str(e)}", "error")
@@ -10956,6 +10946,12 @@ def _process_recognize_results(self, results: dict):
             # Update UI with recognition tooltips
             _update_rectangles_with_recognition(self, recognized_texts)
             self._log(f"📋 Ready for translation! Click 'Translate' to proceed.", "info")
+            
+            # PERSIST: Save viewer_rectangles (now blue) to state so they survive panel/session switches
+            try:
+                _persist_current_image_state(self)
+            except Exception:
+                pass
         else:
             self._log("⚠️ No text was recognized in any regions", "warning")
     

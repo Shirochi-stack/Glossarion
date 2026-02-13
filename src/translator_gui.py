@@ -2178,7 +2178,17 @@ Text to analyze:
         # Intercept window close: hide instead of destroy to preserve state
         def _handle_close(event):
             try:
-                # Flush image state before hiding to persist OCR data
+                # Persist current image rectangles/state before flushing
+                if hasattr(self, 'manga_translator'):
+                    try:
+                        if hasattr(self.manga_translator, '_current_image_path') and self.manga_translator._current_image_path:
+                            import ImageRenderer
+                            ImageRenderer._persist_current_image_state(self.manga_translator)
+                            print("[MANGA_CLOSE] Persisted current image state")
+                    except Exception as e:
+                        print(f"[MANGA_CLOSE] Failed to persist state: {e}")
+                
+                # Flush image state to disk to persist OCR data
                 if hasattr(self, 'manga_translator') and hasattr(self.manga_translator, 'image_state_manager'):
                     try:
                         print("[MANGA_CLOSE] Flushing image state...")
