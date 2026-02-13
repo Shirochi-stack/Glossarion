@@ -957,6 +957,13 @@ def _clear_cross_image_state(self):
             if old_detection:
                 print(f"[STATE_ISOLATION] Cleared detection tracking (was: {os.path.basename(old_detection)})")
         
+        # Clear current detection regions to prevent contaminating other images
+        if hasattr(self, '_current_regions'):
+            old_count = len(self._current_regions) if self._current_regions else 0
+            self._current_regions = []
+            if old_count > 0:
+                print(f"[STATE_ISOLATION] Cleared {old_count} detection regions")
+        
         print(f"[STATE_ISOLATION] Cross-image state isolation completed")
         
     except Exception as e:
@@ -8161,8 +8168,11 @@ def _init_parallel_save_system(self):
                                 self.processing_count += 1
                                 print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
                                 
-                                # Update button state for parallel processing
-                                _update_parallel_save_button_state(self.parent, self.processing_count)
+                                # Update button state via main thread queue (NOT directly - Qt crash)
+                                try:
+                                    self.parent.update_queue.put(('parallel_button_state', self.processing_count))
+                                except Exception:
+                                    pass
                         
                         # Submit the work to thread pool (threads can access parent directly)
                         region_idx = task['region_index']
@@ -8226,8 +8236,11 @@ def _init_parallel_save_system(self):
                             self.processing_count = max(0, self.processing_count - 1)
                             print(f"[PARALLEL] Finished processing region {region_index} (active: {self.processing_count})")
                             
-                            # Update button state
-                            _update_parallel_save_button_state(self.parent, self.processing_count)
+                            # Update button state via main thread queue (NOT directly - Qt crash)
+                            try:
+                                self.parent.update_queue.put(('parallel_button_state', self.processing_count))
+                            except Exception:
+                                pass
             
             def get_active_count(self):
                 """Get the number of currently active processing tasks."""
