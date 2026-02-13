@@ -5289,6 +5289,26 @@ def _process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, o
                 'bbox': bbox
             }
             
+            # Also persist OCR result into image_state_manager so it survives image switches
+            try:
+                image_path = getattr(self.image_preview_widget, 'current_image_path', None)
+                if image_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
+                    state = self.image_state_manager.get_state(image_path) or {}
+                    rec_list = state.get('recognized_texts', [])
+                    # Extend list if needed to accommodate this region_index
+                    while len(rec_list) <= region_index:
+                        rec_list.append({'deleted': True})
+                    rec_list[region_index] = {
+                        'text': recognized_text,
+                        'bbox': bbox,
+                        'region_index': region_index
+                    }
+                    state['recognized_texts'] = rec_list
+                    self.image_state_manager.set_state(image_path, state, save=True)
+                    print(f"[OCR_CONTEXT] Persisted OCR result to state for region {region_index}")
+            except Exception as persist_err:
+                print(f"[OCR_CONTEXT] Failed to persist OCR to state: {persist_err}")
+            
             # Change rectangle color to blue to indicate it now has recognized text
             from PySide6.QtGui import QPen, QBrush, QColor
             rect_item.setPen(QPen(QColor(0, 150, 255), 2))  # Blue border
@@ -5300,6 +5320,12 @@ def _process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, o
             _add_context_menu_to_rectangle(self, rect_item, region_index)
             
             print(f"[OCR_CONTEXT] Successfully recognized text in region {region_index}")
+            
+            # PERSIST: Save updated state so rectangles/OCR survive panel switches and sessions
+            try:
+                _persist_current_image_state(self)
+            except Exception:
+                pass
             
         else:
             self._log("⚠️ No text found in selected region", "warning")
