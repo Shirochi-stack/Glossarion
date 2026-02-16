@@ -474,26 +474,96 @@ _ENTITY_PATTERN = re.compile(r'&[A-Za-z0-9#]+;')
 # Translation table to remove whitespace (much faster than regex or iteration)
 _WHITESPACE_TRANSLATE = str.maketrans('', '', ' \t\n\r\f\v\xa0')
 
-def _count_chars_normalized(text: str) -> int:
+# Precompiled token regex for word counting (legacy)
+_TOKEN_RE = re.compile(r"[0-9A-Za-z\u00C0-\uFFFF']+")
+
+def _count_words(text: str) -> int:
     """
-    Count characters in text (excluding whitespace and HTML artifacts).
-    Optimized for speed - uses translate() which is implemented in C.
-    
-    Note: Input text is typically already processed by BeautifulSoup.get_text(),
-    which strips HTML tags. We only need to handle entities and whitespace.
+    Legacy word counting - normalize text before counting words:
+      - Remove HTML entities (e.g., &nbsp;, &#123;) as whitespace
+      - Decode remaining entities
+      - Collapse whitespace
+      - Count unicode word tokens (letters/numbers/apostrophes)
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    # First strip entities completely to avoid counting them
+    text = re.sub(r'&[A-Za-z0-9#]+;', ' ', text)
+    # Decode any remaining entities defensively
+    text = html_lib.unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text:
+        return 0
+    tokens = _TOKEN_RE.findall(text)
+    return len(tokens)
+
+def _count_chars_exact(text: str) -> int:
+    """
+    Count characters exactly (excluding whitespace and HTML artifacts).
+    Slower but precise.
     """
     if not isinstance(text, str) or not text:
         return 0
     
     # Fast path: if no & character, skip entity processing entirely
     if '&' in text:
-        # Remove HTML entities (e.g., &nbsp;, &#123;)
         text = _ENTITY_PATTERN.sub('', text)
-        # Decode any remaining entities defensively
         text = html_lib.unescape(text)
     
-    # Remove whitespace using translate (C-optimized, much faster than regex/iteration)
     return len(text.translate(_WHITESPACE_TRANSLATE))
+
+def _count_chars_sampled(text: str) -> int:
+    """
+    Count characters using sampling for large texts.
+    Fast and accurate enough for QA ratio comparisons.
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    
+    text_len = len(text)
+    
+    # For texts over 2KB, use sampling to estimate character count
+    if text_len > 2000:
+        # Sample ~1.5KB from beginning, middle, and end
+        sample_size = 500
+        mid = text_len // 2
+        sample = text[:sample_size] + text[mid - sample_size//2:mid + sample_size//2] + text[-sample_size:]
+        
+        # Fast path: if no & character, skip entity processing
+        if '&' in sample:
+            sample = _ENTITY_PATTERN.sub('', sample)
+            sample = html_lib.unescape(sample)
+        
+        # Count non-whitespace in sample
+        sample_chars = len(sample.translate(_WHITESPACE_TRANSLATE))
+        # Extrapolate to full text
+        ratio = sample_chars / len(sample) if sample else 0
+        return int(text_len * ratio)
+    
+    # For smaller texts, count exactly
+    return _count_chars_exact(text)
+
+def _count_chars_normalized(text: str) -> int:
+    """
+    Main counting function - dispatches based on environment settings.
+    
+    Environment variables:
+      QA_USE_WORD_COUNT=1  - Use fast word counting (default: off)
+      QA_EXACT_CHAR_COUNT=1 - Use exact character counting (default: off, uses sampling)
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    
+    # Check for word counting mode (fastest)
+    if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+        return _count_words(text)
+    
+    # Check for exact character counting mode (slowest but precise)
+    if os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1':
+        return _count_chars_exact(text)
+    
+    # Default: sampled character counting (balanced speed/accuracy)
+    return _count_chars_sampled(text)
 
 _charcount_cache = {}
 
@@ -511,13 +581,16 @@ def _count_chars_cached(text: str) -> int:
     if text_len == 0:
         return 0
     
+    # Include counting mode in cache key to prevent stale results when mode changes
+    mode_prefix = 'W' if os.getenv('QA_USE_WORD_COUNT', '0') == '1' else ('E' if os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1' else 'S')
+    
     # For short texts, use text itself as key (faster than hashing)
     if text_len <= 1000:
-        key = f"L{text_len}:{text}"
+        key = f"{mode_prefix}:L{text_len}:{text}"
     else:
         # Sample from beginning, middle, and end for better collision avoidance
         sample = text[:2000] + text[text_len//2:text_len//2+1000] + text[-2000:]
-        key = f"L{text_len}:{hashlib.md5(sample.encode('utf-8', errors='ignore')).hexdigest()}"
+        key = f"{mode_prefix}:L{text_len}:{hashlib.md5(sample.encode('utf-8', errors='ignore')).hexdigest()}"
     
     cached = _charcount_cache.get(key)
     if cached is not None:
@@ -5881,7 +5954,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', True) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
-    log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}") 
+    log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")
+    # Log counting mode
+    if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+        counting_mode_str = "WORD COUNT (legacy)"
+    elif os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1':
+        counting_mode_str = "CHARACTER COUNT (exact)"
+    else:
+        counting_mode_str = "CHARACTER COUNT (sampled)"
+    log(f"   ✓ Counting mode: {counting_mode_str}")
     log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")
     
     # Initialize configuration

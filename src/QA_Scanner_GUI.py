@@ -2559,6 +2559,38 @@ class QAScannerMixin:
         wordcount_desc.setWordWrap(True)
         wordcount_desc.setMaximumWidth(700)
         wordcount_layout.addWidget(wordcount_desc)
+        
+        # Counting mode options
+        counting_mode_widget = QWidget()
+        counting_mode_layout = QHBoxLayout(counting_mode_widget)
+        counting_mode_layout.setContentsMargins(0, 10, 0, 5)
+        
+        counting_mode_label = QLabel("Counting mode:")
+        counting_mode_label.setFont(QFont('Arial', 10))
+        counting_mode_layout.addWidget(counting_mode_label)
+        
+        # Get current mode from environment
+        current_use_word_count = os.getenv('QA_USE_WORD_COUNT', '0') == '1'
+        current_exact_char = os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1'
+        
+        counting_mode_combo = QComboBox()
+        counting_mode_combo.addItem("Character count (sampled) - Default", "sampled")
+        counting_mode_combo.addItem("Character count (exact) - Slower", "exact")
+        counting_mode_combo.addItem("Word count (legacy) - Fastest", "word")
+        counting_mode_combo.setMinimumWidth(250)
+        counting_mode_combo.wheelEvent = lambda event: event.ignore()
+        
+        # Set current selection based on env vars
+        if current_use_word_count:
+            counting_mode_combo.setCurrentIndex(2)  # Word count
+        elif current_exact_char:
+            counting_mode_combo.setCurrentIndex(1)  # Exact char
+        else:
+            counting_mode_combo.setCurrentIndex(0)  # Sampled (default)
+        
+        counting_mode_layout.addWidget(counting_mode_combo)
+        counting_mode_layout.addStretch()
+        wordcount_layout.addWidget(counting_mode_widget)
 
         # Word count multiplier sliders (2-column grid)
         multipliers_label = QLabel("Expected translation length multiplier (translated words ÷ source words)")
@@ -3244,6 +3276,7 @@ class QAScannerMixin:
                     'report_format': (format_radio_buttons, get_selected_radio_value),
                     'auto_save_report': (auto_save_checkbox, lambda x: x.isChecked()),
                     'check_word_count_ratio': (check_word_count_checkbox, lambda x: x.isChecked()),
+                    'counting_mode': (counting_mode_combo, lambda x: x.currentData()),
                     'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
                     'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
                     'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
@@ -3453,6 +3486,9 @@ class QAScannerMixin:
                         ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
                         ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
                         ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 1))),
+                        # Counting mode: set env vars based on selection
+                        ('QA_USE_WORD_COUNT', '1' if qa_settings.get('counting_mode') == 'word' else '0'),
+                        ('QA_EXACT_CHAR_COUNT', '1' if qa_settings.get('counting_mode') == 'exact' else '0'),
                     ]
                     
                     for env_key, env_value in qa_env_mappings:
