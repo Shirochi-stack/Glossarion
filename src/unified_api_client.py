@@ -303,6 +303,31 @@ def _api_watchdog_reset():
     except Exception:
         pass
 
+def _api_watchdog_clear_chapter(chapter_num) -> None:
+    """Clear all watchdog entries for a specific chapter (cleanup after chapter completes)."""
+    global _api_watchdog_in_flight, _api_watchdog_last_change_ts
+    try:
+        chap_str = str(chapter_num)
+        with _api_watchdog_lock:
+            # Find and remove all entries for this chapter
+            to_remove = []
+            for rid, entry in _api_watchdog_entries.items():
+                if str(entry.get('chapter')) == chap_str:
+                    to_remove.append((rid, entry.get('status') == 'in_flight'))
+            
+            for rid, was_in_flight in to_remove:
+                _api_watchdog_entries.pop(rid, None)
+                if was_in_flight:
+                    _api_watchdog_in_flight = max(0, _api_watchdog_in_flight - 1)
+            
+            if to_remove:
+                _api_watchdog_last_change_ts = time.time()
+        
+        if to_remove:
+            _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
 def _api_watchdog_mark_in_flight(request_id: Optional[str], model: Optional[str] = None) -> None:
     """Transition a queued entry to in-flight and increment counter once."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts

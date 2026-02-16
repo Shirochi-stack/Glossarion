@@ -9998,6 +9998,13 @@ def main(log_callback=None, stop_callback=None):
                                     if hist_user and hist_assistant:
                                         batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
                                     print(f"✅ Chapter {chap_num} done")
+                                    # Clear any stale watchdog entries for this chapter
+                                    try:
+                                        import unified_api_client
+                                        if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
+                                            unified_api_client._api_watchdog_clear_chapter(chap_num)
+                                    except Exception:
+                                        pass
                                 else:
                                     failed_in_batch += 1
                                     # Error already printed by worker thread
@@ -10188,6 +10195,13 @@ def main(log_callback=None, stop_callback=None):
                                 if success:
                                     completed_in_batch += 1
                                     print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
+                                    # Clear any stale watchdog entries for this chapter
+                                    try:
+                                        import unified_api_client
+                                        if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
+                                            unified_api_client._api_watchdog_clear_chapter(chap_num)
+                                    except Exception:
+                                        pass
                                     if hist_user and hist_assistant:
                                         batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
                                 else:
@@ -12084,6 +12098,13 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "completed"
 
                 progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
+                # Clear any stale watchdog entries for this chapter
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
+                        unified_api_client._api_watchdog_clear_chapter(actual_num)
+                except Exception:
+                    pass
             else:
                 # For EPUB files, keep original HTML behavior
                 output_path = os.path.join(out, fname)
@@ -12120,6 +12141,13 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "completed"
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
+                # Clear any stale watchdog entries for this chapter
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
+                        unified_api_client._api_watchdog_clear_chapter(actual_num)
+                except Exception:
+                    pass
             progress_manager.save()
             
             # After completing this chapter, check if we should stop
