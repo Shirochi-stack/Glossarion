@@ -1,0 +1,190 @@
+name: Build All Platforms
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  # ============================================================================
+  # Windows Lite Build
+  # ============================================================================
+  build-windows-lite:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      
+      - name: Build with PyInstaller
+        run: pyinstaller translator_lite.spec
+        working-directory: src
+      
+      - name: Upload Windows Lite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-Lite-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # Windows NoCuda Build
+  # ============================================================================
+  build-windows-nocuda:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      
+      - name: Build with PyInstaller
+        run: pyinstaller translator_NoCuda.spec
+        working-directory: src
+      
+      - name: Upload Windows NoCuda artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-NoCuda-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # macOS Build
+  # ============================================================================
+  build-macos:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+      
+      - name: Build with PyInstaller
+        run: pyinstaller translator_lite_mac.spec
+        working-directory: src
+      
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-Lite-macOS
+          path: src/dist/*.dmg
+          if-no-files-found: warn
+      
+      - name: Upload macOS app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-Lite-macOS-App
+          path: src/dist/*.app
+          if-no-files-found: warn
+
+  # ============================================================================
+  # Linux Build
+  # ============================================================================
+  build-linux:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpango-1.0-0 \
+            libpangocairo-1.0-0 \
+            libcairo2 \
+            libgdk-pixbuf2.0-0 \
+            libffi-dev \
+            pkg-config \
+            cmake \
+            libgirepository1.0-dev \
+            gir1.2-pango-1.0
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+      
+      - name: Build with PyInstaller
+        run: pyinstaller translator_lite_linux.spec
+        working-directory: src
+      
+      - name: Make executable
+        run: chmod +x src/dist/Glossarion_Lite_v7.5.2
+      
+      - name: Create tarball
+        run: |
+          cd src/dist
+          tar -czvf Glossarion-Lite-Linux.tar.gz Glossarion_Lite_v7.5.2
+      
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-Lite-Linux
+          path: src/dist/Glossarion-Lite-Linux.tar.gz
+          if-no-files-found: error
