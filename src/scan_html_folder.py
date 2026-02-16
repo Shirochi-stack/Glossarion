@@ -469,45 +469,45 @@ def _get_cache_key(text, max_length=10000):
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
     return text
 
-def _count_words_normalized(text: str) -> int:
+def _count_chars_normalized(text: str) -> int:
     """
-    Normalize text before counting words:
-      - Remove HTML entities (e.g., &nbsp;, &#123;) as whitespace
+    Count characters in text (excluding whitespace and HTML artifacts):
+      - Remove HTML entities (e.g., &nbsp;, &#123;)
       - Decode remaining entities
-      - Collapse whitespace
-      - Count unicode word tokens (letters/numbers/apostrophes)
+      - Remove whitespace
+      - Count remaining characters
     """
     if not isinstance(text, str):
         return 0
-    # First strip entities completely to avoid counting them
-    text = re.sub(r'&[A-Za-z0-9#]+;', ' ', text)
+    # First strip entities completely
+    text = re.sub(r'&[A-Za-z0-9#]+;', '', text)
     # Decode any remaining entities defensively
     text = html_lib.unescape(text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    if not text:
-        return 0
-    tokens = TOKEN_RE.findall(text)
-    return len(tokens)
+    # Remove all whitespace
+    text = re.sub(r'\s+', '', text)
+    return len(text)
 
-# Precompiled token regex and simple cache for word counts
-TOKEN_RE = re.compile(r"[0-9A-Za-z\u00C0-\uFFFF']+")
-_wordcount_cache = {}
+_charcount_cache = {}
 
-def _count_words_cached(text: str) -> int:
+def _count_chars_cached(text: str) -> int:
     """
-    Cached wrapper around _count_words_normalized.
+    Cached wrapper around _count_chars_normalized.
     Caches by hash of first 50KB of text to avoid repeated recomputation.
     """
     if not isinstance(text, str):
         return 0
     sample = text[:50000]
     key = hashlib.sha256(sample.encode('utf-8', errors='ignore')).hexdigest()
-    cached = _wordcount_cache.get(key)
+    cached = _charcount_cache.get(key)
     if cached is not None:
         return cached
-    wc = _count_words_normalized(text)
-    _wordcount_cache[key] = wc
-    return wc
+    cc = _count_chars_normalized(text)
+    _charcount_cache[key] = cc
+    return cc
+
+# Backwards compatibility aliases
+_count_words_normalized = _count_chars_normalized
+_count_words_cached = _count_chars_cached
     
 def extract_text_from_html(file_path):
     """Extract text from HTML or TXT file
@@ -4305,10 +4305,8 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         script_hint = detect_dominant_script(text)
                         has_cjk = script_hint in ['cjk', 'japanese', 'korean']
                         
-                        if has_cjk:
-                            word_count = count_cjk_words(text)
-                        else:
-                            word_count = _count_words_cached(text)
+                        # Use character counting for all languages (no spaces, no HTML)
+                        word_count = _count_chars_cached(text)
                         
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
@@ -4352,16 +4350,14 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             continue
                         
                         # Check if text contains CJK characters
-                        has_cjk = any('\\u4e00' <= char <= '\\u9fff' or  # Chinese
+                        has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
                                       '\u3040' <= char <= '\u309f' or  # Hiragana
                                       '\u30a0' <= char <= '\u30ff' or  # Katakana
                                       '\uac00' <= char <= '\ud7af'     # Korean
                                       for char in text)
                         
-                        if has_cjk:
-                            word_count = count_cjk_words(text)
-                        else:
-                            word_count = _count_words_normalized(text)
+                        # Use character counting for all languages (no spaces, no HTML)
+                        word_count = _count_chars_cached(text)
                         
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))

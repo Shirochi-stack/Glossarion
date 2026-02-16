@@ -343,6 +343,8 @@ class QAScannerMixin:
             'cache_structural_signature': 2000,
             'cache_translation_artifacts': 1000,
             'word_count_multipliers': {
+                # Character-based multipliers (source chars → target chars, no spaces)
+                # CJK languages expand significantly when translated to alphabetic languages
                 'english': 1.0,
                 'spanish': 1.10,
                 'french': 1.10,
@@ -353,14 +355,14 @@ class QAScannerMixin:
                 'arabic': 1.15,
                 'hindi': 1.10,
                 'turkish': 1.05,
-                'chinese': 1.60,
-                'chinese (simplified)': 1.60,
-                'chinese (traditional)': 1.60,
-                'japanese': 1.40,
-                'korean': 1.35,
+                'chinese': 2.50,
+                'chinese (simplified)': 2.50,
+                'chinese (traditional)': 2.50,
+                'japanese': 2.20,
+                'korean': 2.30,
                 'hebrew': 1.05,
                 'thai': 1.10
-            }             
+            }
           
         })
         # Ensure multipliers include all defaults
@@ -368,10 +370,11 @@ class QAScannerMixin:
         if not wordcount_defaults or not isinstance(wordcount_defaults, dict):
             wordcount_defaults = {}
         for _k, _v in {
+            # Character-based multipliers (source chars → target chars, no spaces)
             'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
             'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
-            'chinese': 1.60, 'chinese (simplified)': 1.60, 'chinese (traditional)': 1.60,
-            'japanese': 1.40, 'korean': 1.35, 'hebrew': 1.05, 'thai': 1.10,
+            'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
+            'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
             'other': 1.0
         }.items():
             wordcount_defaults.setdefault(_k, _v)
