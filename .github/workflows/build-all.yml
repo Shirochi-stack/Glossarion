@@ -25,25 +25,36 @@ jobs:
           msystem: MINGW64
           update: true
           install: >-
+            mingw-w64-x86_64-gtk3
             mingw-w64-x86_64-pango
             mingw-w64-x86_64-cairo
             mingw-w64-x86_64-gdk-pixbuf2
             mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
       
-      - name: Add MSYS2 to PATH
-        run: echo "D:\a\_temp\msys64\mingw64\bin" >> $env:GITHUB_PATH
+      - name: Add MSYS2 to PATH and set GTK path
+        run: |
+          echo "D:\a\_temp\msys64\mingw64\bin" >> $env:GITHUB_PATH
+          echo "GTK_FOLDER=D:\a\_temp\msys64\mingw64" >> $env:GITHUB_ENV
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
+        env:
+          PATH: D:\a\_temp\msys64\mingw64\bin;${{ env.PATH }}
       
       - name: Build with PyInstaller
         run: pyinstaller translator_lite.spec
         working-directory: src
         env:
           PATH: D:\a\_temp\msys64\mingw64\bin;${{ env.PATH }}
+          GTK_FOLDER: D:\a\_temp\msys64\mingw64
       
       - name: Upload Windows Lite artifact
         uses: actions/upload-artifact@v4
@@ -73,25 +84,36 @@ jobs:
           msystem: MINGW64
           update: true
           install: >-
+            mingw-w64-x86_64-gtk3
             mingw-w64-x86_64-pango
             mingw-w64-x86_64-cairo
             mingw-w64-x86_64-gdk-pixbuf2
             mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
       
-      - name: Add MSYS2 to PATH
-        run: echo "D:\a\_temp\msys64\mingw64\bin" >> $env:GITHUB_PATH
+      - name: Add MSYS2 to PATH and set GTK path
+        run: |
+          echo "D:\a\_temp\msys64\mingw64\bin" >> $env:GITHUB_PATH
+          echo "GTK_FOLDER=D:\a\_temp\msys64\mingw64" >> $env:GITHUB_ENV
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
+        env:
+          PATH: D:\a\_temp\msys64\mingw64\bin;${{ env.PATH }}
       
       - name: Build with PyInstaller
         run: pyinstaller translator_NoCuda.spec
         working-directory: src
         env:
           PATH: D:\a\_temp\msys64\mingw64\bin;${{ env.PATH }}
+          GTK_FOLDER: D:\a\_temp\msys64\mingw64
       
       - name: Upload Windows NoCuda artifact
         uses: actions/upload-artifact@v4
