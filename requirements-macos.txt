@@ -107,8 +107,3 @@ cryptography
 
 # Version management
 packaging
-
-# other
-pkg-config
-cairo
-cmake
