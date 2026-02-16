@@ -309,7 +309,7 @@ if platform.system() == 'Windows':
                     if not any(b[0] == full_path for b in binaries):
                         binaries.append((full_path, 'torch/lib'))
                         dll_count += 1
-                        print(f"    ✓ {filename}")
+                        print(f"    + {filename}")
             print(f"  Total torch DLLs added: {dll_count}\n")
     except Exception as e:
         print(f"  Warning: Could not collect torch DLLs: {e}")
@@ -1208,7 +1208,7 @@ removed_size = 0
 for binary in a.binaries:
     binary_path = binary[0]
     if is_gpu_related(binary_path):
-        print(f"  ✗ Removing GPU/CUDA: {os.path.basename(binary_path)}")
+        print(f"  - Removing GPU/CUDA: {os.path.basename(binary_path)}")
         # Try to estimate size if possible
         try:
             if os.path.exists(binary[1]):
@@ -1236,7 +1236,7 @@ for data in a.datas:
     # Only remove CUDA specific data files
     if any(x in data_path.lower() for x in ['cuda', 'cudnn', 'nvidia-cuda', 'nvidia-ml']):
         if 'cpu' not in data_path.lower():  # Keep CPU variants
-            print(f"  ✗ Removing: {data_path}")
+            print(f"  - Removing: {data_path}")
             continue
     cleaned_datas.append(data)
 
@@ -1247,11 +1247,11 @@ print(f"\nData files: {original_count} -> {len(a.datas)} (removed {original_coun
 print("\n" + "="*60)
 print("KEEPING CPU ML MODULES (torch, transformers, etc.)...")
 print("="*60)
-print("  ✓ torch CPU modules preserved")
-print("  ✓ Transformers preserved")
-print("  ✓ Ultralytics preserved")
-print("  ✓ ONNX Runtime CPU preserved")
-print("  ✓ All other ML libraries preserved")
+print("  + torch CPU modules preserved")
+print("  + Transformers preserved")
+print("  + Ultralytics preserved")
+print("  + ONNX Runtime CPU preserved")
+print("  + All other ML libraries preserved")
 
 # ============================================================================
 # PYZ (Python Zip archive)
@@ -1343,26 +1343,26 @@ else:
 GPU/CUDA-FREE BUILD - CPU ML FUNCTIONALITY PRESERVED
 
 This spec file removes ONLY GPU/CUDA components while keeping:
-✓ PyTorch CPU (torch_cpu.dll)
-✓ Transformers library
-✓ ONNX Runtime CPU
-✓ Ultralytics YOLO
-✓ All text processing
-✓ All API clients
++ PyTorch CPU (torch_cpu.dll)
++ Transformers library
++ ONNX Runtime CPU
++ Ultralytics YOLO
++ All text processing
++ All API clients
 
 REMOVED (GPU/CUDA only):
-✗ torch_cuda.dll (884MB)
-✗ cudnn_* libraries (870MB+)
-✗ cublasLt64_12.dll (513MB)
-✗ cusparse64_12.dll (250MB)
-✗ CUDA runtime libraries
-✗ onnxruntime_providers_cuda.dll (306MB)
+- torch_cuda.dll (884MB)
+- cudnn_* libraries (870MB+)
+- cublasLt64_12.dll (513MB)
+- cusparse64_12.dll (250MB)
+- CUDA runtime libraries
+- onnxruntime_providers_cuda.dll (306MB)
 
 KEPT (CPU ML):
-✓ torch_cpu.dll (237MB) - REQUIRED for PyTorch CPU
-✓ transformers library
-✓ ONNX Runtime CPU
-✓ All model inference capabilities
++ torch_cpu.dll (237MB) - REQUIRED for PyTorch CPU
++ transformers library
++ ONNX Runtime CPU
++ All model inference capabilities
 
 Expected size: ~3.9GB -> ~600-800MB
 All ML features work on CPU!
