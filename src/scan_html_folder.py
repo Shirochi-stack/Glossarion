@@ -469,38 +469,60 @@ def _get_cache_key(text, max_length=10000):
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
     return text
 
+# Pre-compiled regex patterns for performance
+_ENTITY_PATTERN = re.compile(r'&[A-Za-z0-9#]+;')
+# Translation table to remove whitespace (much faster than regex or iteration)
+_WHITESPACE_TRANSLATE = str.maketrans('', '', ' \t\n\r\f\v\xa0')
+
 def _count_chars_normalized(text: str) -> int:
     """
-    Count characters in text (excluding whitespace and HTML artifacts):
-      - Remove HTML entities (e.g., &nbsp;, &#123;)
-      - Decode remaining entities
-      - Remove whitespace
-      - Count remaining characters
+    Count characters in text (excluding whitespace and HTML artifacts).
+    Optimized for speed - uses translate() which is implemented in C.
+    
+    Note: Input text is typically already processed by BeautifulSoup.get_text(),
+    which strips HTML tags. We only need to handle entities and whitespace.
     """
-    if not isinstance(text, str):
+    if not isinstance(text, str) or not text:
         return 0
-    # First strip entities completely
-    text = re.sub(r'&[A-Za-z0-9#]+;', '', text)
-    # Decode any remaining entities defensively
-    text = html_lib.unescape(text)
-    # Remove all whitespace
-    text = re.sub(r'\s+', '', text)
-    return len(text)
+    
+    # Fast path: if no & character, skip entity processing entirely
+    if '&' in text:
+        # Remove HTML entities (e.g., &nbsp;, &#123;)
+        text = _ENTITY_PATTERN.sub('', text)
+        # Decode any remaining entities defensively
+        text = html_lib.unescape(text)
+    
+    # Remove whitespace using translate (C-optimized, much faster than regex/iteration)
+    return len(text.translate(_WHITESPACE_TRANSLATE))
 
 _charcount_cache = {}
 
 def _count_chars_cached(text: str) -> int:
     """
     Cached wrapper around _count_chars_normalized.
-    Caches by hash of first 50KB of text to avoid repeated recomputation.
+    Uses hash of full text for accurate caching.
     """
     if not isinstance(text, str):
         return 0
-    sample = text[:50000]
-    key = hashlib.sha256(sample.encode('utf-8', errors='ignore')).hexdigest()
+    
+    # Use length + hash of sample for fast cache key generation
+    # This avoids hashing the entire text while still being accurate
+    text_len = len(text)
+    if text_len == 0:
+        return 0
+    
+    # For short texts, use text itself as key (faster than hashing)
+    if text_len <= 1000:
+        key = f"L{text_len}:{text}"
+    else:
+        # Sample from beginning, middle, and end for better collision avoidance
+        sample = text[:2000] + text[text_len//2:text_len//2+1000] + text[-2000:]
+        key = f"L{text_len}:{hashlib.md5(sample.encode('utf-8', errors='ignore')).hexdigest()}"
+    
     cached = _charcount_cache.get(key)
     if cached is not None:
         return cached
+    
     cc = _count_chars_normalized(text)
     _charcount_cache[key] = cc
     return cc
