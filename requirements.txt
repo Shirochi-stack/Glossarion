@@ -11,7 +11,7 @@ ebooklib
 requests
 tqdm
 langdetect
-PySide6=6.9.3
+PySide6==6.9.3
 # discord
 
 # AI/API Clients
