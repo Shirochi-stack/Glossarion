@@ -2569,24 +2569,23 @@ class QAScannerMixin:
         counting_mode_label.setFont(QFont('Arial', 10))
         counting_mode_layout.addWidget(counting_mode_label)
         
-        # Get current mode from environment
-        current_use_word_count = os.getenv('QA_USE_WORD_COUNT', '0') == '1'
-        current_exact_char = os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1'
+        # Get current mode from saved settings (default: exact)
+        saved_counting_mode = qa_settings.get('counting_mode', 'exact')
         
         counting_mode_combo = QComboBox()
-        counting_mode_combo.addItem("Character count (sampled) - Default", "sampled")
-        counting_mode_combo.addItem("Character count (exact) - Slower", "exact")
-        counting_mode_combo.addItem("Word count (legacy) - Fastest", "word")
+        counting_mode_combo.addItem("Character count (sampled) - Fastest", "sampled")
+        counting_mode_combo.addItem("Character count (exact) - Default", "exact")
+        counting_mode_combo.addItem("Word count (legacy)", "word")
         counting_mode_combo.setMinimumWidth(250)
         counting_mode_combo.wheelEvent = lambda event: event.ignore()
         
-        # Set current selection based on env vars
-        if current_use_word_count:
+        # Set current selection based on saved settings
+        if saved_counting_mode == 'word':
             counting_mode_combo.setCurrentIndex(2)  # Word count
-        elif current_exact_char:
-            counting_mode_combo.setCurrentIndex(1)  # Exact char
+        elif saved_counting_mode == 'sampled':
+            counting_mode_combo.setCurrentIndex(0)  # Sampled
         else:
-            counting_mode_combo.setCurrentIndex(0)  # Sampled (default)
+            counting_mode_combo.setCurrentIndex(1)  # Exact (default)
         
         counting_mode_layout.addWidget(counting_mode_combo)
         counting_mode_layout.addStretch()
