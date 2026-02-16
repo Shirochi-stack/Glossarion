@@ -1,0 +1,114 @@
+# Python 3.12.9 - macOS requirements
+# Core packages
+pyinstaller
+pyinstaller-hooks-contrib
+ttkbootstrap
+pillow<12.0
+beautifulsoup4
+lxml
+html5lib
+ebooklib
+requests
+tqdm
+langdetect
+PySide6==6.9.3
+
+# AI/API Clients
+openai==2.17.0
+anthropic
+mistralai
+cohere
+tiktoken
+poe-api-wrapper
+google-genai
+google-cloud-aiplatform==1.136.0
+deepl
+vertexai
+
+# Data processing
+datasketch
+numpy<2.3
+scipy
+
+# HTTP/Networking
+httpx
+httpcore
+anyio
+sniffio
+websocket-client
+websockets
+aiohttp
+aiofiles<25.0
+multidict
+yarl
+async-timeout
+attrs
+
+# Text processing
+regex
+python-dotenv
+certifi
+chardet
+charset-normalizer
+olefile
+html2text
+markdown2
+rapidfuzz
+pymupdf
+jellyfish
+
+# PDF Generation
+weasyprint
+xhtml2pdf
+
+# Image processing
+opencv-python-headless
+
+# Pin typing-extensions
+typing-extensions
+
+# Google Cloud Services
+google-cloud-vision
+google-cloud-translate
+google-cloud-storage>=3.0.0
+google-auth
+google-auth-httplib2
+google-api-core
+googleapis-common-protos
+grpcio
+grpcio-status
+proto-plus
+protobuf<6.0.0dev
+
+# Azure Vision APIs
+azure-ai-vision-imageanalysis==1.0.0
+azure-ai-documentintelligence==1.0.2
+isodate
+azure-core
+azure-identity
+
+# YOLO Bubble Detection
+onnxruntime
+ultralytics
+lap>=0.5.12 
+
+# Inpainting
+replicate
+
+# PyTorch (macOS - no +cpu suffix needed)
+torch
+torchvision
+safetensors
+transformers
+huggingface-hub<1.0.0
+
+# Encryption/Decryption
+cryptography
+
+# Version management
+packaging
+
+# other
+pkg-config
+cairo
+cmake
