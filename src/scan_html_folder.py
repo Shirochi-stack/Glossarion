@@ -4400,8 +4400,16 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         script_hint = detect_dominant_script(text)
                         has_cjk = script_hint in ['cjk', 'japanese', 'korean']
                         
-                        # Use character counting for all languages (no spaces, no HTML)
-                        word_count = _count_chars_cached(text)
+                        # Use appropriate counting based on mode
+                        # Word count mode needs special CJK handling
+                        if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+                            if has_cjk:
+                                word_count = count_cjk_words(text)
+                            else:
+                                word_count = _count_words(text)
+                        else:
+                            # Character counting (sampled or exact)
+                            word_count = _count_chars_cached(text)
                         
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
@@ -4451,8 +4459,15 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                                       '\uac00' <= char <= '\ud7af'     # Korean
                                       for char in text)
                         
-                        # Use character counting for all languages (no spaces, no HTML)
-                        word_count = _count_chars_cached(text)
+                        # Use word or character counting based on mode
+                        if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+                            if has_cjk:
+                                word_count = count_cjk_words(text)
+                            else:
+                                word_count = _count_words(text)
+                        else:
+                            # Character counting (sampled or exact)
+                            word_count = _count_chars_cached(text)
                         
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
