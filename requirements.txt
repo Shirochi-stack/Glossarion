@@ -54,6 +54,7 @@ chardet
 charset-normalizer
 olefile
 html2text
+markdown
 markdown2
 rapidfuzz
 pymupdf
