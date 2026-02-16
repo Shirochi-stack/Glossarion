@@ -155,14 +155,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libpango-1.0-0 \
+            libpango1.0-dev \
             libpangocairo-1.0-0 \
             libcairo2 \
+            libcairo2-dev \
             libgdk-pixbuf2.0-0 \
+            libgdk-pixbuf2.0-dev \
             libffi-dev \
             pkg-config \
             cmake \
             libgirepository1.0-dev \
-            gir1.2-pango-1.0
+            gir1.2-pango-1.0 \
+            python3-dev \
+            build-essential
       
       - name: Install dependencies
         run: |
