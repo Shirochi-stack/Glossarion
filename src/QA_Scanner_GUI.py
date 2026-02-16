@@ -2182,12 +2182,12 @@ class QAScannerMixin:
         def disable_wheel_event(widget):
             widget.wheelEvent = lambda event: event.ignore()
 
-        # Word count multiplier defaults (factory)
+        # Word count multiplier defaults (factory) - character-based ratios
         base_multiplier_defaults = {
-            'english': 1.0, 'spanish': 1.08, 'french': 1.10, 'german': 1.02, 'italian': 1.05,
-            'portuguese': 1.10, 'russian': 1.10, 'arabic': 0.95, 'hindi': 1.05, 'turkish': 0.65,
-            'chinese': 1.55, 'chinese (simplified)': 1.45, 'chinese (traditional)': 1.45,
-            'japanese': 1.35, 'korean': 1.30, 'hebrew': 1.02, 'thai': 1.08,
+            'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
+            'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
+            'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
+            'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
             'other': 1.0
         }
         # Merge current settings over factory defaults for initial display
