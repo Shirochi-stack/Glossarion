@@ -4752,6 +4752,26 @@ Recent translations to summarize:
                     chunk = entry.get("chunk")
                     total = entry.get("total_chunks")
                     ctx = entry.get("context")
+                    merged = entry.get("merged_chapters")
+
+                    # Handle merged chapters first
+                    if merged and len(merged) > 0:
+                        try:
+                            merged_nums = sorted([int(c) for c in merged if c is not None])
+                            if merged_nums:
+                                if len(merged_nums) == 1:
+                                    base_label = f"[Merged {merged_nums[0]}]"
+                                else:
+                                    base_label = f"[Merged {merged_nums[0]}-{merged_nums[-1]}]"
+                                try:
+                                    t = int(total) if total is not None and str(total).strip() != "" else None
+                                except Exception:
+                                    t = None
+                                if chunk and total and t and t > 1:
+                                    return f"{base_label} {chunk}/{total}"
+                                return base_label
+                        except Exception:
+                            pass
 
                     if chapter is not None:
                         try:
@@ -4857,11 +4877,37 @@ Recent translations to summarize:
                     return out
 
                 chapter_items = []
+                merged_items = []
                 other_items = []
 
                 for e in subset:
                     try:
                         chapter = e.get("chapter")
+                        merged = e.get("merged_chapters")
+                        
+                        # Handle merged chapters separately
+                        if merged and len(merged) > 0:
+                            try:
+                                merged_nums = sorted([int(c) for c in merged if c is not None])
+                                if merged_nums:
+                                    if len(merged_nums) == 1:
+                                        token = f"[Merged {merged_nums[0]}]"
+                                    else:
+                                        token = f"[Merged {merged_nums[0]}-{merged_nums[-1]}]"
+                                    try:
+                                        chunk = e.get("chunk")
+                                        total = e.get("total_chunks")
+                                        t = int(total) if total is not None and str(total).strip() != "" else None
+                                        if chunk and total and t and t > 1:
+                                            token = f"{token} ({chunk}/{total})"
+                                    except Exception:
+                                        pass
+                                    if token not in merged_items:
+                                        merged_items.append(token)
+                                    continue
+                            except Exception:
+                                pass
+                        
                         if chapter is not None:
                             # Build a compact per-chapter token (keep chunk ratio only when total > 1)
                             token = str(chapter)
@@ -4881,6 +4927,9 @@ Recent translations to summarize:
                     except Exception:
                         continue
 
+                # Show merged items first, then regular chapters
+                if merged_items:
+                    active_bits.append(", ".join(merged_items))
                 if chapter_items:
                     active_bits.append("Chapter(s) " + ", ".join(_compress_redundant_labels(chapter_items)))
 

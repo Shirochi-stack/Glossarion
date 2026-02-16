@@ -242,7 +242,8 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                           chunk: Optional[Any] = None,
                           total_chunks: Optional[Any] = None,
                           label: Optional[str] = None,
-                          queued: bool = False) -> None:
+                          queued: bool = False,
+                          merged_chapters: Optional[List[Any]] = None) -> None:
     """Track queued requests; only count in-flight after mark_in_flight."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
     global _api_watchdog_last_start_ts, _api_watchdog_last_context, _api_watchdog_last_model
@@ -251,8 +252,27 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
         chap = _api_watchdog_norm_chapter(chapter)
         ch = _api_watchdog_norm_int(chunk)
         total = _api_watchdog_norm_int(total_chunks)
+        
+        # Build merged chapter range label if merged_chapters provided
+        merged_label = None
+        if merged_chapters and len(merged_chapters) > 0:
+            try:
+                merged_nums = sorted([int(c) for c in merged_chapters if c is not None])
+                if merged_nums:
+                    if len(merged_nums) == 1:
+                        merged_label = f"Merged {merged_nums[0]}"
+                    else:
+                        merged_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+            except Exception:
+                pass
+        
         if not label:
-            if chap is not None:
+            if merged_label:
+                if ch and total:
+                    label = f"{merged_label} (chunk {ch}/{total})"
+                else:
+                    label = merged_label
+            elif chap is not None:
                 if ch and total:
                     label = f"Chapter {chap} (chunk {ch}/{total})"
                 else:
@@ -279,6 +299,7 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     "label": label,
                     "start_ts": now,
                     "status": "queued" if queued else "in_flight",
+                    "merged_chapters": merged_chapters,
                 }
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
@@ -3699,6 +3720,7 @@ class UnifiedClient:
             chapter = None
             chunk = None
             total_chunks = None
+            merged_chapters = None
             label = None
             try:
                 tls = self._get_thread_local_client()
@@ -3707,6 +3729,7 @@ class UnifiedClient:
                     chapter = ctx.get("chapter")
                     chunk = ctx.get("chunk")
                     total_chunks = ctx.get("total_chunks")
+                    merged_chapters = ctx.get("merged_chapters")
             except Exception:
                 pass
             try:
@@ -3715,6 +3738,20 @@ class UnifiedClient:
                     label = None
             except Exception:
                 label = None
+            if not label and merged_chapters and len(merged_chapters) > 0:
+                try:
+                    merged_nums = sorted([int(c) for c in merged_chapters if c is not None])
+                    if merged_nums:
+                        if len(merged_nums) == 1:
+                            base_label = f"Merged {merged_nums[0]}"
+                        else:
+                            base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+                        if chunk and total_chunks:
+                            label = f"{base_label} (chunk {chunk}/{total_chunks})"
+                        else:
+                            label = base_label
+                except Exception:
+                    pass
             if not label and chapter is not None:
                 try:
                     if chunk and total_chunks:
@@ -3727,7 +3764,8 @@ class UnifiedClient:
                 label = watchdog_context
             # Queue the request; it'll flip to in-flight right before HTTP send
             _api_watchdog_started(watchdog_context, model=getattr(self, 'model', None), request_id=request_id,
-                                  chapter=chapter, chunk=chunk, total_chunks=total_chunks, label=label, queued=True)
+                                  chapter=chapter, chunk=chunk, total_chunks=total_chunks, label=label, queued=True,
+                                  merged_chapters=merged_chapters)
             watchdog_started = True
             
             # Multi-key retry wrapper
@@ -9492,6 +9530,23 @@ class UnifiedClient:
                     chap = ctx.get("chapter")
                     chunk = ctx.get("chunk")
                     total = ctx.get("total_chunks")
+                    merged = ctx.get("merged_chapters")
+                    
+                    # Build merged label if available
+                    if merged and len(merged) > 0:
+                        try:
+                            merged_nums = sorted([int(c) for c in merged if c is not None])
+                            if merged_nums:
+                                if len(merged_nums) == 1:
+                                    base_label = f"Merged {merged_nums[0]}"
+                                else:
+                                    base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+                                if chunk and total:
+                                    return f"{base_label} (chunk {chunk}/{total})"
+                                return base_label
+                        except Exception:
+                            pass
+                    
                     if chap is not None and chunk and total:
                         return f"Chapter {chap} (chunk {chunk}/{total})"
                     if chap is not None:
@@ -9521,7 +9576,7 @@ class UnifiedClient:
             pass
         return "request"
 
-    def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None):
+    def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None, merged_chapters=None):
         """Store chapter/chunk context on thread-local state for logging."""
         try:
             tls = self._get_thread_local_client()
@@ -9529,9 +9584,24 @@ class UnifiedClient:
                 "chapter": chapter,
                 "chunk": chunk,
                 "total_chunks": total_chunks,
+                "merged_chapters": merged_chapters,
             }
             # Also set a friendly label for paths that only read current_request_label
-            if chapter is not None:
+            if merged_chapters and len(merged_chapters) > 0:
+                try:
+                    merged_nums = sorted([int(c) for c in merged_chapters if c is not None])
+                    if merged_nums:
+                        if len(merged_nums) == 1:
+                            base_label = f"Merged {merged_nums[0]}"
+                        else:
+                            base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+                        if chunk and total_chunks:
+                            tls.current_request_label = f"{base_label} (chunk {chunk}/{total_chunks})"
+                        else:
+                            tls.current_request_label = base_label
+                except Exception:
+                    pass
+            elif chapter is not None:
                 if chunk and total_chunks:
                     tls.current_request_label = f"Chapter {chapter} (chunk {chunk}/{total_chunks})"
                 else:

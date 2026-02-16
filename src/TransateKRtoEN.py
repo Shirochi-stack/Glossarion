@@ -3576,8 +3576,12 @@ class TranslationProcessor:
                 print(f"⚠️ Failed to generate rolling summary: {e}")
             return None
     
-    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None):
-        """Handle translation with retry logic"""
+    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None, merged_chapters=None):
+        """Handle translation with retry logic
+        
+        Args:
+            merged_chapters: Optional list of chapter numbers that were merged into this request
+        """
         
         # CRITICAL FIX: Reset client state for each chunk
         if hasattr(self.client, 'reset_cleanup_state'):
@@ -3771,6 +3775,7 @@ class TranslationProcessor:
                     'chapter': actual_num,
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
+                    'merged_chapters': merged_chapters,
                 }
                 
                 result, finish_reason, raw_obj = send_with_interrupt(
@@ -5581,13 +5586,23 @@ class BatchTranslationProcessor:
                 # Call API for merged content
                 print(f"   🌐 Sending merged request to API...")
                 
+                # Build chapter context with merged chapter numbers for progress bar display
+                merged_chapter_nums_for_context = [cn for cn, _, _, _, _ in chapters_data]
+                chapter_ctx = {
+                    'chapter': parent_actual_num,
+                    'chunk': 1,
+                    'total_chunks': 1,
+                    'merged_chapters': merged_chapter_nums_for_context,
+                }
+                
                 merged_response, finish_reason, raw_obj = send_with_interrupt(
                     msgs,
                     self.client,
                     self.config.TEMP,
                     mtoks,
                     self.check_stop_fn,
-                    context='translation'
+                    context='translation',
+                    chapter_context=chapter_ctx,
                 )
                 # Preserve the finish reason from the merged API call for later status decisions.
                 merged_finish_reason = finish_reason
@@ -5706,7 +5721,8 @@ class BatchTranslationProcessor:
                                     self.config.TEMP,
                                     retry_max_tokens,
                                     self.check_stop_fn,
-                                    context='translation'
+                                    context='translation',
+                                    chapter_context=chapter_ctx,
                                 )
                             finally:
                                 if tls_retry_client is not None:
@@ -6924,7 +6940,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
 
-    chapter_context (dict) may contain "chapter", "chunk", and "total_chunks".
+    chapter_context (dict) may contain "chapter", "chunk", "total_chunks", and "merged_chapters".
     When provided and the client supports set_chapter_context, it will be applied
     inside the API thread so that thread-local payload metadata is accurate.
     """
@@ -6954,6 +6970,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         chapter=chapter_context.get('chapter'),
                         chunk=chapter_context.get('chunk'),
                         total_chunks=chapter_context.get('total_chunks'),
+                        merged_chapters=chapter_context.get('merged_chapters'),
                     )
                 except Exception:
                     # Context is best-effort and should never break the call
@@ -11345,11 +11362,12 @@ def main(log_callback=None, stop_callback=None):
                 c['__progress'] = progress_manager.prog
                 c['history_manager'] = history_manager
                 
-                # Prepare merge_group_len if this is a merged request
+                # Prepare merge_group_len and merged_chapters if this is a merged request
                 merge_group_len = len(merge_info['group']) if merge_info else None
+                merged_chapters = merge_info['expected_chapters'] if merge_info else None
 
                 result, finish_reason, raw_obj = translation_processor.translate_with_retry(
-                    msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=merge_group_len
+                    msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=merge_group_len, merged_chapters=merged_chapters
                 )
 
                 # If this chunk was blocked/prohibited, stop remaining chunks and mark QA fail

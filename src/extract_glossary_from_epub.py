@@ -135,8 +135,12 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None):
-    """Send API request with interrupt capability and optional timeout retry"""
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None, merged_chapters=None):
+    """Send API request with interrupt capability and optional timeout retry
+    
+    Args:
+        merged_chapters: Optional list of chapter numbers that were merged into this request
+    """
     # Mark that an API call is now active (for graceful stop logic)
     os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
     
@@ -146,7 +150,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     # Format chapter context for logs
     chapter_label = "API call"
-    if chapter_idx is not None:
+    if merged_chapters and len(merged_chapters) > 1:
+        # Build merged label like "Merged 1-3"
+        try:
+            merged_nums = sorted([int(c) for c in merged_chapters if c is not None])
+            if len(merged_nums) == 1:
+                chapter_label = f"Merged {merged_nums[0]}"
+            else:
+                chapter_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+            if chunk_idx and total_chunks:
+                chapter_label = f"{chapter_label} (chunk {chunk_idx}/{total_chunks})"
+        except Exception:
+            pass
+    elif chapter_idx is not None:
         try:
             chap_num = int(chapter_idx) + 1
         except Exception:
@@ -192,6 +208,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             chapter=chap_val if chapter_idx is not None else None,
                             chunk=chunk_idx,
                             total_chunks=total_chunks,
+                            merged_chapters=merged_chapters,
                         )
                 except Exception:
                     pass
@@ -2825,7 +2842,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }, f, indent=2, ensure_ascii=False)
         
-        # Make API call (use parent chapter idx for logging)
+        # Make API call (use parent chapter idx for logging, pass merged chapter nums for progress bar)
         raw, finish_reason, raw_obj = send_with_interrupt(
             messages=msgs,
             client=client,
@@ -2833,7 +2850,8 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             max_tokens=mtoks,
             stop_check_fn=stop_check_fn,
             chunk_timeout=chunk_timeout,
-            chapter_idx=parent_idx
+            chapter_idx=parent_idx,
+            merged_chapters=chapter_nums,
         )
         
         # Extract response text
