@@ -30,6 +30,9 @@ jobs:
             mingw-w64-x86_64-gdk-pixbuf2
             mingw-w64-x86_64-libffi
       
+      - name: Add MSYS2 to PATH
+        run: echo "D:\a\_temp\msys64\mingw64\bin" >> $env:GITHUB_PATH
+      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -39,6 +42,8 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller translator_lite.spec
         working-directory: src
+        env:
+          PATH: D:\a\_temp\msys64\mingw64\bin;${{ env.PATH }}
       
       - name: Upload Windows Lite artifact
         uses: actions/upload-artifact@v4
@@ -73,6 +78,9 @@ jobs:
             mingw-w64-x86_64-gdk-pixbuf2
             mingw-w64-x86_64-libffi
       
+      - name: Add MSYS2 to PATH
+        run: echo "D:\a\_temp\msys64\mingw64\bin" >> $env:GITHUB_PATH
+      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -82,6 +90,8 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller translator_NoCuda.spec
         working-directory: src
+        env:
+          PATH: D:\a\_temp\msys64\mingw64\bin;${{ env.PATH }}
       
       - name: Upload Windows NoCuda artifact
         uses: actions/upload-artifact@v4
