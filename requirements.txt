@@ -11,7 +11,7 @@ ebooklib
 requests
 tqdm
 langdetect
-PySide6
+PySide6=6.9.3
 # discord
 
 # AI/API Clients
@@ -114,3 +114,8 @@ cryptography
 
 # Version management
 packaging
+
+# other
+pkg-config
+cairo
+cmake
