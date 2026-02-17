@@ -44,10 +44,21 @@ binaries.extend([])
 # Add MSYS2 DLLs for WeasyPrint (PDF generation with formatting and images)
 import glob
 msys2_bin = r'C:\msys64\mingw64\bin'
+print(f"  Checking for MSYS2 DLLs at: {msys2_bin}")
+print(f"  Path exists: {os.path.exists(msys2_bin)}")
 if os.path.exists(msys2_bin):
-    for dll in glob.glob(os.path.join(msys2_bin, '*.dll')):
-        binaries.append((dll, '.'))
-    print(f"  Added {len(glob.glob(os.path.join(msys2_bin, '*.dll')))} MSYS2 DLLs for WeasyPrint")
+    dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
+    print(f"  Found {len(dll_list)} DLL files")
+    if dll_list:
+        # Print first few DLLs for verification
+        print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
+        for dll in dll_list:
+            binaries.append((dll, '.'))
+        print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
+    else:
+        print(f"  WARNING: No DLLs found in {msys2_bin}")
+else:
+    print(f"  WARNING: MSYS2 directory not found at {msys2_bin}")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:

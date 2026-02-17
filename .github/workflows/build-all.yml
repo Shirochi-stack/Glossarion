@@ -42,8 +42,24 @@ jobs:
         run: |
           echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "GTK_FOLDER=C:\msys64\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # Verify DLLs exist
-          if (Test-Path "C:\msys64\mingw64\bin\libpango-1.0-0.dll") { echo "Pango DLL found" } else { echo "WARNING: Pango DLL not found" }
+      
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          if (Test-Path "C:\msys64\mingw64\bin") {
+            echo "MSYS2 bin directory exists"
+            $dlls = Get-ChildItem "C:\msys64\mingw64\bin\*.dll" | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "C:\msys64\mingw64\bin\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found!"
+            exit 1
+          }
       
       - name: Install dependencies
         shell: pwsh
@@ -106,8 +122,24 @@ jobs:
         run: |
           echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "GTK_FOLDER=C:\msys64\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # Verify DLLs exist
-          if (Test-Path "C:\msys64\mingw64\bin\libpango-1.0-0.dll") { echo "Pango DLL found" } else { echo "WARNING: Pango DLL not found" }
+      
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          if (Test-Path "C:\msys64\mingw64\bin") {
+            echo "MSYS2 bin directory exists"
+            $dlls = Get-ChildItem "C:\msys64\mingw64\bin\*.dll" | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "C:\msys64\mingw64\bin\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found!"
+            exit 1
+          }
       
       - name: Install dependencies
         shell: pwsh
