@@ -4185,7 +4185,13 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     log(f"🔧 Updated {updated_count} chapters in new format")
 
     # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
+    # Note: We do NOT clear qa_failed for chapters with SPLIT_FAILED issues
+    # because SPLIT_FAILED indicates the chapter merge markers were lost and
+    # the chapter needs retranslation, not just QA re-scanning
+    PROTECTED_ISSUES = {"SPLIT_FAILED"}  # Issues that should not be auto-cleared
+    
     resolved_count = 0
+    skipped_count = 0
     resolved_nums_for_log = []
     for resolved_row in resolved_chapters:
         filename = resolved_row["filename"]
@@ -4199,6 +4205,25 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
         was_qa_failed = old_status == "qa_failed" or chapter_info.get("qa_issues")
 
         if was_qa_failed:
+            # Check if this chapter has any protected issues that should NOT be auto-cleared
+            existing_issues = chapter_info.get("qa_issues_found", [])
+            protected_found = []
+            for issue in existing_issues:
+                issue_type = issue.get("type") if isinstance(issue, dict) else str(issue)
+                if issue_type in PROTECTED_ISSUES:
+                    protected_found.append(issue_type)
+            
+            if protected_found:
+                # Do NOT clear - this chapter has issues that require manual retranslation
+                chapter_num = _choose_log_num(
+                    chapter_info,
+                    resolved_row.get("chapter_num") or file_chapter_num,
+                    filename,
+                )
+                log(f"   ⚠️ Skipping chapter {chapter_num} - has protected QA issues: {', '.join(protected_found)} (requires retranslation)")
+                skipped_count += 1
+                continue
+            
             chapter_info["status"] = "completed"
             chapter_info["qa_issues"] = False
             chapter_info["qa_issues_found"] = []
@@ -4217,6 +4242,8 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
 
     if resolved_count:
         log(f"🔧 Cleared qa_failed status for {resolved_count} chapter(s)")
+    if skipped_count:
+        log(f"⚠️ Kept qa_failed status for {skipped_count} chapter(s) with protected issues (SPLIT_FAILED)")
 
     return updated_nums_for_log, resolved_nums_for_log
 
