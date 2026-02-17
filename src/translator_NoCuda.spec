@@ -8,8 +8,18 @@ import sys
 import os
 
 # Fix DLL search path for WeasyPrint during build
-if os.name == 'nt' and os.path.exists(r'C:\msys64\mingw64\bin'):
-    os.environ['PATH'] = r'C:\msys64\mingw64\bin' + os.pathsep + os.environ.get('PATH', '')
+# Check GTK_FOLDER env var first (set by CI), then fallback to common locations
+gtk_folder = os.environ.get('GTK_FOLDER', '')
+msys2_paths = [
+    os.path.join(gtk_folder, 'bin') if gtk_folder else '',
+    r'C:\msys64\mingw64\bin',
+    r'D:\a\_temp\msys64\mingw64\bin',
+]
+for msys_path in msys2_paths:
+    if msys_path and os.path.exists(msys_path):
+        os.environ['PATH'] = msys_path + os.pathsep + os.environ.get('PATH', '')
+        print(f"  Added {msys_path} to PATH for WeasyPrint")
+        break
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
@@ -54,12 +64,28 @@ binaries.extend([
 
 # Add MSYS2 DLLs for WeasyPrint (PDF generation with formatting and images)
 import glob
-msys2_bin = r'C:\msys64\mingw64\bin'
-print(f"  Checking for MSYS2 DLLs at: {msys2_bin}")
-print(f"  Path exists: {os.path.exists(msys2_bin)}")
-if os.path.exists(msys2_bin):
+
+# Find MSYS2 bin directory - check env var first, then common locations
+gtk_folder = os.environ.get('GTK_FOLDER', '')
+msys2_bin_candidates = [
+    os.path.join(gtk_folder, 'bin') if gtk_folder else '',
+    r'C:\msys64\mingw64\bin',
+    r'D:\a\_temp\msys64\mingw64\bin',
+]
+
+msys2_bin = None
+for candidate in msys2_bin_candidates:
+    if candidate and os.path.exists(candidate):
+        msys2_bin = candidate
+        break
+
+print(f"  GTK_FOLDER env var: {gtk_folder}")
+print(f"  Checking candidates: {msys2_bin_candidates}")
+print(f"  Selected MSYS2 bin: {msys2_bin}")
+
+if msys2_bin and os.path.exists(msys2_bin):
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
-    print(f"  Found {len(dll_list)} DLL files")
+    print(f"  Found {len(dll_list)} DLL files in {msys2_bin}")
     if dll_list:
         # Print first few DLLs for verification
         print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
@@ -69,7 +95,7 @@ if os.path.exists(msys2_bin):
     else:
         print(f"  WARNING: No DLLs found in {msys2_bin}")
 else:
-    print(f"  WARNING: MSYS2 directory not found at {msys2_bin}")
+    print(f"  WARNING: No MSYS2 directory found in any candidate location")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:

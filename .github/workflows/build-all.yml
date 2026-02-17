@@ -21,9 +21,9 @@ jobs:
       
       - name: Install MSYS2 for WeasyPrint
         uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: MINGW64
-          location: C:\msys64
           update: true
           install: >-
             mingw-w64-x86_64-gtk3
@@ -37,34 +37,53 @@ jobs:
             mingw-w64-x86_64-fontconfig
             mingw-w64-x86_64-freetype
       
-      - name: Add MSYS2 to PATH
+      - name: Find and set MSYS2 paths
         shell: pwsh
         run: |
-          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "GTK_FOLDER=C:\msys64\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       
       - name: Verify MSYS2 DLLs
         shell: pwsh
         run: |
           echo "=== Checking MSYS2 installation ==="
-          if (Test-Path "C:\msys64\mingw64\bin") {
-            echo "MSYS2 bin directory exists"
-            $dlls = Get-ChildItem "C:\msys64\mingw64\bin\*.dll" | Measure-Object
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
             echo "Found $($dlls.Count) DLLs in MSYS2 bin"
             # Check for key WeasyPrint dependencies
             $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
             foreach ($dll in $keyDlls) {
-              if (Test-Path "C:\msys64\mingw64\bin\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
             }
           } else {
-            echo "ERROR: MSYS2 bin directory not found!"
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
             exit 1
           }
       
       - name: Install dependencies
         shell: pwsh
         run: |
-          $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
@@ -72,8 +91,6 @@ jobs:
       - name: Build with PyInstaller
         shell: pwsh
         run: |
-          $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
-          $env:GTK_FOLDER = "C:\msys64\mingw64"
           cd src
           pyinstaller translator_lite.spec
       
@@ -101,9 +118,9 @@ jobs:
       
       - name: Install MSYS2 for WeasyPrint
         uses: msys2/setup-msys2@v2
+        id: msys2-nocuda
         with:
           msystem: MINGW64
-          location: C:\msys64
           update: true
           install: >-
             mingw-w64-x86_64-gtk3
@@ -117,34 +134,53 @@ jobs:
             mingw-w64-x86_64-fontconfig
             mingw-w64-x86_64-freetype
       
-      - name: Add MSYS2 to PATH
+      - name: Find and set MSYS2 paths
         shell: pwsh
         run: |
-          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "GTK_FOLDER=C:\msys64\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2-nocuda.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       
       - name: Verify MSYS2 DLLs
         shell: pwsh
         run: |
           echo "=== Checking MSYS2 installation ==="
-          if (Test-Path "C:\msys64\mingw64\bin") {
-            echo "MSYS2 bin directory exists"
-            $dlls = Get-ChildItem "C:\msys64\mingw64\bin\*.dll" | Measure-Object
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
             echo "Found $($dlls.Count) DLLs in MSYS2 bin"
             # Check for key WeasyPrint dependencies
             $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
             foreach ($dll in $keyDlls) {
-              if (Test-Path "C:\msys64\mingw64\bin\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
             }
           } else {
-            echo "ERROR: MSYS2 bin directory not found!"
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
             exit 1
           }
       
       - name: Install dependencies
         shell: pwsh
         run: |
-          $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
@@ -152,8 +188,6 @@ jobs:
       - name: Build with PyInstaller
         shell: pwsh
         run: |
-          $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
-          $env:GTK_FOLDER = "C:\msys64\mingw64"
           cd src
           pyinstaller translator_NoCuda.spec
       
