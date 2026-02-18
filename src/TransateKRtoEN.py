@@ -486,16 +486,21 @@ class TranslationConfig:
         self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
+        # Read merge count early so we can use it for placeholder handling
+        self.REQUEST_MERGE_COUNT = int(os.getenv("REQUEST_MERGE_COUNT", "3"))
+        
         # Handle split marker instruction placeholder
+        # Only include split marker instruction if merging is enabled AND merge count > 1
+        # (merge count of 1 means no actual merging, so no split markers needed)
         if self.SYSTEM_PROMPT:
             import re
-            if self.REQUEST_MERGING_ENABLED:
+            if self.REQUEST_MERGING_ENABLED and self.REQUEST_MERGE_COUNT > 1:
                 split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
                 # Replace placeholder with instruction (handling potential newlines if user added them, though usually we want to ensure it has its own line)
                 # We simply replace the placeholder. The prompt template likely has newlines around it.
                 self.SYSTEM_PROMPT = self.SYSTEM_PROMPT.replace("{split_marker_instruction}", split_instr)
             else:
-                # Strip placeholder if merging is disabled
+                # Strip placeholder if merging is disabled or merge count is 1
                 self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
             
         self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
@@ -507,8 +512,7 @@ class TranslationConfig:
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
         self.BATCHING_MODE = os.getenv("BATCHING_MODE", "aggressive")
         self.BATCH_GROUP_SIZE = int(os.getenv("BATCH_GROUP_SIZE", os.getenv("CONSERVATIVE_BATCH_GROUP_SIZE", "3")))
-        self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
-        self.REQUEST_MERGE_COUNT = int(os.getenv("REQUEST_MERGE_COUNT", "3"))
+        # Note: REQUEST_MERGING_ENABLED and REQUEST_MERGE_COUNT are set earlier (before split_marker_instruction handling)
         # Synthetic header injection for merged requests (Split-the-Merge helper)
         self.SYNTHETIC_MERGE_HEADERS = os.getenv("SYNTHETIC_MERGE_HEADERS", "1") == "1"
         self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
