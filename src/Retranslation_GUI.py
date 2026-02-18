@@ -541,6 +541,60 @@ class RetranslationMixin:
                     print("💾 Saved auto-discovered progress (no OPF available)")
                 except Exception as e:
                     print(f"⚠️ Failed to save auto-discovered progress: {e}")
+        else:
+            # OPF-AWARE AUTO-DISCOVERY: Use OPF filenames as original_basename
+            # This ensures correct mapping between OPF entries and response files
+            progress_updated = False
+            for spine_ch in spine_chapters:
+                opf_filename = spine_ch['filename']  # e.g., "0009_10_.xhtml"
+                base_name = os.path.splitext(opf_filename)[0]  # e.g., "0009_10_"
+                
+                # Look for corresponding response file on disk
+                response_file = f"response_{base_name}.html"
+                response_path = os.path.join(output_dir, response_file)
+                
+                if os.path.exists(response_path):
+                    # Check if we already have a progress entry with correct original_basename
+                    already_tracked = False
+                    for ch_info in prog.get("chapters", {}).values():
+                        if ch_info.get("original_basename") == opf_filename:
+                            already_tracked = True
+                            break
+                        # Also check by output_file
+                        if ch_info.get("output_file") == response_file:
+                            # Update original_basename if missing or wrong
+                            if ch_info.get("original_basename") != opf_filename:
+                                ch_info["original_basename"] = opf_filename
+                                progress_updated = True
+                            already_tracked = True
+                            break
+                    
+                    if not already_tracked:
+                        # Create new progress entry with correct original_basename
+                        chapter_num = spine_ch['file_chapter_num']
+                        key = str(chapter_num) if chapter_num else f"special_{base_name}"
+                        
+                        # Avoid duplicate keys
+                        if key not in prog.get("chapters", {}):
+                            prog.setdefault("chapters", {})[key] = {
+                                "actual_num": chapter_num,
+                                "content_hash": "",
+                                "output_file": response_file,
+                                "status": "completed",
+                                "last_updated": os.path.getmtime(response_path),
+                                "auto_discovered": True,
+                                "original_basename": opf_filename  # CORRECT: OPF filename
+                            }
+                            progress_updated = True
+                            print(f"✅ OPF-aware discovery: {opf_filename} -> {response_file}")
+            
+            if progress_updated:
+                try:
+                    with open(progress_file, 'w', encoding='utf-8') as f:
+                        json.dump(prog, f, ensure_ascii=False, indent=2)
+                    print("💾 Saved OPF-aware auto-discovered progress")
+                except Exception as e:
+                    print(f"⚠️ Failed to save progress: {e}")
         
         # =====================================================
         # MATCH OPF CHAPTERS WITH TRANSLATION PROGRESS

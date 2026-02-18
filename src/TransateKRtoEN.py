@@ -2051,6 +2051,13 @@ class ProgressManager:
             "last_updated": time.time()
         }
         
+        # CRITICAL: Store original_basename for OPF->output mapping in GUI
+        if chapter_obj:
+            if chapter_obj.get('original_basename'):
+                chapter_info["original_basename"] = chapter_obj['original_basename']
+            elif chapter_obj.get('original_filename'):
+                chapter_info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
+        
         # Add raw number tracking
         if raw_num is not None:
             chapter_info["raw_chapter_num"] = raw_num
