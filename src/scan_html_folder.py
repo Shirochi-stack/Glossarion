@@ -204,7 +204,8 @@ TRANSLATION_ARTIFACTS = {
     # Also catches h1 tags with split-N id attribute (even if marker text was translated)
     'split_indicators': re.compile(
         r'(split\s+\d+\s+of\s+\d+|chunk\s+\d+\s+of\s+\d+|section\s+\d+/\d+|'
-        r'<h1[^>]*id=["\']split-\d+["\'][^>]*>|'
+        r'<h1\s[^>]*id\s*=\s*["\']?split-\d+["\']?[^>]*>|'
+        r'id\s*=\s*["\']split-\d+["\']|'
         r'&lt;h1[^&]*id=["\']?split-\d+["\']?[^&]*&gt;)',
         re.IGNORECASE | re.DOTALL
     ),
