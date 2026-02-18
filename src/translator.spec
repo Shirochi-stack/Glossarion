@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v7.5.4 - PyInstaller Specification File
+Glossarion v7.5.5 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
