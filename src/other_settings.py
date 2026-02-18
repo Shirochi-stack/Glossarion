@@ -4997,7 +4997,7 @@ def _create_processing_options_section(self, parent):
     standard_rb.setContentsMargins(0, 2, 0, 0)
     extraction_v.addWidget(standard_rb)
     
-    standard_desc = QLabel("Traditional HTML parsing - fast and reliable")
+    standard_desc = QLabel("Traditional HTML parsing - Best for format preservation")
     standard_desc.setStyleSheet("color: gray; font-size: 9pt;")
     standard_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(standard_desc)
@@ -5022,7 +5022,7 @@ def _create_processing_options_section(self, parent):
     enhanced_rb.setContentsMargins(0, 2, 0, 0)
     extraction_v.addWidget(enhanced_rb)
     
-    enhanced_desc = QLabel("Superior Unicode handling, cleaner text extraction")
+    enhanced_desc = QLabel("Superior token effeciency, cleaner text extraction")
     enhanced_desc.setStyleSheet("color: darkgreen; font-size: 9pt;")
     enhanced_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(enhanced_desc)
