@@ -490,18 +490,12 @@ class TranslationConfig:
         self.REQUEST_MERGE_COUNT = int(os.getenv("REQUEST_MERGE_COUNT", "3"))
         
         # Handle split marker instruction placeholder
-        # Only include split marker instruction if merging is enabled AND merge count > 1
-        # (merge count of 1 means no actual merging, so no split markers needed)
+        # Always strip the placeholder from base prompt - we'll add the instruction dynamically
+        # based on whether we're actually merging multiple chapters in a given request
         if self.SYSTEM_PROMPT:
             import re
-            if self.REQUEST_MERGING_ENABLED and self.REQUEST_MERGE_COUNT > 1:
-                split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
-                # Replace placeholder with instruction (handling potential newlines if user added them, though usually we want to ensure it has its own line)
-                # We simply replace the placeholder. The prompt template likely has newlines around it.
-                self.SYSTEM_PROMPT = self.SYSTEM_PROMPT.replace("{split_marker_instruction}", split_instr)
-            else:
-                # Strip placeholder if merging is disabled or merge count is 1
-                self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
+            # Strip placeholder - the actual instruction will be added via get_system_prompt()
+            self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
             
         self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
@@ -685,6 +679,30 @@ class TranslationConfig:
             effective = min(effective, min(per_key_limits))
 
         return effective
+
+    def get_system_prompt(self, actual_merge_count: int = 1) -> str:
+        """Return the system prompt, optionally with split marker instruction.
+        
+        Args:
+            actual_merge_count: The actual number of chapters being merged in this request.
+                               If > 1, the split marker instruction will be added.
+                               If 1 (default), no split marker instruction is added.
+        
+        Returns:
+            The system prompt string, with or without split marker instruction.
+        """
+        if not self.SYSTEM_PROMPT:
+            return self.SYSTEM_PROMPT
+        
+        # Only add split marker instruction if actually merging multiple chapters
+        if actual_merge_count > 1 and self.REQUEST_MERGING_ENABLED:
+            split_instr = ("- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' "
+                          "(Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), "
+                          "you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.")
+            # Append to end of system prompt
+            return self.SYSTEM_PROMPT + "\n\n" + split_instr
+        
+        return self.SYSTEM_PROMPT
 
 
 # =====================================================
@@ -4298,11 +4316,13 @@ class BatchTranslationProcessor:
                     original_length = len(original_glossary)
                     
                     # Build system prompt with compression
-                    chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
+                    # Use get_system_prompt(1) since this is a single chapter (no merging)
+                    base_prompt = self.config.get_system_prompt(actual_merge_count=1)
+                    chapter_system_prompt = build_system_prompt(base_prompt, glossary_path, source_text=chapter_body)
                     
                     # Extract compressed glossary from system prompt to measure compression
                     # The glossary is appended after the prompt, so we can estimate the size
-                    prompt_without_glossary = self.config.SYSTEM_PROMPT
+                    prompt_without_glossary = base_prompt
                     glossary_in_prompt = len(chapter_system_prompt) - len(prompt_without_glossary) if len(chapter_system_prompt) > len(prompt_without_glossary) else 0
                     
                     if glossary_in_prompt > 0 and original_length > glossary_in_prompt:
@@ -4326,9 +4346,9 @@ class BatchTranslationProcessor:
                     
                 except Exception as e:
                     print(f"⚠️ Failed to measure glossary compression: {e}")
-                    chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
+                    chapter_system_prompt = build_system_prompt(self.config.get_system_prompt(actual_merge_count=1), glossary_path, source_text=chapter_body)
             else:
-                chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
+                chapter_system_prompt = build_system_prompt(self.config.get_system_prompt(actual_merge_count=1), glossary_path, source_text=chapter_body)
             
             # Check if chapter needs chunking
             from chapter_splitter import ChapterSplitter
@@ -5553,9 +5573,11 @@ class BatchTranslationProcessor:
             print(f"   📊 Merged {len(merge_group)} chapters ({len(merged_content):,} chars total)")
             
             # Build system prompt with glossary
+            # Use get_system_prompt() with actual merge count to conditionally include split marker instruction
             glossary_path = find_glossary_file(self.out_dir)
+            base_system_prompt = self.config.get_system_prompt(actual_merge_count=len(merge_group))
             chapter_system_prompt = build_system_prompt(
-                self.config.SYSTEM_PROMPT, 
+                base_system_prompt, 
                 glossary_path, 
                 source_text=merged_content
             )
@@ -9443,7 +9465,8 @@ def main(log_callback=None, stop_callback=None):
     glossary_path = find_glossary_file(out)
     # Build system prompt without glossary compression initially
     # Compression will happen per-chapter when enabled
-    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=None)
+    # Use get_system_prompt(1) for initial setup (no merging)
+    system = build_system_prompt(config.get_system_prompt(actual_merge_count=1), glossary_path, source_text=None)
     base_msg = [{"role": "system", "content": system}]
     # Preserve the original system prompt to avoid in-place mutations
     original_system_prompt = system
@@ -11424,11 +11447,15 @@ def main(log_callback=None, stop_callback=None):
 
                 # Build the current system prompt from the original each time.
                 # Apply per-chunk glossary compression if enabled
+                # Use get_system_prompt() with actual merge count to conditionally include split marker instruction
+                actual_merge_count = len(merge_info['group']) if merge_info else 1
+                base_prompt = config.get_system_prompt(actual_merge_count=actual_merge_count)
                 if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
                     # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
-                    current_system_content = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=chunk_html)
+                    current_system_content = build_system_prompt(base_prompt, glossary_path, source_text=chunk_html)
                 else:
-                    current_system_content = original_system_prompt
+                    # Use base prompt with glossary from original_system_prompt but without stale split marker
+                    current_system_content = build_system_prompt(base_prompt, glossary_path, source_text=None)
                 
                 current_base = [{"role": "system", "content": current_system_content}]
 
