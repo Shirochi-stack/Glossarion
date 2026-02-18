@@ -201,12 +201,12 @@ TRANSLATION_ARTIFACTS = {
     # Catches: "split 1 of 2", "chunk 3 of 5", "section 1/3" (with slash)
     # Also catches leaked request merge markers that should have been stripped
     # Includes both raw HTML and escaped HTML entity versions of split markers
-    # Also catches h1 tags with split-N id attribute (even if marker text was translated)
+    # Also catches any element with id="split-N" attribute (even if marker text was translated)
     'split_indicators': re.compile(
         r'(split\s+\d+\s+of\s+\d+|chunk\s+\d+\s+of\s+\d+|section\s+\d+/\d+|'
-        r'<h1\s[^>]*id\s*=\s*["\']?split-\d+["\']?[^>]*>|'
         r'id\s*=\s*["\']split-\d+["\']|'
-        r'&lt;h1[^&]*id=["\']?split-\d+["\']?[^&]*&gt;)',
+        r'id\s*=\s*split-\d+|'
+        r'&lt;h1[^&]*split-\d+[^&]*&gt;)',
         re.IGNORECASE | re.DOTALL
     ),
     'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE),
@@ -5173,6 +5173,31 @@ def process_html_file_batch(args):
                         'examples': formatted_examples,
                         'severity': 'medium'
                     })
+                
+                # Check for split markers in RAW HTML content (these are HTML tags stripped from raw_text)
+                # This catches id="split-N" attributes that indicate leftover merge split markers
+                split_marker_pattern = re.compile(
+                    r'(id\s*=\s*["\']split-\d+["\']|'
+                    r'id\s*=\s*split-\d+|'
+                    r'&lt;h1[^&]*split-\d+[^&]*&gt;|'
+                    r'SPLIT\s*MARKER[^<]*)',
+                    re.IGNORECASE
+                )
+                split_matches = split_marker_pattern.findall(raw_file_content)
+                if split_matches:
+                    # Check if we already have split_indicators from detect_translation_artifacts
+                    existing_split = next((a for a in artifacts if a['type'] == 'split_indicators'), None)
+                    if existing_split:
+                        # Update count and add new examples
+                        existing_split['count'] += len(split_matches)
+                        existing_split['examples'] = list(set(existing_split.get('examples', []) + split_matches))[:5]
+                    else:
+                        artifacts.append({
+                            'type': 'split_indicators',
+                            'count': len(split_matches),
+                            'examples': list(set(split_matches))[:5],
+                            'severity': 'high'
+                        })
             
         # Filter out encoding_issues if disabled
         if not qa_settings.get('check_encoding_issues', True):
