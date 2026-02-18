@@ -674,9 +674,7 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     # Initialize defaults if not provided
     if parser is None:
         parser = _get_best_parser()
-    if pattern_manager is None:
-        from TransateKRtoEN import PatternManager
-        pattern_manager = None  # No longer needed
+    # pattern_manager is no longer used - kept for API compatibility
     
     # Check stop at the beginning
     if is_stop_requested():
