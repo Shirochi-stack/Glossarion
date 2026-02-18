@@ -14,6 +14,7 @@ class RotatableLabel(QLabel):
         self._original_pixmap = None
         self._scaled_pixmap = None
         self._last_size = QSize()
+        self._painting = False  # Prevent concurrent painting
     
     def set_rotation(self, angle):
         self._rotation = angle
@@ -64,24 +65,32 @@ class RotatableLabel(QLabel):
         self._last_size = self.size()
 
     def paintEvent(self, event):
+        # Prevent re-entrant painting
+        if self._painting:
+            return
+            
         if not self._scaled_pixmap:
             super().paintEvent(event)
             return
 
-        painter = QPainter(self)
-        painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-        
-        w, h = self.width(), self.height()
-        
-        # Translate to center
-        painter.translate(w / 2, h / 2)
-        
-        # Rotate
-        painter.rotate(self._rotation)
-        
-        # Draw the pre-scaled pixmap centered
-        pix = self._scaled_pixmap
-        painter.translate(-pix.width() / 2, -pix.height() / 2)
-        painter.drawPixmap(0, 0, pix)
-        
-        painter.end()
+        self._painting = True
+        try:
+            painter = QPainter(self)
+            painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+            
+            w, h = self.width(), self.height()
+            
+            # Translate to center
+            painter.translate(w / 2, h / 2)
+            
+            # Rotate
+            painter.rotate(self._rotation)
+            
+            # Draw the pre-scaled pixmap centered
+            pix = self._scaled_pixmap
+            painter.translate(-pix.width() / 2, -pix.height() / 2)
+            painter.drawPixmap(0, 0, pix)
+            
+            # Let QPainter be destroyed automatically - no explicit end() needed
+        finally:
+            self._painting = False

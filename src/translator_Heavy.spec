@@ -262,6 +262,9 @@ app_files = [
     # Spinning icon helper
     ('spinning.py', '.'),
     
+    # Rotatable label widget for animations
+    ('rotatable_label.py', '.'),
+    
     # Update Manager
     ('update_manager.py', '.'),
 	
@@ -348,6 +351,7 @@ app_modules = [
     'manga_image_preview', # Manga image preview widget
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
+    'rotatable_label',     # Rotatable label widget
     'update_manager',
     'api_key_encryption',
 	'http_logger',

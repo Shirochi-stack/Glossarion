@@ -100,6 +100,9 @@ app_files = [
     # Spinning icon helper
     ('spinning.py', '.'),
     
+    # Rotatable label widget for animations
+    ('rotatable_label.py', '.'),
+    
     # Update Manager
     ('update_manager.py', '.'),
 	
@@ -166,6 +169,7 @@ app_modules = [
     'ai_hunter_enhanced',
     'dialog_animations',
     'spinning',
+    'rotatable_label',
     'update_manager',
     'api_key_encryption',
     'http_logger',
