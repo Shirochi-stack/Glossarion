@@ -1763,19 +1763,13 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
         self.fallback_tree.setMinimumHeight(150)
         
-        # Enable drag and drop for fallback tree (manual move handling)
-        self.fallback_tree.setDragEnabled(True)
-        self.fallback_tree.setAcceptDrops(True)
-        # Use generic DragDrop so Qt does not auto-move items; we handle reordering ourselves
-        self.fallback_tree.setDragDropMode(QAbstractItemView.DragDrop)
-        self.fallback_tree.setDefaultDropAction(Qt.MoveAction)
-        self.fallback_tree.setDragDropOverwriteMode(False)
-        self.fallback_tree.dragEnterEvent = lambda e: e.acceptProposedAction()
-        self.fallback_tree.dragMoveEvent = lambda e: e.acceptProposedAction()
+        # Enable drag and drop for fallback tree using InternalMove (like profile manager)
+        # This is the simplest approach - let Qt handle everything
+        self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.fallback_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
-        # Store original dropEvent and override
-        self._fallback_tree_original_dropEvent = self.fallback_tree.dropEvent
-        self.fallback_tree.dropEvent = self._on_fallback_tree_drop
+        # Connect to model's rowsMoved signal to sync data after Qt moves items
+        self.fallback_tree.model().rowsMoved.connect(self._on_fallback_rows_moved)
         
         container_layout.addWidget(self.fallback_tree)
         
@@ -2057,6 +2051,8 @@ class MultiAPIKeyDialog(QDialog):
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
             
+            # Disable drop on this item to prevent nesting (keep it a flat list)
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self.fallback_tree.addTopLevelItem(item)
             
         # Restore selection
@@ -2809,20 +2805,12 @@ class MultiAPIKeyDialog(QDialog):
         # Set selection mode
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
-        # Enable drag and drop (manual handling to avoid Qt auto-removal)
-        self.tree.setDragEnabled(True)
-        self.tree.setAcceptDrops(True)
-        self.tree.setDragDropMode(QAbstractItemView.DragDrop)  # prevent automatic moves/deletions
-        # Ignore by default; we fully handle drops in _on_tree_drop
-        self.tree.setDefaultDropAction(Qt.IgnoreAction)
-        self.tree.setDragDropOverwriteMode(False)
-        self.tree.dragEnterEvent = lambda e: e.acceptProposedAction()
-        self.tree.dragMoveEvent = lambda e: e.acceptProposedAction()
+        # Enable drag and drop using InternalMove (like profile manager)
+        # This is the simplest approach - let Qt handle everything
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
         
-        # Connect drop event to custom handler
-        # Store original dropEvent to wrap it
-        self._tree_original_dropEvent = self.tree.dropEvent
-        self.tree.dropEvent = self._on_tree_drop
+        # Connect to model's rowsMoved signal to sync data after Qt moves items
+        self.tree.model().rowsMoved.connect(self._on_tree_rows_moved)
         
         # Connect signals
         self.tree.itemDoubleClicked.connect(self._on_click)
@@ -3092,221 +3080,67 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self.position_label.setText("")
 
-    def _on_tree_drop(self, event):
-        """Handle drop event for reordering keys"""
-        # Block Qt's built-in move; we'll handle reordering ourselves
-        event.setDropAction(Qt.IgnoreAction)
-        # Get the item being dropped and its target position
-        drop_indicator = self.tree.dropIndicatorPosition()
-        target_item = self.tree.itemAt(event.pos())
-        # Ignore drops onto empty viewport (outside rows)
-        if drop_indicator == QAbstractItemView.OnViewport or not self.tree.viewport().rect().contains(event.pos()):
-            event.ignore()
-            return
-        
-        # Get selected items (items being dragged)
-        selected_items = self.tree.selectedItems()
-        if not selected_items:
-            event.ignore()
-            return
-        
-        # Get indices of selected items
-        selected_indices = []
-        for item in selected_items:
-            index = self.tree.indexOfTopLevelItem(item)
-            if index >= 0 and index < len(self.key_pool.keys):
-                selected_indices.append(index)
-        
-        if not selected_indices:
-            event.ignore()
-            return
-        
-        selected_indices.sort()
-        
-        # Determine target index
-        if target_item is None:
-            # Dropped at the end
-            target_index = len(self.key_pool.keys)
-        else:
-            target_index = self.tree.indexOfTopLevelItem(target_item)
-            
-            # Adjust based on drop indicator position
-            if drop_indicator == QAbstractItemView.BelowItem:
-                target_index += 1
-            elif drop_indicator == QAbstractItemView.OnItem:
-                # Treat as above item
-                pass
-        # Clamp target index to valid range
-        target_index = max(0, min(target_index, len(self.key_pool.keys)))
-        
-        # Don't do anything if dropping in the same position
-        if len(selected_indices) == 1 and selected_indices[0] == target_index:
-            event.ignore()
-            return
-        
-        # Reorder keys in the pool
-        with self.key_pool.lock:
-            # Extract the selected keys
-            selected_keys = [self.key_pool.keys[i] for i in selected_indices]
-            
-            # Remove selected keys from their original positions (in reverse order to maintain indices)
-            for index in reversed(selected_indices):
-                del self.key_pool.keys[index]
-            
-            # Adjust target index if items were removed before it
-            adjusted_target = target_index
-            for index in selected_indices:
-                if index < target_index:
-                    adjusted_target -= 1
-            
-            # Insert selected keys at the new position
-            for i, key in enumerate(selected_keys):
-                self.key_pool.keys.insert(adjusted_target + i, key)
-        
-        # Refresh the display
-        self._refresh_key_list()
-        try:
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-        except Exception:
-            pass
-        try:
-            self.tree.viewport().update()
-        except Exception:
-            pass
-        
-        # Reselect the moved items
-        new_start_index = adjusted_target
-        first_item_to_scroll = None
-        for i in range(len(selected_keys)):
-            item = self.tree.topLevelItem(new_start_index + i)
+    def _on_tree_rows_moved(self):
+        """Sync key_pool.keys with tree order after Qt moves rows via drag-drop"""
+        # Read the new order from the tree and rebuild key_pool.keys
+        new_order = []
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
             if item:
-                item.setSelected(True)
-                if first_item_to_scroll is None:
-                    first_item_to_scroll = item
-        # Ensure the first moved item is visible immediately
-        if first_item_to_scroll:
-            try:
-                self.tree.scrollToItem(first_item_to_scroll, QAbstractItemView.PositionAtCenter)
-            except Exception:
-                pass
+                # Find the matching key by masked API key and model
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key in self.key_pool.keys:
+                    key_masked = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
+                    if key_masked == masked_key and key.model == model and key not in new_order:
+                        new_order.append(key)
+                        break
         
-        # Show status
-        if len(selected_indices) == 1:
-            self._show_status(f"Moved key to position {adjusted_target + 1}")
-        else:
-            self._show_status(f"Moved {len(selected_indices)} keys to position {adjusted_target + 1}")
-        
-        # Explicitly accept to finish without Qt moving items
-        event.accept()
-        return  # Prevent any default handling
+        # Update the pool if we got a valid reordering
+        if len(new_order) == len(self.key_pool.keys):
+            with self.key_pool.lock:
+                self.key_pool.keys = new_order
+            
+            # Save to config
+            self._save_keys_to_config()
+            
+            # Update primary key label
+            if hasattr(self, 'primary_key_label') and new_order:
+                first_key = new_order[0]
+                masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
+                self.primary_key_label.setText(f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
+            
+            self._show_status("Reordered keys")
 
     def _show_fallback_status(self, message: str):
         """Show status message in the fallback section."""
         if hasattr(self, 'fallback_status_label'):
             self.fallback_status_label.setText(message)
     
-    def _on_fallback_tree_drop(self, event):
-        """Handle drop event for reordering fallback keys"""
-        # Block Qt's built-in move; we'll handle reordering ourselves
-        event.setDropAction(Qt.IgnoreAction)
-
-        # Get the item being dropped and its target position
-        drop_indicator = self.fallback_tree.dropIndicatorPosition()
-        target_item = self.fallback_tree.itemAt(event.pos())
-        # Ignore drops onto empty viewport (outside rows)
-        if drop_indicator == QAbstractItemView.OnViewport or not self.fallback_tree.viewport().rect().contains(event.pos()):
-            event.ignore()
-            return
-        
-        # Get selected items (items being dragged)
-        selected_items = self.fallback_tree.selectedItems()
-        if not selected_items:
-            event.ignore()
-            return
-        
-        # Get current fallback keys
+    def _on_fallback_rows_moved(self):
+        """Sync fallback_keys config with tree order after Qt moves rows via drag-drop"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
-        # Get indices of selected items
-        selected_indices = []
-        for item in selected_items:
-            index = self.fallback_tree.indexOfTopLevelItem(item)
-            if index >= 0 and index < len(fallback_keys):
-                selected_indices.append(index)
-        
-        if not selected_indices:
-            event.ignore()
-            return
-        
-        selected_indices.sort()
-        
-        # Determine target index
-        if target_item is None:
-            target_index = len(fallback_keys)
-        else:
-            target_index = self.fallback_tree.indexOfTopLevelItem(target_item)
-            
-            if drop_indicator == QAbstractItemView.BelowItem:
-                target_index += 1
-            elif drop_indicator == QAbstractItemView.OnItem:
-                pass
-        # Clamp target index to valid range
-        target_index = max(0, min(target_index, len(fallback_keys)))
-        
-        # Don't do anything if dropping in the same position
-        if len(selected_indices) == 1 and selected_indices[0] == target_index:
-            event.ignore()
-            return
-        
-        # Reorder keys in the fallback list
-        selected_keys = [fallback_keys[i] for i in selected_indices]
-        
-        # Remove selected keys from their original positions (in reverse)
-        for index in reversed(selected_indices):
-            del fallback_keys[index]
-        
-        # Adjust target index
-        adjusted_target = target_index
-        for index in selected_indices:
-            if index < target_index:
-                adjusted_target -= 1
-        
-        # Insert selected keys at the new position
-        for i, key in enumerate(selected_keys):
-            fallback_keys.insert(adjusted_target + i, key)
-        
-        # Save to config
-        self.translator_gui.config['fallback_keys'] = fallback_keys
-        self.translator_gui.save_config(show_message=False)
-        
-        # Reload the list
-        self._load_fallback_keys()
-        try:
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-        except Exception:
-            pass
-        try:
-            self.fallback_tree.viewport().update()
-        except Exception:
-            pass
-        
-        # Reselect the moved items
-        for i in range(len(selected_keys)):
-            item = self.fallback_tree.topLevelItem(adjusted_target + i)
+        # Read the new order from the tree
+        new_order = []
+        for i in range(self.fallback_tree.topLevelItemCount()):
+            item = self.fallback_tree.topLevelItem(i)
             if item:
-                item.setSelected(True)
+                # Find the matching key by masked API key and model
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key_data in fallback_keys:
+                    api_key = key_data.get('api_key', '')
+                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                        new_order.append(key_data)
+                        break
         
-        # Show status
-        if len(selected_indices) == 1:
-            self._show_fallback_status(f"Moved fallback key to position {adjusted_target + 1}")
-        else:
-            self._show_fallback_status(f"Moved {len(selected_indices)} fallback keys to position {adjusted_target + 1}")
-        
-        # Explicitly accept to finish without Qt moving items
-        event.accept()
-        return  # Prevent any default handling
+        # Update config if we got a valid reordering
+        if len(new_order) == len(fallback_keys):
+            self.translator_gui.config['fallback_keys'] = new_order
+            self.translator_gui.save_config(show_message=False)
+            self._show_fallback_status("Reordered fallback keys")
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
@@ -3431,6 +3265,8 @@ class MultiAPIKeyDialog(QDialog):
                 for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkRed)
             
+            # Disable drop on this item to prevent nesting (keep it a flat list)
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self.tree.addTopLevelItem(item)
         
         # Update stats
