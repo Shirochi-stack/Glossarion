@@ -201,10 +201,11 @@ TRANSLATION_ARTIFACTS = {
     # Catches: "split 1 of 2", "chunk 3 of 5", "section 1/3" (with slash)
     # Also catches leaked request merge markers that should have been stripped
     # Includes both raw HTML and escaped HTML entity versions of split markers
+    # Also catches h1 tags with split-N id attribute (even if marker text was translated)
     'split_indicators': re.compile(
         r'(split\s+\d+\s+of\s+\d+|chunk\s+\d+\s+of\s+\d+|section\s+\d+/\d+|'
-        r'<h1[^>]*id=["\']split-\d+["\'][^>]*>.*?SPLIT\s+MARKER|'
-        r'&lt;h1[^&]*id=["\']?split-\d+["\']?[^&]*&gt;.*?SPLIT\s+MARKER.*?&lt;/h1&gt;)',
+        r'<h1[^>]*id=["\']split-\d+["\'][^>]*>|'
+        r'&lt;h1[^&]*id=["\']?split-\d+["\']?[^&]*&gt;)',
         re.IGNORECASE | re.DOTALL
     ),
     'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE),
