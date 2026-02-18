@@ -399,6 +399,42 @@ class EnhancedTextExtractor:
         
         return text.strip()
     
+    def _remove_markdown_duplicate_headers(self, text: str) -> str:
+        """Remove duplicate text that appears before a markdown header with the same content.
+        
+        Pattern: "Title Text\n\n# Title Text" -> "# Title Text"
+        This handles cases where html2text converts both <p> and <h1> with same text.
+        """
+        if not text:
+            return text
+        
+        lines = text.split('\n')
+        result = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Check if this is a non-empty, non-header line
+            if line.strip() and not line.strip().startswith('#'):
+                # Look ahead for pattern: [blank lines] [# header with same text]
+                j = i + 1
+                # Skip blank lines
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                # Check if next non-blank line is a markdown header
+                if j < len(lines):
+                    next_line = lines[j]
+                    header_match = re.match(r'^(#{1,6})\s+(.+)$', next_line)
+                    if header_match:
+                        header_text = header_match.group(2).strip()
+                        # Compare with current line (stripped)
+                        if line.strip() == header_text:
+                            # Skip this duplicate line, keep blanks and header
+                            i += 1
+                            continue
+            result.append(line)
+            i += 1
+        return '\n'.join(result)
+    
     def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
         """Extract chapter title from various sources"""
         # Try title tag first
@@ -597,6 +633,11 @@ class EnhancedTextExtractor:
             
             # Restore CJK angle brackets as HTML entities
             clean_text = self._restore_cjk_angle_brackets(clean_text)
+            
+            # Remove markdown duplicate headers if enabled
+            # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
+            if remove_duplicate_h1_p and clean_text:
+                clean_text = self._remove_markdown_duplicate_headers(clean_text)
             
             # For enhanced mode, both display and translation content are the same
             return clean_text, clean_text, chapter_title
