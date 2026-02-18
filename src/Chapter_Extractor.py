@@ -8,10 +8,28 @@ import time
 import shutil
 import hashlib
 import warnings
-from TransateKRtoEN import PatternManager
 
-# Initialize PatternManager at module level for ProcessPoolExecutor compatibility
-PM = PatternManager()
+# Lazy import for PatternManager to speed up ProcessPoolExecutor worker startup on Windows
+# The heavy TransateKRtoEN import is deferred until actually needed
+_PatternManager = None
+_PM = None
+
+def _get_pattern_manager():
+    """Lazy initialization of PatternManager to avoid slow imports in worker processes"""
+    global _PatternManager, _PM
+    if _PatternManager is None:
+        from TransateKRtoEN import PatternManager as PM_Class
+        _PatternManager = PM_Class
+        _PM = PM_Class()
+    return _PM
+
+# For backward compatibility - property-like access
+class _LazyPM:
+    def __getattr__(self, name):
+        return getattr(_get_pattern_manager(), name)
+
+PM = _LazyPM()
+
 from bs4 import BeautifulSoup
 try:
     from bs4 import XMLParsedAsHTMLWarning
