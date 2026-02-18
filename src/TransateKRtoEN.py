@@ -1688,21 +1688,9 @@ class FileUtilities:
                         return f"{base}{_full_ext_from_original(chapter)}"
                     return f"response_{base}.html"
             
-            # Check for the special XXXX_YY decimal pattern
-            decimal_prefix_match = re.match(r'^(\d{4})_(\d{1,2})(?:_|\.)?(?:x?html?)?$', basename)
-            if decimal_prefix_match:
-                first_part = decimal_prefix_match.group(1)
-                second_part = decimal_prefix_match.group(2)
-                
-                # If this matches our decimal pattern (e.g., 0002_33 -> 2.33)
-                if len(second_part) == 2 and int(second_part) > 9:
-                    chapter_num = int(first_part[-1])
-                    decimal_part = second_part
-                    # Create filename reflecting the decimal interpretation
-                    if is_text_file:
-                        return f"{chapter_num:03d}_{decimal_part}.txt" if retain else f"response_{chapter_num:03d}_{decimal_part}.txt"
-                    else:
-                        return f"{chapter_num:03d}_{decimal_part}{_full_ext_from_original(chapter)}" if retain else f"response_{chapter_num:03d}_{decimal_part}.html"
+            # NOTE: Removed broken XXXX_YY decimal pattern handling that was mangling filenames
+            # Files like 0009_10.xhtml should just use original_basename (handled below at line 1707+)
+            # The old code was incorrectly extracting just the last digit and losing leading zeros
         
         # Standard EPUB handling - use original basename
         if 'original_basename' in chapter and chapter['original_basename']:
@@ -3750,19 +3738,26 @@ class TranslationProcessor:
                 # Generate filename for chunks
                 if chunk_idx and total_chunks > 1:
                     # This is a chunk - use chunk naming format
-                    # Handle float chapter numbers (e.g., 1.0, 2.5) properly
-                    chapter_num = c['num']
-                    if isinstance(chapter_num, float):
-                        # For decimal chapters like 1.5, use format like "response_001_5_chunk_1.html"
-                        major = int(chapter_num)
-                        minor = int(round((chapter_num - major) * 100))  # 1.5 -> 50, 1.1 -> 10
-                        if minor > 0:
-                            fname = f"response_{major:03d}_{minor:02d}_chunk_{chunk_idx}.html"
-                        else:
-                            # It's like 1.0, just use the integer part
-                            fname = f"response_{major:03d}_chunk_{chunk_idx}.html"
+                    # Prefer original_basename to preserve source file's zero-padding (e.g., 0009_10)
+                    original_basename = c.get('original_basename', '')
+                    if original_basename:
+                        # Use original basename (without extension) + _chunk_N
+                        base = os.path.splitext(original_basename)[0]
+                        fname = f"response_{base}_chunk_{chunk_idx}.html"
                     else:
-                        fname = f"response_{chapter_num:03d}_chunk_{chunk_idx}.html"
+                        # Handle float chapter numbers (e.g., 1.0, 2.5) properly
+                        chapter_num = c['num']
+                        if isinstance(chapter_num, float):
+                            # For decimal chapters like 1.5, use format like "response_001_5_chunk_1.html"
+                            major = int(chapter_num)
+                            minor = int(round((chapter_num - major) * 100))  # 1.5 -> 50, 1.1 -> 10
+                            if minor > 0:
+                                fname = f"response_{major:03d}_{minor:02d}_chunk_{chunk_idx}.html"
+                            else:
+                                # It's like 1.0, just use the integer part
+                                fname = f"response_{major:03d}_chunk_{chunk_idx}.html"
+                        else:
+                            fname = f"response_{chapter_num:03d}_chunk_{chunk_idx}.html"
                 else:
                     # Not a chunk - use regular naming
                     fname = FileUtilities.create_chapter_filename(c, c.get('actual_chapter_num', c['num']))
@@ -4539,8 +4534,13 @@ class BatchTranslationProcessor:
                 # Generate filename before API call
                 if chunk_idx < total_chunks:
                     # This is a chunk - use chunk naming format
-                    # Handle float chapter numbers (e.g., 1.0, 2.5) properly
-                    if isinstance(actual_num, float):
+                    # Prefer original_basename to preserve source file's zero-padding (e.g., 0009_10)
+                    original_basename = chapter.get('original_basename', '')
+                    if original_basename:
+                        # Use original basename (without extension) + _chunk_N
+                        base = os.path.splitext(original_basename)[0]
+                        fname = f"response_{base}_chunk_{chunk_idx}.html"
+                    elif isinstance(actual_num, float):
                         # For decimal chapters like 1.5, use format like "response_001_5_chunk_1.html"
                         major = int(actual_num)
                         minor = int(round((actual_num - major) * 100))  # 1.5 -> 50, 1.1 -> 10
