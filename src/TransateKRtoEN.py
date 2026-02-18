@@ -5413,7 +5413,7 @@ class BatchTranslationProcessor:
                     for header_tag in body_soup.find_all(['h1', 'h2', 'h3']):
                         header_tag.decompose()
                 
-                # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
+                # Remove duplicate H1+P pairs (where P is adjacent to H1 with same text)
                 if remove_duplicate_h1_p:
                     for h1_tag in body_soup.find_all('h1'):
                         # Skip split marker H1 tags
@@ -5424,14 +5424,20 @@ class BatchTranslationProcessor:
                         if 'SPLIT MARKER' in h1_text:
                             continue
                         
-                        # Get the next sibling (skipping whitespace/text nodes)
+                        # Check next sibling (P after H1)
                         next_sibling = h1_tag.find_next_sibling()
                         if next_sibling and next_sibling.name == 'p':
-                            # Compare text content (stripped)
                             p_text = next_sibling.get_text(strip=True)
                             if h1_text == p_text:
-                                # Remove the duplicate paragraph
                                 next_sibling.decompose()
+                                continue
+                        
+                        # Check previous sibling (P before H1)
+                        prev_sibling = h1_tag.find_previous_sibling()
+                        if prev_sibling and prev_sibling.name == 'p':
+                            p_text = prev_sibling.get_text(strip=True)
+                            if h1_text == p_text:
+                                prev_sibling.decompose()
                 
                 chapter_body = str(body_soup)
             
@@ -11745,6 +11751,31 @@ def main(log_callback=None, stop_callback=None):
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
+
+            # Post-process: Remove duplicate H1+P pairs from translated OUTPUT if enabled
+            remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
+            if remove_duplicate_h1_p and cleaned:
+                from bs4 import BeautifulSoup
+                output_soup = BeautifulSoup(cleaned, 'html.parser')
+                for h1_tag in output_soup.find_all('h1'):
+                    h1_id = h1_tag.get('id', '')
+                    if h1_id and h1_id.startswith('split-'):
+                        continue
+                    h1_text = h1_tag.get_text(strip=True)
+                    if 'SPLIT MARKER' in h1_text:
+                        continue
+                    # Check next sibling (P after H1)
+                    next_sibling = h1_tag.find_next_sibling()
+                    if next_sibling and next_sibling.name == 'p':
+                        if h1_text == next_sibling.get_text(strip=True):
+                            next_sibling.decompose()
+                            continue
+                    # Check previous sibling (P before H1)
+                    prev_sibling = h1_tag.find_previous_sibling()
+                    if prev_sibling and prev_sibling.name == 'p':
+                        if h1_text == prev_sibling.get_text(strip=True):
+                            prev_sibling.decompose()
+                cleaned = str(output_soup)
 
             # If the cleaned translation is empty/whitespace, treat as failure and skip file write
             if not cleaned or not str(cleaned).strip():
