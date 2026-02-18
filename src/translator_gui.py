@@ -86,7 +86,7 @@ try:
                                     QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
-    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop
+    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop, QMetaObject
     from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
 except ImportError as e:
     print(f"\n{'='*60}")
@@ -10277,7 +10277,7 @@ Important rules:
                    self.qa_spinner.stop()
 
     def _reset_api_watchdog_progress(self, *, clear_stale_external_files: bool = True) -> None:
-        """Reset the API watchdog (and the UI bar) immediately.
+        """Reset the API watchdog (and the UI bar) immediately - thread-safe.
 
         This is used when the user clicks Stop so the progress bar doesn't remain stuck
         due to stale watchdog counts/files.
@@ -10307,6 +10307,36 @@ Important rules:
                 pass
 
         # 3) Reset the UI bar immediately (timer will keep it consistent going forward)
+        # Use QMetaObject.invokeMethod to ensure this runs on the main GUI thread
+        def _do_reset_ui():
+            try:
+                if hasattr(self, 'api_watchdog_bar') and self.api_watchdog_bar:
+                    self.api_watchdog_bar.setRange(0, 1)
+                    self.api_watchdog_bar.setValue(0)
+                    self.api_watchdog_bar.setFormat("API idle")
+                    self.api_watchdog_bar.setToolTip("No API calls in flight")
+            except Exception:
+                pass
+        
+        # Check if we're on the main thread
+        try:
+            from PySide6.QtCore import QThread
+            if QThread.currentThread() == QApplication.instance().thread():
+                # We're on the main thread, safe to call directly
+                _do_reset_ui()
+            else:
+                # We're on a worker thread, use invokeMethod with QueuedConnection
+                QMetaObject.invokeMethod(self, "_reset_api_watchdog_ui", Qt.QueuedConnection)
+        except Exception:
+            # Fallback: try direct call (might fail if on wrong thread)
+            try:
+                _do_reset_ui()
+            except Exception:
+                pass
+    
+    @Slot()
+    def _reset_api_watchdog_ui(self):
+        """Slot for resetting watchdog UI - always runs on main thread"""
         try:
             if hasattr(self, 'api_watchdog_bar') and self.api_watchdog_bar:
                 self.api_watchdog_bar.setRange(0, 1)

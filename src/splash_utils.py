@@ -2,14 +2,20 @@
 import sys
 import time
 import atexit
+import threading
 from PySide6.QtWidgets import QApplication, QWidget, QLabel, QProgressBar, QVBoxLayout
-from PySide6.QtCore import Qt, QTimer, QEventLoop
+from PySide6.QtCore import Qt, QTimer, QEventLoop, QObject, Signal, QMetaObject, Q_ARG
 from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QFontMetrics
 
-class SplashManager:
-    """PySide6 splash screen manager - shows faster than Tkinter"""
+class SplashManager(QObject):
+    """PySide6 splash screen manager - thread-safe with signals"""
+    
+    # Qt signals for thread-safe UI updates
+    _status_update_signal = Signal(str)
+    _progress_update_signal = Signal(int)
     
     def __init__(self):
+        super().__init__()
         self.splash_window = None
         self.app = None
         self._status_text = "Initializing..."
@@ -21,6 +27,12 @@ class SplashManager:
         # Scale factor for low-res/HiDPI displays (computed in start_splash)
         self._ui_scale = 1.0
         self._icon_logical_px = 110
+        self._main_thread_id = threading.current_thread().ident
+        self._closed = False
+        
+        # Connect signals to slots
+        self._status_update_signal.connect(self._do_update_status)
+        self._progress_update_signal.connect(self._do_set_progress)
     
     def _set_windows_taskbar_icon(self):
         """Set Windows taskbar icon early, before any windows are created"""
@@ -431,69 +443,103 @@ class SplashManager:
             return message
 
     def update_status(self, message):
-        """Update splash status and progress"""
+        """Update splash status and progress - thread-safe"""
+        if self._closed:
+            return
+            
         self._status_text = message
+        
+        # Enhanced progress mapping
+        progress_map = {
+            "Loading theme framework...": 5,
+            "Loading UI framework...": 8,
+            
+            # Script validation phase - 10-25%
+            "Scanning Python modules...": 10,
+            "Validating": 12,  # Partial match for "Validating X Python scripts..."
+            "✅ All scripts validated": 25,
+            
+            # Module loading phase - 30-85%
+            "Loading translation modules...": 30,
+            "Initializing module system...": 35,
+            "Loading translation engine...": 40,
+            "Validating translation engine...": 45,
+            "✅ translation engine loaded": 50,
+            "Loading glossary extractor...": 55,
+            "Validating glossary extractor...": 60,
+            "✅ glossary extractor loaded": 65,
+            "Loading EPUB converter...": 70,
+            "✅ EPUB converter loaded": 75,
+            "Loading QA scanner...": 78,
+            "✅ QA scanner loaded": 82,
+            "Finalizing module initialization...": 85,
+            "✅ All modules loaded successfully": 88,
+            
+            "Creating main window...": 92,
+            "Ready!": 100
+        }
+        
+        # Use thread-safe signal to update UI
         try:
-            if self.splash_window and self.status_label:
+            self._status_update_signal.emit(message)
+        except Exception:
+            pass
+        
+        # Check for progress updates
+        try:
+            # Check for exact matches first
+            if message in progress_map:
+                self.set_progress(progress_map[message])
+            else:
+                # Check for partial matches
+                for key, value in progress_map.items():
+                    if key in message:
+                        self.set_progress(value)
+                        break
+        except Exception:
+            pass
+    
+    def _do_update_status(self, message):
+        """Internal method to update status - called on main thread via signal"""
+        try:
+            if self.splash_window and self.status_label and not self._closed:
                 self.status_label.setText(self._elide_status(message))
-                
-                # Enhanced progress mapping
-                progress_map = {
-                    "Loading theme framework...": 5,
-                    "Loading UI framework...": 8,
-                    
-                    # Script validation phase - 10-25%
-                    "Scanning Python modules...": 10,
-                    "Validating": 12,  # Partial match for "Validating X Python scripts..."
-                    "✅ All scripts validated": 25,
-                    
-                    # Module loading phase - 30-85%
-                    "Loading translation modules...": 30,
-                    "Initializing module system...": 35,
-                    "Loading translation engine...": 40,
-                    "Validating translation engine...": 45,
-                    "✅ translation engine loaded": 50,
-                    "Loading glossary extractor...": 55,
-                    "Validating glossary extractor...": 60,
-                    "✅ glossary extractor loaded": 65,
-                    "Loading EPUB converter...": 70,
-                    "✅ EPUB converter loaded": 75,
-                    "Loading QA scanner...": 78,
-                    "✅ QA scanner loaded": 82,
-                    "Finalizing module initialization...": 85,
-                    "✅ All modules loaded successfully": 88,
-                    
-                    "Creating main window...": 92,
-                    "Ready!": 100
-                }
-                
-                # Check for exact matches first
-                if message in progress_map:
-                    self.set_progress(progress_map[message])
-                else:
-                    # Check for partial matches
-                    for key, value in progress_map.items():
-                        if key in message:
-                            self.set_progress(value)
-                            break
                 
                 # Process events
                 if self.app:
                     self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
-        except Exception:
+        except (RuntimeError, AttributeError):
+            # Widget deleted or not available
             pass
     
     def set_progress(self, value):
-        """Manually set progress value (0-100)"""
+        """Manually set progress value (0-100) - thread-safe"""
+        if self._closed:
+            return
+            
         self.progress_value = max(0, min(100, value))
-        if self.progress_bar:
-            self.progress_bar.setValue(self.progress_value)
-        if self.progress_label:
-            self.progress_label.setText(f"{self.progress_value}%")
         
-        # Process events to ensure smooth UI updates
-        if self.app:
-            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        # Use thread-safe signal to update UI
+        try:
+            self._progress_update_signal.emit(self.progress_value)
+        except Exception:
+            pass
+    
+    def _do_set_progress(self, value):
+        """Internal method to set progress - called on main thread via signal"""
+        try:
+            if not self._closed:
+                if self.progress_bar:
+                    self.progress_bar.setValue(value)
+                if self.progress_label:
+                    self.progress_label.setText(f"{value}%")
+                
+                # Process events to ensure smooth UI updates
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except (RuntimeError, AttributeError):
+            # Widget deleted or not available
+            pass
     
     def validate_all_scripts(self, base_dir=None):
         """Validate that all Python scripts in the project compile without syntax errors
@@ -661,6 +707,9 @@ class SplashManager:
     def close_splash(self):
         """Close the splash screen"""
         try:
+            # Mark as closed to prevent any further updates from worker threads
+            self._closed = True
+            
             # Stop timer first
             if self.timer:
                 self.timer.stop()
