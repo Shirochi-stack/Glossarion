@@ -657,6 +657,13 @@ def _extract_all_resources(zf, output_dir, progress_callback=None):
                 if extracted_count < 10 or resource_type in ['css', 'fonts']:
                     print(f"   📄 Extracted {resource_type}: {filename}")
     
+    # Show 100% completion
+    if progress_callback:
+        progress_callback(f"Extracting resources: {total_resources}/{total_resources}")
+    else:
+        ProgressBar.update(total_resources, total_resources, prefix="📦 Extracting resources")
+        ProgressBar.finish()
+    
     # Mark as complete
     with open(extraction_marker, 'w') as f:
         f.write(f"Resources extracted at {time.time()}")
@@ -992,6 +999,12 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     print(f"[ERROR] Process error processing {file_path}: {e}")
                     import traceback
                     traceback.print_exc()
+        
+        # Show 100% completion
+        if progress_callback:
+            progress_callback(f"Processing chapters: {total_files}/{total_files} (100%)")
+        else:
+            ProgressBar.update(total_files, total_files, prefix="📚 Processing chapters")
     else:
         print("📦 Using sequential processing (small file count)...")
         
@@ -1059,6 +1072,12 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
             # Collect skipped info
             if skipped_info:
                 skipped_files.append(skipped_info)
+        
+        # Show 100% completion for sequential mode
+        if progress_callback:
+            progress_callback(f"Processing chapters: {total_files}/{total_files} (100%)")
+        else:
+            ProgressBar.update(total_files, total_files, prefix="📚 Processing chapters")
     
     # Final progress update and cleanup progress bar
     if not progress_callback:
