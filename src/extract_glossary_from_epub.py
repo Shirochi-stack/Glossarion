@@ -3800,6 +3800,8 @@ def main(log_callback=None, stop_callback=None):
                     # Use wait(FIRST_COMPLETED) so newly-submitted futures are also observed promptly.
                     active_futures = {}
                     next_unit_idx = 0
+                    # Ensure batch_size is at least 1 to avoid submission loops never running
+                    effective_aggressive_batch_size = max(1, batch_size)
 
                     def _submit_next():
                         nonlocal next_unit_idx
@@ -3812,7 +3814,7 @@ def main(log_callback=None, stop_callback=None):
                         return True
 
                     # Prime the executor to fill all slots
-                    while len(active_futures) < batch_size and _submit_next():
+                    while len(active_futures) < effective_aggressive_batch_size and _submit_next():
                         pass
 
                     while active_futures or next_unit_idx < len(current_batch_units):
@@ -3827,11 +3829,22 @@ def main(log_callback=None, stop_callback=None):
 
                         # Auto-refill to maintain batch_size parallel calls (but not during graceful stop)
                         if os.environ.get('GRACEFUL_STOP') != '1':
-                            while len(active_futures) < batch_size and _submit_next():
+                            while len(active_futures) < effective_aggressive_batch_size and _submit_next():
                                 pass
 
-                        if not active_futures:
+                        # Only break if truly done: no active futures AND nothing left to submit
+                        if not active_futures and next_unit_idx >= len(current_batch_units):
                             break
+                        
+                        # If active_futures is empty but there are items left, submit them now
+                        # (This handles edge cases where graceful stop was briefly set then cleared)
+                        if not active_futures and next_unit_idx < len(current_batch_units):
+                            while len(active_futures) < effective_aggressive_batch_size and _submit_next():
+                                pass
+                            if not active_futures:
+                                # Still empty after trying to submit - something's wrong, break to avoid infinite loop
+                                print("⚠️ Warning: Could not submit remaining items, breaking loop")
+                                break
 
                         done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
 
@@ -3842,7 +3855,7 @@ def main(log_callback=None, stop_callback=None):
 
                             # Refill freed slot ASAP (unless graceful stop is active)
                             if os.environ.get('GRACEFUL_STOP') != '1':
-                                while len(active_futures) < batch_size and _submit_next():
+                                while len(active_futures) < effective_aggressive_batch_size and _submit_next():
                                     pass
 
                             _handle_future_result(future, unit)
