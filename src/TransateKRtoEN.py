@@ -5184,6 +5184,64 @@ class BatchTranslationProcessor:
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
             
+            # Post-process: Remove duplicate H1+P pairs from translated OUTPUT if enabled
+            remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
+            if remove_duplicate_h1_p and cleaned:
+                # First: HTML-based duplicate removal
+                from bs4 import BeautifulSoup
+                output_soup = BeautifulSoup(cleaned, 'html.parser')
+                for h1_tag in output_soup.find_all('h1'):
+                    h1_id = h1_tag.get('id', '')
+                    if h1_id and h1_id.startswith('split-'):
+                        continue
+                    h1_text = h1_tag.get_text(strip=True)
+                    if 'SPLIT MARKER' in h1_text:
+                        continue
+                    # Check next sibling (P after H1)
+                    next_sibling = h1_tag.find_next_sibling()
+                    if next_sibling and next_sibling.name == 'p':
+                        if h1_text == next_sibling.get_text(strip=True):
+                            next_sibling.decompose()
+                            continue
+                    # Check previous sibling (P before H1)
+                    prev_sibling = h1_tag.find_previous_sibling()
+                    if prev_sibling and prev_sibling.name == 'p':
+                        if h1_text == prev_sibling.get_text(strip=True):
+                            prev_sibling.decompose()
+                cleaned = str(output_soup)
+                
+                # Second: Markdown-based duplicate removal (for enhanced extraction mode)
+                # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
+                def remove_markdown_duplicate_headers_batch(text):
+                    lines = text.split('\n')
+                    result_lines = []
+                    i = 0
+                    while i < len(lines):
+                        line = lines[i]
+                        # Check if this is a non-empty line followed by blank lines and then a markdown header
+                        if line.strip() and not line.strip().startswith('#'):
+                            # Look ahead for pattern: [blank lines] [# header with same text]
+                            j = i + 1
+                            # Skip blank lines
+                            while j < len(lines) and not lines[j].strip():
+                                j += 1
+                            # Check if next non-blank line is a markdown header
+                            if j < len(lines):
+                                next_line = lines[j]
+                                header_match = re.match(r'^(#{1,6})\s+(.+)$', next_line)
+                                if header_match:
+                                    header_text = header_match.group(2).strip()
+                                    # Compare with current line (stripped)
+                                    if line.strip() == header_text:
+                                        # Skip this duplicate line, keep blanks and header
+                                        i += 1
+                                        continue
+                        result_lines.append(line)
+                        i += 1
+                    return '\n'.join(result_lines)
+                
+                cleaned = remove_markdown_duplicate_headers_batch(cleaned)
+            
             # Check for empty or failed response BEFORE writing to disk
             if not cleaned or not str(cleaned).strip():
                 print(f"❌ Batch: Translation empty for chapter {actual_num} — skipping file write")
@@ -5440,6 +5498,37 @@ class BatchTranslationProcessor:
                                 prev_sibling.decompose()
                 
                 chapter_body = str(body_soup)
+            
+            # Also apply markdown-based duplicate removal (for enhanced extraction mode)
+            if remove_duplicate_h1_p and chapter_body:
+                def remove_markdown_duplicate_headers_input(text):
+                    lines = text.split('\n')
+                    result = []
+                    i = 0
+                    while i < len(lines):
+                        line = lines[i]
+                        # Check if this is a non-empty line followed by blank lines and then a markdown header
+                        if line.strip() and not line.strip().startswith('#'):
+                            # Look ahead for pattern: [blank lines] [# header with same text]
+                            j = i + 1
+                            # Skip blank lines
+                            while j < len(lines) and not lines[j].strip():
+                                j += 1
+                            # Check if next non-blank line is a markdown header
+                            if j < len(lines):
+                                next_line = lines[j]
+                                header_match = re.match(r'^(#{1,6})\s+(.+)$', next_line)
+                                if header_match:
+                                    header_text = header_match.group(2).strip()
+                                    # Compare with current line (stripped)
+                                    if line.strip() == header_text:
+                                        # Skip this duplicate line, keep blanks and header
+                                        i += 1
+                                        continue
+                        result.append(line)
+                        i += 1
+                    return '\n'.join(result)
+                chapter_body = remove_markdown_duplicate_headers_input(chapter_body)
             
             chapters_data.append((actual_num, chapter_body, idx, chapter, content_hash))
         
@@ -11755,6 +11844,7 @@ def main(log_callback=None, stop_callback=None):
             # Post-process: Remove duplicate H1+P pairs from translated OUTPUT if enabled
             remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
             if remove_duplicate_h1_p and cleaned:
+                # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
                 for h1_tag in output_soup.find_all('h1'):
@@ -11776,6 +11866,38 @@ def main(log_callback=None, stop_callback=None):
                         if h1_text == prev_sibling.get_text(strip=True):
                             prev_sibling.decompose()
                 cleaned = str(output_soup)
+                
+                # Second: Markdown-based duplicate removal (for enhanced extraction mode)
+                # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
+                def remove_markdown_duplicate_headers(text):
+                    lines = text.split('\n')
+                    result = []
+                    i = 0
+                    while i < len(lines):
+                        line = lines[i]
+                        # Check if this is a non-empty line followed by blank lines and then a markdown header
+                        if line.strip() and not line.strip().startswith('#'):
+                            # Look ahead for pattern: [blank lines] [# header with same text]
+                            j = i + 1
+                            # Skip blank lines
+                            while j < len(lines) and not lines[j].strip():
+                                j += 1
+                            # Check if next non-blank line is a markdown header
+                            if j < len(lines):
+                                next_line = lines[j]
+                                header_match = re.match(r'^(#{1,6})\s+(.+)$', next_line)
+                                if header_match:
+                                    header_text = header_match.group(2).strip()
+                                    # Compare with current line (stripped)
+                                    if line.strip() == header_text:
+                                        # Skip this duplicate line, keep blanks and header
+                                        i += 1
+                                        continue
+                        result.append(line)
+                        i += 1
+                    return '\n'.join(result)
+                
+                cleaned = remove_markdown_duplicate_headers(cleaned)
 
             # If the cleaned translation is empty/whitespace, treat as failure and skip file write
             if not cleaned or not str(cleaned).strip():

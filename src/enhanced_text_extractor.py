@@ -514,7 +514,7 @@ class EnhancedTextExtractor:
                         for hdr in soup.find_all(tag_name):
                             hdr.decompose()
                 
-                # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
+                # Remove duplicate H1+P pairs (where P immediately follows or precedes H1 with same text)
                 if remove_duplicate_h1_p:
                     for h1_tag in soup.find_all('h1'):
                         # Skip split marker H1 tags
@@ -525,14 +525,20 @@ class EnhancedTextExtractor:
                         if 'SPLIT MARKER' in h1_text:
                             continue
                         
-                        # Get the next sibling (skipping whitespace/text nodes)
+                        # Check next sibling (P after H1)
                         next_sibling = h1_tag.find_next_sibling()
                         if next_sibling and next_sibling.name == 'p':
-                            # Compare text content (stripped)
                             p_text = next_sibling.get_text(strip=True)
                             if h1_text == p_text:
-                                # Remove the duplicate paragraph
                                 next_sibling.decompose()
+                                continue
+                        
+                        # Check previous sibling (P before H1)
+                        prev_sibling = h1_tag.find_previous_sibling()
+                        if prev_sibling and prev_sibling.name == 'p':
+                            p_text = prev_sibling.get_text(strip=True)
+                            if h1_text == p_text:
+                                prev_sibling.decompose()
             except Exception:
                 # Non-fatal – proceed with original soup if anything goes wrong
                 pass
