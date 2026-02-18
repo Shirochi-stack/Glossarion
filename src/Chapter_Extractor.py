@@ -860,6 +860,8 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         files_to_process.append(file_path)
     
     print(f"📚 Processing {len(files_to_process)} files after merge analysis")
+    if progress_callback:
+        progress_callback(f"Preparing to process {len(files_to_process)} chapters...")
     
     # Initialize collections for aggregating results
     file_size_groups = {}
@@ -890,6 +892,8 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         # Get worker count from environment variable
         max_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
         print(f"📦 Using parallel processing with {max_workers} workers...")
+        if progress_callback:
+            progress_callback(f"Starting {max_workers} extraction workers...")
         
         # Use ProcessPoolExecutor for true multi-process parallelism
         # Now that all functions are at module level and picklable, we can use processes
