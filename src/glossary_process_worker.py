@@ -10,7 +10,7 @@ import sys
 import json
 import time
 
-def generate_glossary_in_process(output_dir, chapters_data, instructions, env_vars, log_queue=None):
+def generate_glossary_in_process(output_dir, chapters_data, instructions, env_vars, log_queue=None, log_file_path=None):
     """
     Generate glossary in a separate process to avoid GIL blocking.
     
@@ -19,7 +19,8 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         chapters_data: Serialized chapters data
         instructions: Glossary instructions
         env_vars: Environment variables to set
-        log_queue: Queue to send logs back to main process
+        log_queue: Queue to send logs back to main process (optional)
+        log_file_path: File path to append logs for the parent process to tail (optional)
     
     Returns:
         Dictionary with glossary results or error info
@@ -32,9 +33,20 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
     captured_logs = []
     
     class LogCapture:
-        def __init__(self, queue=None):
+        def __init__(self, queue=None, log_file_path=None):
             self.queue = queue
+            self.log_file_path = log_file_path
             self.buffer = ""
+            
+        def _append_file(self, line: str) -> None:
+            if not self.log_file_path:
+                return
+            try:
+                # Best-effort append; keep it simple and resilient
+                with open(self.log_file_path, "a", encoding="utf-8", errors="ignore") as f:
+                    f.write(str(line) + "\n")
+            except Exception:
+                pass
             
         def write(self, text):
             if text:
@@ -44,6 +56,8 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
                     line, self.buffer = self.buffer.split('\n', 1)
                     if line:
                         captured_logs.append(line)
+                        # Mirror to file for parent-side tailing
+                        self._append_file(line)
                         if self.queue:
                             try:
                                 self.queue.put(line)
@@ -53,6 +67,7 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         def flush(self):
             if self.buffer:
                 captured_logs.append(self.buffer)
+                self._append_file(self.buffer)
                 if self.queue:
                     try:
                         self.queue.put(self.buffer)
@@ -62,11 +77,17 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
     
     try:
         # Redirect BOTH stdout and stderr to capture ALL output
-        log_capture = LogCapture(log_queue)
+        log_capture = LogCapture(log_queue, log_file_path=log_file_path)
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         sys.stdout = log_capture
         sys.stderr = log_capture
+        
+        # Emit a boot marker early so the parent knows the worker started
+        try:
+            log_capture._append_file(f"[glossary-worker] started pid={os.getpid()}")
+        except Exception:
+            pass
         
         # ALSO capture logging module output
         import logging

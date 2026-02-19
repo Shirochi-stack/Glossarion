@@ -9070,10 +9070,16 @@ def main(log_callback=None, stop_callback=None):
                         if var in os.environ:
                             env_vars[var] = os.environ[var]
                     
-                    # NOTE: Do not use multiprocessing.Manager() here.
-                    # The Manager spins up its own spawn worker process and proxy calls (empty/get)
-                    # can hang during force-stop. Auto-glossary still works without real-time log streaming.
+                    # NOTE: Avoid multiprocessing.Manager() here.
+                    # Instead, have the subprocess append logs to a file and tail it from the parent.
                     log_queue = None
+                    glossary_log_fp = os.path.join(out, "glossary_subprocess.log")
+                    try:
+                        # Truncate any previous log
+                        with open(glossary_log_fp, "w", encoding="utf-8") as _f:
+                            _f.write("")
+                    except Exception:
+                        pass
                     
                     # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
                     print("📑 Starting glossary generation in separate process...")
@@ -9085,26 +9091,36 @@ def main(log_callback=None, stop_callback=None):
                             chapters,
                             instructions,
                             env_vars,
-                            log_queue  # Pass the queue for real-time logs
+                            log_queue,  # Queue disabled (None)
+                            glossary_log_fp  # log_file_path for parent tailing
                         )
                         
                         # Poll for completion and stream logs in real-time
                         poll_count = 0
                         graceful_stop_notice_shown = False
+                        # Tail the subprocess log file for visibility
+                        _log_pos = 0
+                        
                         while not future.done():
                             poll_count += 1
                             
-                            # Check for logs from subprocess and print them immediately (if enabled)
-                            if log_queue is not None:
-                                try:
-                                    while not log_queue.empty():
-                                        log_line = log_queue.get_nowait()
-                                        print(log_line)  # Print to GUI
-                                except Exception:
-                                    pass
+                            # Tail subprocess log file (best-effort)
+                            try:
+                                if glossary_log_fp and os.path.exists(glossary_log_fp):
+                                    with open(glossary_log_fp, "r", encoding="utf-8", errors="ignore") as _lf:
+                                        _lf.seek(_log_pos)
+                                        new = _lf.read()
+                                        _log_pos = _lf.tell()
+                                    if new:
+                                        # Print as-is (already line-delimited)
+                                        for _ln in new.splitlines():
+                                            if _ln.strip():
+                                                print(_ln)
+                            except Exception:
+                                pass
                             
                             # Super short sleep to yield to GUI
-                            time.sleep(0.001)
+                            time.sleep(0.01)
                             
                             # Check for stop every 100 polls
                             if poll_count % 100 == 0:
@@ -9258,14 +9274,19 @@ def main(log_callback=None, stop_callback=None):
                                         pass
                                     return
                         
-                        # Get any remaining logs from queue
-                        if log_queue is not None:
-                            try:
-                                while not log_queue.empty():
-                                    log_line = log_queue.get_nowait()
-                                    print(log_line)
-                            except Exception:
-                                pass
+                        # Get any remaining logs from subprocess log file
+                        try:
+                            if glossary_log_fp and os.path.exists(glossary_log_fp):
+                                with open(glossary_log_fp, "r", encoding="utf-8", errors="ignore") as _lf:
+                                    _lf.seek(_log_pos)
+                                    new = _lf.read()
+                                    _log_pos = _lf.tell()
+                                if new:
+                                    for _ln in new.splitlines():
+                                        if _ln.strip():
+                                            print(_ln)
+                        except Exception:
+                            pass
                         
                         # Get result
                         if future.done():
