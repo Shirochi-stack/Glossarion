@@ -569,6 +569,32 @@ class GlossaryManagerMixin:
                     except ValueError:
                         pass
                 
+                # Update glossary anti-duplicate parameters
+                if hasattr(self, 'glossary_enable_anti_duplicate_var'):
+                    self.config['glossary_enable_anti_duplicate'] = bool(self.glossary_enable_anti_duplicate_var)
+                if hasattr(self, 'glossary_top_p_var'):
+                    self.config['glossary_top_p'] = float(self.glossary_top_p_var)
+                if hasattr(self, 'glossary_top_k_var'):
+                    self.config['glossary_top_k'] = int(self.glossary_top_k_var)
+                if hasattr(self, 'glossary_frequency_penalty_var'):
+                    self.config['glossary_frequency_penalty'] = float(self.glossary_frequency_penalty_var)
+                if hasattr(self, 'glossary_presence_penalty_var'):
+                    self.config['glossary_presence_penalty'] = float(self.glossary_presence_penalty_var)
+                if hasattr(self, 'glossary_repetition_penalty_var'):
+                    self.config['glossary_repetition_penalty'] = float(self.glossary_repetition_penalty_var)
+                if hasattr(self, 'glossary_candidate_count_var'):
+                    self.config['glossary_candidate_count'] = int(self.glossary_candidate_count_var)
+                if hasattr(self, 'glossary_custom_stop_sequences_var'):
+                    self.config['glossary_custom_stop_sequences'] = str(self.glossary_custom_stop_sequences_var)
+                if hasattr(self, 'glossary_logit_bias_enabled_var'):
+                    self.config['glossary_logit_bias_enabled'] = bool(self.glossary_logit_bias_enabled_var)
+                if hasattr(self, 'glossary_logit_bias_strength_var'):
+                    self.config['glossary_logit_bias_strength'] = float(self.glossary_logit_bias_strength_var)
+                if hasattr(self, 'glossary_bias_common_words_var'):
+                    self.config['glossary_bias_common_words'] = bool(self.glossary_bias_common_words_var)
+                if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
+                    self.config['glossary_bias_repetitive_phrases'] = bool(self.glossary_bias_repetitive_phrases_var)
+                
                 # Update target language from combo box (check both auto and manual)
                 if hasattr(self, 'glossary_target_language_combo'):
                     self.config['glossary_target_language'] = self.glossary_target_language_combo.currentText()
@@ -819,24 +845,6 @@ class GlossaryManagerMixin:
         # add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
         type_control_layout.addWidget(add_type_button)
         
-        # Shortcut button: Anti Duplicate Parameters (glossary-specific)
-        anti_dup_btn = QPushButton("Anti Duplicate Parameters")
-        anti_dup_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2b6cb0;
-                color: white;
-                padding: 5px 10px;
-                border: 1px solid #1e4e8c;
-                border-radius: 4px;
-                font-size: 9pt;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #255f9a; }
-            QPushButton:pressed { background-color: #1f5286; }
-        """)
-        anti_dup_btn.setToolTip("Configure anti-duplicate parameters for glossary generation only.")
-        anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
-        manual_layout.addWidget(anti_dup_btn)
         type_control_layout.addStretch()
         
         # Initialize checkboxes
@@ -1609,6 +1617,25 @@ CRITICAL EXTRACTION RULES:
             "Merge Count:", self.glossary_request_merge_count_entry,
             tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
         ), 3, 1)
+        
+        # Shortcut button: Anti Duplicate Parameters (glossary-specific)
+        anti_dup_btn = QPushButton("Anti Duplicate Parameters")
+        anti_dup_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b6cb0;
+                color: white;
+                padding: 5px 10px;
+                border: 1px solid #1e4e8c;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #255f9a; }
+            QPushButton:pressed { background-color: #1f5286; }
+        """)
+        anti_dup_btn.setToolTip("Configure anti-duplicate parameters for glossary generation only.")
+        anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
+        manual_layout.addWidget(anti_dup_btn)
 
     def update_glossary_prompts(self):
         """Update glossary prompts from text widgets if they exist"""
@@ -2622,6 +2649,16 @@ CRITICAL EXTRACTION RULES:
     def _open_glossary_anti_duplicate_dialog(self, parent):
         """Open glossary-specific anti-duplicate parameters dialog."""
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QLabel, QWidget
+        from PySide6.QtCore import Qt
+        
+        if hasattr(self, 'glossary_anti_duplicate_dialog') and self.glossary_anti_duplicate_dialog:
+            try:
+                self.glossary_anti_duplicate_dialog.showNormal()
+                self.glossary_anti_duplicate_dialog.raise_()
+                self.glossary_anti_duplicate_dialog.activateWindow()
+                return
+            except Exception:
+                pass
         
         dialog = QDialog(parent)
         dialog.setWindowTitle("Glossary Anti-Duplicate Parameters")
@@ -2630,6 +2667,7 @@ CRITICAL EXTRACTION RULES:
         width = int(screen.width() * 0.36)
         height = int(screen.height() * 0.50)
         dialog.setMinimumSize(width, height)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
         
         main_layout = QVBoxLayout(dialog)
         main_layout.setContentsMargins(12, 12, 12, 12)
@@ -2648,11 +2686,21 @@ CRITICAL EXTRACTION RULES:
         controls_layout = QHBoxLayout(controls)
         controls_layout.addStretch()
         close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.accept)
+        close_btn.clicked.connect(dialog.showMinimized)
         controls_layout.addWidget(close_btn)
         main_layout.addWidget(controls)
         
-        dialog.exec()
+        # Store and override close behavior to minimize instead of destroying
+        self.glossary_anti_duplicate_dialog = dialog
+        def _minimize_on_close(event):
+            try:
+                dialog.showMinimized()
+                event.ignore()
+            except Exception:
+                pass
+        dialog.closeEvent = _minimize_on_close
+        
+        dialog.show()
 
     def _create_glossary_anti_duplicate_section(self, parent):
         """Create glossary-specific anti-duplicate parameter controls with tabs (PySide6)."""
