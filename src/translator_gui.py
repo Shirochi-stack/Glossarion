@@ -10564,14 +10564,56 @@ Important rules:
                 
                 if processes_to_terminate:
                     self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
+                    # Diagnostic: log what we're about to terminate (helps debug "stuck terminating")
                     for proc in processes_to_terminate:
                         try:
+                            pid = getattr(proc, 'pid', None)
+                            try:
+                                name = proc.name()
+                            except Exception:
+                                name = "<unknown>"
+                            try:
+                                cmd = proc.cmdline()
+                                cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                            except Exception:
+                                cmd_s = "<cmdline unavailable>"
+                            # Keep log short to avoid UI spam
+                            if isinstance(cmd_s, str) and len(cmd_s) > 300:
+                                cmd_s = cmd_s[:300] + "…"
+                            self.append_log(f"   • pid={pid} name={name} cmd={cmd_s}")
+                        except Exception:
+                            pass
+
+                    # Kill spawn_main workers immediately; terminate others normally.
+                    remaining = []
+                    for proc in processes_to_terminate:
+                        try:
+                            cmd_s = ""
+                            try:
+                                cmd = proc.cmdline()
+                                cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                            except Exception:
+                                cmd_s = ""
+
+                            is_spawn_worker = ("multiprocessing.spawn" in cmd_s) or ("spawn_main" in cmd_s) or ("--multiprocessing-fork" in cmd_s)
+                            if is_spawn_worker:
+                                try:
+                                    proc.kill()
+                                    self.append_log(f"   • hard-killed spawn worker pid={proc.pid}")
+                                    continue
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    continue
+
                             proc.terminate()
+                            remaining.append(proc)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-                    
-                    # Wait for processes to terminate, then force kill if needed
-                    gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+
+                    # Wait briefly for remaining processes to terminate, then force kill if needed
+                    try:
+                        gone, alive = psutil.wait_procs(remaining, timeout=1)
+                    except Exception:
+                        gone, alive = ([], remaining)
                     for proc in alive:
                         try:
                             proc.kill()

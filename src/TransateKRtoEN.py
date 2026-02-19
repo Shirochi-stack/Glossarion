@@ -9070,9 +9070,10 @@ def main(log_callback=None, stop_callback=None):
                         if var in os.environ:
                             env_vars[var] = os.environ[var]
                     
-                    # Create a Queue for real-time log streaming
-                    manager = multiprocessing.Manager()
-                    log_queue = manager.Queue()
+                    # NOTE: Do not use multiprocessing.Manager() here.
+                    # The Manager spins up its own spawn worker process and proxy calls (empty/get)
+                    # can hang during force-stop. Auto-glossary still works without real-time log streaming.
+                    log_queue = None
                     
                     # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
                     print("📑 Starting glossary generation in separate process...")
@@ -9093,13 +9094,14 @@ def main(log_callback=None, stop_callback=None):
                         while not future.done():
                             poll_count += 1
                             
-                            # Check for logs from subprocess and print them immediately
-                            try:
-                                while not log_queue.empty():
-                                    log_line = log_queue.get_nowait()
-                                    print(log_line)  # Print to GUI
-                            except:
-                                pass
+                            # Check for logs from subprocess and print them immediately (if enabled)
+                            if log_queue is not None:
+                                try:
+                                    while not log_queue.empty():
+                                        log_line = log_queue.get_nowait()
+                                        print(log_line)  # Print to GUI
+                                except Exception:
+                                    pass
                             
                             # Super short sleep to yield to GUI
                             time.sleep(0.001)
@@ -9257,12 +9259,13 @@ def main(log_callback=None, stop_callback=None):
                                     return
                         
                         # Get any remaining logs from queue
-                        try:
-                            while not log_queue.empty():
-                                log_line = log_queue.get_nowait()
-                                print(log_line)
-                        except:
-                            pass
+                        if log_queue is not None:
+                            try:
+                                while not log_queue.empty():
+                                    log_line = log_queue.get_nowait()
+                                    print(log_line)
+                            except Exception:
+                                pass
                         
                         # Get result
                         if future.done():
