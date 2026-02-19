@@ -9073,9 +9073,22 @@ def main(log_callback=None, stop_callback=None):
                     # NOTE: Avoid multiprocessing.Manager() here.
                     # Instead, have the subprocess append logs to a file and tail it from the parent.
                     log_queue = None
-                    glossary_log_fp = os.path.join(out, "glossary_subprocess.log")
+                    # Write subprocess logs to a central logs folder (not the output book folder)
                     try:
-                        # Truncate any previous log
+                        _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                    except Exception:
+                        _project_root = os.path.abspath(".")
+                    logs_dir = os.path.join(_project_root, "logs")
+                    try:
+                        os.makedirs(logs_dir, exist_ok=True)
+                    except Exception:
+                        pass
+                    glossary_log_fp = os.path.join(
+                        logs_dir,
+                        f"glossary_subprocess_{int(time.time() * 1000)}_{os.getpid()}.log"
+                    )
+                    try:
+                        # Ensure file exists (fresh per run)
                         with open(glossary_log_fp, "w", encoding="utf-8") as _f:
                             _f.write("")
                     except Exception:
