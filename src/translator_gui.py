@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.5.7"
+        __version__ = "7.5.8"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.5.7')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.5.8')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2647,7 +2647,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.5.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.5.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -13057,18 +13057,18 @@ Important rules:
                 ('bias_repetitive_phrases', ['bias_repetitive_phrases_var'], False, bool),
                 
                 # Glossary anti-duplicate parameters (separate from translation)
-                ('glossary_enable_anti_duplicate', ['glossary_enable_anti_duplicate_var'], False, bool),
-                ('glossary_top_p', ['glossary_top_p_var'], 1.0, float),
-                ('glossary_top_k', ['glossary_top_k_var'], 0, int),
-                ('glossary_frequency_penalty', ['glossary_frequency_penalty_var'], 0.0, float),
-                ('glossary_presence_penalty', ['glossary_presence_penalty_var'], 0.0, float),
-                ('glossary_repetition_penalty', ['glossary_repetition_penalty_var'], 1.0, float),
-                ('glossary_candidate_count', ['glossary_candidate_count_var'], 1, int),
-                ('glossary_custom_stop_sequences', ['glossary_custom_stop_sequences_var'], '', str),
-                ('glossary_logit_bias_enabled', ['glossary_logit_bias_enabled_var'], False, bool),
-                ('glossary_logit_bias_strength', ['glossary_logit_bias_strength_var'], -0.5, float),
-                ('glossary_bias_common_words', ['glossary_bias_common_words_var'], False, bool),
-                ('glossary_bias_repetitive_phrases', ['glossary_bias_repetitive_phrases_var'], False, bool),
+                ('glossary_enable_anti_duplicate', ['glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')], False, bool),
+                ('glossary_top_p', ['glossary_top_p_var', ('config', 'glossary_top_p')], 1.0, float),
+                ('glossary_top_k', ['glossary_top_k_var', ('config', 'glossary_top_k')], 0, int),
+                ('glossary_frequency_penalty', ['glossary_frequency_penalty_var', ('config', 'glossary_frequency_penalty')], 0.0, float),
+                ('glossary_presence_penalty', ['glossary_presence_penalty_var', ('config', 'glossary_presence_penalty')], 0.0, float),
+                ('glossary_repetition_penalty', ['glossary_repetition_penalty_var', ('config', 'glossary_repetition_penalty')], 1.0, float),
+                ('glossary_candidate_count', ['glossary_candidate_count_var', ('config', 'glossary_candidate_count')], 1, int),
+                ('glossary_custom_stop_sequences', ['glossary_custom_stop_sequences_var', ('config', 'glossary_custom_stop_sequences')], '', str),
+                ('glossary_logit_bias_enabled', ['glossary_logit_bias_enabled_var', ('config', 'glossary_logit_bias_enabled')], False, bool),
+                ('glossary_logit_bias_strength', ['glossary_logit_bias_strength_var', ('config', 'glossary_logit_bias_strength')], -0.5, float),
+                ('glossary_bias_common_words', ['glossary_bias_common_words_var', ('config', 'glossary_bias_common_words')], False, bool),
+                ('glossary_bias_repetitive_phrases', ['glossary_bias_repetitive_phrases_var', ('config', 'glossary_bias_repetitive_phrases')], False, bool),
 
                 # OpenRouter
                 ('openrouter_use_http_only', ['openrouter_http_only_var'], False, bool),
@@ -14142,7 +14142,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.5.7...")
+    print("🚀 Starting Glossarion v7.5.8...")
     
     # Initialize splash screen
     splash_manager = None

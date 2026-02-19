@@ -2680,13 +2680,15 @@ CRITICAL EXTRACTION RULES:
         # Anti-duplicate section (same layout as Other Settings)
         section_box = self._create_glossary_anti_duplicate_section(dialog)
         main_layout.addWidget(section_box)
+        # Ensure enabled/disabled state matches toggle
+        self._toggle_glossary_anti_duplicate_controls()
         
         # Close button
         controls = QWidget()
         controls_layout = QHBoxLayout(controls)
         controls_layout.addStretch()
         close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.showMinimized)
+        close_btn.clicked.connect(lambda: self._persist_glossary_anti_duplicate_settings(minimize_dialog=dialog))
         controls_layout.addWidget(close_btn)
         main_layout.addWidget(controls)
         
@@ -2694,13 +2696,49 @@ CRITICAL EXTRACTION RULES:
         self.glossary_anti_duplicate_dialog = dialog
         def _minimize_on_close(event):
             try:
-                dialog.showMinimized()
+                self._persist_glossary_anti_duplicate_settings(minimize_dialog=dialog)
                 event.ignore()
             except Exception:
                 pass
         dialog.closeEvent = _minimize_on_close
         
         dialog.show()
+
+    def _persist_glossary_anti_duplicate_settings(self, minimize_dialog=None):
+        """Persist glossary anti-duplicate settings to config and optionally minimize dialog."""
+        try:
+            if hasattr(self, 'glossary_enable_anti_duplicate_var'):
+                self.config['glossary_enable_anti_duplicate'] = bool(self.glossary_enable_anti_duplicate_var)
+            if hasattr(self, 'glossary_top_p_var'):
+                self.config['glossary_top_p'] = float(self.glossary_top_p_var)
+            if hasattr(self, 'glossary_top_k_var'):
+                self.config['glossary_top_k'] = int(self.glossary_top_k_var)
+            if hasattr(self, 'glossary_frequency_penalty_var'):
+                self.config['glossary_frequency_penalty'] = float(self.glossary_frequency_penalty_var)
+            if hasattr(self, 'glossary_presence_penalty_var'):
+                self.config['glossary_presence_penalty'] = float(self.glossary_presence_penalty_var)
+            if hasattr(self, 'glossary_repetition_penalty_var'):
+                self.config['glossary_repetition_penalty'] = float(self.glossary_repetition_penalty_var)
+            if hasattr(self, 'glossary_candidate_count_var'):
+                self.config['glossary_candidate_count'] = int(self.glossary_candidate_count_var)
+            if hasattr(self, 'glossary_custom_stop_sequences_var'):
+                self.config['glossary_custom_stop_sequences'] = str(self.glossary_custom_stop_sequences_var)
+            if hasattr(self, 'glossary_logit_bias_enabled_var'):
+                self.config['glossary_logit_bias_enabled'] = bool(self.glossary_logit_bias_enabled_var)
+            if hasattr(self, 'glossary_logit_bias_strength_var'):
+                self.config['glossary_logit_bias_strength'] = float(self.glossary_logit_bias_strength_var)
+            if hasattr(self, 'glossary_bias_common_words_var'):
+                self.config['glossary_bias_common_words'] = bool(self.glossary_bias_common_words_var)
+            if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
+                self.config['glossary_bias_repetitive_phrases'] = bool(self.glossary_bias_repetitive_phrases_var)
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        if minimize_dialog is not None:
+            try:
+                minimize_dialog.showMinimized()
+            except Exception:
+                pass
 
     def _create_glossary_anti_duplicate_section(self, parent):
         """Create glossary-specific anti-duplicate parameter controls with tabs (PySide6)."""
@@ -2721,6 +2759,7 @@ CRITICAL EXTRACTION RULES:
         # Enable/Disable toggle
         self.glossary_enable_anti_duplicate_var = self.config.get('glossary_enable_anti_duplicate', False)
         enable_cb = self._create_styled_checkbox("Enable Anti-Duplicate Parameters")
+        self.glossary_enable_anti_duplicate_checkbox = enable_cb
         try:
             enable_cb.setChecked(bool(self.glossary_enable_anti_duplicate_var))
         except Exception:
@@ -3034,7 +3073,10 @@ CRITICAL EXTRACTION RULES:
             if not hasattr(self, 'glossary_anti_duplicate_content'):
                 return
             
-            enabled = bool(self.glossary_enable_anti_duplicate_var)
+            if hasattr(self, 'glossary_enable_anti_duplicate_checkbox'):
+                enabled = bool(self.glossary_enable_anti_duplicate_checkbox.isChecked())
+            else:
+                enabled = bool(self.glossary_enable_anti_duplicate_var)
             self.glossary_anti_duplicate_content.setVisible(True)
             self.glossary_anti_duplicate_content.setEnabled(enabled)
             
@@ -3055,8 +3097,14 @@ CRITICAL EXTRACTION RULES:
         """Reset all glossary anti-duplicate parameters to their default values."""
         from PySide6.QtWidgets import QMessageBox
         
+        parent = None
+        try:
+            parent = getattr(self, 'glossary_anti_duplicate_dialog', None)
+        except Exception:
+            parent = None
+        
         reply = QMessageBox.question(
-            None,
+            parent,
             "Reset Anti-Duplicate Parameters",
             "Are you sure you want to reset all anti-duplicate parameters to their default values?",
             QMessageBox.Yes | QMessageBox.No,
@@ -3092,7 +3140,7 @@ CRITICAL EXTRACTION RULES:
         
         self._toggle_glossary_anti_duplicate_controls()
         
-        QMessageBox.information(None, "Reset Complete", "All anti-duplicate parameters have been reset to their default values.")
+        QMessageBox.information(parent, "Reset Complete", "All anti-duplicate parameters have been reset to their default values.")
         
         if hasattr(self, 'append_log'):
             self.append_log("🔄 Glossary anti-duplicate parameters reset to defaults")

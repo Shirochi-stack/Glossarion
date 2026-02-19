@@ -3320,6 +3320,15 @@ def main(log_callback=None, stop_callback=None):
         print("📑 Honorifics Filtering: ❌ DISABLED")
     else:
         print("📑 Honorifics Filtering: ✅ ENABLED")
+
+    # Log glossary anti-duplicate parameters usage (matches GlossaryManager)
+    if os.getenv("GLOSSARY_ENABLE_ANTI_DUPLICATE", "0") == "1":
+        ad_top_p = os.getenv("GLOSSARY_TOP_P", "1.0")
+        ad_top_k = os.getenv("GLOSSARY_TOP_K", "0")
+        ad_freq = os.getenv("GLOSSARY_FREQUENCY_PENALTY", "0.0")
+        ad_pres = os.getenv("GLOSSARY_PRESENCE_PENALTY", "0.0")
+        ad_rep = os.getenv("GLOSSARY_REPETITION_PENALTY", "1.0")
+        print(f"🎯 Anti-duplicate enabled for glossary (top_p={ad_top_p}, top_k={ad_top_k}, freq_penalty={ad_freq}, presence_penalty={ad_pres}, repetition_penalty={ad_rep})")
     
     # Log custom fields
     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')

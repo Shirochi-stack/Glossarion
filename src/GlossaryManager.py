@@ -4270,6 +4270,15 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             
             from unified_api_client import UnifiedClient, UnifiedClientError
             client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
+            
+            # Log glossary anti-duplicate parameters usage
+            if os.getenv("GLOSSARY_ENABLE_ANTI_DUPLICATE", "0") == "1":
+                ad_top_p = os.getenv("GLOSSARY_TOP_P", "1.0")
+                ad_top_k = os.getenv("GLOSSARY_TOP_K", "0")
+                ad_freq = os.getenv("GLOSSARY_FREQUENCY_PENALTY", "0.0")
+                ad_pres = os.getenv("GLOSSARY_PRESENCE_PENALTY", "0.0")
+                ad_rep = os.getenv("GLOSSARY_REPETITION_PENALTY", "1.0")
+                print(f"🎯 Anti-duplicate enabled for glossary (top_p={ad_top_p}, top_k={ad_top_k}, freq_penalty={ad_freq}, presence_penalty={ad_pres}, repetition_penalty={ad_rep})")
 
             # Progress-bar labeling: when running chunked auto-glossary, give each in-flight call a unique name.
             # This drives the GUI watchdog tooltip "Active calls" list.
