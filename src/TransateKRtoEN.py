@@ -9100,6 +9100,9 @@ def main(log_callback=None, stop_callback=None):
                         graceful_stop_notice_shown = False
                         # Tail the subprocess log file for visibility
                         _log_pos = 0
+                        _seen_worker_output = False
+                        _submit_ts = time.time()
+                        _last_wait_log_ts = 0.0
                         
                         while not future.done():
                             poll_count += 1
@@ -9112,12 +9115,31 @@ def main(log_callback=None, stop_callback=None):
                                         new = _lf.read()
                                         _log_pos = _lf.tell()
                                     if new:
+                                        _seen_worker_output = True
                                         # Print as-is (already line-delimited)
                                         for _ln in new.splitlines():
                                             if _ln.strip():
                                                 print(_ln)
                             except Exception:
                                 pass
+
+                            # If the subprocess hasn't produced any output yet, show periodic wait logs.
+                            # This helps during Windows spawn/import/pickling startup delays.
+                            if not _seen_worker_output:
+                                now = time.time()
+                                if (now - _last_wait_log_ts) >= 5.0:
+                                    _last_wait_log_ts = now
+                                    try:
+                                        elapsed = int(now - _submit_ts)
+                                    except Exception:
+                                        elapsed = 0
+                                    # Best-effort status: future.running() may become True once the worker begins executing.
+                                    try:
+                                        running = future.running()
+                                    except Exception:
+                                        running = False
+                                    state = "booting" if running else "spawning"
+                                    print(f"⏳ Waiting for glossary subprocess to start ({state})… {elapsed}s")
                             
                             # Super short sleep to yield to GUI
                             time.sleep(0.01)
@@ -9158,13 +9180,33 @@ def main(log_callback=None, stop_callback=None):
                                         except Exception:
                                             return False
 
+                                    def _glossary_any_in_flight() -> bool:
+                                        """Detect in-flight API calls from the glossary subprocess via watchdog files."""
+                                        try:
+                                            wd_dir = os.environ.get('GLOSSARION_WATCHDOG_DIR')
+                                            if not wd_dir or not os.path.isdir(wd_dir):
+                                                return False
+                                            import glob as _glob
+                                            for fp in _glob.glob(os.path.join(wd_dir, 'api_watchdog_*.json')):
+                                                try:
+                                                    with open(fp, 'r', encoding='utf-8') as f:
+                                                        st = json.load(f)
+                                                    if isinstance(st, dict) and int(st.get('in_flight', 0) or 0) > 0:
+                                                        return True
+                                                except Exception:
+                                                    continue
+                                        except Exception:
+                                            return False
+                                        return False
+
                                     should_wait = False
                                     if graceful_stop_active:
                                         if wait_for_chunks:
                                             should_wait = True
                                         else:
-                                            # WAIT_FOR_CHUNKS disabled: only wait if all chunks were already submitted.
-                                            should_wait = _glossary_all_chunks_submitted()
+                                            # Graceful stop semantics: wait if ANY in-flight API call exists,
+                                            # otherwise only wait if all chunks were already submitted.
+                                            should_wait = _glossary_any_in_flight() or _glossary_all_chunks_submitted()
 
                                     if should_wait:
                                         if not graceful_stop_notice_shown:
