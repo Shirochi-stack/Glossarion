@@ -9330,6 +9330,14 @@ def main(log_callback=None, stop_callback=None):
                         except Exception:
                             pass
                         
+                        # If Stop was requested at any point, treat as CANCELLED and do not continue.
+                        try:
+                            if check_stop():
+                                print("📑 ❌ Automatic glossary generation CANCELLED")
+                                return
+                        except Exception:
+                            pass
+
                         # Get result
                         if future.done():
                             try:
@@ -9343,8 +9351,9 @@ def main(log_callback=None, stop_callback=None):
                                             print(f"📑 Error details:\n{result.get('traceback')}")
                             except Exception as e:
                                 print(f"📑 ❌ Error retrieving glossary result: {e}")
-                    
-                    print("✅ Automatic glossary generation COMPLETED")
+
+                        # Only mark completed when not stopping.
+                        print("✅ Automatic glossary generation COMPLETED")
                     
                     # If the user requested graceful stop (wait_for_chunks), stop here after glossary is done.
                     try:
