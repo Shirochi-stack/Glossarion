@@ -8512,6 +8512,14 @@ def main(log_callback=None, stop_callback=None):
 
     print(f"[DEBUG] Initializing client with model = {config.MODEL}")
     client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
+    # Log translation anti-duplicate parameters usage
+    if os.getenv("ENABLE_ANTI_DUPLICATE", "0") == "1":
+        ad_top_p = os.getenv("TOP_P", "1.0")
+        ad_top_k = os.getenv("TOP_K", "0")
+        ad_freq = os.getenv("FREQUENCY_PENALTY", "0.0")
+        ad_pres = os.getenv("PRESENCE_PENALTY", "0.0")
+        ad_rep = os.getenv("REPETITION_PENALTY", "1.0")
+        print(f"🎯 Anti-duplicate enabled for translation (top_p={ad_top_p}, top_k={ad_top_k}, freq_penalty={ad_freq}, presence_penalty={ad_pres}, repetition_penalty={ad_rep})")
     if hasattr(client, 'use_multi_keys') and client.use_multi_keys:
         stats = client.get_stats()
         print(f"🔑 Multi-key mode active: {stats.get('total_keys', 0)} keys loaded")
