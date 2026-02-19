@@ -3644,10 +3644,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 
             with executor_cls(max_workers=extraction_workers) as executor:
                 # Submit all batches
-                futures = [executor.submit(_score_sentence_batch, 
-                                         (batch_data, term_list, honorific_pattern_str, 
-                                          gender_pronouns, include_gender_context)) 
-                          for batch_data in batches]
+                futures = [executor.submit(
+                    _score_sentence_batch,
+                    (batch_data, term_list, honorific_pattern_str, gender_pronouns, include_gender_context)
+                ) for batch_data in batches]
                 
                 # Collect results with progress logging
                 completed_batches = 0
@@ -3656,44 +3656,67 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 last_log_time = scoring_start_time
                 total_batches = len(batches)
                 total_to_score = len(filtered_sentences)
-                
-                for future in as_completed(futures):
-                    try:
-                        batch_scores, batch_term_map = future.result()
-                        sentence_scores.update(batch_scores)
-                        # Merge term mappings
-                        for term, indices in batch_term_map.items():
-                            if term not in term_to_sentences:
-                                term_to_sentences[term] = []
-                            term_to_sentences[term].extend(indices)
-                            
-                        # Update progress stats
-                        completed_batches += 1
-                        # Estimate sentences processed in this batch (approximate if batches vary)
-                        processed_count += len(batch_scores) 
-                        
-                        current_time = time.time()
-                        elapsed = current_time - scoring_start_time
-                        
-                        # Log periodically (every ~5 seconds or if it's the last batch)
-                        if (current_time - last_log_time >= 5.0) or (completed_batches == total_batches):
-                            # Ensure processed_count doesn't exceed total_to_score for display
-                            display_count = min(processed_count, total_to_score)
-                            progress_pct = min(99.9, (display_count / total_to_score) * 100)
-                            
-                            rate = display_count / elapsed if elapsed > 0 else 0
-                            
-                            if completed_batches < total_batches:
-                                print(f"📑 Scoring... {display_count:,}/{total_to_score:,} sentences ({progress_pct:.1f}%) | Batch {completed_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
-                            else:
-                                print(f"📑 Scoring... {total_to_score:,}/{total_to_score:,} sentences (100.0%) | Batch {total_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
-                                print(f"📑 Scoring... finalizing last batches | {elapsed:.0f}s elapsed")
-                                
-                            last_log_time = current_time
-                            
-                    except Exception as e:
-                        print(f"⚠️ Scoring batch failed: {e}")
-                
+
+                # Emit wait logs even before the first batch completes
+                try:
+                    from concurrent.futures import wait as _wait, FIRST_COMPLETED as _FIRST_COMPLETED
+                except Exception:
+                    _wait = None
+                    _FIRST_COMPLETED = None
+
+                pending = set(futures)
+                while pending:
+                    done = set()
+                    if _wait is not None and _FIRST_COMPLETED is not None:
+                        done, pending = _wait(pending, timeout=5.0, return_when=_FIRST_COMPLETED)
+                        done = set(done or [])
+                    else:
+                        # Fallback: block until first completion (no wait logs)
+                        for future in as_completed(list(pending)):
+                            done.add(future)
+                            pending.discard(future)
+                            break
+
+                    if not done:
+                        # No batch completed within timeout
+                        elapsed = time.time() - scoring_start_time
+                        print(f"📑 Scoring... waiting for worker batches | Batch {completed_batches}/{total_batches} | {elapsed:.0f}s elapsed")
+                        continue
+
+                    for future in done:
+                        try:
+                            batch_scores, batch_term_map = future.result()
+                            sentence_scores.update(batch_scores)
+                            # Merge term mappings
+                            for term, indices in batch_term_map.items():
+                                if term not in term_to_sentences:
+                                    term_to_sentences[term] = []
+                                term_to_sentences[term].extend(indices)
+
+                            # Update progress stats
+                            completed_batches += 1
+                            processed_count += len(batch_scores)
+
+                            current_time = time.time()
+                            elapsed = current_time - scoring_start_time
+
+                            # Log periodically (every ~5 seconds or if it's the last batch)
+                            if (current_time - last_log_time >= 5.0) or (completed_batches == total_batches):
+                                display_count = min(processed_count, total_to_score)
+                                progress_pct = min(99.9, (display_count / total_to_score) * 100)
+                                rate = display_count / elapsed if elapsed > 0 else 0
+
+                                if completed_batches < total_batches:
+                                    print(f"📑 Scoring... {display_count:,}/{total_to_score:,} sentences ({progress_pct:.1f}%) | Batch {completed_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
+                                else:
+                                    print(f"📑 Scoring... {total_to_score:,}/{total_to_score:,} sentences (100.0%) | Batch {total_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
+                                    print(f"📑 Scoring... finalizing last batches | {elapsed:.0f}s elapsed")
+
+                                last_log_time = current_time
+
+                        except Exception as e:
+                            print(f"⚠️ Scoring batch failed: {e}")
+
                 total_elapsed = time.time() - scoring_start_time
                 print(f"📁 All scoring batches completed in {total_elapsed:.1f}s!")
         else:
