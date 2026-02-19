@@ -3680,7 +3680,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     if not done:
                         # No batch completed within timeout
                         elapsed = time.time() - scoring_start_time
-                        print(f"📑 Scoring... waiting for worker batches | Batch {completed_batches}/{total_batches} | {elapsed:.0f}s elapsed")
+                        print(f"📑 Scoring... {elapsed:.0f}s elapsed")
                         continue
 
                     for future in done:
