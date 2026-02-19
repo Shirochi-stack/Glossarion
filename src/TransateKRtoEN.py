@@ -9115,7 +9115,8 @@ def main(log_callback=None, stop_callback=None):
                         _log_pos = 0
                         _seen_worker_output = False
                         _submit_ts = time.time()
-                        _last_wait_log_ts = 0.0
+                        # Start wait logging after 5s (avoid a noisy "0s" line)
+                        _last_wait_log_ts = _submit_ts
                         
                         while not future.done():
                             poll_count += 1

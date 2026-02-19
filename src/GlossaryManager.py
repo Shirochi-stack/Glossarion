@@ -2940,31 +2940,31 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Poll for completion with progress estimates
                 completed_batches = 0
                 batch_start_time = time.time()
-                last_estimate_time = batch_start_time
+                next_report_ts = batch_start_time + 5.0
                 
                 print(f"📁 Processing batches with {extraction_workers} parallel workers...")
                 
                 while not result_async.ready():
                     time.sleep(2)  # Check every 2 seconds
-                    elapsed = time.time() - batch_start_time
+                    now = time.time()
+                    elapsed = now - batch_start_time
                     
-                    # Show periodic updates even without exact progress
-                    if elapsed - (last_estimate_time - batch_start_time) >= 5:  # Every 5 seconds
-                        # Estimate progress based on time and worker count
-                        # With 16 workers and ~0.3s per batch, we process ~53 batches/sec total
-                        # So elapsed * workers / 0.3 gives rough estimate
-                        batches_per_second = extraction_workers / 0.3  # Rough estimate: 53 for 16 workers
-                        estimated_completed = min(int(elapsed * batches_per_second), len(all_args))
+                    # Emit logs on a fixed 5s cadence (5, 10, 15...) even if our poll loop wakes late.
+                    while now >= next_report_ts:
+                        elapsed_for_log = int(next_report_ts - batch_start_time)
                         
-                        # Cap estimate at 95% until actually complete (avoid showing 100% while still working)
+                        # Estimate progress based on time and worker count
+                        batches_per_second = extraction_workers / 0.3  # rough heuristic
+                        estimated_completed = min(int(elapsed * batches_per_second), len(all_args))
                         estimated_progress = min(95, (estimated_completed / len(all_args)) * 100)
                         estimated_sentences = min(estimated_completed * optimal_batch_size, total_sentences)
                         
-                        if estimated_progress < 95:  # Only show if not at cap
-                            print(f"📁 Processing... ~{estimated_progress:.0f}% estimated (~{estimated_sentences:,} sentences) | {elapsed:.0f}s elapsed")
+                        if estimated_progress < 95:
+                            print(f"📁 Processing... ~{estimated_progress:.0f}% estimated (~{estimated_sentences:,} sentences) | {elapsed_for_log}s elapsed")
                         else:
-                            print(f"📁 Processing... finalizing last batches | {elapsed:.0f}s elapsed")
-                        last_estimate_time = time.time()
+                            print(f"📁 Processing... finalizing last batches | {elapsed_for_log}s elapsed")
+                        
+                        next_report_ts += 5.0
                 
                 # Get all results
                 total_elapsed = time.time() - batch_start_time
