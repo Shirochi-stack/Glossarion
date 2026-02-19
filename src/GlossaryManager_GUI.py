@@ -818,6 +818,25 @@ class GlossaryManagerMixin:
         add_type_button.clicked.connect(add_custom_type)
         # add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
         type_control_layout.addWidget(add_type_button)
+        
+        # Shortcut button: Anti Duplicate Parameters (glossary-specific)
+        anti_dup_btn = QPushButton("Anti Duplicate Parameters")
+        anti_dup_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b6cb0;
+                color: white;
+                padding: 5px 10px;
+                border: 1px solid #1e4e8c;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #255f9a; }
+            QPushButton:pressed { background-color: #1f5286; }
+        """)
+        anti_dup_btn.setToolTip("Configure anti-duplicate parameters for glossary generation only.")
+        anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
+        manual_layout.addWidget(anti_dup_btn)
         type_control_layout.addStretch()
         
         # Initialize checkboxes
@@ -2407,6 +2426,25 @@ CRITICAL EXTRACTION RULES:
         reset_extraction_btn.clicked.connect(reset_extraction_settings)
         extraction_grid.addWidget(reset_extraction_btn, 7, 0, 1, 2)
         
+        # Row 8 - Anti Duplicate Parameters button (glossary-specific)
+        anti_dup_btn = QPushButton("Anti Duplicate Parameters")
+        anti_dup_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b6cb0;
+                color: white;
+                padding: 5px 10px;
+                border: 1px solid #1e4e8c;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #255f9a; }
+            QPushButton:pressed { background-color: #1f5286; }
+        """)
+        anti_dup_btn.setToolTip("Configure anti-duplicate parameters for glossary generation only.")
+        anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
+        extraction_grid.addWidget(anti_dup_btn, 7, 2, 1, 2)
+        
         # Help text
         help_widget = QWidget()
         help_layout = QVBoxLayout(help_widget)
@@ -2580,6 +2618,436 @@ CRITICAL EXTRACTION RULES:
         # Connect signals
         self.enable_auto_glossary_checkbox.stateChanged.connect(update_auto_glossary_state)
         self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
+
+    def _open_glossary_anti_duplicate_dialog(self, parent):
+        """Open glossary-specific anti-duplicate parameters dialog."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QLabel, QWidget
+        
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Glossary Anti-Duplicate Parameters")
+        # Use screen ratios for sizing (smaller than settings dialog)
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.36)
+        height = int(screen.height() * 0.50)
+        dialog.setMinimumSize(width, height)
+        
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        
+        # Title
+        title_label = QLabel("Glossary Anti-Duplicate Parameters")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        main_layout.addWidget(title_label)
+        
+        # Anti-duplicate section (same layout as Other Settings)
+        section_box = self._create_glossary_anti_duplicate_section(dialog)
+        main_layout.addWidget(section_box)
+        
+        # Close button
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        controls_layout.addWidget(close_btn)
+        main_layout.addWidget(controls)
+        
+        dialog.exec()
+
+    def _create_glossary_anti_duplicate_section(self, parent):
+        """Create glossary-specific anti-duplicate parameter controls with tabs (PySide6)."""
+        from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QLineEdit, QTabWidget, QSlider, QPushButton
+        from PySide6.QtCore import Qt
+        
+        section_box = QGroupBox("🎯 Anti-Duplicate Parameters")
+        section_v = QVBoxLayout(section_box)
+        
+        # Description
+        desc_label = QLabel("Configure parameters to reduce duplicate glossary outputs across all AI providers.")
+        desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        desc_label.setWordWrap(True)
+        desc_label.setMaximumWidth(520)
+        desc_label.setContentsMargins(0, 0, 0, 10)
+        section_v.addWidget(desc_label)
+        
+        # Enable/Disable toggle
+        self.glossary_enable_anti_duplicate_var = self.config.get('glossary_enable_anti_duplicate', False)
+        enable_cb = self._create_styled_checkbox("Enable Anti-Duplicate Parameters")
+        try:
+            enable_cb.setChecked(bool(self.glossary_enable_anti_duplicate_var))
+        except Exception:
+            pass
+        def _on_enable_anti_dup_toggle(checked):
+            try:
+                self.glossary_enable_anti_duplicate_var = bool(checked)
+                self._toggle_glossary_anti_duplicate_controls()
+            except Exception:
+                pass
+        enable_cb.toggled.connect(_on_enable_anti_dup_toggle)
+        enable_cb.setContentsMargins(0, 0, 0, 10)
+        section_v.addWidget(enable_cb)
+        
+        # Create container for all content below the main checkbox
+        content_container = QWidget()
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(4)
+        
+        # Store reference for slide animation
+        self.glossary_anti_duplicate_content = content_container
+        
+        # Create tab widget for organized parameters
+        self.glossary_anti_duplicate_notebook = QTabWidget()
+        
+        # Enhanced tab styling
+        self.glossary_anti_duplicate_notebook.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #555;
+                background-color: #2d2d2d;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 4px;
+                border-bottom-left-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QTabWidget::tab-bar {
+                left: 5px;
+            }
+            QTabBar::tab {
+                background-color: #404040;
+                color: #cccccc;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                min-width: 80px;
+                font-weight: 500;
+            }
+            QTabBar::tab:selected {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                border-bottom: 2px solid #0078d4;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #4a4a4a;
+                color: #ffffff;
+            }
+            QTabBar::tab:first {
+                margin-left: 0;
+            }
+        """)
+        
+        content_layout.addWidget(self.glossary_anti_duplicate_notebook)
+        
+        # Tab 1: Core Parameters
+        core_frame = QWidget()
+        core_v = QVBoxLayout(core_frame)
+        core_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
+        
+        # Top-P (Nucleus Sampling)
+        def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False):
+            """Helper to create a slider row with label and value display
+            var_holder: object that holds the variable (typically self)
+            var_name: string name of the attribute to set
+            """
+            row_w = QWidget()
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(0, 5, 0, 5)
+            
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(200)
+            row_h.addWidget(lbl)
+            
+            slider = QSlider(Qt.Horizontal)
+            if is_int:
+                slider.setMinimum(int(min_val))
+                slider.setMaximum(int(max_val))
+                try:
+                    current_val = getattr(var_holder, var_name, min_val)
+                    slider.setValue(int(current_val))
+                except Exception:
+                    pass
+            else:
+                # For double values, use int slider and scale
+                steps = int((max_val - min_val) / (0.01 if decimals == 2 else 0.1))
+                slider.setMinimum(0)
+                slider.setMaximum(steps)
+                try:
+                    current = float(getattr(var_holder, var_name, min_val))
+                    slider.setValue(int((current - min_val) / (max_val - min_val) * steps))
+                except Exception:
+                    pass
+            slider.setFixedWidth(200)
+            # Disable mousewheel scrolling on slider
+            slider.wheelEvent = lambda event: None
+            row_h.addWidget(slider)
+            
+            value_lbl = QLabel("")
+            value_lbl.setFixedWidth(80)
+            row_h.addWidget(value_lbl)
+            row_h.addStretch()
+            
+            def _on_slider_change(value):
+                try:
+                    if is_int:
+                        actual_value = value
+                        setattr(var_holder, var_name, actual_value)
+                        if actual_value == 0:
+                            value_lbl.setText("OFF")
+                        else:
+                            value_lbl.setText(f"{actual_value}")
+                    else:
+                        actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
+                        setattr(var_holder, var_name, actual_value)
+                        if decimals == 1:
+                            value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
+                        else:
+                            value_lbl.setText(f"{actual_value:.2f}")
+                except Exception:
+                    pass
+            
+            slider.valueChanged.connect(_on_slider_change)
+            # Trigger initial update
+            _on_slider_change(slider.value())
+            
+            parent_layout.addWidget(row_w)
+            return slider, value_lbl
+        
+        self.glossary_top_p_var = self.config.get('glossary_top_p', 1.0)
+        top_p_slider, self.glossary_top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'glossary_top_p_var', 0.1, 1.0, decimals=2)
+        
+        # Top-K (Vocabulary Limit)
+        self.glossary_top_k_var = self.config.get('glossary_top_k', 0)
+        top_k_slider, self.glossary_top_k_value_label = _create_slider_row(core_v, "Top-K (Vocabulary Limit):", self, 'glossary_top_k_var', 0, 100, is_int=True)
+        
+        # Frequency Penalty
+        self.glossary_frequency_penalty_var = self.config.get('glossary_frequency_penalty', 0.0)
+        freq_slider, self.glossary_freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'glossary_frequency_penalty_var', 0.0, 2.0, decimals=2)
+        
+        # Presence Penalty
+        self.glossary_presence_penalty_var = self.config.get('glossary_presence_penalty', 0.0)
+        pres_slider, self.glossary_pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'glossary_presence_penalty_var', 0.0, 2.0, decimals=2)
+        
+        core_v.addStretch()
+        
+        # Tab 2: Advanced Parameters
+        advanced_frame = QWidget()
+        advanced_v = QVBoxLayout(advanced_frame)
+        advanced_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(advanced_frame, "Advanced")
+        
+        # Repetition Penalty
+        self.glossary_repetition_penalty_var = self.config.get('glossary_repetition_penalty', 1.0)
+        rep_slider, self.glossary_rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'glossary_repetition_penalty_var', 1.0, 2.0, decimals=2)
+        
+        # Candidate Count (Gemini)
+        self.glossary_candidate_count_var = self.config.get('glossary_candidate_count', 1)
+        candidate_slider, self.glossary_candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self, 'glossary_candidate_count_var', 1, 4, is_int=True)
+        
+        advanced_v.addStretch()
+        
+        # Tab 3: Stop Sequences
+        stop_frame = QWidget()
+        stop_v = QVBoxLayout(stop_frame)
+        stop_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(stop_frame, "Stop Sequences")
+        
+        # Custom Stop Sequences
+        stop_row = QWidget()
+        stop_h = QHBoxLayout(stop_row)
+        stop_h.setContentsMargins(0, 5, 0, 5)
+        stop_h.addWidget(QLabel("Custom Stop Sequences:"))
+        
+        self.glossary_custom_stop_sequences_var = self.config.get('glossary_custom_stop_sequences', '')
+        stop_entry = QLineEdit()
+        stop_entry.setFixedWidth(300)
+        try:
+            stop_entry.setText(str(self.glossary_custom_stop_sequences_var))
+        except Exception:
+            pass
+        def _on_stop_seq_changed(text):
+            try:
+                self.glossary_custom_stop_sequences_var = text
+            except Exception:
+                pass
+        stop_entry.textChanged.connect(_on_stop_seq_changed)
+        stop_h.addWidget(stop_entry)
+        
+        stop_tip = QLabel("(comma-separated)")
+        stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
+        stop_h.addWidget(stop_tip)
+        stop_h.addStretch()
+        stop_v.addWidget(stop_row)
+        stop_v.addStretch()
+        
+        # Tab 4: Logit Bias (OpenAI)
+        bias_frame = QWidget()
+        bias_v = QVBoxLayout(bias_frame)
+        bias_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(bias_frame, "Logit Bias")
+        
+        # Logit Bias Enable
+        self.glossary_logit_bias_enabled_var = self.config.get('glossary_logit_bias_enabled', False)
+        bias_cb = self._create_styled_checkbox("Enable Logit Bias (OpenAI only)")
+        try:
+            bias_cb.setChecked(bool(self.glossary_logit_bias_enabled_var))
+        except Exception:
+            pass
+        def _on_bias_enable_toggle(checked):
+            try:
+                self.glossary_logit_bias_enabled_var = bool(checked)
+            except Exception:
+                pass
+        bias_cb.toggled.connect(_on_bias_enable_toggle)
+        bias_cb.setContentsMargins(0, 0, 0, 5)
+        bias_v.addWidget(bias_cb)
+        
+        # Logit Bias Strength
+        self.glossary_logit_bias_strength_var = self.config.get('glossary_logit_bias_strength', -0.5)
+        bias_slider, self.glossary_bias_strength_value_label = _create_slider_row(bias_v, "Bias Strength:", self, 'glossary_logit_bias_strength_var', -2.0, 2.0, decimals=1)
+        
+        # Preset bias targets
+        preset_title = QLabel("Preset Bias Targets:")
+        preset_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        preset_title.setContentsMargins(0, 10, 0, 5)
+        bias_v.addWidget(preset_title)
+        
+        self.glossary_bias_common_words_var = self.config.get('glossary_bias_common_words', False)
+        common_cb = self._create_styled_checkbox("Bias against common words (the, and, said)")
+        try:
+            common_cb.setChecked(bool(self.glossary_bias_common_words_var))
+        except Exception:
+            pass
+        def _on_common_toggle(checked):
+            try:
+                self.glossary_bias_common_words_var = bool(checked)
+            except Exception:
+                pass
+        common_cb.toggled.connect(_on_common_toggle)
+        bias_v.addWidget(common_cb)
+        
+        self.glossary_bias_repetitive_phrases_var = self.config.get('glossary_bias_repetitive_phrases', False)
+        phrases_cb = self._create_styled_checkbox("Bias against repetitive phrases")
+        try:
+            phrases_cb.setChecked(bool(self.glossary_bias_repetitive_phrases_var))
+        except Exception:
+            pass
+        def _on_phrases_toggle(checked):
+            try:
+                self.glossary_bias_repetitive_phrases_var = bool(checked)
+            except Exception:
+                pass
+        phrases_cb.toggled.connect(_on_phrases_toggle)
+        bias_v.addWidget(phrases_cb)
+        bias_v.addStretch()
+        
+        # Provider compatibility info
+        compat_title = QLabel("Parameter Compatibility:")
+        compat_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        compat_title.setContentsMargins(0, 15, 0, 0)
+        content_layout.addWidget(compat_title)
+        
+        compat_text = QLabel("• Core: Most providers • Advanced: DeepSeek, Mistral, Groq • Logit Bias: OpenAI only")
+        compat_text.setStyleSheet("color: gray; font-size: 8pt;")
+        compat_text.setContentsMargins(0, 5, 0, 0)
+        content_layout.addWidget(compat_text)
+        
+        # Reset button
+        reset_row = QWidget()
+        reset_h = QHBoxLayout(reset_row)
+        reset_h.setContentsMargins(0, 10, 0, 0)
+        
+        reset_btn = QPushButton("🔄 Reset to Defaults")
+        reset_btn.setFixedWidth(180)
+        reset_btn.clicked.connect(lambda: self._reset_glossary_anti_duplicate_defaults())
+        reset_h.addWidget(reset_btn)
+        
+        reset_desc = QLabel("Reset all anti-duplicate parameters to default values")
+        reset_desc.setStyleSheet("color: gray; font-size: 8pt;")
+        reset_h.addWidget(reset_desc)
+        reset_h.addStretch()
+        content_layout.addWidget(reset_row)
+        
+        # Add content container to main section
+        section_v.addWidget(content_container)
+        
+        # Store all tab frames for enable/disable
+        self.glossary_anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
+        
+        # Initialize anti-duplicate section visibility
+        self.toggle_glossary_anti_duplicate_section()
+        
+        return section_box
+
+    def toggle_glossary_anti_duplicate_section(self):
+        """Enable/disable glossary anti-duplicate content (no hide)."""
+        try:
+            if not hasattr(self, 'glossary_anti_duplicate_content'):
+                return
+            
+            enabled = bool(self.glossary_enable_anti_duplicate_var)
+            self.glossary_anti_duplicate_content.setVisible(True)
+            self.glossary_anti_duplicate_content.setEnabled(enabled)
+            
+        except Exception:
+            try:
+                if hasattr(self, 'glossary_anti_duplicate_content'):
+                    enabled = bool(self.glossary_enable_anti_duplicate_var)
+                    self.glossary_anti_duplicate_content.setVisible(True)
+                    self.glossary_anti_duplicate_content.setEnabled(enabled)
+            except Exception:
+                pass
+
+    def _toggle_glossary_anti_duplicate_controls(self):
+        """Enable/disable glossary anti-duplicate parameter controls."""
+        self.toggle_glossary_anti_duplicate_section()
+
+    def _reset_glossary_anti_duplicate_defaults(self):
+        """Reset all glossary anti-duplicate parameters to their default values."""
+        from PySide6.QtWidgets import QMessageBox
+        
+        reply = QMessageBox.question(
+            None,
+            "Reset Anti-Duplicate Parameters",
+            "Are you sure you want to reset all anti-duplicate parameters to their default values?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        
+        if hasattr(self, 'glossary_enable_anti_duplicate_var'):
+            self.glossary_enable_anti_duplicate_var = False
+        if hasattr(self, 'glossary_top_p_var'):
+            self.glossary_top_p_var = 1.0
+        if hasattr(self, 'glossary_top_k_var'):
+            self.glossary_top_k_var = 0
+        if hasattr(self, 'glossary_frequency_penalty_var'):
+            self.glossary_frequency_penalty_var = 0.0
+        if hasattr(self, 'glossary_presence_penalty_var'):
+            self.glossary_presence_penalty_var = 0.0
+        if hasattr(self, 'glossary_repetition_penalty_var'):
+            self.glossary_repetition_penalty_var = 1.0
+        if hasattr(self, 'glossary_candidate_count_var'):
+            self.glossary_candidate_count_var = 1
+        if hasattr(self, 'glossary_custom_stop_sequences_var'):
+            self.glossary_custom_stop_sequences_var = ""
+        if hasattr(self, 'glossary_logit_bias_enabled_var'):
+            self.glossary_logit_bias_enabled_var = False
+        if hasattr(self, 'glossary_logit_bias_strength_var'):
+            self.glossary_logit_bias_strength_var = -0.5
+        if hasattr(self, 'glossary_bias_common_words_var'):
+            self.glossary_bias_common_words_var = False
+        if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
+            self.glossary_bias_repetitive_phrases_var = False
+        
+        self._toggle_glossary_anti_duplicate_controls()
+        
+        QMessageBox.information(None, "Reset Complete", "All anti-duplicate parameters have been reset to their default values.")
+        
+        if hasattr(self, 'append_log'):
+            self.append_log("🔄 Glossary anti-duplicate parameters reset to defaults")
 
     def _setup_glossary_editor_tab(self, parent):
         """Set up the glossary editor/trimmer tab"""

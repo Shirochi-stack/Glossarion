@@ -8120,13 +8120,15 @@ class UnifiedClient:
                             print(f"   🖼️ Image config: aspect_ratio=auto, resolution={image_resolution}")
                 
                 # Add anti-duplicate parameters if enabled
-                if os.getenv("ENABLE_ANTI_DUPLICATE", "0") == "1":
-                    if os.getenv("TOP_P"):
-                        top_p = float(os.getenv("TOP_P", "1.0"))
+                if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") == "1":
+                    top_p_raw = self._get_anti_duplicate_env("TOP_P", "")
+                    if top_p_raw:
+                        top_p = float(top_p_raw)
                         if top_p < 1.0:
                             config_params["top_p"] = top_p
-                    if os.getenv("TOP_K"):
-                        top_k = int(os.getenv("TOP_K", "0"))
+                    top_k_raw = self._get_anti_duplicate_env("TOP_K", "")
+                    if top_k_raw:
+                        top_k = int(top_k_raw)
                         if top_k > 0:
                             config_params["top_k"] = top_k
                 
@@ -9696,14 +9698,14 @@ class UnifiedClient:
     def _get_anti_duplicate_params(self, temperature):
         """Get user-configured anti-duplicate parameters from GUI settings"""
         # Check if user enabled anti-duplicate
-        if os.getenv("ENABLE_ANTI_DUPLICATE", "0") != "1":
+        if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
             return {}
         
         # Get user's exact values from GUI (via environment variables)
-        top_p = float(os.getenv("TOP_P", "1.0"))
-        top_k = int(os.getenv("TOP_K", "0"))
-        frequency_penalty = float(os.getenv("FREQUENCY_PENALTY", "0.0"))
-        presence_penalty = float(os.getenv("PRESENCE_PENALTY", "0.0"))
+        top_p = float(self._get_anti_duplicate_env("TOP_P", "1.0"))
+        top_k = int(self._get_anti_duplicate_env("TOP_K", "0"))
+        frequency_penalty = float(self._get_anti_duplicate_env("FREQUENCY_PENALTY", "0.0"))
+        presence_penalty = float(self._get_anti_duplicate_env("PRESENCE_PENALTY", "0.0"))
         
         # Apply parameters based on provider capabilities
         params = {}
@@ -9736,6 +9738,23 @@ class UnifiedClient:
             logger.info(f"Applying anti-duplicate params for {self.client_type}: {list(params.keys())}")
         
         return params
+
+    def _get_anti_duplicate_prefix(self) -> str:
+        """Resolve which anti-duplicate namespace to use based on request context."""
+        try:
+            ctx = str(getattr(self, "context", "") or "").lower()
+            if "glossary" in ctx:
+                return "GLOSSARY_"
+        except Exception:
+            pass
+        return ""
+
+    def _get_anti_duplicate_env(self, key: str, default=None):
+        """Fetch anti-duplicate env vars with glossary-aware prefixing."""
+        prefix = self._get_anti_duplicate_prefix()
+        if prefix:
+            return os.getenv(f"{prefix}{key}", default)
+        return os.getenv(key, default)
     
  
     def _send_electronhub(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:

@@ -9580,6 +9580,20 @@ Important rules:
                     'CONTEXTUAL': '1' if self.contextual_var else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
+                    # Glossary anti-duplicate parameters (separate from translation)
+                    'GLOSSARY_ENABLE_ANTI_DUPLICATE': '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0',
+                    'GLOSSARY_TOP_P': str(self.config.get('glossary_top_p', 1.0)),
+                    'GLOSSARY_TOP_K': str(self.config.get('glossary_top_k', 0)),
+                    'GLOSSARY_FREQUENCY_PENALTY': str(self.config.get('glossary_frequency_penalty', 0.0)),
+                    'GLOSSARY_PRESENCE_PENALTY': str(self.config.get('glossary_presence_penalty', 0.0)),
+                    'GLOSSARY_REPETITION_PENALTY': str(self.config.get('glossary_repetition_penalty', 1.0)),
+                    'GLOSSARY_CANDIDATE_COUNT': str(self.config.get('glossary_candidate_count', 1)),
+                    'GLOSSARY_CUSTOM_STOP_SEQUENCES': str(self.config.get('glossary_custom_stop_sequences', '')),
+                    'GLOSSARY_LOGIT_BIAS_ENABLED': '1' if self.config.get('glossary_logit_bias_enabled', False) else '0',
+                    'GLOSSARY_LOGIT_BIAS_STRENGTH': str(self.config.get('glossary_logit_bias_strength', -0.5)),
+                    'GLOSSARY_BIAS_COMMON_WORDS': '1' if self.config.get('glossary_bias_common_words', False) else '0',
+                    'GLOSSARY_BIAS_REPETITIVE_PHRASES': '1' if self.config.get('glossary_bias_repetitive_phrases', False) else '0',
+                    
                     # NEW GLOSSARY ADDITIONS
                     'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
@@ -13041,6 +13055,20 @@ Important rules:
                 ('logit_bias_strength', ['logit_bias_strength_var'], 1.0, float),
                 ('bias_common_words', ['bias_common_words_var'], False, bool),
                 ('bias_repetitive_phrases', ['bias_repetitive_phrases_var'], False, bool),
+                
+                # Glossary anti-duplicate parameters (separate from translation)
+                ('glossary_enable_anti_duplicate', ['glossary_enable_anti_duplicate_var'], False, bool),
+                ('glossary_top_p', ['glossary_top_p_var'], 1.0, float),
+                ('glossary_top_k', ['glossary_top_k_var'], 0, int),
+                ('glossary_frequency_penalty', ['glossary_frequency_penalty_var'], 0.0, float),
+                ('glossary_presence_penalty', ['glossary_presence_penalty_var'], 0.0, float),
+                ('glossary_repetition_penalty', ['glossary_repetition_penalty_var'], 1.0, float),
+                ('glossary_candidate_count', ['glossary_candidate_count_var'], 1, int),
+                ('glossary_custom_stop_sequences', ['glossary_custom_stop_sequences_var'], '', str),
+                ('glossary_logit_bias_enabled', ['glossary_logit_bias_enabled_var'], False, bool),
+                ('glossary_logit_bias_strength', ['glossary_logit_bias_strength_var'], -0.5, float),
+                ('glossary_bias_common_words', ['glossary_bias_common_words_var'], False, bool),
+                ('glossary_bias_repetitive_phrases', ['glossary_bias_repetitive_phrases_var'], False, bool),
 
                 # OpenRouter
                 ('openrouter_use_http_only', ['openrouter_http_only_var'], False, bool),
@@ -13262,6 +13290,19 @@ Important rules:
                     ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
                     ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
                     ('GLOSSARY_TARGET_LANGUAGE', self.config.get('glossary_target_language', 'English')),
+                    # Glossary anti-duplicate parameters
+                    ('GLOSSARY_ENABLE_ANTI_DUPLICATE', '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0'),
+                    ('GLOSSARY_TOP_P', str(self.config.get('glossary_top_p', 1.0))),
+                    ('GLOSSARY_TOP_K', str(self.config.get('glossary_top_k', 0))),
+                    ('GLOSSARY_FREQUENCY_PENALTY', str(self.config.get('glossary_frequency_penalty', 0.0))),
+                    ('GLOSSARY_PRESENCE_PENALTY', str(self.config.get('glossary_presence_penalty', 0.0))),
+                    ('GLOSSARY_REPETITION_PENALTY', str(self.config.get('glossary_repetition_penalty', 1.0))),
+                    ('GLOSSARY_CANDIDATE_COUNT', str(self.config.get('glossary_candidate_count', 1))),
+                    ('GLOSSARY_CUSTOM_STOP_SEQUENCES', str(self.config.get('glossary_custom_stop_sequences', ''))),
+                    ('GLOSSARY_LOGIT_BIAS_ENABLED', '1' if self.config.get('glossary_logit_bias_enabled', False) else '0'),
+                    ('GLOSSARY_LOGIT_BIAS_STRENGTH', str(self.config.get('glossary_logit_bias_strength', -0.5))),
+                    ('GLOSSARY_BIAS_COMMON_WORDS', '1' if self.config.get('glossary_bias_common_words', False) else '0'),
+                    ('GLOSSARY_BIAS_REPETITIVE_PHRASES', '1' if self.config.get('glossary_bias_repetitive_phrases', False) else '0'),
                 ]
                 for env_key, env_value in glossary_env_mappings:
                     if env_key:  # Skip None entries
