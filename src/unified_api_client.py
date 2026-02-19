@@ -12678,7 +12678,7 @@ class UnifiedClient:
                         finish_reason = "length"
                     
                     usage = None
-                    if hasattr(resp, 'usage'):
+                    if hasattr(resp, 'usage') and resp.usage is not None:
                         usage = {
                             'prompt_tokens': resp.usage.prompt_tokens,
                             'completion_tokens': resp.usage.completion_tokens,
