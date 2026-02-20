@@ -1144,9 +1144,12 @@ class RetranslationMixin:
                 # Create QApplication if it doesn't exist
                 import sys
                 QApplication(sys.argv)
-            
-            # Create standalone PySide6 dialog
-            dialog = QDialog()
+
+            # Create standalone PySide6 dialog.
+            # IMPORTANT: If created without a parent, it will NOT inherit the main window's
+            # dark stylesheet and will fall back to the OS theme (white on some Win10 setups).
+            parent_widget = self if isinstance(self, QWidget) else None
+            dialog = QDialog(parent_widget)
             dialog.setWindowTitle("Progress Manager - OPF Based" if spine_chapters else "Progress Manager")
             # Keep above the translator window but allow interaction with it
             dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -1154,6 +1157,15 @@ class RetranslationMixin:
             # Use 38% width, 40% height for 1920x1080
             width, height = self._get_dialog_size(0.38, 0.4)
             dialog.resize(width, height)
+
+            # Inherit/copy the main window stylesheet when available (ensures consistent dark theme).
+            try:
+                if parent_widget is not None:
+                    ss = parent_widget.styleSheet()
+                    if ss:
+                        dialog.setStyleSheet(ss)
+            except Exception:
+                pass
             
             # Set icon
             try:
@@ -1169,7 +1181,7 @@ class RetranslationMixin:
             except Exception as e:
                 print(f"Failed to load icon: {e}")
             dialog_layout = QVBoxLayout(dialog)
-            container = QWidget()
+            container = QWidget(dialog)
             container_layout = QVBoxLayout(container)
             dialog_layout.addWidget(container)
         else:
