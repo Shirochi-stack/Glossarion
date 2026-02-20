@@ -9167,8 +9167,10 @@ def main(log_callback=None, stop_callback=None):
                                     def _glossary_all_chunks_submitted() -> bool:
                                         """Best-effort check via GlossaryManager status file.
 
-                                        Allows graceful stop to "wait" even when WAIT_FOR_CHUNKS is disabled,
-                                        but only if all chunks were already submitted.
+                                        IMPORTANT: We only consider chunks "submitted" once they have been
+                                        sent to the API (i.e., transitioned to in-flight after any stagger/delay).
+
+                                        Executor/thread submission is NOT sufficient for this.
                                         """
                                         try:
                                             import json as _json
@@ -9182,12 +9184,12 @@ def main(log_callback=None, stop_callback=None):
                                                 st = _json.load(f)
                                             if not isinstance(st, dict):
                                                 return False
-                                            # Prefer the "all_sent" flag written by GlossaryManager.
+
+                                            # Prefer the explicit "all_sent" flag written by GlossaryManager.
                                             if st.get('all_sent') is True:
                                                 return True
-                                            # Backward compat fallback
-                                            if st.get('all_submitted') is True and st.get('all_sent') is None:
-                                                return True
+
+                                            # Fallback: compare counts (sent_chunks is post-stagger/in-flight).
                                             total = int(st.get('total_chunks', 0) or 0)
                                             sent = int(st.get('sent_chunks', 0) or 0)
                                             return total > 0 and sent >= total
@@ -9197,6 +9199,7 @@ def main(log_callback=None, stop_callback=None):
                                     def _glossary_any_in_flight() -> bool:
                                         """Detect in-flight API calls from the glossary subprocess via watchdog files."""
                                         try:
+                                            import json as _json
                                             wd_dir = os.environ.get('GLOSSARION_WATCHDOG_DIR')
                                             if not wd_dir or not os.path.isdir(wd_dir):
                                                 return False
@@ -9204,7 +9207,7 @@ def main(log_callback=None, stop_callback=None):
                                             for fp in _glob.glob(os.path.join(wd_dir, 'api_watchdog_*.json')):
                                                 try:
                                                     with open(fp, 'r', encoding='utf-8') as f:
-                                                        st = json.load(f)
+                                                        st = _json.load(f)
                                                     if isinstance(st, dict) and int(st.get('in_flight', 0) or 0) > 0:
                                                         return True
                                                 except Exception:
@@ -9216,18 +9219,19 @@ def main(log_callback=None, stop_callback=None):
                                     should_wait = False
                                     if graceful_stop_active:
                                         if wait_for_chunks:
+                                            # WAIT_FOR_CHUNKS=1: allow in-flight work to complete.
                                             should_wait = True
                                         else:
-                                            # Graceful stop semantics: wait if ANY in-flight API call exists,
-                                            # otherwise only wait if all chunks were already submitted.
-                                            should_wait = _glossary_any_in_flight() or _glossary_all_chunks_submitted()
+                                            # WAIT_FOR_CHUNKS=0: do NOT wait just because something is in-flight.
+                                            # Only wait if ALL chunks were already sent to the API (i.e., nothing new would be started anyway).
+                                            should_wait = _glossary_all_chunks_submitted()
 
                                     if should_wait:
                                         if not graceful_stop_notice_shown:
                                             if wait_for_chunks:
                                                 print("⏳ Graceful stop — waiting for glossary generation to finish...")
                                             else:
-                                                print("⏳ Graceful stop — waiting (all glossary chunks already submitted)...")
+                                                print("⏳ Graceful stop — waiting (all glossary chunks already sent to API)...")
                                             graceful_stop_notice_shown = True
                                         continue
 

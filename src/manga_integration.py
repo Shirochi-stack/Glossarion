@@ -13210,7 +13210,14 @@ class MangaTranslationTab(QObject):
             
             # Log message depends on stop mode
             if graceful_stop:
-                self._log("\n⏳ Graceful stop — waiting for in-flight API calls to complete...", "info")
+                try:
+                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                except Exception:
+                    wait_for_chunks = False
+                if wait_for_chunks:
+                    self._log("\n⏳ Graceful stop — waiting for in-flight API calls to complete...", "info")
+                else:
+                    self._log("\n🛑 Stop requested — cancelling queued/in-flight API calls (WAIT_FOR_CHUNKS=0)", "info")
                 # For graceful stop: DON'T schedule UI reset here
                 # The UI will be reset when the API call actually completes
                 # via the GRACEFUL_STOP_COMPLETED check in the worker loop

@@ -10647,7 +10647,14 @@ Important rules:
         
         # Log message depends on stop mode
         if graceful_stop:
-            self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+            try:
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+            except Exception:
+                wait_for_chunks = False
+            if wait_for_chunks:
+                self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+            else:
+                self.append_log("🛑 Stop requested — cancelling queued/in-flight API calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("🛑 Stop requested — waiting for current operation to finish")
 
@@ -10859,7 +10866,14 @@ Important rules:
         
         # Log message depends on stop mode
         if graceful_stop:
-            self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+            try:
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+            except Exception:
+                wait_for_chunks = False
+            if wait_for_chunks:
+                self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+            else:
+                self.append_log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("❌ Glossary extraction stop requested.")
             self.append_log("⏳ Please wait... stopping after current API call completes.")
@@ -10942,7 +10956,14 @@ Important rules:
         
         # Log message depends on stop mode
         if graceful_stop:
-            self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+            try:
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+            except Exception:
+                wait_for_chunks = False
+            if wait_for_chunks:
+                self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+            else:
+                self.append_log("🛑 Stop requested — cancelling queued/in-flight API calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("❌ EPUB converter stop requested.")
             self.append_log("⌛ Please wait... stopping after current operation completes.")
