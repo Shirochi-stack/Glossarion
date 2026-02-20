@@ -7064,6 +7064,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Check stop before final summary
             if self.stop_requested:
                 self.append_log(f"\n⏹️ Translation stopped - processed {successful} of {total_files} files")
+                # Reset progress bar when stopped
+                try:
+                    if hasattr(self, 'progress_bar') and self.progress_bar:
+                        self.progress_bar.setValue(0)
+                        self.progress_bar.setFormat("Batch stopped")
+                        
+                    # Also clean up any lingering watchdog files to ensure "in-flight" count clears
+                    # ONLY if WAIT_FOR_CHUNKS=0 (immediate stop behavior)
+                    if os.environ.get('WAIT_FOR_CHUNKS', '0') == '0':
+                        self._reset_api_watchdog_progress(clear_stale_external_files=True)
+                        
+                        # And ensure hard cancel is triggered one last time
+                        import unified_api_client
+                        if hasattr(unified_api_client, 'hard_cancel_all'):
+                            unified_api_client.hard_cancel_all()
+                except Exception:
+                    pass
                 return False
                 
             # Final summary
@@ -10434,6 +10451,26 @@ Important rules:
                 self._reset_api_watchdog_progress(clear_stale_external_files=True)
             except Exception:
                 pass
+        # SPECIAL CASE: Batch mode with WAIT_FOR_CHUNKS=0.
+        # In this case, we are not waiting for the full queue to finish, just the current in-flight chunks.
+        # However, the overall progress bar (which tracks total chapters) might stick if we don't reset it
+        # because the remaining chapters are simply skipped/cancelled.
+        # For the API watchdog bar, we want it to drain naturally (showing the last few chunks finishing).
+        elif os.environ.get('BATCH_TRANSLATION', '0') == '1' and os.environ.get('WAIT_FOR_CHUNKS', '0') == '0':
+            # Force reset the MAIN progress bar to indicate stopped state, since we are cancelling future items.
+            # We do NOT clear stale files here (keep False) because some chunks might still be genuinely in-flight
+            # and we want to see them finish on the API watchdog bar.
+            try:
+                # Reset main UI progress bar directly if available
+                if hasattr(self, 'progress_bar') and self.progress_bar:
+                    self.progress_bar.setValue(0)
+                    self.progress_bar.setFormat("Batch stopped")
+                
+                # Also reset the "Overall" status text in the log if possible?
+                # Actually, simply setting the bar to 0 is the clearest signal.
+            except Exception:
+                pass
+        # During graceful stop, keep button enabled to allow triple-click force stop
         
         # During graceful stop, keep button enabled to allow triple-click force stop
         # Otherwise disable it immediately

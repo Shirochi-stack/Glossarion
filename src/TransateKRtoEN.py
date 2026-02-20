@@ -3701,7 +3701,27 @@ class TranslationProcessor:
 
         # Fallback stop callback (overridden later for chunked chapters)
         def local_stop_cb():
-            return self.check_stop() if hasattr(self, "check_stop") else False
+            # First check if we should abort due to internal error/cancel
+            if hasattr(self, "check_stop") and self.check_stop():
+                # User requested stop. Check graceful settings.
+                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                
+                if not graceful_stop_active:
+                    # Force stop
+                    return True
+                
+                # Graceful stop is active.
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                
+                # If wait_for_chunks is OFF (0), we should cancel immediately 
+                # (unless we're in a specific "wait for just this one" scenario, but user wants immediate cancel)
+                if not wait_for_chunks:
+                    return True
+                    
+                # If wait_for_chunks is ON (1), we return False to let it finish
+                return False
+                
+            return False
         
         while True:
             if local_stop_cb():
@@ -3811,6 +3831,7 @@ class TranslationProcessor:
                     chunk_timeout,
                     context='translation',
                     chapter_context=chapter_ctx,
+                    bypass_graceful_stop=True
                 )
                 
                 # Enhanced mode workflow:
@@ -4622,6 +4643,7 @@ class BatchTranslationProcessor:
                             chunk_timeout=chunk_timeout,
                             context='translation',
                             chapter_context=chapter_ctx,
+                            bypass_graceful_stop=True
                         )
                         break  # Success, exit retry loop
                     except UnifiedClientError as e:
@@ -4814,6 +4836,7 @@ class BatchTranslationProcessor:
                                     chunk_timeout=chunk_timeout,
                                     context='translation',
                                     chapter_context=chapter_ctx,
+                                    bypass_graceful_stop=True
                                 )
                             except UnifiedClientError as e:
                                 # Treat timeout during char-ratio retry as a timeout for the chunk
@@ -4920,7 +4943,38 @@ class BatchTranslationProcessor:
                     return False
 
             def local_stop_cb() -> bool:
-                return _user_stop_requested() or chunk_abort_event.is_set()
+                # 1. Check for immediate aborts (errors, etc.)
+                if chunk_abort_event.is_set():
+                    return True
+
+                # 2. Check for user stop request
+                if not _user_stop_requested():
+                    return False
+                
+                # 3. User requested stop. Check type of stop.
+                graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                
+                if not graceful_stop_active:
+                    # Force stop
+                    return True
+                
+                # 4. Graceful stop active. Check policies.
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                
+                if wait_for_chunks:
+                    # User explicitly wants to wait for chunks -> Do not stop.
+                    return False
+                
+                # 5. Graceful stop, WAIT_FOR_CHUNKS=0.
+                # Only wait if ALL chunks are already sent/done.
+                try:
+                    if _all_chunks_sent_or_done():
+                        return False
+                except Exception:
+                    pass
+                    
+                # 6. Otherwise (Graceful stop, partial chunks in flight) -> Stop.
+                return True
 
             # WAIT_FOR_CHUNKS semantics (batch translation):
             # - WAIT_FOR_CHUNKS=1: always wait for remaining chunks of this chapter
@@ -7064,7 +7118,7 @@ def cleanup_previous_extraction(output_dir):
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
                        chunk_timeout=None, request_id=None, context=None,
-                       chapter_context=None):
+                       chapter_context=None, bypass_graceful_stop=False):
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
 
@@ -7192,7 +7246,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             return result
         except queue.Empty:
             # During graceful stop, don't cancel the API call - let it complete
-            if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
+            # Unless bypass_graceful_stop is enabled, in which case we defer to stop_check_fn logic
+            should_stop = stop_check_fn()
+            graceful_active = os.environ.get('GRACEFUL_STOP') == '1'
+            
+            if should_stop and (bypass_graceful_stop or not graceful_active):
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
