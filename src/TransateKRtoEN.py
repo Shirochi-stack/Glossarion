@@ -3702,20 +3702,30 @@ class TranslationProcessor:
         # Fallback stop callback (overridden later for chunked chapters)
         def local_stop_cb():
             # First check if we should abort due to internal error/cancel
-            if hasattr(self, "check_stop") and self.check_stop():
+            # Check stop_callback directly to bypass check_stop's graceful logic override
+            stop_requested = False
+            if self.stop_callback and self.stop_callback():
+                stop_requested = True
+            
+            if stop_requested:
                 # User requested stop. Check graceful settings.
                 graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                 
                 if not graceful_stop_active:
                     # Force stop
+                    log_stop_once()
                     return True
                 
                 # Graceful stop is active.
                 wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                 
                 # If wait_for_chunks is OFF (0), we should cancel immediately 
-                # (unless we're in a specific "wait for just this one" scenario, but user wants immediate cancel)
-                if not wait_for_chunks:
+                # UNLESS we are at the last chunk (chunk_idx == total_chunks),
+                # in which case we wait for it to complete the chapter.
+                is_last_chunk = (chunk_idx == total_chunks)
+                
+                if not wait_for_chunks and not is_last_chunk:
+                    log_stop_once()
                     return True
                     
                 # If wait_for_chunks is ON (1), we return False to let it finish
