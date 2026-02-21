@@ -600,6 +600,20 @@ class RefusalPatternsDialog(QDialog):
             pass
         return 1000
     
+    def _reload_from_config(self):
+        """Reload patterns/toggles from config and refresh UI controls."""
+        try:
+            self.patterns = self._load_patterns()
+            self.disable_refusal_checks = self._load_disable_refusal_checks()
+            self.refusal_length_limit = self._load_refusal_length_limit()
+            self._refresh_tree()
+            if hasattr(self, 'disable_refusal_checks_cb'):
+                self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
+            if hasattr(self, 'refusal_length_limit_entry'):
+                self.refusal_length_limit_entry.setText(str(self.refusal_length_limit))
+        except Exception:
+            pass
+    
     def _load_halgakos_pixmap(self, logical_size: int = 36):
         """Load the Halgakos icon as a HiDPI-aware pixmap scaled to logical_size."""
         try:
@@ -623,6 +637,55 @@ class RefusalPatternsDialog(QDialog):
             return scaled
         except Exception:
             return None
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        checkbox = QCheckBox(text)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+        
+        def update_checkmark():
+            try:
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
+        return checkbox
     
     def _create_dialog(self):
         """Create the dialog UI"""
@@ -730,7 +793,7 @@ class RefusalPatternsDialog(QDialog):
         controls_h = QHBoxLayout(controls_row)
         controls_h.setContentsMargins(0, 0, 0, 10)
         
-        self.disable_refusal_checks_cb = QCheckBox("Disable refusal pattern checks")
+        self.disable_refusal_checks_cb = self._create_styled_checkbox("Disable refusal pattern checks")
         try:
             self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
         except Exception:
@@ -1021,6 +1084,17 @@ class RefusalPatternsDialog(QDialog):
         if reply == QMessageBox.Yes:
             self.patterns = self._get_default_patterns()
             self._refresh_tree()
+            # Reset toggle + limit to defaults
+            try:
+                if hasattr(self, 'disable_refusal_checks_cb'):
+                    self.disable_refusal_checks_cb.setChecked(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'refusal_length_limit_entry'):
+                    self.refusal_length_limit_entry.setText("1000")
+            except Exception:
+                pass
     
     def _save_and_close(self):
         """Save patterns and close dialog"""
@@ -3762,6 +3836,11 @@ class MultiAPIKeyDialog(QDialog):
         if not hasattr(self, '_refusal_patterns_dialog') or self._refusal_patterns_dialog is None:
             self._refusal_patterns_dialog = RefusalPatternsDialog(self, self.translator_gui)
             self._refusal_patterns_dialog.setWindowModality(Qt.NonModal)
+        else:
+            try:
+                self._refusal_patterns_dialog._reload_from_config()
+            except Exception:
+                pass
         
         # Show and raise the dialog
         self._refusal_patterns_dialog.show()
