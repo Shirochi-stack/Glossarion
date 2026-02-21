@@ -592,7 +592,7 @@ class RetranslationMixin:
                 try:
                     with open(progress_file, 'w', encoding='utf-8') as f:
                         json.dump(prog, f, ensure_ascii=False, indent=2)
-                    print("💾 Saved OPF-aware auto-discovered progress")
+                    #print("💾 Saved OPF-aware auto-discovered progress")
                 except Exception as e:
                     print(f"⚠️ Failed to save progress: {e}")
         
