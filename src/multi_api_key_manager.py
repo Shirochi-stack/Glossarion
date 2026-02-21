@@ -609,8 +609,12 @@ class RefusalPatternsDialog(QDialog):
             self._refresh_tree()
             if hasattr(self, 'disable_refusal_checks_cb'):
                 self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
+            if hasattr(self.translator_gui, 'disable_refusal_checks_var'):
+                self.translator_gui.disable_refusal_checks_var = bool(self.disable_refusal_checks)
             if hasattr(self, 'refusal_length_limit_entry'):
                 self.refusal_length_limit_entry.setText(str(self.refusal_length_limit))
+            if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                self.translator_gui.refusal_pattern_length_limit_var = int(self.refusal_length_limit)
         except Exception:
             pass
     
@@ -1088,11 +1092,15 @@ class RefusalPatternsDialog(QDialog):
             try:
                 if hasattr(self, 'disable_refusal_checks_cb'):
                     self.disable_refusal_checks_cb.setChecked(False)
+                    if hasattr(self.translator_gui, 'disable_refusal_checks_var'):
+                        self.translator_gui.disable_refusal_checks_var = False
             except Exception:
                 pass
             try:
                 if hasattr(self, 'refusal_length_limit_entry'):
                     self.refusal_length_limit_entry.setText("1000")
+                    if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                        self.translator_gui.refusal_pattern_length_limit_var = 1000
             except Exception:
                 pass
     
@@ -1103,6 +1111,9 @@ class RefusalPatternsDialog(QDialog):
             # Save refusal controls
             try:
                 self.translator_gui.config['disable_refusal_checks'] = bool(self.disable_refusal_checks_cb.isChecked())
+                # Keep GUI vars in sync so save_config doesn't overwrite
+                if hasattr(self.translator_gui, 'disable_refusal_checks_var'):
+                    self.translator_gui.disable_refusal_checks_var = self.translator_gui.config['disable_refusal_checks']
             except Exception:
                 pass
             try:
@@ -1111,8 +1122,12 @@ class RefusalPatternsDialog(QDialog):
                 if limit_val <= 0:
                     limit_val = 1000
                 self.translator_gui.config['refusal_pattern_length_limit'] = limit_val
+                if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                    self.translator_gui.refusal_pattern_length_limit_var = limit_val
             except Exception:
                 self.translator_gui.config['refusal_pattern_length_limit'] = 1000
+                if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                    self.translator_gui.refusal_pattern_length_limit_var = 1000
             self.translator_gui.save_config(show_message=False)
             QMessageBox.information(self, "Success", f"Saved {len(self.patterns)} refusal patterns")
         self.accept()
