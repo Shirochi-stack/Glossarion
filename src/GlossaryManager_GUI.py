@@ -2662,6 +2662,7 @@ CRITICAL EXTRACTION RULES:
         
         dialog = QDialog(parent)
         dialog.setWindowTitle("Glossary Anti-Duplicate Parameters")
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         # Use screen ratios for sizing (smaller than settings dialog)
         screen = QApplication.primaryScreen().geometry()
         width = int(screen.width() * 0.36)
@@ -2694,13 +2695,13 @@ CRITICAL EXTRACTION RULES:
         
         # Store and override close behavior to minimize instead of destroying
         self.glossary_anti_duplicate_dialog = dialog
-        def _minimize_on_close(event):
+        def _close_on_close(event):
             try:
                 self._persist_glossary_anti_duplicate_settings(minimize_dialog=dialog)
-                event.ignore()
+                event.accept()
             except Exception:
-                pass
-        dialog.closeEvent = _minimize_on_close
+                event.accept()
+        dialog.closeEvent = _close_on_close
         
         dialog.show()
 
@@ -2736,7 +2737,7 @@ CRITICAL EXTRACTION RULES:
             pass
         if minimize_dialog is not None:
             try:
-                minimize_dialog.showMinimized()
+                minimize_dialog.close()
             except Exception:
                 pass
 
