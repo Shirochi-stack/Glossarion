@@ -533,6 +533,8 @@ class RefusalPatternsDialog(QDialog):
         
         # Load patterns from config
         self.patterns = self._load_patterns()
+        self.disable_refusal_checks = self._load_disable_refusal_checks()
+        self.refusal_length_limit = self._load_refusal_length_limit()
         
         self._create_dialog()
     
@@ -579,6 +581,24 @@ class RefusalPatternsDialog(QDialog):
             "i cannot translate this content",
             "i can't translate this content",
         ]
+    
+    def _load_disable_refusal_checks(self):
+        """Load refusal check disable toggle from config"""
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                return bool(self.translator_gui.config.get('disable_refusal_checks', False))
+        except Exception:
+            pass
+        return False
+    
+    def _load_refusal_length_limit(self):
+        """Load refusal length limit from config"""
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                return int(self.translator_gui.config.get('refusal_pattern_length_limit', 1000))
+        except Exception:
+            pass
+        return 1000
     
     def _load_halgakos_pixmap(self, logical_size: int = 36):
         """Load the Halgakos icon as a HiDPI-aware pixmap scaled to logical_size."""
@@ -700,10 +720,35 @@ class RefusalPatternsDialog(QDialog):
         desc_label = QLabel(
             "Patterns used to detect AI refusals in responses. "
             "When detected, fallback keys will be attempted.\n"
-            "Patterns are checked on responses under 1000 characters (case-insensitive).")
+            "Patterns are checked on responses under a configurable length (case-insensitive).")
         desc_label.setStyleSheet("color: gray; padding: 5px 0px 10px 0px;")
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
+        
+        # Controls row: disable toggle + length limit
+        controls_row = QWidget()
+        controls_h = QHBoxLayout(controls_row)
+        controls_h.setContentsMargins(0, 0, 0, 10)
+        
+        self.disable_refusal_checks_cb = QCheckBox("Disable refusal pattern checks")
+        try:
+            self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
+        except Exception:
+            pass
+        controls_h.addWidget(self.disable_refusal_checks_cb)
+        
+        controls_h.addSpacing(12)
+        controls_h.addWidget(QLabel("Length limit:"))
+        self.refusal_length_limit_entry = QLineEdit()
+        self.refusal_length_limit_entry.setFixedWidth(80)
+        try:
+            self.refusal_length_limit_entry.setText(str(self.refusal_length_limit))
+        except Exception:
+            self.refusal_length_limit_entry.setText("1000")
+        controls_h.addWidget(self.refusal_length_limit_entry)
+        controls_h.addWidget(QLabel("chars"))
+        controls_h.addStretch()
+        main_layout.addWidget(controls_row)
         
         # Tree widget for patterns
         self.tree = QTreeWidget()
@@ -981,6 +1026,19 @@ class RefusalPatternsDialog(QDialog):
         """Save patterns and close dialog"""
         if hasattr(self.translator_gui, 'config'):
             self.translator_gui.config['refusal_patterns'] = self.patterns
+            # Save refusal controls
+            try:
+                self.translator_gui.config['disable_refusal_checks'] = bool(self.disable_refusal_checks_cb.isChecked())
+            except Exception:
+                pass
+            try:
+                raw_limit = self.refusal_length_limit_entry.text().strip()
+                limit_val = int(raw_limit) if raw_limit.isdigit() else 1000
+                if limit_val <= 0:
+                    limit_val = 1000
+                self.translator_gui.config['refusal_pattern_length_limit'] = limit_val
+            except Exception:
+                self.translator_gui.config['refusal_pattern_length_limit'] = 1000
             self.translator_gui.save_config(show_message=False)
             QMessageBox.information(self, "Success", f"Saved {len(self.patterns)} refusal patterns")
         self.accept()

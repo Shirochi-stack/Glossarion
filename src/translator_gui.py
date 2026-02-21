@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.6.0"
+        __version__ = "7.6.1"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.0')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.1')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2383,6 +2383,8 @@ Recent translations to summarize:
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', False),
             ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
+            ('disable_refusal_checks_var', 'disable_refusal_checks', False),
+            ('refusal_pattern_length_limit_var', 'refusal_pattern_length_limit', '1000'),
             # NEW: QA scanning helpers
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
             ('scan_phase_enabled_var', 'scan_phase_enabled', True),
@@ -2649,7 +2651,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.6.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.6.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -8354,6 +8356,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
             'DISABLE_QA_MARKER_CHECKS': "1" if getattr(self, 'disable_qa_marker_checks_var', False) else "0",
             'QA_MARKER_LENGTH_LIMIT': str(getattr(self, 'qa_marker_length_limit_var', '500')),
+            'DISABLE_REFUSAL_CHECKS': "1" if getattr(self, 'disable_refusal_checks_var', False) else "0",
+            'REFUSAL_PATTERN_LENGTH_LIMIT': str(getattr(self, 'refusal_pattern_length_limit_var', '1000')),
             'DUPLICATE_LOOKBACK_CHAPTERS': str(self.duplicate_lookback_var),
             'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
             'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
@@ -13018,6 +13022,8 @@ Important rules:
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
                 ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], False, bool),
                 ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
+                ('disable_refusal_checks', ['disable_refusal_checks_var'], False, bool),
+                ('refusal_pattern_length_limit', ['refusal_pattern_length_limit_var'], 1000, lambda v: safe_int(v, 1000)),
 
                 # Prompts and text fields
                 ('summary_role', ['summary_role_var'], '', str),
@@ -13923,6 +13929,8 @@ Important rules:
                 ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
                 ('DISABLE_QA_MARKER_CHECKS', '1' if getattr(self, 'disable_qa_marker_checks_var', False) else '0'),
                 ('QA_MARKER_LENGTH_LIMIT', str(getattr(self, 'qa_marker_length_limit_var', '500'))),
+                ('DISABLE_REFUSAL_CHECKS', '1' if getattr(self, 'disable_refusal_checks_var', False) else '0'),
+                ('REFUSAL_PATTERN_LENGTH_LIMIT', str(getattr(self, 'refusal_pattern_length_limit_var', '1000'))),
                 ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else '0'),
                 ('CHUNK_TIMEOUT', str(getattr(self, 'chunk_timeout_var', '1800'))),
                 ('ENABLE_HTTP_TUNING', '1' if self.config.get('enable_http_tuning', False) else '0'),
@@ -14250,7 +14258,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.6.0...")
+    print("🚀 Starting Glossarion v7.6.1...")
     
     # Initialize splash screen
     splash_manager = None

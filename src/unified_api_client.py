@@ -4347,7 +4347,15 @@ class UnifiedClient:
         Returns:
             True if refusal pattern detected, False otherwise
         """
-        if not content or len(content) >= 1000:
+        if os.getenv("DISABLE_REFUSAL_CHECKS", "0") == "1":
+            return False
+        try:
+            limit = int(os.getenv("REFUSAL_PATTERN_LENGTH_LIMIT", "1000"))
+        except Exception:
+            limit = 1000
+        if limit <= 0:
+            limit = 1000
+        if not content or len(content) >= limit:
             return False
         
         content_lower = content.lower().strip()
