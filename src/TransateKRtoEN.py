@@ -5340,7 +5340,7 @@ class BatchTranslationProcessor:
 
             if is_qa_failed_response(cleaned):
                 failure_reason = get_failure_reason(cleaned)
-                print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created")
+                print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created (reason: {failure_reason})")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
@@ -7564,83 +7564,85 @@ def is_qa_failed_response(content):
     content_lower = content_str.lower()
     
     # 1. EXPLICIT FAILURE MARKERS from unified_api_client fallback responses
-    explicit_failures = [
-        "[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]",
-        "[IMAGE TRANSLATION FAILED]",
-        "[Content Blocked]",
-        "API response unavailable",
-        "[]",  # Empty JSON response from glossary context
-        "[API_ERROR]",
-        "[TIMEOUT]",
-        "[RATE_LIMIT_EXCEEDED]",
-        "All Google Translate endpoints failed"  # Free Google Translate failures
-    ]
-    
-    for marker in explicit_failures:
-        if marker in content_str:
-            return True
-    
     # 2. HTTP ERROR STATUS MESSAGES
-    http_errors = [
-        "400 - invalid_request_error",
-        "401 - authentication_error", 
-        "403 - permission_error",
-        "404 - not_found_error",
-        "413 - request_too_large",
-        "429 - rate_limit_error",
-        "500 - api_error",
-        "529 - overloaded_error",
-        "invalid x-api-key",
-        "authentication_error",
-        "permission_error",
-        "rate_limit_error",
-        "api_error",
-        "overloaded_error"
-    ]
-    
-    for error in http_errors:
-        if error in content_lower:
-            return True
-    
     # 3. CONTENT FILTERING / SAFETY BLOCKS
-    content_filter_markers = [
-        "content_filter",  # OpenAI finish_reason
-        "content was blocked",
-        "response was blocked",
-        "safety filter",
-        "content policy",
-        "harmful content",
-        "content filtering",
-        "blocked by safety",
-        "harm_category_harassment",
-        "harm_category_hate_speech", 
-        "harm_category_sexually_explicit",
-        "harm_category_dangerous_content",
-        "block_low_and_above",
-        "block_medium_and_above",
-        "block_only_high"
-    ]
-    
-    for marker in content_filter_markers:
-        if marker in content_lower:
-            return True
-    
     # 4. TIMEOUT AND NETWORK ERRORS
-    timeout_markers = [
-        "timed out",
-        "request timeout",
-        "connection timeout",
-        "read timeout",
-        "apitimeouterror",
-        "network error",
-        "connection refused",
-        "connection reset",
-        "socket timeout"
-    ]
-    
-    for marker in timeout_markers:
-        if marker in content_lower:
-            return True
+    # NOTE: All marker checks are gated to short outputs only (< 500 chars).
+    if len(content_str) < 500:
+        explicit_failures = [
+            "[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]",
+            "[IMAGE TRANSLATION FAILED]",
+            "[Content Blocked]",
+            "API response unavailable",
+            "[]",  # Empty JSON response from glossary context
+            "[API_ERROR]",
+            "[TIMEOUT]",
+            "[RATE_LIMIT_EXCEEDED]",
+            "All Google Translate endpoints failed"  # Free Google Translate failures
+        ]
+        
+        for marker in explicit_failures:
+            if marker in content_str:
+                return True
+        
+        http_errors = [
+            "400 - invalid_request_error",
+            "401 - authentication_error", 
+            "403 - permission_error",
+            "404 - not_found_error",
+            "413 - request_too_large",
+            "429 - rate_limit_error",
+            "500 - api_error",
+            "529 - overloaded_error",
+            "invalid x-api-key",
+            "authentication_error",
+            "permission_error",
+            "rate_limit_error",
+            "api_error",
+            "overloaded_error"
+        ]
+        
+        for error in http_errors:
+            if error in content_lower:
+                return True
+        
+        content_filter_markers = [
+            "content_filter",  # OpenAI finish_reason
+            "content was blocked",
+            "response was blocked",
+            "safety filter",
+            "content policy",
+            "harmful content",
+            "content filtering",
+            "blocked by safety",
+            "harm_category_harassment",
+            "harm_category_hate_speech", 
+            "harm_category_sexually_explicit",
+            "harm_category_dangerous_content",
+            "block_low_and_above",
+            "block_medium_and_above",
+            "block_only_high"
+        ]
+        
+        for marker in content_filter_markers:
+            if marker in content_lower:
+                return True
+        
+        timeout_markers = [
+            "timed out",
+            "request timeout",
+            "connection timeout",
+            "read timeout",
+            "apitimeouterror",
+            "network error",
+            "connection refused",
+            "connection reset",
+            "socket timeout"
+        ]
+        
+        for marker in timeout_markers:
+            if marker in content_lower:
+                return True
     
     # 6. EMPTY OR MINIMAL RESPONSES INDICATING FAILURE
     if len(content_str) <= 10:
@@ -7682,104 +7684,104 @@ def is_qa_failed_response(content):
                 return True
     
     # 8. JSON ERROR RESPONSES
-    json_error_patterns = [
-        '{"error"',
-        '{"type":"error"',
-        '"error_type"',
-        '"error_message"',
-        '"error_code"',
-        '"message":"error"',
-        '"status":"error"',
-        '"success":false'
-    ]
-    
-    for pattern in json_error_patterns:
-        if pattern in content_lower:
-            return True
-    
     # 9. GEMINI-SPECIFIC ERRORS
-    gemini_errors = [
-        "finish_reason: safety",
-        "finish_reason: other", 
-        "finish_reason: recitation",
-        "candidate.content field",  # Voided content field
-        "safety_ratings",
-        "probability_score",
-        "severity_score"
-    ]
-    
-    for error in gemini_errors:
-        if error in content_lower:
-            return True
-    
-    # 10. ANTHROPIC-SPECIFIC ERRORS  
-    anthropic_errors = [
-        "invalid_request_error",
-        "authentication_error",
-        "permission_error", 
-        "not_found_error",
-        "request_too_large",
-        "rate_limit_error",
-        "api_error",
-        "overloaded_error"
-    ]
-    
-    for error in anthropic_errors:
-        if error in content_lower:
-            return True
-    
+    # 10. ANTHROPIC-SPECIFIC ERRORS
     # 11. OPENAI-SPECIFIC ERRORS
-    openai_errors = [
-        "finish_reason: content_filter",
-        "finish_reason: length",  # Only if very short content
-        "insufficient_quota",
-        "invalid_api_key",
-        "model_not_found",
-        "context_length_exceeded"
-    ]
-    
-    for error in openai_errors:
-        if error in content_lower:
-            return True
-    
     # 12. EMPTY RESPONSE PATTERNS
-    empty_patterns = [
-        "choices: [ { text: '', index: 0",  # OpenAI empty response pattern
-        '"text": ""',
-        '"content": ""',
-        '"content": null',
-        "text: ''",
-        "content: ''"
-    ]
-    
-    for pattern in empty_patterns:
-        if pattern in content_lower:
-            return True
-    
     # 13. PROVIDER-AGNOSTIC ERROR MESSAGES
-    generic_errors = [
-        "internal server error",
-        "service error", 
-        "server error",
-        "bad gateway",
-        "service temporarily unavailable",
-        "upstream error",
-        "proxy error",
-        "gateway timeout",
-        "connection error",
-        "network failure",
-        "service degraded",
-        "maintenance mode"
-    ]
-    
-    for error in generic_errors:
-        if error in content_lower:
-            return True
-    
     # 14. SPECIAL CASE: Check for responses that are just original text
-    # (indicating translation completely failed and fallback was used)
-    if content_str.startswith("[") and content_str.endswith("]") and "FAILED" in content_str:
-        return True
+    if len(content_str) < 500:
+        json_error_patterns = [
+            '{"error"',
+            '{"type":"error"',
+            '"error_type"',
+            '"error_message"',
+            '"error_code"',
+            '"message":"error"',
+            '"status":"error"',
+            '"success":false'
+        ]
+        
+        for pattern in json_error_patterns:
+            if pattern in content_lower:
+                return True
+        
+        gemini_errors = [
+            "finish_reason: safety",
+            "finish_reason: other", 
+            "finish_reason: recitation",
+            "candidate.content field",  # Voided content field
+            "safety_ratings",
+            "probability_score",
+            "severity_score"
+        ]
+        
+        for error in gemini_errors:
+            if error in content_lower:
+                return True
+        
+        anthropic_errors = [
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error", 
+            "not_found_error",
+            "request_too_large",
+            "rate_limit_error",
+            "api_error",
+            "overloaded_error"
+        ]
+        
+        for error in anthropic_errors:
+            if error in content_lower:
+                return True
+        
+        openai_errors = [
+            "finish_reason: content_filter",
+            "finish_reason: length",  # Only if very short content
+            "insufficient_quota",
+            "invalid_api_key",
+            "model_not_found",
+            "context_length_exceeded"
+        ]
+        
+        for error in openai_errors:
+            if error in content_lower:
+                return True
+        
+        empty_patterns = [
+            "choices: [ { text: '', index: 0",  # OpenAI empty response pattern
+            '"text": ""',
+            '"content": ""',
+            '"content": null',
+            "text: ''",
+            "content: ''"
+        ]
+        
+        for pattern in empty_patterns:
+            if pattern in content_lower:
+                return True
+        
+        generic_errors = [
+            "internal server error",
+            "service error", 
+            "server error",
+            "bad gateway",
+            "service temporarily unavailable",
+            "upstream error",
+            "proxy error",
+            "gateway timeout",
+            "connection error",
+            "network failure",
+            "service degraded",
+            "maintenance mode"
+        ]
+        
+        for error in generic_errors:
+            if error in content_lower:
+                return True
+        
+        if content_str.startswith("[") and content_str.endswith("]") and "FAILED" in content_str:
+            return True
     
     # 15. FINAL CHECK: Very short responses with error indicators
     if len(content_str) < 100:
@@ -7844,6 +7846,8 @@ def get_failure_reason(content):
     }
     
     for category, markers in failure_categories.items():
+        if len(content_str) >= 500:
+            continue
         for marker in markers:
             if marker in content_str or marker in content_lower:
                 return f"{category}: {marker}"
