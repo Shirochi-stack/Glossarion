@@ -2381,6 +2381,8 @@ Recent translations to summarize:
             ('retry_split_failed_var', 'retry_split_failed', True),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
+            ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', False),
+            ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
             # NEW: QA scanning helpers
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
             ('scan_phase_enabled_var', 'scan_phase_enabled', True),
@@ -8350,6 +8352,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SPLIT_FAILED_RETRY_ATTEMPTS': str(max(1, int(str(getattr(self, 'split_failed_retry_attempts_var', self.config.get('split_failed_retry_attempts', '1'))).strip() or "1"))),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
+            'DISABLE_QA_MARKER_CHECKS': "1" if getattr(self, 'disable_qa_marker_checks_var', False) else "0",
+            'QA_MARKER_LENGTH_LIMIT': str(getattr(self, 'qa_marker_length_limit_var', '500')),
             'DUPLICATE_LOOKBACK_CHAPTERS': str(self.duplicate_lookback_var),
             'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
             'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
@@ -13012,6 +13016,8 @@ Important rules:
                 ('ignore_header', ['ignore_header_var'], False, bool),
                 ('ignore_title', ['ignore_title_var'], False, bool),
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
+                ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], False, bool),
+                ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
 
                 # Prompts and text fields
                 ('summary_role', ['summary_role_var'], '', str),
@@ -13915,6 +13921,8 @@ Important rules:
                 ('SPLIT_FAILED_RETRY_ATTEMPTS', str(getattr(self, 'split_failed_retry_attempts_var', '1'))),
                 ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),
                 ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
+                ('DISABLE_QA_MARKER_CHECKS', '1' if getattr(self, 'disable_qa_marker_checks_var', False) else '0'),
+                ('QA_MARKER_LENGTH_LIMIT', str(getattr(self, 'qa_marker_length_limit_var', '500'))),
                 ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else '0'),
                 ('CHUNK_TIMEOUT', str(getattr(self, 'chunk_timeout_var', '1800'))),
                 ('ENABLE_HTTP_TUNING', '1' if self.config.get('enable_http_tuning', False) else '0'),

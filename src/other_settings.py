@@ -2907,6 +2907,48 @@ def _create_response_handling_section(self, parent):
     preserve_desc.setStyleSheet("color: gray; font-size: 10pt;")
     preserve_desc.setContentsMargins(20, 5, 0, 10)
     section_v.addWidget(preserve_desc)
+
+    # Disable QA marker checks
+    disable_qa_markers_cb = self._create_styled_checkbox("Disable QA marker checks (error-keyword auto-fail)")
+    try:
+        disable_qa_markers_cb.setChecked(bool(self.disable_qa_marker_checks_var))
+    except Exception:
+        pass
+    def _on_disable_qa_markers_toggle(checked):
+        try:
+            self.disable_qa_marker_checks_var = bool(checked)
+        except Exception:
+            pass
+    disable_qa_markers_cb.toggled.connect(_on_disable_qa_markers_toggle)
+    
+    # Row: disable toggle + threshold
+    qa_marker_row = QWidget()
+    qa_marker_h = QHBoxLayout(qa_marker_row)
+    qa_marker_h.setContentsMargins(0, 0, 0, 0)
+    qa_marker_h.addWidget(disable_qa_markers_cb)
+    qa_marker_h.addSpacing(12)
+    qa_marker_h.addWidget(QLabel("Marker length limit:"))
+    qa_marker_limit_entry = QLineEdit()
+    qa_marker_limit_entry.setFixedWidth(70)
+    try:
+        qa_marker_limit_entry.setText(str(self.qa_marker_length_limit_var))
+    except Exception:
+        qa_marker_limit_entry.setText("500")
+    def _on_qa_marker_limit_changed(text):
+        try:
+            self.qa_marker_length_limit_var = text
+        except Exception:
+            pass
+    qa_marker_limit_entry.textChanged.connect(_on_qa_marker_limit_changed)
+    qa_marker_h.addWidget(qa_marker_limit_entry)
+    qa_marker_h.addWidget(QLabel("chars"))
+    qa_marker_h.addStretch()
+    section_v.addWidget(qa_marker_row)
+    
+    disable_qa_markers_desc = QLabel("When enabled, QA won't auto-fail based on error keywords (timeout, rate-limit, etc.).")
+    disable_qa_markers_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    disable_qa_markers_desc.setContentsMargins(20, 5, 0, 10)
+    section_v.addWidget(disable_qa_markers_desc)
     
     # Add Halgakos icon under the description (HiDPI-aware 90x90, centered)
     import os

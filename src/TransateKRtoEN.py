@@ -7560,6 +7560,9 @@ def is_qa_failed_response(content):
     if not content:
         return True
     
+    if os.getenv("DISABLE_QA_MARKER_CHECKS", "0") == "1":
+        return False
+    
     content_str = str(content).strip()
     content_lower = content_str.lower()
     
@@ -7567,8 +7570,14 @@ def is_qa_failed_response(content):
     # 2. HTTP ERROR STATUS MESSAGES
     # 3. CONTENT FILTERING / SAFETY BLOCKS
     # 4. TIMEOUT AND NETWORK ERRORS
-    # NOTE: All marker checks are gated to short outputs only (< 500 chars).
-    if len(content_str) < 500:
+    # NOTE: All marker checks are gated to short outputs only (configurable).
+    try:
+        _qa_marker_limit = int(os.getenv("QA_MARKER_LENGTH_LIMIT", "500"))
+    except Exception:
+        _qa_marker_limit = 500
+    if _qa_marker_limit <= 0:
+        _qa_marker_limit = 500
+    if len(content_str) < _qa_marker_limit:
         explicit_failures = [
             "[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]",
             "[IMAGE TRANSLATION FAILED]",
@@ -7690,7 +7699,7 @@ def is_qa_failed_response(content):
     # 12. EMPTY RESPONSE PATTERNS
     # 13. PROVIDER-AGNOSTIC ERROR MESSAGES
     # 14. SPECIAL CASE: Check for responses that are just original text
-    if len(content_str) < 500:
+    if len(content_str) < _qa_marker_limit:
         json_error_patterns = [
             '{"error"',
             '{"type":"error"',
@@ -7814,6 +7823,9 @@ def get_failure_reason(content):
     if not content:
         return "Empty content"
     
+    if os.getenv("DISABLE_QA_MARKER_CHECKS", "0") == "1":
+        return "QA marker checks disabled"
+    
     content_str = str(content).strip()
     content_lower = content_str.lower()
     
@@ -7846,7 +7858,7 @@ def get_failure_reason(content):
     }
     
     for category, markers in failure_categories.items():
-        if len(content_str) >= 500:
+        if len(content_str) >= _qa_marker_limit:
             continue
         for marker in markers:
             if marker in content_str or marker in content_lower:
