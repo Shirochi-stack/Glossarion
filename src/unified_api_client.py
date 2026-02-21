@@ -9733,9 +9733,10 @@ class UnifiedClient:
             if top_k > 0:
                 params["top_k"] = top_k
         
-        # Log applied parameters
+        # Log applied parameters with exact values
         if params:
-            logger.info(f"Applying anti-duplicate params for {self.client_type}: {list(params.keys())}")
+            applied_kv = ", ".join([f"{k}={params[k]}" for k in params.keys()])
+            logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
         
         return params
 
