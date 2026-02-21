@@ -9695,7 +9695,7 @@ class UnifiedClient:
             # Fallback if import fails
             return False
     
-    def _get_anti_duplicate_params(self, temperature):
+    def _get_anti_duplicate_params(self, temperature, log_key=None):
         """Get user-configured anti-duplicate parameters from GUI settings"""
         # Check if user enabled anti-duplicate
         if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
@@ -9733,10 +9733,23 @@ class UnifiedClient:
             if top_k > 0:
                 params["top_k"] = top_k
         
-        # Log applied parameters with exact values
+        # Log applied parameters with exact values (once per request if log_key provided)
         if params:
-            applied_kv = ", ".join([f"{k}={params[k]}" for k in params.keys()])
-            logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
+            should_log = True
+            if log_key:
+                try:
+                    tls = self._get_thread_local_client()
+                    if not hasattr(tls, "anti_dupe_logged"):
+                        tls.anti_dupe_logged = set()
+                    if log_key in tls.anti_dupe_logged:
+                        should_log = False
+                    else:
+                        tls.anti_dupe_logged.add(log_key)
+                except Exception:
+                    pass
+            if should_log:
+                applied_kv = ", ".join([f"{k}={params[k]}" for k in params.keys()])
+                logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
         
         return params
 
@@ -10104,7 +10117,7 @@ class UnifiedClient:
                 params = self._build_openai_params(messages, temperature, max_tokens, max_completion_tokens)
                 
                 # Get user-configured anti-duplicate parameters
-                anti_dupe_params = self._get_anti_duplicate_params(temperature)
+                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
                 params.update(anti_dupe_params)
                 
                 # Apply any fixes from previous attempts
@@ -10777,7 +10790,7 @@ class UnifiedClient:
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # Get user-configured anti-duplicate parameters
-                anti_dupe_params = self._get_anti_duplicate_params(temperature)
+                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
 
                 # Build generation config with anti-duplicate parameters
                 generation_config_params = {
@@ -11633,7 +11646,7 @@ class UnifiedClient:
                 })
         
         # Get user-configured anti-duplicate parameters
-        anti_dupe_params = self._get_anti_duplicate_params(temperature)
+        anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
         data = self._build_anthropic_payload(formatted_messages, temperature, max_tokens, anti_dupe_params, system_message)
         
         resp = self._http_request_with_retries(
@@ -12133,7 +12146,7 @@ class UnifiedClient:
                     is_gemini_endpoint = provider == "gemini-openai" or effective_model.lower().startswith('gemini')
                     
                     # Get user-configured anti-duplicate parameters
-                    anti_dupe_params = self._get_anti_duplicate_params(temperature)
+                    anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
 
                     # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
                     req_temperature = temperature
@@ -13837,7 +13850,7 @@ class UnifiedClient:
         }
 
         # Get user-configured anti-duplicate parameters
-        anti_dupe_params = self._get_anti_duplicate_params(temperature)
+        anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
         data.update(anti_dupe_params)  # Add user's custom parameters
 
         if system_message:
