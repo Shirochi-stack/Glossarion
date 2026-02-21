@@ -2351,7 +2351,7 @@ Recent translations to summarize:
             if self.config.get('conservative_batching', False):
                 self.config['batching_mode'] = 'conservative'
             else:
-                self.config['batching_mode'] = 'direct'
+                self.config['batching_mode'] = 'aggressive'
         if 'batch_group_size' not in self.config:
             # legacy hardcoded multiplier was 3
             self.config['batch_group_size'] = str(self.config.get('conservative_batch_multiplier', 3) or 3)
@@ -8397,7 +8397,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
-            'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'aggressive')) == 'conservative' else "0",
+            'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
@@ -9584,7 +9584,7 @@ Important rules:
                     'BATCH_SIZE': str(self.batch_size_var),
                     'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
                     'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
-                    'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'aggressive')) == 'conservative' else "0",
+                    'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
                     'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',

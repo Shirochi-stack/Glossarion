@@ -5949,7 +5949,7 @@ def _create_processing_options_section(self, parent):
     batch_group.addButton(aggressive_rb)
 
     # Load current selection
-    current_mode = getattr(self, 'batch_mode_var', 'direct') or 'direct'
+    current_mode = getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive'
     if current_mode == 'conservative':
         conservative_rb.setChecked(True)
     elif current_mode == 'direct':
