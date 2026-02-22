@@ -4829,20 +4829,44 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             ratio_norm = ratio / max(0.01, multiplier)
             
             # Define VERY PERMISSIVE ratio ranges for novel translation
+            # These thresholds apply to the *normalized* ratio (ratio_norm).
+            min_ratio_cjk = 0.6
+            max_ratio_cjk = 2.0
+            min_ratio_non_cjk = 0.7
+            max_ratio_non_cjk = 1.5
+
+            # Override with custom settings if available
+            setting_min = None
+            setting_max = None
+            if qa_settings:
+                setting_min = qa_settings.get('word_count_min_ratio')
+                setting_max = qa_settings.get('word_count_max_ratio')
+                try:
+                    if setting_min is not None and str(setting_min).lower() != 'auto':
+                        val = float(setting_min)
+                        min_ratio_cjk = val
+                        min_ratio_non_cjk = val
+                    if setting_max is not None and str(setting_max).lower() != 'auto':
+                        val = float(setting_max)
+                        max_ratio_cjk = val
+                        max_ratio_non_cjk = val
+                except (ValueError, TypeError):
+                    # Keep defaults on parse error
+                    pass
+
             if is_cjk:
                 # CJK to English novel translation - reasonable bounds
-                min_ratio = 0.6   # 60% - catches significant omissions
-                max_ratio = 2.5   # 250% - catches excessive padding
-                
+                min_ratio = min_ratio_cjk
+                max_ratio = max_ratio_cjk
                 # Typical healthy range
-                typical_min = 0.8   # 80%
-                typical_max = 1.8   # 180%
+                typical_min = min_ratio + 0.2
+                typical_max = max_ratio * 0.7
             else:
                 # Non-CJK source
-                min_ratio = 0.7
-                max_ratio = 1.5
-                typical_min = 0.8
-                typical_max = 1.2
+                min_ratio = min_ratio_non_cjk
+                max_ratio = max_ratio_non_cjk
+                typical_min = min_ratio + 0.1
+                typical_max = max_ratio * 0.8
             
             # Relax bounds for short files to avoid false positives from small word count variations
             # Example: 18→24 words = 133%, which shouldn't be flagged as an issue
@@ -4871,6 +4895,15 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             is_typical = typical_min <= ratio_norm <= typical_max
             percentage = ratio * 100
             
+            setting_min = None
+            setting_max = None
+            try:
+                if qa_settings:
+                    setting_min = qa_settings.get('word_count_min_ratio')
+                    setting_max = qa_settings.get('word_count_max_ratio')
+            except Exception:
+                pass
+
             result = {
                 'found_match': True,
                 'chapter_num': spine_idx,
@@ -4882,7 +4915,12 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 'percentage': percentage,
                 'is_reasonable': is_reasonable,
                 'is_typical': is_typical,
-                'original_file': count_info['filename']
+                'original_file': count_info['filename'],
+                # Debug info for mismatch logs (normalized ratio bounds)
+                'min_ratio_norm': min_ratio,
+                'max_ratio_norm': max_ratio,
+                'setting_min_ratio': setting_min,
+                'setting_max_ratio': setting_max,
             }
             
             # Add descriptive warnings for extreme but acceptable ratios
@@ -5693,7 +5731,9 @@ def process_html_file_batch(args):
                                     f"word_count_mismatch: translated={ratio:.2f}x source "
                                     f"(expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f}, "
                                     f"counts: src={original_wc}, dst={translated_wc}, "
-                                    f"thresholds: min={min_ratio}, max={max_ratio})"
+                                    f"thresholds: min={min_ratio}, max={max_ratio}, "
+                                    f"settings: min={(qa_settings.get('word_count_min_ratio') if qa_settings else None)}, "
+                                    f"max={(qa_settings.get('word_count_max_ratio') if qa_settings else None)})"
                                 )
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
@@ -5718,7 +5758,9 @@ def process_html_file_batch(args):
                             f"(expected≈{wc_result.get('multiplier', 1.0):.2f}x, "
                             f"normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f}, "
                             f"counts: src={wc_result.get('original_wc','?')}, dst={wc_result.get('translated_wc','?')}, "
-                            f"thresholds: min={min_ratio}, max={max_ratio})"
+                            f"thresholds: min={wc_result.get('min_ratio_norm','?')}, max={wc_result.get('max_ratio_norm','?')}, "
+                            f"settings: min={wc_result.get('setting_min_ratio', (qa_settings or {}).get('word_count_min_ratio'))}, "
+                            f"max={wc_result.get('setting_max_ratio', (qa_settings or {}).get('word_count_max_ratio'))})"
                         )
                 else:
                     word_count_check = wc_result

@@ -1360,15 +1360,6 @@ class QAScannerMixin:
                     custom_widgets['check_all_pairs'].setChecked(False)
                     custom_widgets['sample_size'].setValue(3000)
                     custom_widgets['min_text_length'].setValue(500)
-                    
-                    # Also reset the ratio dropdowns if they exist in scope
-                    # Using global search since local closure capture might be failing
-                    try:
-                        ratio_min_spin.setCurrentText("Auto")
-                        ratio_max_spin.setCurrentText("Auto")
-                    except Exception:
-                        pass
-                        
                     self.append_log("ℹ️ Settings reset to defaults")
             
             # Flag to prevent recursive cancel calls
@@ -3645,7 +3636,6 @@ class QAScannerMixin:
                 # Word count analysis defaults
                 check_word_count_checkbox.setChecked(True)
                 try:
-                    # default is "exact" per combo construction
                     idx = counting_mode_combo.findData('exact')
                     counting_mode_combo.setCurrentIndex(idx if idx >= 0 else 1)
                 except Exception:
@@ -3666,7 +3656,6 @@ class QAScannerMixin:
                         default_val = default_wordcount_defaults.get(lang_key, 1.0)
                         widget.setValue(int(default_val * 100))
 
-                # File processing / report defaults
                 check_glossary_checkbox.setChecked(True)
                 check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)
@@ -3674,8 +3663,6 @@ class QAScannerMixin:
                 for rb, value in format_radio_buttons:
                     rb.setChecked(value == 'detailed')
                 auto_save_checkbox.setChecked(True)
-
-                # HTML / structure defaults
                 check_multiple_headers_checkbox.setChecked(True)
                 warn_mismatch_checkbox.setChecked(True)
                 check_missing_html_tag_checkbox.setChecked(True)
@@ -4043,12 +4030,6 @@ def show_custom_detection_dialog(parent=None):
             custom_widgets['sample_size'].setValue(3000)
             custom_widgets['min_text_length'].setValue(500)
             custom_widgets['min_duplicate_word_count'].setValue(500)
-            
-            # Reset word count ratios if available
-            if 'word_count_min_ratio' in custom_widgets:
-                custom_widgets['word_count_min_ratio'].setCurrentText("Auto")
-            if 'word_count_max_ratio' in custom_widgets:
-                custom_widgets['word_count_max_ratio'].setCurrentText("Auto")
     
     # Create buttons
     cancel_btn = QPushButton("Cancel")
