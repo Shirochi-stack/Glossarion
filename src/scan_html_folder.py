@@ -4559,7 +4559,9 @@ def detect_dominant_script(text):
         ('hebrew', [(0x0590, 0x05FF)]),
         ('thai', [(0x0E00, 0x0E7F)]),
         ('devanagari', [(0x0900, 0x097F)]),
-        ('latin', [(0x0020, 0x024F), (0x1E00, 0x1EFF)]),
+        # Latin range refined to exclude ASCII control/space/punctuation (0x20-0x40, 0x5B-0x60, 0x7B-0x7F)
+        # Includes A-Z, a-z, Extended Latin, etc.
+        ('latin', [(0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F), (0x1E00, 0x1EFF)]),
     ]
     counts = {k: 0 for k, _ in ranges}
     for ch in text[:20000]:  # sample first 20k chars for speed
@@ -4609,18 +4611,26 @@ def _normalize_lang_for_multiplier(lang: str) -> str:
     return mapping.get(s, s)
 
 
+DEFAULT_WC_MULTIPLIERS = {
+    'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
+    'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
+    'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
+    'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
+    'other': 1.0
+}
+
 def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, script_hint: str = None, is_cjk: bool = None, log_fn=None):
     """
     Choose multiplier based on SOURCE language (expected expansion source→target).
     Priority: explicit source_lang_hint > qa_settings['source_language'] > CJK heuristic > target_language > other > 1.0
     """
-    multipliers = {}
+    multipliers = DEFAULT_WC_MULTIPLIERS.copy()
     try:
         mults = qa_settings.get('word_count_multipliers', {})
-        if isinstance(mults, dict):
-            multipliers = mults
+        if isinstance(mults, dict) and mults:
+            multipliers.update(mults)
     except Exception:
-        multipliers = {}
+        pass
 
     def pick(lang_key):
         if not lang_key or str(lang_key).lower() == 'auto':
