@@ -12450,6 +12450,10 @@ class UnifiedClient:
                         log_stream = False
                     if use_streaming:
                         call_kwargs["stream"] = True
+
+                    # Avoid infinite retry loops when we need to auto-adjust max_tokens
+                    context_retry_done = False
+
                     try:
                         import time as _t
                         start_ts = _t.time()
@@ -12470,52 +12474,140 @@ class UnifiedClient:
                             else:
                                 print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
                     except Exception as sdk_err:
-                        # Special handling for Chutes/vLLM max_completion_tokens limit in non-streaming mode
-                        # Error: max_completion_tokens is too large... (streaming mode allows up to X)
+                        # Special handling: provider context length errors (e.g., OpenRouter 32768 window)
+                        # Example:
+                        #   "maximum context length is 32768 tokens... requested about 72559 tokens (7023 of text input, 65536 in the output)"
                         err_str = str(sdk_err)
-                        if (provider in ('chutes', 'openai') and 
-                            "max_completion_tokens" in err_str and 
-                            "streaming mode allows" in err_str and 
-                            not call_kwargs.get("stream", False)):
-                            
-                            print(f"⚠️ {provider} token limit error: Auto-enabling streaming to bypass non-streaming limit")
-                            
-                            # Enable streaming and retry immediately
-                            call_kwargs["stream"] = True
-                            use_streaming = True
-                            
+                        err_l = err_str.lower()
+                        context_auto_adjust_succeeded = False
+                        if (not context_retry_done) and ("maximum context length" in err_l or "max context length" in err_l):
                             try:
-                                import time as _t
-                                start_ts = _t.time()
-                                if not self._is_stop_requested():
-                                    print(f"🛰️ [{provider}] Retrying with streaming enabled...")
-                                resp = client.chat.completions.create(**call_kwargs)
-                                dur = _t.time() - start_ts
-                                if not self._is_stop_requested():
-                                    print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
-                            except Exception as retry_err:
-                                print(f"🛑 [{provider}] SDK retry failed: {retry_err}")
-                                raise retry_err
+                                import re
+
+                                m_ctx = re.search(r"maximum context length is\s+(\d+)\s+tokens", err_str, re.IGNORECASE)
+                                # Try a few common variants for the input token count
+                                m_in = (
+                                    re.search(r"\((\d+)\s+of\s+(?:text\s+)?input", err_str, re.IGNORECASE)
+                                    or re.search(r"\((\d+)\s+in\s+the\s+messages", err_str, re.IGNORECASE)
+                                    or re.search(r"\((\d+)\s+in\s+the\s+prompt", err_str, re.IGNORECASE)
+                                )
+
+                                if m_ctx and m_in:
+                                    max_ctx = int(m_ctx.group(1))
+                                    in_tokens = int(m_in.group(1))
+
+                                    # Determine which token parameter we are using
+                                    token_key = None
+                                    if "max_completion_tokens" in call_kwargs:
+                                        token_key = "max_completion_tokens"
+                                    elif "max_tokens" in call_kwargs:
+                                        token_key = "max_tokens"
+
+                                    if token_key:
+                                        requested_out = call_kwargs.get(token_key)
+                                        try:
+                                            requested_out_int = int(requested_out)
+                                        except Exception:
+                                            requested_out_int = None
+
+                                        allowed_out = max_ctx - in_tokens
+                                        if allowed_out <= 0:
+                                            raise UnifiedClientError(
+                                                f"Context length exceeded: max_context={max_ctx}, input≈{in_tokens}.",
+                                                error_type="context_length",
+                                                details={"max_context": max_ctx, "input_tokens": in_tokens}
+                                            )
+
+                                        if requested_out_int is None or requested_out_int > allowed_out:
+                                            if not self._is_stop_requested():
+                                                old_disp = requested_out_int if requested_out_int is not None else requested_out
+                                                print(
+                                                    f"⚠️ [{provider}] Context window {max_ctx} tokens; input≈{in_tokens}. "
+                                                    f"Auto-adjusting {token_key} {old_disp} → {allowed_out} and retrying."
+                                                )
+
+                                            call_kwargs[token_key] = int(allowed_out)
+                                            context_retry_done = True
+
+                                            # Retry immediately with adjusted output token limit
+                                            import time as _t
+                                            start_ts = _t.time()
+                                            resp = client.chat.completions.create(**call_kwargs)
+                                            context_auto_adjust_succeeded = True
+                                            if use_streaming:
+                                                with self._active_streams_lock:
+                                                    self._active_streams.add(resp)
+                                            dur = _t.time() - start_ts
+                                            graceful_stop_mode = os.getenv('GRACEFUL_STOP', '0') == '1'
+                                            if graceful_stop_mode or not self._is_stop_requested():
+                                                if use_streaming:
+                                                    print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (after context auto-adjust)")
+                                                else:
+                                                    print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s (after context auto-adjust)")
+                                        else:
+                                            # The provider thinks we exceeded context, but our requested output is already within limit.
+                                            # Fall through to normal error handling.
+                                            pass
+                            except UnifiedClientError:
+                                raise
+                            except Exception:
+                                # If parsing fails, fall through to normal handling
+                                pass
+
+                        if context_auto_adjust_succeeded:
+                            # We already retried successfully with an adjusted output token limit.
+                            # Continue with normal response extraction below.
+                            pass
                         else:
-                            # Catch-all for SDK errors - reduce verbosity for known errors
+                            # Special handling for Chutes/vLLM max_completion_tokens limit in non-streaming mode
+                            # Error: max_completion_tokens is too large... (streaming mode allows up to X)
                             err_str = str(sdk_err)
-                            is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
-                            is_402 = "402" in err_str and "insufficient" in err_str.lower()
-                            
-                            if is_timeout:
-                                # Just log the error, skip full traceback for timeouts
-                                print(f"🛑 [{provider}] SDK call failed: Request timed out.")
-                            elif is_402:
-                                # Just log the error, skip full traceback for 402 payment errors
-                                print(f"🛑 [{provider}] SDK error: {sdk_err}")
-                            elif "429" in err_str or "rate limit" in err_str or "quota" in err_str or "resource_exhausted" in err_str.lower() or "resource exhausted" in err_str.lower():
-                                # Rate limit: terse log, no traceback
-                                print(f"🛑 [{provider}] SDK rate limit: {sdk_err}")
-                                raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
+                            if (provider in ('chutes', 'openai') and 
+                                "max_completion_tokens" in err_str and 
+                                "streaming mode allows" in err_str and 
+                                not call_kwargs.get("stream", False)):
+                                
+                                print(f"⚠️ {provider} token limit error: Auto-enabling streaming to bypass non-streaming limit")
+                                
+                                # Enable streaming and retry immediately
+                                call_kwargs["stream"] = True
+                                use_streaming = True
+                                
+                                try:
+                                    import time as _t
+                                    start_ts = _t.time()
+                                    if not self._is_stop_requested():
+                                        print(f"🛰️ [{provider}] Retrying with streaming enabled...")
+                                    resp = client.chat.completions.create(**call_kwargs)
+                                    dur = _t.time() - start_ts
+                                    if use_streaming:
+                                        with self._active_streams_lock:
+                                            self._active_streams.add(resp)
+                                    if not self._is_stop_requested():
+                                        print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
+                                except Exception as retry_err:
+                                    print(f"🛑 [{provider}] SDK retry failed: {retry_err}")
+                                    raise retry_err
                             else:
-                                # Log the error without printing a traceback
-                                print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
-                            raise
+                                # Catch-all for SDK errors - reduce verbosity for known errors
+                                err_str = str(sdk_err)
+                                is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
+                                is_402 = "402" in err_str and "insufficient" in err_str.lower()
+                                
+                                if is_timeout:
+                                    # Just log the error, skip full traceback for timeouts
+                                    print(f"🛑 [{provider}] SDK call failed: Request timed out.")
+                                elif is_402:
+                                    # Just log the error, skip full traceback for 402 payment errors
+                                    print(f"🛑 [{provider}] SDK error: {sdk_err}")
+                                elif "429" in err_str or "rate limit" in err_str or "quota" in err_str or "resource_exhausted" in err_str.lower() or "resource exhausted" in err_str.lower():
+                                    # Rate limit: terse log, no traceback
+                                    print(f"🛑 [{provider}] SDK rate limit: {sdk_err}")
+                                    raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
+                                else:
+                                    # Log the error without printing a traceback
+                                    print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
+                                raise
                     
                     # Enhanced extraction for Gemini endpoints
                     content = None
