@@ -9909,17 +9909,18 @@ class UnifiedClient:
             #if any(indicator in all_content for indicator in mature_indicators):
                 #print(f"💡 ElectronHub: Consider using models like yi-34b-chat, deepseek-chat, or llama-2-70b for this content")
         
-        # Temporarily update self.model for the API call
-        # This is necessary because _send_openai_compatible uses self.model
-        self.model = actual_model
-        
+        # IMPORTANT: Do NOT mutate self.model here.
+        # This client instance is shared across parallel threads; changing self.model can cause
+        # other threads to mis-route (e.g., ElectronHub key sent to Google's Gemini endpoint).
         try:
-            # Make the API call using OpenAI-compatible format
+            # Make the API call using OpenAI-compatible format.
+            # ElectronHub expects the model WITHOUT the 'eh/' prefix, so we pass it via model_override.
             result = self._send_openai_compatible(
                 messages, temperature, max_tokens,
                 base_url=base_url,
                 response_name=response_name,
-                provider="electronhub"
+                provider="electronhub",
+                model_override=actual_model
             )
             
             return result
@@ -9972,10 +9973,6 @@ class UnifiedClient:
                 print(f"ElectronHub API error for model '{actual_model}': {e}")
                 raise
                 
-        finally:
-            # Always restore the original model name
-            # This ensures subsequent calls work correctly
-            self.model = original_model
  
     def _parse_poe_tokens(self, key_str: str) -> dict:
         """Parse POE cookies from a single string.
