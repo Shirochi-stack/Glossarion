@@ -397,17 +397,46 @@ def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] =
         now = time.time()
         with _api_watchdog_lock:
             # Only decrement if this entry was counted as in-flight
-            counted = True
-            if request_id and request_id in _api_watchdog_entries:
-                if _api_watchdog_entries[request_id].get("status") != "in_flight":
-                    counted = False
-                _api_watchdog_entries.pop(request_id, None)
-            if counted:
+            should_decrement = False
+            
+            if request_id:
+                # If ID provided, only decrement if it exists and was in-flight
+                if request_id in _api_watchdog_entries:
+                    entry = _api_watchdog_entries[request_id]
+                    if entry.get("status") == "in_flight":
+                        should_decrement = True
+                    _api_watchdog_entries.pop(request_id, None)
+                else:
+                    # ID provided but not found - treat as idempotent/duplicate call
+                    pass
+            else:
+                # Legacy behavior (no ID): assume one decrement
+                should_decrement = True
+                
+            if should_decrement:
                 _api_watchdog_in_flight = max(0, _api_watchdog_in_flight - 1)
+                
             _api_watchdog_last_change_ts = now
             _api_watchdog_last_finish_ts = now
             _api_watchdog_last_context = context or _api_watchdog_last_context
             _api_watchdog_last_model = model or _api_watchdog_last_model
+        _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
+def _api_watchdog_record_retry(request_id: str, attempt: int, reason: str = None) -> None:
+    """Record a retry attempt for an active request."""
+    global _api_watchdog_last_change_ts
+    try:
+        if not request_id:
+            return
+        with _api_watchdog_lock:
+            if request_id in _api_watchdog_entries:
+                entry = _api_watchdog_entries[request_id]
+                entry["retry_count"] = attempt
+                if reason:
+                    entry["retry_reason"] = reason
+                _api_watchdog_last_change_ts = time.time()
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -3797,6 +3826,9 @@ class UnifiedClient:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             attempt += 1
                             
+                            # Watchdog retry tracking
+                            _api_watchdog_record_retry(request_id, attempt, reason="rate_limit")
+                            
                             if indefinite_retry_enabled:
                                 print(f"🔄 Multi-key mode: Rate limit hit, attempting key rotation (indefinite retry, attempt {attempt})")
                             else:
@@ -4584,6 +4616,10 @@ class UnifiedClient:
         gemma_no_system_retry_done = False
 
         for attempt in range(internal_retries):
+            # Watchdog retry tracking for internal retries
+            if attempt > 0:
+                _api_watchdog_record_retry(request_id, attempt, reason="internal_error")
+
             try:
                 # Check for stop request at start of each retry attempt
                 if self._is_stop_requested():
@@ -5466,6 +5502,9 @@ class UnifiedClient:
                 # Consistent log prefix for display (1-based)
                 log_prefix = f"[{label} {idx+1}/{max_attempts}]"
 
+                # Watchdog retry tracking for fallback keys
+                _api_watchdog_record_retry(request_id, idx + 1, reason=f"fallback_{label}")
+
                 print(f"{log_prefix} Trying {fallback_model}")
                 
                 try:
@@ -5605,6 +5644,10 @@ class UnifiedClient:
                                 # If output is less than 10% of input, severely truncated
                                 if char_ratio < 0.1:
                                     is_severely_truncated = True
+                                    
+                                    # Watchdog retry tracking for char ratio / severe truncation
+                                    _api_watchdog_record_retry(request_id, idx + 1, reason=f"char_ratio_{label}")
+                                    
                                     # Only continue if not the last key
                                     if idx < max_attempts - 1:
                                         msg = f"[{label} {idx+1}] ⚠️ Severely truncated ({output_len}/{input_len} = {char_ratio:.1%}) - trying next key"

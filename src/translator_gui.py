@@ -4757,6 +4757,8 @@ Recent translations to summarize:
                     total = entry.get("total_chunks")
                     ctx = entry.get("context")
                     merged = entry.get("merged_chapters")
+                    retry = entry.get("retry_count")
+                    retry_suffix = f" (retry {retry})" if retry and int(retry) > 0 else ""
 
                     # Handle merged chapters first
                     if merged and len(merged) > 0:
@@ -4772,8 +4774,8 @@ Recent translations to summarize:
                                 except Exception:
                                     t = None
                                 if chunk and total and t and t > 1:
-                                    return f"{base_label} {chunk}/{total}"
-                                return base_label
+                                    return f"{base_label} {chunk}/{total}{retry_suffix}"
+                                return f"{base_label}{retry_suffix}"
                         except Exception:
                             pass
 
@@ -4789,7 +4791,7 @@ Recent translations to summarize:
                             chunk_part = f" {chunk}/{total}"
 
                         # Context suffix removed (redundant in this UI)
-                        return f"Chapter {chapter}{chunk_part}"
+                        return f"Chapter {chapter}{chunk_part}{retry_suffix}"
 
                     lab = entry.get("label") or entry.get("context") or "request"
                     s = str(lab)
@@ -4805,7 +4807,7 @@ Recent translations to summarize:
                     s = re.sub(r"\(\s*(translation|glossary)\s*\)", "", s, flags=re.IGNORECASE)
 
                     s = re.sub(r"\s+", " ", s).strip()
-                    return s or "request"
+                    return (s or "request") + retry_suffix
                 except Exception:
                     return "request"
 
@@ -4990,6 +4992,21 @@ Recent translations to summarize:
                                 label = ctx
                         if not label:
                             label = "request"
+                            
+                        # Add retry info if present
+                        retry = entry.get("retry_count")
+                        if retry and int(retry) > 0:
+                            reason = entry.get("retry_reason", "")
+                            # Simplify reason for display
+                            if "rate_limit" in reason: reason = "rate limit"
+                            elif "internal" in reason: reason = "internal"
+                            elif "fallback" in reason: reason = "fallback"
+                            
+                            if reason:
+                                label = f"{label} (retry {retry}: {reason})"
+                            else:
+                                label = f"{label} (retry {retry})"
+                                
                         labels.append(str(label))
                     except Exception:
                         continue
