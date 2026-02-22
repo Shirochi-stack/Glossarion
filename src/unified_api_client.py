@@ -9211,6 +9211,21 @@ class UnifiedClient:
     def _with_sdk_retries(self, provider_name: str, max_retries: int, call):
         """Run an SDK call with standardized retry behavior and error wrapping."""
         api_delay = self._get_send_interval()
+
+        def _rand_sleep(base: float) -> float:
+            try:
+                b = float(base)
+            except Exception:
+                b = 0.0
+            if b <= 0:
+                return 0.0
+            lo = max(0.0, b / 2.0)
+            hi = max(lo, b)
+            try:
+                return float(random.uniform(lo, hi))
+            except Exception:
+                return hi
+
         for attempt in range(max_retries):
             try:
                 # Use comprehensive stop check
@@ -9230,7 +9245,13 @@ class UnifiedClient:
                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                 if attempt < max_retries - 1:
                     self._debug_log(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
-                    time.sleep(api_delay)
+                    sleep_s = _rand_sleep(api_delay)
+                    if sleep_s > 0:
+                        # Keep the log recognizable; avoid leaking details.
+                        if not self._is_stop_requested():
+                            print(f"Retrying request in {sleep_s:.6f} seconds")
+                        if not self._sleep_with_cancel(sleep_s, 0.1):
+                            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                     continue
                 self._debug_log(f"{provider_name} SDK error after all retries: {e}")
                 raise UnifiedClientError(f"{provider_name} SDK error: {e}")
@@ -9373,10 +9394,13 @@ class UnifiedClient:
             except Exception:
                 _, read = self._get_timeouts()
                 timeout_obj = float(read)
+            # Disable OpenAI SDK internal retries so our outer retry loop (and user-configured
+            # SEND_INTERVAL_SECONDS pacing) is the single source of truth.
             client = openai.OpenAI(
                 api_key=api_key_clean,
                 base_url=base_url,
-                timeout=timeout_obj
+                timeout=timeout_obj,
+                max_retries=0
             )
             tls.openai_clients[map_key] = client
 
@@ -12526,24 +12550,65 @@ class UnifiedClient:
                                                     f"Auto-adjusting {token_key} {old_disp} → {allowed_out} and retrying."
                                                 )
 
+                                            # Cache the discovered safe output budget so subsequent retries for the
+                                            # same model don't start at the too-large value again.
+                                            try:
+                                                with self.__class__._model_limits_lock:
+                                                    prev = self.__class__._model_token_limits.get(effective_model)
+                                                    if prev is None or int(allowed_out) < int(prev):
+                                                        self.__class__._model_token_limits[effective_model] = int(allowed_out)
+                                            except Exception:
+                                                pass
+                                            # Also update the local max_tokens for this function's retry loop
+                                            try:
+                                                if token_key == "max_tokens":
+                                                    try:
+                                                        if max_tokens is None or int(max_tokens) > int(allowed_out):
+                                                            max_tokens = int(allowed_out)
+                                                    except Exception:
+                                                        max_tokens = int(allowed_out)
+                                            except Exception:
+                                                pass
+
                                             call_kwargs[token_key] = int(allowed_out)
                                             context_retry_done = True
 
-                                            # Retry immediately with adjusted output token limit
-                                            import time as _t
-                                            start_ts = _t.time()
-                                            resp = client.chat.completions.create(**call_kwargs)
-                                            context_auto_adjust_succeeded = True
-                                            if use_streaming:
-                                                with self._active_streams_lock:
-                                                    self._active_streams.add(resp)
-                                            dur = _t.time() - start_ts
-                                            graceful_stop_mode = os.getenv('GRACEFUL_STOP', '0') == '1'
-                                            if graceful_stop_mode or not self._is_stop_requested():
+                                            # Retry with adjusted output token limit.
+                                            # Respect SEND_INTERVAL_SECONDS pacing: sleep a random 50–100% of api_delay.
+                                            # If the retry fails (e.g., 402/429), propagate THAT failure instead of
+                                            # re-raising the original context-length 400.
+                                            try:
+                                                sleep_s = 0.0
+                                                try:
+                                                    base = float(api_delay)
+                                                    if base > 0:
+                                                        sleep_s = float(random.uniform(base / 2.0, base))
+                                                except Exception:
+                                                    sleep_s = 0.0
+                                                if sleep_s > 0 and not self._is_stop_requested():
+                                                    print(f"Retrying request to /chat/completions in {sleep_s:.6f} seconds")
+                                                if sleep_s > 0:
+                                                    if not self._sleep_with_cancel(sleep_s, 0.1):
+                                                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                                                import time as _t
+                                                start_ts = _t.time()
+                                                resp = client.chat.completions.create(**call_kwargs)
+                                                context_auto_adjust_succeeded = True
                                                 if use_streaming:
-                                                    print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (after context auto-adjust)")
-                                                else:
-                                                    print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s (after context auto-adjust)")
+                                                    with self._active_streams_lock:
+                                                        self._active_streams.add(resp)
+                                                dur = _t.time() - start_ts
+                                                graceful_stop_mode = os.getenv('GRACEFUL_STOP', '0') == '1'
+                                                if graceful_stop_mode or not self._is_stop_requested():
+                                                    if use_streaming:
+                                                        print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (after context auto-adjust)")
+                                                    else:
+                                                        print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s (after context auto-adjust)")
+                                            except Exception as retry_err:
+                                                # Override sdk_err so downstream handling reflects the real failure.
+                                                sdk_err = retry_err
+                                                err_str = str(sdk_err)
+                                                err_l = err_str.lower()
                                         else:
                                             # The provider thinks we exceeded context, but our requested output is already within limit.
                                             # Fall through to normal error handling.
