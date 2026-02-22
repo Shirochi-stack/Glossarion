@@ -9256,6 +9256,70 @@ class UnifiedClient:
                 self._debug_log(f"{provider_name} SDK error after all retries: {e}")
                 raise UnifiedClientError(f"{provider_name} SDK error: {e}")
 
+    def _summarize_exception(self, err: Exception, *, max_len: int = 300) -> str:
+        """Return a short, user-friendly exception string.
+
+        Some providers (e.g., Cloudflare fronted endpoints) return full HTML error pages (504/520/etc.)
+        which can spam logs; we condense those to the status code/title.
+        """
+        try:
+            s = str(err) if err is not None else ""
+        except Exception:
+            s = ""
+
+        if not s:
+            try:
+                return type(err).__name__
+            except Exception:
+                return "Error"
+
+        sl = s.lower()
+
+        # Collapse HTML error pages into a concise one-liner.
+        if "<!doctype html" in sl or "<html" in sl:
+            try:
+                import re
+                code = None
+                # Cloudflare page contains: "Error code 504"
+                m_code = re.search(r"error\s+code\s+(\d{3})", s, re.IGNORECASE)
+                if m_code:
+                    code = m_code.group(1)
+                # Title often contains: "electronhub.ai | 504: Gateway time-out"
+                title = None
+                m_title = re.search(r"<title>\s*([^<]+?)\s*</title>", s, re.IGNORECASE)
+                if m_title:
+                    title = m_title.group(1).strip()
+                    # Avoid repeating the numeric code if we already have it
+                    if code and title.startswith(code + ":"):
+                        title = title[len(code) + 1 :].strip()
+                parts = []
+                if code:
+                    parts.append(f"HTTP {code}")
+                if title:
+                    parts.append(title)
+                if parts:
+                    return " - ".join(parts)
+            except Exception:
+                pass
+            # Fallback for HTML pages we couldn't parse
+            return "HTTP error (HTML response)"
+
+        # Prefer first line if multi-line
+        if "\n" in s:
+            try:
+                s = s.splitlines()[0].strip() or s
+            except Exception:
+                pass
+
+        # Bound very long errors
+        try:
+            if max_len and len(s) > int(max_len):
+                s = s[: int(max_len)].rstrip() + "…"
+        except Exception:
+            pass
+
+        return s
+
     def _build_openai_headers(self, provider: str, api_key: str, headers: Optional[dict]) -> dict:
         """Construct standard headers for OpenAI-compatible HTTP calls.
 
@@ -12667,8 +12731,9 @@ class UnifiedClient:
                                     print(f"🛑 [{provider}] SDK rate limit: {sdk_err}")
                                     raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
                                 else:
-                                    # Log the error without printing a traceback
-                                    print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
+                                    # Log the error without printing a traceback.
+                                    # Some providers return full HTML pages for 5xx errors (e.g., 504); condense them.
+                                    print(f"🛑 [{provider}] SDK call failed: {self._summarize_exception(sdk_err)}")
                                 raise
                     
                     # Enhanced extraction for Gemini endpoints
@@ -13203,7 +13268,7 @@ class UnifiedClient:
                         if is_cancelled:
                             # Preserve original cancellation without wrapping
                             raise
-                        print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
+                        print(f"{provider} SDK error (attempt {attempt + 1}): {self._summarize_exception(e)}")
                         time.sleep(api_delay)
                         continue
                     elif self._multi_key_mode:
