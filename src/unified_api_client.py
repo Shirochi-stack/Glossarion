@@ -10673,6 +10673,10 @@ class UnifiedClient:
         thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
         model_lower = self.model.lower() if self.model else ""
 
+        # Normalize unexpected values defensively
+        if thinking_level not in ("minimal", "low", "medium", "high"):
+            thinking_level = "high"
+
         # If user tries to disable thinking via budget=0, map to the lowest supported level per model
         if self._is_gemini_3_model() and thinking_budget == 0:
             if "flash" in model_lower:
@@ -10685,13 +10689,16 @@ class UnifiedClient:
                     print("   ⚠️ Gemini 3 Pro does not support disabled thinking; using low instead of 0")
             thinking_budget = -1  # avoid sending 0 budget for Gemini 3
 
-        # gemini-3-pro (non-flash) does not support medium/minimal; fall back appropriately
+        # Gemini 3 Pro (non-flash):
+        # - "minimal" is not supported; coerce to low.
+        # - "medium" is supported on Gemini 3.1 Pro, but NOT on Gemini 3.0 Pro (e.g., gemini-3-pro-preview).
         if "gemini-3-pro" in model_lower and "flash" not in model_lower:
-            if thinking_level == "medium":
+            is_gemini_31 = "gemini-3.1" in model_lower
+            if thinking_level == "medium" and not is_gemini_31:
                 thinking_level = "high"
                 if not self._is_stop_requested():
-                    print("   ⚠️ Gemini 3 Pro does not support thinking_level=medium; falling back to high")
-            elif thinking_level == "minimal":
+                    print("   ⚠️ Gemini 3 Pro (non-3.1) does not support thinking_level=medium; falling back to high")
+            if thinking_level == "minimal":
                 thinking_level = "low"
                 if not self._is_stop_requested():
                     print("   ⚠️ Gemini 3 Pro does not support thinking_level=minimal; falling back to low")
