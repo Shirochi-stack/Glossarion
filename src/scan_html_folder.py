@@ -5731,9 +5731,7 @@ def process_html_file_batch(args):
                                     f"word_count_mismatch: translated={ratio:.2f}x source "
                                     f"(expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f}, "
                                     f"counts: src={original_wc}, dst={translated_wc}, "
-                                    f"thresholds: min={min_ratio}, max={max_ratio}, "
-                                    f"settings: min={(qa_settings.get('word_count_min_ratio') if qa_settings else None)}, "
-                                    f"max={(qa_settings.get('word_count_max_ratio') if qa_settings else None)})"
+                                    f"thresholds: min={min_ratio}, max={max_ratio})"
                                 )
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
@@ -5758,9 +5756,7 @@ def process_html_file_batch(args):
                             f"(expected≈{wc_result.get('multiplier', 1.0):.2f}x, "
                             f"normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f}, "
                             f"counts: src={wc_result.get('original_wc','?')}, dst={wc_result.get('translated_wc','?')}, "
-                            f"thresholds: min={wc_result.get('min_ratio_norm','?')}, max={wc_result.get('max_ratio_norm','?')}, "
-                            f"settings: min={wc_result.get('setting_min_ratio', (qa_settings or {}).get('word_count_min_ratio'))}, "
-                            f"max={wc_result.get('setting_max_ratio', (qa_settings or {}).get('word_count_max_ratio'))})"
+                            f"thresholds: min={wc_result.get('min_ratio_norm','?')}, max={wc_result.get('max_ratio_norm','?')})"
                         )
                 else:
                     word_count_check = wc_result
