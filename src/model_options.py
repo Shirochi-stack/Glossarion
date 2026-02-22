@@ -152,6 +152,7 @@ def get_model_options() -> List[str]:
         "eh/gemini-2.5-flash-preview-05-20-thinking","eh/gemini-2.5-flash-preview-09-2025",
         "eh/gemini-2.5-flash-lite", "eh/gemini-2.5-pro","eh/gemini-2.5-pro-thinking",
         "eh/gemini-2.5-pro-preview-06-05","eh/gemini-2.5-pro-preview-05-06", "eh/gemini-2.5-pro-preview-03-25",
+        "eh/gemini-3.1-pro-preview", "eh/gemini-3.1-pro-preview-medium", "eh/gemini-3.1-pro-preview-low",
         "eh/gemini-2.0-flash-001","eh/gemini-2.0-flash-exp","eh/gemini-2.0-flash-thinking-exp", "eh/grok-4-fast",
         "eh/grok-4-0709", "eh/grok-3", "eh/grok-3-mini-fast", "eh/grok-3-mini", "eh/grok-3-fast",
         "eh/grok-code-fast-1","eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large", "eh/deepseek-v3-0324:free",

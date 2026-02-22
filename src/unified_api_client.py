@@ -9320,6 +9320,67 @@ class UnifiedClient:
 
         return s
 
+    def _extract_http_status_from_exception(self, err: Exception) -> Optional[int]:
+        """Best-effort extraction of an HTTP status code from SDK exceptions.
+
+        Used for retry classification and watchdog annotations. Handles cases where the exception text
+        is an HTML error page (e.g., Cloudflare 504) or includes an embedded status code.
+        """
+        if err is None:
+            return None
+        # Common structured attributes
+        for attr in ("http_status", "status_code", "status", "code"):
+            try:
+                v = getattr(err, attr, None)
+                if isinstance(v, int) and 100 <= v <= 599:
+                    return v
+                if isinstance(v, str) and v.isdigit():
+                    iv = int(v)
+                    if 100 <= iv <= 599:
+                        return iv
+            except Exception:
+                pass
+        # Parse from message
+        try:
+            s = str(err)
+        except Exception:
+            return None
+        if not s:
+            return None
+        try:
+            import re
+            m = re.search(r"error\s+code\s+(\d{3})", s, re.IGNORECASE)
+            if m:
+                return int(m.group(1))
+            m = re.search(r"\bhttp\s+(\d{3})\b", s, re.IGNORECASE)
+            if m:
+                return int(m.group(1))
+            # Cloudflare titles sometimes include: "| 504: Gateway time-out"
+            m = re.search(r"\|\s*(\d{3})\s*:\s*[A-Za-z\-\s]+", s)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            return None
+        return None
+
+    def _get_request_label_for_logs(self, messages=None) -> Optional[str]:
+        """Return the best available chapter/chunk label for log lines."""
+        try:
+            tls = self._get_thread_local_client()
+            label = getattr(tls, 'current_request_label', None)
+            if label:
+                return str(label)
+        except Exception:
+            pass
+        try:
+            if messages is not None:
+                label = self._extract_chapter_label(messages)
+                if label:
+                    return str(label)
+        except Exception:
+            pass
+        return None
+
     def _build_openai_headers(self, provider: str, api_key: str, headers: Optional[dict]) -> dict:
         """Construct standard headers for OpenAI-compatible HTTP calls.
 
@@ -12720,20 +12781,27 @@ class UnifiedClient:
                                 is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
                                 is_402 = "402" in err_str and "insufficient" in err_str.lower()
                                 
+                                req_label = None
+                                try:
+                                    req_label = self._get_request_label_for_logs(messages)
+                                except Exception:
+                                    req_label = None
+                                label_part = f" [{req_label}]" if req_label else ""
+
                                 if is_timeout:
                                     # Just log the error, skip full traceback for timeouts
-                                    print(f"🛑 [{provider}] SDK call failed: Request timed out.")
+                                    print(f"🛑 [{provider}]{label_part} SDK call failed: Request timed out.")
                                 elif is_402:
                                     # Just log the error, skip full traceback for 402 payment errors
-                                    print(f"🛑 [{provider}] SDK error: {sdk_err}")
+                                    print(f"🛑 [{provider}]{label_part} SDK error: {sdk_err}")
                                 elif "429" in err_str or "rate limit" in err_str or "quota" in err_str or "resource_exhausted" in err_str.lower() or "resource exhausted" in err_str.lower():
                                     # Rate limit: terse log, no traceback
-                                    print(f"🛑 [{provider}] SDK rate limit: {sdk_err}")
+                                    print(f"🛑 [{provider}]{label_part} SDK rate limit: {sdk_err}")
                                     raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
                                 else:
                                     # Log the error without printing a traceback.
                                     # Some providers return full HTML pages for 5xx errors (e.g., 504); condense them.
-                                    print(f"🛑 [{provider}] SDK call failed: {self._summarize_exception(sdk_err)}")
+                                    print(f"🛑 [{provider}]{label_part} SDK call failed: {self._summarize_exception(sdk_err)}")
                                 raise
                     
                     # Enhanced extraction for Gemini endpoints
@@ -13268,8 +13336,51 @@ class UnifiedClient:
                         if is_cancelled:
                             # Preserve original cancellation without wrapping
                             raise
-                        print(f"{provider} SDK error (attempt {attempt + 1}): {self._summarize_exception(e)}")
-                        time.sleep(api_delay)
+                        # Include chapter/chunk label if available
+                        req_label = None
+                        try:
+                            req_label = self._get_request_label_for_logs(messages)
+                        except Exception:
+                            req_label = None
+                        label_part = f" [{req_label}]" if req_label else ""
+
+                        # If this is an upstream 504 (often Cloudflare/ElectronHub), treat as transient and
+                        # retry with randomized delay (50–100% of SEND_INTERVAL_SECONDS).
+                        http_status = None
+                        try:
+                            http_status = self._extract_http_status_from_exception(e)
+                        except Exception:
+                            http_status = None
+
+                        # Record retry in watchdog (if we have a request_id)
+                        try:
+                            tls = self._get_thread_local_client()
+                            rid = getattr(tls, 'current_request_id', None)
+                        except Exception:
+                            rid = None
+                        if rid and http_status == 504:
+                            try:
+                                _api_watchdog_record_retry(rid, attempt + 1, reason="sdk_http_504")
+                            except Exception:
+                                pass
+
+                        print(f"{provider} SDK error (attempt {attempt + 1}){label_part}: {self._summarize_exception(e)}")
+
+                        sleep_s = 0.0
+                        try:
+                            base = float(api_delay)
+                            if base > 0:
+                                if http_status == 504:
+                                    sleep_s = float(random.uniform(base / 2.0, base))
+                                else:
+                                    sleep_s = base
+                        except Exception:
+                            sleep_s = float(api_delay) if api_delay else 0.0
+                        if sleep_s > 0 and not self._is_stop_requested():
+                            print(f"Retrying request in {sleep_s:.6f} seconds")
+                        if sleep_s > 0:
+                            if not self._sleep_with_cancel(sleep_s, 0.1):
+                                raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                         continue
                     elif self._multi_key_mode:
                         raise UnifiedClientError(f"{provider} error: {e}", error_type="api_error")
