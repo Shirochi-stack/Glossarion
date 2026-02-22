@@ -2984,9 +2984,61 @@ class QAScannerMixin:
         auto_save_checkbox.setChecked(qa_settings.get('auto_save_report', True))
         report_layout.addWidget(auto_save_checkbox)
 
-        scroll_layout.addSpacing(20)
+        # Add word count ratio threshold settings
+        # Min/Max normalized ratio thresholds
+        ratio_thresholds_widget = QWidget()
+        ratio_thresholds_layout = QHBoxLayout(ratio_thresholds_widget)
+        ratio_thresholds_layout.setContentsMargins(0, 10, 0, 5)
         
-        # Cache Settings Section
+        ratio_min_label = QLabel("Min Ratio (normalized):")
+        ratio_min_label.setFont(QFont('Arial', 10))
+        ratio_thresholds_layout.addWidget(ratio_min_label)
+        
+        # Min ratio spinbox
+        ratio_min_spin = QComboBox()
+        ratio_min_spin.setEditable(True)
+        ratio_min_spin.addItem("Auto")
+        # Add reasonable range options
+        for val in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+            ratio_min_spin.addItem(str(val))
+        
+        saved_min = qa_settings.get('word_count_min_ratio', 'Auto')
+        ratio_min_spin.setCurrentText(str(saved_min))
+        ratio_min_spin.setMinimumWidth(100)  # Increased from 80
+        disable_wheel_event(ratio_min_spin)
+        ratio_thresholds_layout.addWidget(ratio_min_spin)
+        
+        ratio_thresholds_layout.addSpacing(20)
+        
+        ratio_max_label = QLabel("Max Ratio (normalized):")
+        ratio_max_label.setFont(QFont('Arial', 10))
+        ratio_thresholds_layout.addWidget(ratio_max_label)
+        
+        # Max ratio spinbox
+        ratio_max_spin = QComboBox()
+        ratio_max_spin.setEditable(True)
+        ratio_max_spin.addItem("Auto")
+        # Add reasonable range options
+        for val in [1.2, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 4.0, 5.0]:
+            ratio_max_spin.addItem(str(val))
+            
+        saved_max = qa_settings.get('word_count_max_ratio', 'Auto')
+        ratio_max_spin.setCurrentText(str(saved_max))
+        ratio_max_spin.setMinimumWidth(100)  # Increased from 80
+        disable_wheel_event(ratio_max_spin)
+        ratio_thresholds_layout.addWidget(ratio_max_spin)
+        
+        ratio_thresholds_layout.addStretch()
+        wordcount_layout.addWidget(ratio_thresholds_widget)
+        
+        ratio_hint = QLabel("(Auto CJK: Min 0.6, Max 2.0 | Auto Non-CJK: Min 0.7, Max 1.5)\nValues are normalized by the language multiplier above.")
+        ratio_hint.setFont(QFont('Arial', 9))
+        ratio_hint.setStyleSheet("color: gray;")
+        wordcount_layout.addWidget(ratio_hint)
+
+        scroll_layout.addSpacing(15)
+        
+        # HTML Structure Analysis Section
         cache_group = QGroupBox("Performance Cache Settings")
         cache_group.setFont(QFont('Arial', 12, QFont.Bold))
         cache_layout = QVBoxLayout(cache_group)
@@ -3283,6 +3335,8 @@ class QAScannerMixin:
                     'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                     'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                     'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
+                    'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
+                    'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
                 }
                 
                 failed_core_settings = []

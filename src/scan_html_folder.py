@@ -4990,20 +4990,49 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         
         # Define VERY PERMISSIVE ratio ranges for novel translation
         # These are much looser to accommodate extreme translation cases
+        
+        # Default Auto Logic (used if settings are missing or explicitly None/Auto)
+        min_ratio_cjk = 0.6
+        max_ratio_cjk = 2.0  # Reduced from 2.5 to 2.0 as per request
+        min_ratio_non_cjk = 0.7
+        max_ratio_non_cjk = 1.5
+        
+        # Override with custom settings if available
+        if qa_settings:
+            # Word Count Ratio Thresholds (normalized)
+            # Use 'word_count_min_ratio' and 'word_count_max_ratio'
+            # If set to 'auto' or not present, fallback to defaults
+            
+            setting_min = qa_settings.get('word_count_min_ratio')
+            setting_max = qa_settings.get('word_count_max_ratio')
+            
+            try:
+                if setting_min is not None and str(setting_min).lower() != 'auto':
+                    val = float(setting_min)
+                    min_ratio_cjk = val
+                    min_ratio_non_cjk = val
+                
+                if setting_max is not None and str(setting_max).lower() != 'auto':
+                    val = float(setting_max)
+                    max_ratio_cjk = val
+                    max_ratio_non_cjk = val
+            except (ValueError, TypeError):
+                pass  # Keep defaults on error
+
         if is_cjk:
             # CJK to English novel translation - reasonable bounds
-            min_ratio = 0.6   # 60% - catches significant omissions
-            max_ratio = 2.5   # 250% - catches excessive padding
+            min_ratio = min_ratio_cjk
+            max_ratio = max_ratio_cjk
             
-            # Typical healthy range
-            typical_min = 0.8   # 80%
-            typical_max = 1.8   # 180%
+            # Typical healthy range (derived from reasonable bounds)
+            typical_min = min_ratio + 0.2
+            typical_max = max_ratio * 0.7
         else:
             # Non-CJK source
-            min_ratio = 0.7
-            max_ratio = 1.5
-            typical_min = 0.8
-            typical_max = 1.2
+            min_ratio = min_ratio_non_cjk
+            max_ratio = max_ratio_non_cjk
+            typical_min = min_ratio + 0.1
+            typical_max = max_ratio * 0.8
         
         # Relax bounds for short files to avoid false positives from small word count variations
         # Example: 18→24 words = 133%, which shouldn't be flagged as an issue
@@ -5603,9 +5632,46 @@ def process_html_file_batch(args):
                                 log_fn=dummy_log
                             )
                             ratio_norm = ratio / max(0.01, multiplier)
-                            # For text files, use same reasonable bounds as EPUB
-                            is_reasonable = 0.7 <= ratio_norm <= 2.0
-                            is_typical = 0.8 <= ratio_norm <= 1.5
+                            # Define ratio ranges consistent with EPUB mode
+                            
+                            # Default Auto Logic
+                            min_ratio_cjk = 0.6
+                            max_ratio_cjk = 2.0  # Reduced from 2.5 to 2.0 as per request
+                            min_ratio_non_cjk = 0.7
+                            max_ratio_non_cjk = 1.5
+                            
+                            # Override with custom settings if available
+                            if qa_settings:
+                                setting_min = qa_settings.get('word_count_min_ratio')
+                                setting_max = qa_settings.get('word_count_max_ratio')
+                                try:
+                                    if setting_min is not None and str(setting_min).lower() != 'auto':
+                                        val = float(setting_min)
+                                        min_ratio_cjk = val
+                                        min_ratio_non_cjk = val
+                                    
+                                    if setting_max is not None and str(setting_max).lower() != 'auto':
+                                        val = float(setting_max)
+                                        max_ratio_cjk = val
+                                        max_ratio_non_cjk = val
+                                except (ValueError, TypeError):
+                                    pass
+
+                            if is_cjk:
+                                # CJK to English novel translation - reasonable bounds
+                                min_ratio = min_ratio_cjk
+                                max_ratio = max_ratio_cjk
+                                typical_min = min_ratio + 0.2
+                                typical_max = max_ratio * 0.7
+                            else:
+                                # Non-CJK source
+                                min_ratio = min_ratio_non_cjk
+                                max_ratio = max_ratio_non_cjk
+                                typical_min = min_ratio + 0.1
+                                typical_max = max_ratio * 0.8
+
+                            is_reasonable = min_ratio <= ratio_norm <= max_ratio
+                            is_typical = typical_min <= ratio_norm <= typical_max
                             
                             word_count_check = {
                                 'found_match': True,
