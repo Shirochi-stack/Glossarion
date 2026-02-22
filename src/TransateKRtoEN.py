@@ -12271,6 +12271,11 @@ def main(log_callback=None, stop_callback=None):
                 if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
                     print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
                     
+                    # Update watchdog: Record this as a "split_failed" event before the request technically finishes
+                    # Using the first request ID from the group if possible, though this runs post-request.
+                    # Since the original request is finished by now, we can't update its watchdog state directly.
+                    # But we can log it clearly.
+                    
                     # Only save file for debugging if it contains meaningful content beyond error markers
                     cleaned_stripped = cleaned.strip()
                     is_only_error_marker = cleaned_stripped in [
