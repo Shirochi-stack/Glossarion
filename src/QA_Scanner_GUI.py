@@ -1360,6 +1360,15 @@ class QAScannerMixin:
                     custom_widgets['check_all_pairs'].setChecked(False)
                     custom_widgets['sample_size'].setValue(3000)
                     custom_widgets['min_text_length'].setValue(500)
+                    
+                    # Also reset the ratio dropdowns if they exist in scope
+                    # Using global search since local closure capture might be failing
+                    try:
+                        ratio_min_spin.setCurrentText("Auto")
+                        ratio_max_spin.setCurrentText("Auto")
+                    except Exception:
+                        pass
+                        
                     self.append_log("ℹ️ Settings reset to defaults")
             
             # Flag to prevent recursive cancel calls
@@ -3618,10 +3627,13 @@ class QAScannerMixin:
             if result == QMessageBox.Yes:
                 # Save current excluded characters before reset
                 saved_excluded_chars = excluded_text.toPlainText()
-                
+
+                # Foreign character / language defaults
                 threshold_spinbox.setValue(10)
-                # Don't clear excluded_text - preserve it
+                source_lang_combo.setCurrentText('Auto')
                 target_language_combo.setCurrentText('English')
+
+                # Detection defaults
                 check_encoding_checkbox.setChecked(False)
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
@@ -3630,9 +3642,20 @@ class QAScannerMixin:
                 excess_punct_checkbox.setChecked(False)
                 excess_threshold_spinbox.setValue(49)
 
+                # Word count analysis defaults
+                check_word_count_checkbox.setChecked(True)
+                try:
+                    # default is "exact" per combo construction
+                    idx = counting_mode_combo.findData('exact')
+                    counting_mode_combo.setCurrentIndex(idx if idx >= 0 else 1)
+                except Exception:
+                    pass
+                ratio_min_spin.setCurrentText('Auto')
+                ratio_max_spin.setCurrentText('Auto')
+
                 # Reset auto multipliers checkbox to default (enabled)
                 auto_multipliers_checkbox.setChecked(True)
-                
+
                 # Reset word count multipliers to defaults
                 for lang_key, widget in word_multiplier_sliders.items():
                     if lang_key.endswith('__spin'):
@@ -3642,6 +3665,8 @@ class QAScannerMixin:
                     elif f"{lang_key}__spin" not in word_multiplier_sliders:
                         default_val = default_wordcount_defaults.get(lang_key, 1.0)
                         widget.setValue(int(default_val * 100))
+
+                # File processing / report defaults
                 check_glossary_checkbox.setChecked(True)
                 check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)
@@ -3649,7 +3674,8 @@ class QAScannerMixin:
                 for rb, value in format_radio_buttons:
                     rb.setChecked(value == 'detailed')
                 auto_save_checkbox.setChecked(True)
-                check_word_count_checkbox.setChecked(True)
+
+                # HTML / structure defaults
                 check_multiple_headers_checkbox.setChecked(True)
                 warn_mismatch_checkbox.setChecked(True)
                 check_missing_html_tag_checkbox.setChecked(True)
@@ -3657,17 +3683,20 @@ class QAScannerMixin:
                 check_paragraph_structure_checkbox.setChecked(True)
                 check_invalid_nesting_checkbox.setChecked(False)
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
-                
+
                 # Reset cache settings
                 cache_enabled_checkbox.setChecked(True)
                 auto_size_checkbox.setChecked(False)
                 show_stats_checkbox.setChecked(False)
-                
+
                 # Reset cache sizes to defaults
                 for cache_name, default_value in cache_defaults.items():
                     cache_spinboxes[cache_name].setValue(default_value)
-                    
+
                 ai_hunter_workers_spinbox.setValue(1)
+
+                # Restore excluded characters (per confirmation text)
+                excluded_text.setPlainText(saved_excluded_chars)
         
         scroll_layout.addStretch()
         
@@ -4014,6 +4043,12 @@ def show_custom_detection_dialog(parent=None):
             custom_widgets['sample_size'].setValue(3000)
             custom_widgets['min_text_length'].setValue(500)
             custom_widgets['min_duplicate_word_count'].setValue(500)
+            
+            # Reset word count ratios if available
+            if 'word_count_min_ratio' in custom_widgets:
+                custom_widgets['word_count_min_ratio'].setCurrentText("Auto")
+            if 'word_count_max_ratio' in custom_widgets:
+                custom_widgets['word_count_max_ratio'].setCurrentText("Auto")
     
     # Create buttons
     cancel_btn = QPushButton("Cancel")

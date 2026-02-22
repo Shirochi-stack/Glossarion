@@ -5692,7 +5692,8 @@ def process_html_file_batch(args):
                                 issues.append(
                                     f"word_count_mismatch: translated={ratio:.2f}x source "
                                     f"(expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f}, "
-                                    f"counts: src={original_wc}, dst={translated_wc})"
+                                    f"counts: src={original_wc}, dst={translated_wc}, "
+                                    f"thresholds: min={min_ratio}, max={max_ratio})"
                                 )
                 elif '_total' in original_word_counts:
                     # Fallback: old behavior with total count (skip analysis)
@@ -5716,7 +5717,8 @@ def process_html_file_batch(args):
                             f"word_count_mismatch: translated={wc_result['ratio']:.2f}x source "
                             f"(expected≈{wc_result.get('multiplier', 1.0):.2f}x, "
                             f"normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f}, "
-                            f"counts: src={wc_result.get('original_wc','?')}, dst={wc_result.get('translated_wc','?')})"
+                            f"counts: src={wc_result.get('original_wc','?')}, dst={wc_result.get('translated_wc','?')}, "
+                            f"thresholds: min={min_ratio}, max={max_ratio})"
                         )
                 else:
                     word_count_check = wc_result
