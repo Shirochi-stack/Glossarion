@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.6.6"
+        __version__ = "7.6.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.6')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.7')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2651,7 +2651,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.6.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.6.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -8233,10 +8233,32 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
                 
             except Exception as e:
-                # Suppress noisy traceback when user stops/cancels
+                # Suppress noisy traceback when user stops/cancels (including graceful stop).
                 err_str = str(e).lower()
-                if "cancelled by user" in err_str or "canceled by user" in err_str or "operation cancelled" in err_str or "operation canceled" in err_str:
-                    self.append_log("❌ Translation stopped by user")
+
+                # Prefer structured cancellation detection when available.
+                is_cancelled = False
+                try:
+                    from unified_api_client import UnifiedClientError
+                    if isinstance(e, UnifiedClientError) and getattr(e, 'error_type', None) == 'cancelled':
+                        is_cancelled = True
+                except Exception:
+                    pass
+
+                # Fallback to string matching for legacy/foreign exceptions.
+                if (
+                    "cancelled by user" in err_str or "canceled by user" in err_str or
+                    "operation cancelled" in err_str or "operation canceled" in err_str or
+                    "graceful stop active" in err_str
+                ):
+                    is_cancelled = True
+
+                if is_cancelled:
+                    # Keep messaging user-friendly and avoid traceback spam.
+                    if "graceful stop" in err_str:
+                        self.append_log("⏹️ Graceful stop: not starting new API call")
+                    else:
+                        self.append_log("❌ Translation stopped by user")
                 else:
                     # For other exceptions, show full details
                     self.append_log(f"❌ Translation error: {e}")
@@ -14275,7 +14297,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.6.6...")
+    print("🚀 Starting Glossarion v7.6.7...")
     
     # Initialize splash screen
     splash_manager = None

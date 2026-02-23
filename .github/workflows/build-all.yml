@@ -288,12 +288,12 @@ jobs:
         working-directory: src
       
       - name: Make executable
-        run: chmod +x src/dist/L_Glossarion_Lite_v7.6.6_Linux
+        run: chmod +x src/dist/L_Glossarion_Lite_v7.6.7_Linux
       
       - name: Create tarball
         run: |
           cd src/dist
-          tar -czvf Glossarion-Lite-Linux.tar.gz L_Glossarion_Lite_v7.6.6_Linux
+          tar -czvf Glossarion-Lite-Linux.tar.gz L_Glossarion_Lite_v7.6.7_Linux
       
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
