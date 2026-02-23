@@ -9245,6 +9245,16 @@ class UnifiedClient:
                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                 if attempt < max_retries - 1:
                     self._debug_log(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
+
+                    # If graceful stop is active, do not schedule any further API calls (including retries).
+                    try:
+                        if os.environ.get('GRACEFUL_STOP') == '1':
+                            raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+                    except UnifiedClientError:
+                        raise
+                    except Exception:
+                        pass
+
                     sleep_s = _rand_sleep(api_delay)
                     if sleep_s > 0:
                         # Keep the log recognizable; avoid leaking details.
@@ -13365,6 +13375,16 @@ class UnifiedClient:
                                 pass
 
                         print(f"{provider} SDK error (attempt {attempt + 1}){label_part}: {self._summarize_exception(e)}")
+
+                        # If graceful stop is active, do not schedule any further API calls (including retries).
+                        # Graceful stop is different from force-stop: it lets in-flight calls finish, but blocks new ones.
+                        try:
+                            if os.environ.get('GRACEFUL_STOP') == '1':
+                                raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
+                        except UnifiedClientError:
+                            raise
+                        except Exception:
+                            pass
 
                         sleep_s = 0.0
                         try:
