@@ -127,6 +127,7 @@ def get_model_options() -> List[str]:
         "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
         
         # For OR, prevfix with 'or/'
+        "or/openrouter/free",
         "or/google/gemini-2.5-pro",
         "or/google/gemini-2.5-flash",
         "or/google/gemini-2.5-flash-preview-09-2025",
