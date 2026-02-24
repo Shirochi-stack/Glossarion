@@ -4547,8 +4547,13 @@ def detect_multiple_headers(html_content):
 
 
 def detect_dominant_script(text):
-    """Heuristic dominant script detection to drive auto source-language multiplier.
+    """Heuristic dominant script detection.
+
     Returns one of: cjk, japanese, korean, cyrillic, arabic, hebrew, thai, devanagari, latin, other
+
+    Notes:
+    - This is used for multiple purposes (non-target detection heuristics, word-count multipliers, etc.).
+    - It is *not* precise language detection, but it is fast and robust for major scripts.
     """
     ranges = [
         ('cjk', [(0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x20000, 0x2A6DF), (0x2A700, 0x2B73F)]),
@@ -4576,6 +4581,236 @@ def detect_dominant_script(text):
     if dominant[1] == 0:
         return 'other'
     return dominant[0]
+
+
+def _script_to_source_language_label(script_hint: str) -> Optional[str]:
+    """Map a dominant script to a best-effort source language label used by multipliers."""
+    if not script_hint:
+        return None
+    s = str(script_hint).strip().lower()
+    mapping = {
+        # CJK
+        'cjk': 'chinese',
+        'japanese': 'japanese',
+        'korean': 'korean',
+        # Other scripts
+        'cyrillic': 'russian',
+        'arabic': 'arabic',
+        'hebrew': 'hebrew',
+        'thai': 'thai',
+        # Devanagari is most often Hindi in this context
+        'devanagari': 'hindi',
+    }
+    return mapping.get(s)
+
+
+def _sample_text_from_word_count_folder(folder_path: str, max_files: int = 3, max_chars: int = 15000) -> str:
+    """Read a small sample of *source* text from word_count folder.
+
+    This folder is typically created during extraction and contains original chunks
+    (often in the source language). We keep this fast and best-effort.
+    """
+    try:
+        word_count_folder = os.path.join(folder_path, 'word_count')
+        if not os.path.exists(word_count_folder):
+            return ''
+
+        sample_parts = []
+        files = sorted([
+            f for f in os.listdir(word_count_folder)
+            if f.lower().endswith(('.txt', '.html', '.htm', '.xhtml'))
+        ])
+        for f in files[:max_files]:
+            try:
+                p = os.path.join(word_count_folder, f)
+                with open(p, 'r', encoding='utf-8', errors='ignore') as fh:
+                    raw = fh.read(max_chars)
+                if '<' in raw and f.lower().endswith(('.html', '.htm', '.xhtml')):
+                    soup = BeautifulSoup(raw, 'html.parser')
+                    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                        try:
+                            tag.decompose()
+                        except Exception:
+                            pass
+                    txt = soup.get_text(separator=' ', strip=True)
+                else:
+                    txt = raw
+                txt = txt.strip()
+                if txt:
+                    sample_parts.append(txt)
+            except Exception:
+                continue
+
+        sample = ' '.join(sample_parts)
+        if len(sample) > max_chars:
+            sample = sample[:max_chars]
+        return sample
+    except Exception:
+        return ''
+
+
+def _sample_text_from_epub(epub_path: str, max_spine_items: int = 3, max_chars: int = 15000) -> str:
+    """Read a small sample of *source* text from the original EPUB.
+
+    This is used for logging the AUTO source language when the user configured
+    source_language=auto in QA settings.
+    """
+    try:
+        sample_parts = []
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find content.opf
+            content_opf_data = None
+            content_opf_path = None
+            for fname in zf.namelist():
+                if 'content.opf' in fname.lower():
+                    try:
+                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
+                        content_opf_path = fname
+                        break
+                    except Exception:
+                        continue
+
+            if not content_opf_data:
+                return ''
+
+            soup_opf = BeautifulSoup(content_opf_data, 'xml')
+            manifest_map = {}
+            manifest = soup_opf.find('manifest')
+            if manifest:
+                for item in manifest.find_all('item'):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    if item_id and href:
+                        manifest_map[item_id] = href
+
+            spine_hrefs = []
+            spine = soup_opf.find('spine')
+            if spine:
+                for itemref in spine.find_all('itemref'):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest_map:
+                        spine_hrefs.append(manifest_map[idref])
+
+            if not spine_hrefs:
+                return ''
+
+            base_dir = ''
+            if content_opf_path:
+                base_dir = os.path.dirname(content_opf_path)
+                if base_dir:
+                    base_dir = base_dir + '/'
+
+            for href in spine_hrefs[:max_spine_items]:
+                possible_paths = [
+                    href,
+                    base_dir + href,
+                    'OEBPS/' + href,
+                    'OPS/' + href,
+                ]
+                content = None
+                for try_path in possible_paths:
+                    try:
+                        content = zf.read(try_path).decode('utf-8', errors='ignore')
+                        break
+                    except KeyError:
+                        continue
+                    except Exception:
+                        continue
+
+                if not content:
+                    continue
+
+                soup = BeautifulSoup(content, 'html.parser')
+                for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                    try:
+                        tag.decompose()
+                    except Exception:
+                        pass
+                txt = soup.get_text(separator=' ', strip=True)
+                txt = txt.strip()
+                if txt:
+                    sample_parts.append(txt)
+                if sum(len(x) for x in sample_parts) >= max_chars:
+                    break
+
+        sample = ' '.join(sample_parts)
+        if len(sample) > max_chars:
+            sample = sample[:max_chars]
+        return sample
+    except Exception:
+        return ''
+
+
+def _auto_detect_source_language_for_log(qa_settings, folder_path: str, epub_path: Optional[str], text_file_mode: bool,
+                                        original_word_counts: dict, log_fn=None) -> Tuple[Optional[str], Optional[str], Optional[float]]:
+    """Best-effort source language detection for logging when source_language is AUTO.
+
+    Returns:
+        (language_label, method, confidence)
+
+    Notes:
+    - The QA scan operates on *translated* HTML, so we try to detect from the original
+      inputs (EPUB / word_count folder) when available.
+    - This is for logging/visibility; per-chapter heuristics still drive multipliers.
+    """
+    try:
+        src = str(qa_settings.get('source_language', 'auto') or 'auto').strip().lower()
+        if src != 'auto':
+            return None, None, None
+
+        # 1) If we have per-chapter script hints from EPUB word-count extraction, use the dominant script.
+        script_counts = Counter()
+        try:
+            for _k, info in (original_word_counts or {}).items():
+                if isinstance(info, dict) and info.get('script'):
+                    script_counts[str(info.get('script')).strip().lower()] += 1
+        except Exception:
+            script_counts = Counter()
+
+        if script_counts:
+            top_script, top_count = script_counts.most_common(1)[0]
+            label = _script_to_source_language_label(top_script)
+            if label:
+                conf = top_count / max(1, sum(script_counts.values()))
+                return label, f"dominant_script:{top_script}", conf
+
+        # 2) Otherwise, sample original text and use langdetect.
+        sample = ''
+        if text_file_mode:
+            sample = _sample_text_from_word_count_folder(folder_path)
+        else:
+            if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith('.epub'):
+                sample = _sample_text_from_epub(epub_path)
+
+        if sample:
+            # Quick script shortcut first (robust for CJK/etc)
+            script_hint = detect_dominant_script(sample)
+            label = _script_to_source_language_label(script_hint)
+            if label:
+                return label, f"sample_script:{script_hint}", None
+
+            try:
+                from langdetect import detect_langs
+                detections = detect_langs(sample)
+                if detections:
+                    top = detections[0]
+                    # Map ISO codes to labels used by multipliers
+                    code_map = {
+                        'en': 'english', 'es': 'spanish', 'fr': 'french', 'de': 'german',
+                        'pt': 'portuguese', 'it': 'italian', 'ru': 'russian',
+                        'ja': 'japanese', 'ko': 'korean', 'zh-cn': 'chinese (simplified)',
+                        'zh-tw': 'chinese (traditional)', 'zh': 'chinese',
+                        'ar': 'arabic', 'he': 'hebrew', 'th': 'thai',
+                        'hi': 'hindi',
+                    }
+                    label = code_map.get(str(top.lang).lower(), str(top.lang).lower())
+                    return label, 'langdetect', float(getattr(top, 'prob', 0.0))
+            except Exception:
+                pass
+
+        return None, None, None
+    except Exception:
+        return None, None, None
 
 def _normalize_lang_for_multiplier(lang: str) -> str:
     if not lang:
@@ -6131,6 +6366,64 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Log settings
     log(f"\n📋 QA Settings Status:")
     log(f"   ✓ Target language: {qa_settings.get('target_language', 'english').upper()}")
+
+    # Source language visibility (esp. when configured as AUTO)
+    src_lang_setting = qa_settings.get('source_language', 'auto')
+    log(f"   ✓ Source language: {str(src_lang_setting).upper()}")
+
+    detected_label = None
+    detected_method = None
+    detected_conf = None
+
+    if str(src_lang_setting).strip().lower() == 'auto':
+        detected_label, detected_method, detected_conf = _auto_detect_source_language_for_log(
+            qa_settings,
+            folder_path=folder_path,
+            epub_path=epub_path,
+            text_file_mode=bool(text_file_mode),
+            original_word_counts=original_word_counts,
+            log_fn=log
+        )
+        if detected_label:
+            extra = []
+            if detected_method:
+                extra.append(detected_method)
+            if detected_conf is not None:
+                try:
+                    extra.append(f"conf={detected_conf:.2f}")
+                except Exception:
+                    pass
+            suffix = f" ({', '.join(extra)})" if extra else ""
+            log(f"      → AUTO detected source language: {str(detected_label).upper()}{suffix}")
+        else:
+            log(f"      → AUTO detected source language: (unable to detect from source input; will rely on per-chapter script heuristics)")
+
+    # Show which word-count multiplier will be used for source→target expansion expectations
+    # (This is primarily relevant for the word count ratio check.)
+    try:
+        multiplier_hint = detected_label if str(src_lang_setting).strip().lower() == 'auto' else src_lang_setting
+        # If still None/auto, fall back to the existing internal logic.
+        multiplier = _get_wc_multiplier(
+            qa_settings,
+            source_lang_hint=multiplier_hint,
+            script_hint=None,
+            is_cjk=None,
+            log_fn=None
+        )
+        # Display key in normalized form (aligns with word_count_multipliers keys)
+        try:
+            if multiplier_hint and str(multiplier_hint).strip().lower() != 'auto':
+                mult_key = _normalize_lang_for_multiplier(str(multiplier_hint))
+            else:
+                mult_key = "(auto/fallback)"
+        except Exception:
+            mult_key = str(multiplier_hint) if multiplier_hint else "(auto/fallback)"
+
+        tgt = str(qa_settings.get('target_language', 'english')).lower()
+        log(f"      → Word count multiplier used: {multiplier:.2f} (source={mult_key} → target={tgt})")
+    except Exception:
+        pass
+
     log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
