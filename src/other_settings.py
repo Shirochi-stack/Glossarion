@@ -1830,7 +1830,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(thoughts_row)
     
     # Store reference to description label for enable/disable
-    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3).\nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — Gemini 3 Flash supports minimal; Gemini 3.0 Pro (gemini-3-pro-*) does not support medium; Gemini 3.1 Pro supports medium.")
+    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3).\nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — Gemini 3 Flash supports minimal\nGemini 3.0 Pro (gemini-3-pro-*) does not support medium; Gemini 3.1 Pro supports medium.")
     self.gemini_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.gemini_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gemini_desc_label)
