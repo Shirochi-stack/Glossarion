@@ -6394,15 +6394,28 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 except Exception:
                     pass
             suffix = f" ({', '.join(extra)})" if extra else ""
-            log(f"      → AUTO detected source language: {str(detected_label).upper()}{suffix}")
+            log(f"      → AUTO detected source language (global): {str(detected_label).upper()}{suffix}")
         else:
-            log(f"      → AUTO detected source language: (unable to detect from source input; will rely on per-chapter script heuristics)")
+            log(f"      → AUTO detected source language (global): (unable to detect from source input; will rely on per-chapter script heuristics)")
+
+    # If source_language is AUTO and we successfully detected a dominant source language,
+    # FORCE it globally so per-chapter oddballs don't flip multipliers.
+    # This matches the common case where EPUBs are single-language throughout.
+    if str(src_lang_setting).strip().lower() == 'auto' and detected_label:
+        try:
+            qa_settings['_source_language_setting'] = src_lang_setting
+            qa_settings['source_language'] = detected_label
+            qa_settings['source_language_detection_method'] = detected_method
+            qa_settings['source_language_detection_conf'] = detected_conf
+            log(f"      → Applying AUTO source language globally for all chapters: {str(detected_label).upper()}")
+        except Exception:
+            pass
 
     # Show which word-count multiplier will be used for source→target expansion expectations
     # (This is primarily relevant for the word count ratio check.)
     try:
-        multiplier_hint = detected_label if str(src_lang_setting).strip().lower() == 'auto' else src_lang_setting
-        # If still None/auto, fall back to the existing internal logic.
+        # Note: after the override above, qa_settings['source_language'] is the effective global value.
+        multiplier_hint = qa_settings.get('source_language', src_lang_setting)
         multiplier = _get_wc_multiplier(
             qa_settings,
             source_lang_hint=multiplier_hint,
@@ -6420,7 +6433,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             mult_key = str(multiplier_hint) if multiplier_hint else "(auto/fallback)"
 
         tgt = str(qa_settings.get('target_language', 'english')).lower()
-        log(f"      → Word count multiplier used: {multiplier:.2f} (source={mult_key} → target={tgt})")
+        log(f"      → Word count multiplier used (global): {multiplier:.2f} (source={mult_key} → target={tgt})")
     except Exception:
         pass
 
