@@ -2844,7 +2844,11 @@ def detect_duplicates(results, log, should_stop, config):
                 # Keep the original sequential code for when there's no LSH and not in AI Hunter mode
                 log("⚠️ No MinHash index available - checking all pairs (slower)")
                 
-                total_comparisons = (len(results) * (len(results) - 1)) // 2
+                # IMPORTANT: signatures were extracted only for results_for_dup_check
+                # (files over the minimum word count), so all-pairs comparisons must use that list.
+                pair_results = results_for_dup_check
+                
+                total_comparisons = (len(pair_results) * (len(pair_results) - 1)) // 2
                 comparisons_done = 0
                 last_progress = 0  # This is already here for sequential mode
                 ai_start_time = time.time()  # Use local timer
@@ -2855,10 +2859,10 @@ def detect_duplicates(results, log, should_stop, config):
                 @lru_cache(maxsize=10000)
                 def ai_hunter_check_cached(idx1, idx2):
                     """Cached AI Hunter check"""
-                    sem_sim = calculate_semantic_similarity(results[idx1]['semantic_sig'], 
-                                                          results[idx2]['semantic_sig'])
-                    struct_sim = calculate_structural_similarity(results[idx1]['structural_sig'],
-                                                               results[idx2]['structural_sig'])
+                    sem_sim = calculate_semantic_similarity(pair_results[idx1]['semantic_sig'], 
+                                                          pair_results[idx2]['semantic_sig'])
+                    struct_sim = calculate_structural_similarity(pair_results[idx1]['structural_sig'],
+                                                               pair_results[idx2]['structural_sig'])
                     
                     # Quick text check
                     hash1 = text_hashes[idx1]['hash_2k']
@@ -2873,12 +2877,12 @@ def detect_duplicates(results, log, should_stop, config):
                     return sem_sim, struct_sim, text_sim
                 
                 # Check EVERY pair of files
-                for i in range(len(results)):
+                for i in range(len(pair_results)):
                     if should_stop():
                         log("⛔ Semantic check interrupted by user.")
                         break
                     
-                    for j in range(i + 1, len(results)):
+                    for j in range(i + 1, len(pair_results)):
                         comparisons_done += 1
                         
                         # Show progress every 5%
@@ -2894,9 +2898,9 @@ def detect_duplicates(results, log, should_stop, config):
                             last_progress = progress
                         
                         # Skip if already in same group
-                        if (results[i]['filename'] in duplicate_groups and 
-                            results[j]['filename'] in duplicate_groups and
-                            duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                        if (pair_results[i]['filename'] in duplicate_groups and 
+                            pair_results[j]['filename'] in duplicate_groups and
+                            duplicate_groups[pair_results[i]['filename']] == duplicate_groups[pair_results[j]['filename']]):
                             continue
                         
                         # Get cached comparison results
@@ -2912,26 +2916,26 @@ def detect_duplicates(results, log, should_stop, config):
                                 # If text similarity is low but semantic/structural is high, it's likely a retranslation
                                 if text_sim < 0.6:  # Different enough text
                                     log(f"   🎯 AI Hunter: Found potential retranslation")
-                                    log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
+                                    log(f"      Files: {pair_results[i]['filename']} ≈ {pair_results[j]['filename']}")
                                     log(f"      Text similarity: {int(text_sim*100)}% (low)")
                                     log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
                                     log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
                                     
                                     merge_duplicate_groups(duplicate_groups, 
-                                                         results[i]['filename'], 
-                                                         results[j]['filename'])
+                                                         pair_results[i]['filename'], 
+                                                         pair_results[j]['filename'])
                                     confidence = (sem_sim + struct_sim) / 2
-                                    duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
+                                    duplicate_confidence[(pair_results[i]['filename'], pair_results[j]['filename'])] = confidence
                                     log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
                         else:
                             # Normal semantic checking
                             if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
                                 merge_duplicate_groups(duplicate_groups, 
-                                                     results[i]['filename'], 
-                                                     results[j]['filename'])
+                                                     pair_results[i]['filename'], 
+                                                     pair_results[j]['filename'])
                                 confidence = (sem_sim + struct_sim) / 2
-                                duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                                log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
+                                duplicate_confidence[(pair_results[i]['filename'], pair_results[j]['filename'])] = confidence
+                                log(f"   └─ Semantic match: {pair_results[i]['filename']} ≈ {pair_results[j]['filename']} "
                                     f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
                 
                 # Clear local cache

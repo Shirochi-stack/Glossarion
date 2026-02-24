@@ -55,7 +55,7 @@ class SplashManager(QObject):
             
             if os.path.isfile(ico_path):
                 # Set app user model ID immediately
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.7')
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.9')
                 
                 # Set app-level icon
                 if self.app:
@@ -162,7 +162,7 @@ class SplashManager(QObject):
             self._load_icon(layout)
             
             # Title
-            title_label = QLabel("Glossarion v7.6.7")
+            title_label = QLabel("Glossarion v7.6.9")
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title_font = QFont("Arial", int(max(14, 20 * self._ui_scale)), QFont.Weight.Bold)
             title_label.setFont(title_font)
@@ -320,7 +320,7 @@ class SplashManager(QObject):
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.7')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.6.9')
                         
                         # Load icon from file and set it on the window
                         hwnd = int(self.splash_window.winId())
