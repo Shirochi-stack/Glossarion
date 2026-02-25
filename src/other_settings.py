@@ -3110,42 +3110,6 @@ def _create_response_handling_section(self, parent):
     disable_qa_markers_desc.setContentsMargins(20, 5, 0, 10)
     section_v.addWidget(disable_qa_markers_desc)
     
-    # Add Halgakos icon under the description (HiDPI-aware 90x90, centered)
-    import os
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-    if os.path.exists(icon_path):
-        from PySide6.QtGui import QIcon, QPixmap
-        from PySide6.QtCore import QSize
-        icon_label = QLabel()
-        icon_label.setStyleSheet("background-color: transparent;")
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        logical_px = 200
-        dev_px = int(logical_px * max(1.0, dpr))
-        icon = QIcon(icon_path)
-        pm = icon.pixmap(QSize(dev_px, dev_px))
-        if pm.isNull():
-            raw = QPixmap(icon_path)
-            img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            pm = QPixmap.fromImage(img)
-        try:
-            pm.setDevicePixelRatio(dpr)
-        except Exception:
-            pass
-        # Fit into logical size while preserving DPR
-        pm_fitted = pm.scaled(int(logical_px * dpr), int(logical_px * dpr),
-                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        try:
-            pm_fitted.setDevicePixelRatio(dpr)
-        except Exception:
-            pass
-        icon_label.setPixmap(pm_fitted)
-        icon_label.setFixedSize(logical_px, logical_px)
-        icon_label.setAlignment(Qt.AlignCenter)
-        section_v.addWidget(icon_label, alignment=Qt.AlignCenter)
-    
     # Place the section at row 1, column 0 to match the original grid
     try:
         grid = parent.layout()
@@ -5049,6 +5013,41 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_epub_desc)
+
+    # Halgakos icon (HiDPI-aware)
+    import os as _os_icon
+    _ico_path = _os_icon.path.join(_os_icon.path.dirname(_os_icon.path.abspath(__file__)), 'Halgakos.ico')
+    if _os_icon.path.exists(_ico_path):
+        from PySide6.QtGui import QIcon, QPixmap
+        from PySide6.QtCore import QSize
+        _icon_label = QLabel()
+        _icon_label.setStyleSheet("background-color: transparent;")
+        try:
+            _dpr = self.devicePixelRatioF()
+        except Exception:
+            _dpr = 1.0
+        _logical_px = 150
+        _dev_px = int(_logical_px * max(1.0, _dpr))
+        _icon = QIcon(_ico_path)
+        _pm = _icon.pixmap(QSize(_dev_px, _dev_px))
+        if _pm.isNull():
+            _raw = QPixmap(_ico_path)
+            _img = _raw.toImage().scaled(_dev_px, _dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _pm = QPixmap.fromImage(_img)
+        try:
+            _pm.setDevicePixelRatio(_dpr)
+        except Exception:
+            pass
+        _pm_fitted = _pm.scaled(int(_logical_px * _dpr), int(_logical_px * _dpr),
+                                Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        try:
+            _pm_fitted.setDevicePixelRatio(_dpr)
+        except Exception:
+            pass
+        _icon_label.setPixmap(_pm_fitted)
+        _icon_label.setFixedSize(_logical_px, _logical_px)
+        _icon_label.setAlignment(Qt.AlignCenter)
+        left_v.addWidget(_icon_label, alignment=Qt.AlignCenter)
 
     # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
     empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
