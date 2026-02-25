@@ -8820,6 +8820,10 @@ class UnifiedClient:
                 self._cancelled = True
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
+            # Graceful stop: don't start new API calls (including retries)
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                raise UnifiedClientError("Graceful stop active - aborting API retry", error_type="cancelled")
+            
             # Debug logging for retry loop
             if debug_max_tokens and attempt > 0:
                 current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
