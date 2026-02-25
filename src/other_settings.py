@@ -1952,6 +1952,13 @@ def _create_response_handling_section(self, parent):
     anthropic_h2.setContentsMargins(40, 2, 0, 0)
 
     self.anthropic_force_adaptive_cb = self._create_styled_checkbox("Force Adaptive Thinking")
+    self.anthropic_force_adaptive_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Forces adaptive thinking on all Claude models. "
+        "Not all models support adaptive thinking — enabling this on unsupported models will cause API errors. "
+        "Opus 4.6 always uses adaptive automatically."
+        "</p></qt>"
+    )
     try:
         self.anthropic_force_adaptive_cb.setChecked(bool(getattr(self, 'anthropic_force_adaptive_var', False)))
     except Exception:

@@ -1366,6 +1366,10 @@ class UnifiedClient:
     _model_token_limits = {}  # model_name -> max_tokens
     _model_limits_lock = threading.Lock()
     
+    # Cache models that don't support adaptive thinking (fall back to standard extended thinking)
+    _adaptive_unsupported_models = set()
+    _adaptive_unsupported_lock = threading.Lock()
+    
     # Track all HTTP sessions so we can close them on cancellation
     _all_sessions = set()
     _all_sessions_lock = threading.Lock()
@@ -9000,6 +9004,37 @@ class UnifiedClient:
             if attempt < max_retries - 1:
                 snippet = _sanitize_for_log(resp.text, 300)
                 
+                # Check for adaptive thinking not supported error (Anthropic)
+                if status == 400 and "adaptive thinking is not supported" in resp.text.lower():
+                    print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
+                    # Cache this model as not supporting adaptive thinking
+                    model_name = json.get('model') if json else None
+                    if model_name:
+                        try:
+                            with self.__class__._adaptive_unsupported_lock:
+                                self.__class__._adaptive_unsupported_models.add(str(model_name))
+                        except Exception:
+                            pass
+                        print(f"    🧠 Disabled adaptive thinking for {model_name} (not supported)")
+                    # Fall back to standard extended thinking for retry
+                    if json:
+                        json.pop('thinking', None)
+                        json.pop('output_config', None)
+                        budget_str = os.getenv('ANTHROPIC_THINKING_BUDGET', '10000')
+                        try:
+                            budget = int(budget_str)
+                        except Exception:
+                            budget = 10000
+                        if budget > 0:
+                            json['thinking'] = {'type': 'enabled', 'budget_tokens': budget}
+                            print(f"    🔄 Falling back to extended thinking (budget={budget:,} tokens)")
+                    # Don't count this as a failed attempt
+                    attempt = max(0, attempt - 1)
+                    sleep_s = max(random.uniform(api_delay / 2.0, api_delay), 0.5)
+                    if not self._sleep_with_cancel(sleep_s, 0.1):
+                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                    continue
+                
                 # Check for token-limit errors before logging
                 # Supports: chat (/chat/completions), legacy completions (/completions), and Responses API (/responses).
                 # DeepSeek commonly returns: "Invalid max_tokens value, the valid range of max_tokens is [1, 8192]"
@@ -9459,11 +9494,23 @@ class UnifiedClient:
                 force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
                 is_opus_46 = 'opus-4-6' in model_lower or 'opus-4.6' in model_lower
                 
+                # Check if model is cached as not supporting adaptive thinking
+                adaptive_blocked = False
+                try:
+                    with self.__class__._adaptive_unsupported_lock:
+                        if self.model in self.__class__._adaptive_unsupported_models:
+                            adaptive_blocked = True
+                except Exception:
+                    pass
+                
                 # Determine thinking mode:
                 # - opus 4.6: always adaptive (only mode it supports)
                 # - force_adaptive toggle: adaptive for all models
                 # - default: enabled with budget_tokens
-                use_adaptive = is_opus_46 or force_adaptive
+                # - adaptive_blocked: model doesn't support adaptive, fall through to standard
+                use_adaptive = (is_opus_46 or force_adaptive) and not adaptive_blocked
+                if adaptive_blocked and (is_opus_46 or force_adaptive):
+                    print(f"🧠 Adaptive thinking not supported on {self.model}, using standard extended thinking")
                 
                 if use_adaptive:
                     data["thinking"] = {"type": "adaptive"}
