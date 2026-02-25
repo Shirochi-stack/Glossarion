@@ -8540,6 +8540,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PRESERVE_TRANSPARENCY': "1" if self.config.get('preserve_transparency', False) else "0",
             
             # PDF settings
+            'ENABLE_PDF_OUTPUT': '1' if self.config.get('enable_pdf_output', False) else '0',
             'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
             'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'xhtml',
             'PRESERVE_ORIGINAL_FORMAT': "1" if self.config.get('preserve_original_format', False) else "0", 
@@ -14098,6 +14099,9 @@ Important rules:
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
                 ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'),
                 ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', '')),
+
+                # PDF output
+                ('ENABLE_PDF_OUTPUT', '1' if getattr(self, 'enable_pdf_output_var', False) else '0'),
 
                 # Image compression settings
                 ('ENABLE_IMAGE_COMPRESSION', '1' if getattr(self, 'enable_image_compression_var', False) else '0'),
