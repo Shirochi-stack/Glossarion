@@ -9451,12 +9451,54 @@ class UnifiedClient:
         }
         if system_message:
             data["system"] = system_message
+        
+        # Inject Anthropic extended/adaptive thinking if enabled
+        try:
+            if os.getenv('ENABLE_ANTHROPIC_THINKING', '0') == '1':
+                model_lower = (self.model or '').lower()
+                force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
+                is_opus_46 = 'opus-4-6' in model_lower or 'opus-4.6' in model_lower
+                
+                # Determine thinking mode:
+                # - opus 4.6: always adaptive (only mode it supports)
+                # - force_adaptive toggle: adaptive for all models
+                # - default: enabled with budget_tokens
+                use_adaptive = is_opus_46 or force_adaptive
+                
+                if use_adaptive:
+                    data["thinking"] = {"type": "adaptive"}
+                    # Add effort level via output_config
+                    effort = os.getenv('ANTHROPIC_EFFORT', 'medium').lower()
+                    if effort in ('low', 'medium', 'high'):
+                        data["output_config"] = {"effort": effort}
+                    orig_temp = data.get("temperature")
+                    data["temperature"] = 1
+                    print(f"🧠 Anthropic adaptive thinking: effort={effort} (temperature overridden to 1 for compatibility)")
+                else:
+                    budget_str = os.getenv('ANTHROPIC_THINKING_BUDGET', '10000')
+                    try:
+                        budget = int(budget_str)
+                    except Exception:
+                        budget = 10000
+                    if budget > 0:
+                        data["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                        orig_temp = data.get("temperature")
+                        data["temperature"] = 1
+                        print(f"🧠 Anthropic extended thinking: budget={budget:,} tokens (temperature overridden to 1 for compatibility)")
+        except Exception:
+            pass
+        
         return data
 
     def _parse_anthropic_json(self, json_resp: dict):
         content_parts = json_resp.get("content", [])
         if isinstance(content_parts, list):
-            content = "".join(part.get("text", "") for part in content_parts)
+            # Skip thinking blocks — only extract text from non-thinking parts
+            content = "".join(
+                part.get("text", "")
+                for part in content_parts
+                if isinstance(part, dict) and part.get("type") != "thinking"
+            )
         else:
             content = str(content_parts)
         finish_reason = json_resp.get("stop_reason")

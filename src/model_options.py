@@ -22,7 +22,7 @@ def get_model_options() -> List[str]:
         
         # Anthropic Claude Models
         "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
-        "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514", "claude-3-7-sonnet-20250219", "claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022", 
+        "claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022", 
         "claude-3-haiku-20240307",       
         
         # Grok Models
@@ -30,7 +30,6 @@ def get_model_options() -> List[str]:
         "grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning",
         
         # Vertex AI Model Garden - Claude models (confirmed)
-        "claude-sonnet-4-5-20250929",
         "claude-4-opus@20250514",
         "claude-4-sonnet@20250514",
         "claude-opus-4@20250514",

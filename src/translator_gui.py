@@ -1060,6 +1060,11 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.gpt_effort_var = self.config.get('gpt_effort', 'medium')
         # NEW: DeepSeek thinking (OpenAI-compatible extra_body)
         self.enable_deepseek_thinking_var = self.config.get('enable_deepseek_thinking', True)
+        # NEW: Anthropic extended/adaptive thinking
+        self.enable_anthropic_thinking_var = self.config.get('enable_anthropic_thinking', False)
+        self.anthropic_thinking_budget_var = str(self.config.get('anthropic_thinking_budget', '10000'))
+        self.anthropic_force_adaptive_var = self.config.get('anthropic_force_adaptive', False)
+        self.anthropic_effort_var = self.config.get('anthropic_effort', 'medium')
         self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.5))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
@@ -8503,6 +8508,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GPT_EFFORT': self.gpt_effort_var,
             # DeepSeek thinking (DeepSeek OpenAI-compatible API)
             'ENABLE_DEEPSEEK_THINKING': "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0",
+            # Anthropic extended/adaptive thinking
+            'ENABLE_ANTHROPIC_THINKING': "1" if getattr(self, 'enable_anthropic_thinking_var', False) else "0",
+            'ANTHROPIC_THINKING_BUDGET': str(self.anthropic_thinking_budget_var) if getattr(self, 'enable_anthropic_thinking_var', False) else '0',
+            'ANTHROPIC_FORCE_ADAPTIVE': "1" if getattr(self, 'anthropic_force_adaptive_var', False) else "0",
+            'ANTHROPIC_EFFORT': getattr(self, 'anthropic_effort_var', 'medium'),
             'OPENROUTER_EXCLUDE': '1',
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
@@ -13105,6 +13115,11 @@ Important rules:
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
                 ('enable_deepseek_thinking', ['enable_deepseek_thinking_var'], True, bool),
+                # Anthropic extended/adaptive thinking
+                ('enable_anthropic_thinking', ['enable_anthropic_thinking_var'], False, bool),
+                ('anthropic_thinking_budget', ['anthropic_thinking_budget_var'], 10000, lambda v: int(v) if str(v).lstrip('-').isdigit() else 10000),
+                ('anthropic_force_adaptive', ['anthropic_force_adaptive_var'], False, bool),
+                ('anthropic_effort', ['anthropic_effort_var'], 'medium', str),
                 
                 # Chapter processing
                 ('chapter_number_offset', ['chapter_number_offset_var'], 0, lambda v: safe_int(v, 0)),

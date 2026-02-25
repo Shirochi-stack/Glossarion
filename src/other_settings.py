@@ -108,7 +108,8 @@ def setup_other_settings_methods(gui_instance):
         'import_profiles', 'export_profiles',
         # Other settings methods
         'configure_rolling_summary_prompts', 'toggle_thinking_budget', 
-        'toggle_gpt_reasoning_controls', 'open_other_settings',
+        'toggle_gpt_reasoning_controls', 'toggle_anthropic_thinking_controls',
+        'open_other_settings',
         'open_multi_api_key_manager', 'show_ai_hunter_settings',
         'delete_translated_headers_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
         'show_header_help_dialog',
@@ -604,6 +605,36 @@ def toggle_thinking_budget(self):
             self.gemini_desc_label.setEnabled(enabled)
             color = "gray" if enabled else "#606060"
             self.gemini_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
+    except Exception:
+        pass
+
+def toggle_anthropic_thinking_controls(self):
+    """Enable/disable Anthropic thinking controls based on checkbox state"""
+    try:
+        enabled = bool(getattr(self, 'enable_anthropic_thinking_var', False))
+        
+        if hasattr(self, 'anthropic_budget_label'):
+            self.anthropic_budget_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.anthropic_budget_label.setStyleSheet(f"color: {color};")
+        if hasattr(self, 'anthropic_budget_entry'):
+            self.anthropic_budget_entry.setEnabled(enabled and not getattr(self, 'anthropic_force_adaptive_var', False))
+        if hasattr(self, 'anthropic_budget_tokens_label'):
+            self.anthropic_budget_tokens_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.anthropic_budget_tokens_label.setStyleSheet(f"color: {color};")
+        if hasattr(self, 'anthropic_force_adaptive_cb'):
+            self.anthropic_force_adaptive_cb.setEnabled(enabled)
+        if hasattr(self, 'anthropic_effort_label'):
+            self.anthropic_effort_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.anthropic_effort_label.setStyleSheet(f"color: {color};")
+        if hasattr(self, 'anthropic_effort_combo'):
+            self.anthropic_effort_combo.setEnabled(enabled)
+        if hasattr(self, 'anthropic_desc_label'):
+            self.anthropic_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.anthropic_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
     except Exception:
         pass
 
@@ -1867,7 +1898,118 @@ def _create_response_handling_section(self, parent):
 
     deepseek_desc = QLabel("Adds extra_body={thinking:{type:enabled}} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    
+    deepseek_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(deepseek_desc)
+
+    # Anthropic Extended Thinking
+    anthropic_title = QLabel("Anthropic Extended Thinking")
+    anthropic_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(anthropic_title)
+
+    anthropic_row1 = QWidget()
+    anthropic_h1 = QHBoxLayout(anthropic_row1)
+    anthropic_h1.setContentsMargins(20, 5, 0, 0)
+
+    anthropic_enable_cb = self._create_styled_checkbox("Enable Anthropic Extended Thinking")
+    try:
+        anthropic_enable_cb.setChecked(bool(getattr(self, 'enable_anthropic_thinking_var', False)))
+    except Exception:
+        pass
+    def _on_anthropic_thinking_toggle(checked):
+        try:
+            self.enable_anthropic_thinking_var = bool(checked)
+            os.environ['ENABLE_ANTHROPIC_THINKING'] = '1' if checked else '0'
+            self.toggle_anthropic_thinking_controls()
+        except Exception:
+            pass
+    anthropic_enable_cb.toggled.connect(_on_anthropic_thinking_toggle)
+    anthropic_h1.addWidget(anthropic_enable_cb)
+
+    anthropic_h1.addSpacing(20)
+    self.anthropic_budget_label = QLabel("Budget:")
+    anthropic_h1.addWidget(self.anthropic_budget_label)
+    self.anthropic_budget_entry = QLineEdit()
+    self.anthropic_budget_entry.setFixedWidth(70)
+    try:
+        self.anthropic_budget_entry.setText(str(getattr(self, 'anthropic_thinking_budget_var', '10000')))
+    except Exception:
+        pass
+    def _on_anthropic_budget_changed(text):
+        try:
+            self.anthropic_thinking_budget_var = text
+        except Exception:
+            pass
+    self.anthropic_budget_entry.textChanged.connect(_on_anthropic_budget_changed)
+    anthropic_h1.addWidget(self.anthropic_budget_entry)
+    self.anthropic_budget_tokens_label = QLabel("tokens")
+    anthropic_h1.addWidget(self.anthropic_budget_tokens_label)
+    anthropic_h1.addStretch()
+    section_v.addWidget(anthropic_row1)
+
+    # Second row: Force adaptive + Effort
+    anthropic_row2 = QWidget()
+    anthropic_h2 = QHBoxLayout(anthropic_row2)
+    anthropic_h2.setContentsMargins(40, 2, 0, 0)
+
+    self.anthropic_force_adaptive_cb = self._create_styled_checkbox("Force Adaptive Thinking")
+    try:
+        self.anthropic_force_adaptive_cb.setChecked(bool(getattr(self, 'anthropic_force_adaptive_var', False)))
+    except Exception:
+        pass
+    def _on_anthropic_force_adaptive_toggle(checked):
+        try:
+            self.anthropic_force_adaptive_var = bool(checked)
+            os.environ['ANTHROPIC_FORCE_ADAPTIVE'] = '1' if checked else '0'
+            # Disable budget entry when adaptive is forced (no budget_tokens needed)
+            if hasattr(self, 'anthropic_budget_entry'):
+                self.anthropic_budget_entry.setEnabled(not checked and bool(getattr(self, 'enable_anthropic_thinking_var', False)))
+        except Exception:
+            pass
+    self.anthropic_force_adaptive_cb.toggled.connect(_on_anthropic_force_adaptive_toggle)
+    anthropic_h2.addWidget(self.anthropic_force_adaptive_cb)
+
+    anthropic_h2.addSpacing(20)
+    self.anthropic_effort_label = QLabel("Effort:")
+    anthropic_h2.addWidget(self.anthropic_effort_label)
+    self.anthropic_effort_combo = QComboBox()
+    self.anthropic_effort_combo.addItems(["low", "medium", "high"])
+    self.anthropic_effort_combo.setFixedWidth(100)
+    self.anthropic_effort_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(self.anthropic_effort_combo)
+    self._disable_combobox_mousewheel(self.anthropic_effort_combo)
+    try:
+        effort_val = getattr(self, 'anthropic_effort_var', 'medium')
+        idx = self.anthropic_effort_combo.findText(effort_val)
+        if idx >= 0:
+            self.anthropic_effort_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_anthropic_effort_changed(text):
+        try:
+            self.anthropic_effort_var = text
+            os.environ['ANTHROPIC_EFFORT'] = text
+        except Exception:
+            pass
+    self.anthropic_effort_combo.currentTextChanged.connect(_on_anthropic_effort_changed)
+    anthropic_h2.addWidget(self.anthropic_effort_combo)
+    anthropic_h2.addStretch()
+    section_v.addWidget(anthropic_row2)
+
+    self.anthropic_desc_label = QLabel("Extended thinking for Claude models. Budget sets thinking token limit.\nAdaptive thinking uses effort level instead of fixed budget.\nOpus 4.6 always uses adaptive; Sonnet 4.6 optionally supports it.")
+    self.anthropic_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.anthropic_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.anthropic_desc_label)
+
+    # Initialize enabled state for Anthropic controls
+    self.toggle_anthropic_thinking_controls()
+
     # Parallel Extraction
     parallel_title = QLabel("Parallel Extraction")
     parallel_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
