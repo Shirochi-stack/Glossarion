@@ -3114,7 +3114,7 @@ class MangaImagePreviewWidget(QWidget):
                     painter = QPainter(transparent_pixmap)
                     painter.setOpacity(0.15)  # 15% opacity for subtle watermark
                     painter.drawPixmap(0, 0, placeholder_pixmap)
-                    # Let QPainter be destroyed automatically - no explicit end() needed
+                    painter.end()
                     
                     # Set the full-size transparent image
                     self.viewer.setPhoto(transparent_pixmap)
