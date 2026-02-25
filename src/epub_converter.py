@@ -4647,25 +4647,7 @@ img {
         chapter_page_map = {}
         current_page = 0
         
-        # TOC dry run to estimate page count
-        toc_page_count = 0
-        if settings['toc']:
-            self.log("  Calculating TOC size...")
-            dummy_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, None)
-            toc_css = ""
-            if settings['page_numbers']:
-                toc_css = f"<style>@page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }}</style>"
-            dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
-            try:
-                toc_doc = WeasyHTML(string=dummy_toc_html, base_url=self.output_dir).render()
-                toc_page_count = len(toc_doc.pages)
-            except Exception as e:
-                self.log(f"  ⚠️ TOC size estimation failed: {e}")
-                toc_page_count = 1
-            current_page = toc_page_count
-            self.log(f"  Estimated TOC: {toc_page_count} pages")
-        
-        # Render cover page if a cover image exists
+        # Render cover page first (TOC goes after cover)
         if cover_file:
             try:
                 # Find the actual cover file in the images directory
@@ -4699,6 +4681,25 @@ img {
                         self.log(f"  ✅ Added cover page to PDF")
             except Exception as e:
                 self.log(f"  ⚠️ Failed to add cover to PDF: {e}")
+        
+        # TOC dry run to estimate page count (after cover, before chapters)
+        toc_page_count = 0
+        toc_insert_index = len(documents)  # Insert TOC after whatever is already in documents (cover)
+        if settings['toc']:
+            self.log("  Calculating TOC size...")
+            dummy_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, None)
+            toc_css = ""
+            if settings['page_numbers']:
+                toc_css = f"<style>@page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }}</style>"
+            dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
+            try:
+                toc_doc = WeasyHTML(string=dummy_toc_html, base_url=self.output_dir).render()
+                toc_page_count = len(toc_doc.pages)
+            except Exception as e:
+                self.log(f"  ⚠️ TOC size estimation failed: {e}")
+                toc_page_count = 1
+            current_page += toc_page_count
+            self.log(f"  Estimated TOC: {toc_page_count} pages")
         
         self.log(f"  Rendering {len(html_files)} chapters...")
         for i, html_file in enumerate(html_files):
@@ -4751,7 +4752,7 @@ img {
             
             try:
                 toc_doc = WeasyHTML(string=real_toc_html, base_url=self.output_dir).render()
-                documents.insert(0, toc_doc)
+                documents.insert(toc_insert_index, toc_doc)
             except Exception as e:
                 self.log(f"  ⚠️ TOC generation failed: {e}")
         
