@@ -12620,6 +12620,20 @@ Important rules:
                    self._update_auto_compression_factor()
                except Exception as e:
                    print(f"Error updating auto compression factor: {e}")
+           
+           # Clamp Anthropic thinking budget if it now exceeds the new limit
+           try:
+               cap = val - 1
+               budget = int(getattr(self, 'anthropic_thinking_budget_var', 0))
+               if budget > cap:
+                   self.anthropic_thinking_budget_var = str(cap)
+                   if hasattr(self, 'anthropic_budget_entry'):
+                       self.anthropic_budget_entry.blockSignals(True)
+                       self.anthropic_budget_entry.setText(str(cap))
+                       self.anthropic_budget_entry.blockSignals(False)
+                   self.append_log(f"🧠 Anthropic thinking budget clamped to {cap:,} (output limit - 1)")
+           except Exception:
+               pass
 
     # Note: open_other_settings method is bound from other_settings.py during __init__
     # No need to define it here - it's injected dynamically

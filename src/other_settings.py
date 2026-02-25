@@ -1936,6 +1936,17 @@ def _create_response_handling_section(self, parent):
         pass
     def _on_anthropic_budget_changed(text):
         try:
+            val = int(text)
+            max_out = int(getattr(self, 'max_output_tokens', 65536))
+            cap = max_out - 1
+            if val > cap:
+                self.anthropic_budget_entry.blockSignals(True)
+                self.anthropic_budget_entry.setText(str(cap))
+                self.anthropic_budget_entry.blockSignals(False)
+                self.anthropic_thinking_budget_var = str(cap)
+            else:
+                self.anthropic_thinking_budget_var = text
+        except (ValueError, TypeError):
             self.anthropic_thinking_budget_var = text
         except Exception:
             pass
