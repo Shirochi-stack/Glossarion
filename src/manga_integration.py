@@ -11258,11 +11258,12 @@ class MangaTranslationTab(QObject):
                 )
                 
                 # Apply all environment variables EXCEPT SYSTEM_PROMPT
+                import large_env
                 for key, value in env_vars.items():
                     if key == 'SYSTEM_PROMPT':
                         # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
                         continue
-                    os.environ[key] = str(value)
+                    large_env.set_env(key, str(value))
                 
                 # Use custom OCR prompt from GUI if available, otherwise use default
                 if hasattr(self, 'ocr_prompt') and self.ocr_prompt:

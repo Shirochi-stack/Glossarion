@@ -3294,11 +3294,12 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                             epub_path='',  # Not needed for manga
                             api_key=api_key or ''
                         )
+                        import large_env
                         for key, value in env_vars.items():
                             if key == 'SYSTEM_PROMPT':
                                 # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
                                 continue
-                            os.environ[key] = str(value)
+                            large_env.set_env(key, str(value))
                         self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)", "info")
                     else:
                         print("[OCR_REGIONS] _get_environment_variables not available on main_gui")
@@ -4440,10 +4441,11 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
                     api_key=api_key
                 )
                 # Apply ALL environment variables (excluding SYSTEM_PROMPT for OCR)
+                import large_env
                 for key, value in env_vars.items():
                     if key == 'SYSTEM_PROMPT':
                         continue  # Don't set translation prompt for OCR
-                    os.environ[key] = str(value)
+                    large_env.set_env(key, str(value))
                 print(f"[DEBUG] Applied {len(env_vars)} environment variables from main GUI exactly like Start Translation")
                 # Clear any cached manga translator instance since environment changed
                 if hasattr(self, '_manga_translator'):

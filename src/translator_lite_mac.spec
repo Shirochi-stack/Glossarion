@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v7.7.0 - PyInstaller Specification File (macOS)
+Glossarion Lite v7.7.1 - PyInstaller Specification File (macOS)
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 Includes post-build step to create .dmg
 """
@@ -14,7 +14,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite_v7.7.0_MAC'
+APP_NAME = 'L_Glossarion_Lite_v7.7.1_MAC'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -130,6 +130,9 @@ app_files = [
 	# Duplicate detection
 	('duplicate_detection_config.py', '.'),
 	('advanced_duplicate_detection.py', '.'),
+
+	# Environment variable size limit workaround
+	('large_env.py', '.'),
 	
 ]
 # Add application files to datas
@@ -188,6 +191,7 @@ app_modules = [
 	'hyphen_textwrap',
 	'duplicate_detection_config',
 	'advanced_duplicate_detection',
+	'large_env',
 	
 ]
 # GUI Framework
@@ -1103,8 +1107,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Glossarion Lite',
         'CFBundleDisplayName': 'Glossarion Lite',
-        'CFBundleVersion': '7.7.0',
-        'CFBundleShortVersionString': '7.7.0',
+        'CFBundleVersion': '7.7.1',
+        'CFBundleShortVersionString': '7.7.1',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.15.0',
     },

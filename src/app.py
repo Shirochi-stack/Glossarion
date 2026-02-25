@@ -799,7 +799,12 @@ class GlossarionWeb:
             # Set the system prompt - CRITICAL: Must set environment variable for TransateKRtoEN.main()
             if translation_prompt:
                 # Set environment variable that TransateKRtoEN reads
-                os.environ['SYSTEM_PROMPT'] = translation_prompt
+                # Use large_env to bypass Windows 32,767-char env var limit
+                try:
+                    import large_env
+                    large_env.set_env('SYSTEM_PROMPT', translation_prompt)
+                except Exception:
+                    os.environ['SYSTEM_PROMPT'] = translation_prompt
                 print(f"✅ System prompt set ({len(translation_prompt)} characters)")
                 
                 # Save to temp profile for consistency
@@ -813,7 +818,11 @@ class GlossarionWeb:
                     json.dump(temp_config, f, ensure_ascii=False, indent=2)
             else:
                 # Even if empty, set it to avoid using stale value
-                os.environ['SYSTEM_PROMPT'] = ''
+                try:
+                    import large_env
+                    large_env.set_env('SYSTEM_PROMPT', '')
+                except Exception:
+                    os.environ['SYSTEM_PROMPT'] = ''
                 print("⚠️ No system prompt provided")
             
             translation_logs.append("⚙️ Configuration set")
@@ -2165,7 +2174,12 @@ class GlossarionWeb:
             mock_gui = MockGUI(simple_config.config, profile_name, system_prompt, web_max_tokens, api_key, model)
             
             # CRITICAL: Set SYSTEM_PROMPT environment variable for manga translation
-            os.environ['SYSTEM_PROMPT'] = system_prompt if system_prompt else ''
+            # Use large_env to bypass Windows 32,767-char env var limit
+            try:
+                import large_env
+                large_env.set_env('SYSTEM_PROMPT', system_prompt if system_prompt else '')
+            except Exception:
+                os.environ['SYSTEM_PROMPT'] = system_prompt if system_prompt else ''
             if system_prompt:
                 print(f"✅ System prompt set ({len(system_prompt)} characters)")
             else:

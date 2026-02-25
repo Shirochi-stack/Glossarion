@@ -482,7 +482,12 @@ class TranslationConfig:
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
         self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
-        self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
+        # Use large_env to bypass Windows 32,767-char env var limit for large prompts
+        try:
+            import large_env
+            self.SYSTEM_PROMPT = (large_env.get_env("SYSTEM_PROMPT", "") or "").strip()
+        except Exception:
+            self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
         self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         

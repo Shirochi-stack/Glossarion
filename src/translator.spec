@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v7.7.0 - PyInstaller Specification File
+Glossarion v7.7.1 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -17,7 +17,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v7.7.0'  # CHANGED: Updated version
+APP_NAME = 'Glossarion v7.7.1'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -165,7 +165,10 @@ app_files = [
 	('hyphen_textwrap.py', '.'),
 	
 	# Image Rendering
-	('ImageRenderer.py', '.')
+	('ImageRenderer.py', '.'),
+
+	# Environment variable size limit workaround
+	('large_env.py', '.')
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -243,6 +246,7 @@ app_modules = [
 	'model_options',
 	'hyphen_textwrap',
 	'ImageRenderer',
+	'large_env',
 	
 	# MAT Inpainting Support
 	'torch_utils',
