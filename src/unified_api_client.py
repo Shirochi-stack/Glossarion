@@ -1370,6 +1370,10 @@ class UnifiedClient:
     _adaptive_unsupported_models = set()
     _adaptive_unsupported_lock = threading.Lock()
     
+    # Cache models that don't support thinking at all (strip thinking params entirely)
+    _thinking_unsupported_models = set()
+    _thinking_unsupported_lock = threading.Lock()
+    
     # Track all HTTP sessions so we can close them on cancellation
     _all_sessions = set()
     _all_sessions_lock = threading.Lock()
@@ -9008,6 +9012,28 @@ class UnifiedClient:
             if attempt < max_retries - 1:
                 snippet = _sanitize_for_log(resp.text, 300)
                 
+                # Check for model not supporting thinking at all (Anthropic)
+                if status == 400 and "does not support thinking" in resp.text.lower():
+                    print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
+                    model_name = json.get('model') if json else None
+                    if model_name:
+                        try:
+                            with self.__class__._thinking_unsupported_lock:
+                                self.__class__._thinking_unsupported_models.add(str(model_name))
+                        except Exception:
+                            pass
+                        print(f"    🧠 Disabled extended thinking for {model_name} (not supported)")
+                    # Strip all thinking params from payload for retry
+                    if json:
+                        json.pop('thinking', None)
+                        json.pop('output_config', None)
+                    # Don't count this as a failed attempt
+                    attempt = max(0, attempt - 1)
+                    sleep_s = max(random.uniform(api_delay / 2.0, api_delay), 0.5)
+                    if not self._sleep_with_cancel(sleep_s, 0.1):
+                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                    continue
+                
                 # Check for adaptive thinking not supported error (Anthropic)
                 if status == 400 and "adaptive thinking is not supported" in resp.text.lower():
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
@@ -9494,6 +9520,18 @@ class UnifiedClient:
         # Inject Anthropic extended/adaptive thinking if enabled
         try:
             if os.getenv('ENABLE_ANTHROPIC_THINKING', '0') == '1':
+                # Check if model is cached as not supporting thinking at all
+                thinking_blocked = False
+                try:
+                    with self.__class__._thinking_unsupported_lock:
+                        if self.model in self.__class__._thinking_unsupported_models:
+                            thinking_blocked = True
+                except Exception:
+                    pass
+                if thinking_blocked:
+                    print(f"🧠 Thinking not supported on {self.model}, skipping")
+                    return data
+                
                 model_lower = (self.model or '').lower()
                 force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
                 is_opus_46 = 'opus-4-6' in model_lower or 'opus-4.6' in model_lower
