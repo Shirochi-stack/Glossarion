@@ -2421,7 +2421,7 @@ def _create_response_handling_section(self, parent):
     
     # Graceful Stop toggle
     if not hasattr(self, 'graceful_stop_var'):
-        self.graceful_stop_var = self.config.get('graceful_stop', False)
+        self.graceful_stop_var = self.config.get('graceful_stop', True)
     
     self.graceful_stop_checkbox = self._create_styled_checkbox("Graceful Stop (wait for in-flight API calls)")
     self.graceful_stop_checkbox.setContentsMargins(20, 5, 0, 0)

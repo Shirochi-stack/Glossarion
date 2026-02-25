@@ -1322,7 +1322,7 @@ Text to analyze:
         os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         
         # Graceful stop - wait for in-flight API calls to complete instead of aborting them
-        self.graceful_stop_var = self.config.get('graceful_stop', False)
+        self.graceful_stop_var = self.config.get('graceful_stop', True)
         # Wait for chunks - when graceful stop is active, wait for all chunks of a chapter to complete
         self.wait_for_chunks_var = self.config.get('wait_for_chunks', False)
         
