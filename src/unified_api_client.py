@@ -9095,9 +9095,10 @@ class UnifiedClient:
                             # Don't count this as a failed attempt - reset the counter
                             attempt = max(0, attempt - 1)
                             
-                            # Retry immediately
-                            print(f"    ⏱️ Sleeping 1s before retry...")
-                            if not self._sleep_with_cancel(1, 0.1):
+                            # Respect api_delay: sleep a random 50-100% of the configured interval
+                            sleep_s = max(random.uniform(api_delay / 2.0, api_delay), 0.5)
+                            print(f"    ⏱️ Sleeping {sleep_s:.1f}s before retry...")
+                            if not self._sleep_with_cancel(sleep_s, 0.1):
                                 raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                             print(f"    🚀 Retrying request with adjusted token limit...")
                             continue
