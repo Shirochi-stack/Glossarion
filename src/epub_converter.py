@@ -3720,6 +3720,19 @@ img {
             original_name, safe_name = image_data
             img_path = os.path.join(self.images_dir, original_name)
             
+            # If original was compressed to a different format (e.g. png→webp),
+            # the original file may have been deleted. Fall back to the
+            # compressed file whose extension matches safe_name.
+            if not os.path.isfile(img_path):
+                safe_ext = os.path.splitext(safe_name)[1]
+                if safe_ext:
+                    alt_path = os.path.join(
+                        self.images_dir,
+                        os.path.splitext(original_name)[0] + safe_ext
+                    )
+                    if os.path.isfile(alt_path):
+                        img_path = alt_path
+            
             try:
                 ctype, _ = mimetypes.guess_type(img_path)
                 if not ctype:
@@ -3838,6 +3851,20 @@ img {
             return None
         
         cover_path = os.path.join(self.images_dir, original_cover)
+        
+        # If original was compressed to a different format (e.g. jpg→webp),
+        # the original file may have been deleted. Fall back to the
+        # compressed file whose extension matches cover_file.
+        if not os.path.isfile(cover_path):
+            cover_ext = os.path.splitext(cover_file)[1]
+            if cover_ext:
+                alt_path = os.path.join(
+                    self.images_dir,
+                    os.path.splitext(original_cover)[0] + cover_ext
+                )
+                if os.path.isfile(alt_path):
+                    cover_path = alt_path
+        
         try:
             with open(cover_path, 'rb') as f:
                 cover_data = f.read()
@@ -4474,9 +4501,15 @@ img {
                         except Exception:
                             pass
                     
-                    webp_original_key = os.path.splitext(original_name)[0] + '.webp'
-                    new_processed[webp_original_key] = webp_name
+                    # Keep original key so HTML image references still resolve correctly.
+                    # _add_images_to_book and _create_cover_page have fallback logic to
+                    # find the compressed .webp file on disk when the original is gone.
+                    new_processed[original_name] = webp_name
                     compressed_count += 1
+                    
+                    # Update cover reference if this image was the cover
+                    if is_cover:
+                        new_cover = webp_name
                     
             except Exception as e:
                 self.log(f"  ⚠️ Failed to compress {original_name}: {e}")
