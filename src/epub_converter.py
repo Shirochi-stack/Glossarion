@@ -4568,12 +4568,19 @@ img {
         import re
         
         # Build image lookup from images directory
+        _mime_fallback = {
+            '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp',
+            '.svg': 'image/svg+xml',
+        }
         images_by_name = {}
         if os.path.isdir(self.images_dir):
             for fname in os.listdir(self.images_dir):
                 fpath = os.path.join(self.images_dir, fname)
                 if os.path.isfile(fpath):
                     ctype, _ = mimetypes.guess_type(fpath)
+                    if not ctype:
+                        ctype = _mime_fallback.get(os.path.splitext(fname)[1].lower())
                     if ctype and ctype.startswith('image/'):
                         images_by_name[fname] = (fpath, ctype)
                         # Also index without extension for flexible matching
