@@ -1587,6 +1587,10 @@ class EPUBCompiler:
             # Process images and cover
             processed_images, cover_file = self._process_images()
             
+            # Compress images if enabled (before adding to EPUB)
+            if os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1':
+                processed_images, cover_file = self._compress_images(processed_images, cover_file)
+            
             # Check stop flag
             if self.is_stopped():
                 self.log("🛑 EPUB converter stopped by user")
@@ -1654,6 +1658,18 @@ class EPUBCompiler:
             
             # Write EPUB
             self._write_epub(book, metadata)
+            
+            # Generate PDF if enabled
+            if os.environ.get('ENABLE_PDF_OUTPUT', '0') == '1':
+                if self.is_stopped():
+                    self.log("🛑 PDF generation skipped - stop requested")
+                else:
+                    try:
+                        self._generate_pdf(html_files, chapter_titles_info, processed_images, cover_file, metadata)
+                    except Exception as e:
+                        self.log(f"⚠️ PDF generation failed: {e}")
+                        import traceback
+                        self.log(f"[DEBUG] {traceback.format_exc()}")
             
             # Persist updated metadata (including translated fields/language)
             try:
@@ -4363,6 +4379,407 @@ img {
         self.log("   • Special characters escaped")
         self.log("   • Extracted translated titles")
         self.log("   • Enhanced entity decoding")
+
+
+    def _compress_images(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> Tuple[Dict[str, str], Optional[str]]:
+        """Compress images: convert to .webp, with configurable cover/GIF exclusion and quality"""
+        try:
+            from PIL import Image
+        except ImportError:
+            self.log("⚠️ Pillow not installed - image compression disabled. Install with: pip install Pillow")
+            return processed_images, cover_file
+        
+        # Read compression settings
+        quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+        exclude_cover = os.environ.get('EXCLUDE_COVER_COMPRESSION', '1') == '1'
+        exclude_gif = os.environ.get('EXCLUDE_GIF_COMPRESSION', '1') == '1'
+        
+        self.log(f"\n🗜️ Compressing images (quality: {quality}%, exclude cover: {exclude_cover}, exclude GIF: {exclude_gif})...")
+        new_processed = {}
+        new_cover = cover_file
+        compressed_count = 0
+        skipped_count = 0
+        
+        for original_name, safe_name in processed_images.items():
+            if self.is_stopped():
+                self.log("🛑 Image compression stopped by user")
+                break
+            
+            img_path = os.path.join(self.images_dir, original_name)
+            if not os.path.isfile(img_path):
+                new_processed[original_name] = safe_name
+                continue
+            
+            ext = os.path.splitext(original_name)[1].lower()
+            is_cover = (safe_name == cover_file)
+            is_gif = (ext == '.gif')
+            
+            # Skip cover page if excluded
+            if is_cover and exclude_cover:
+                self.log(f"  ⏭️ Skipping cover: {original_name}")
+                new_processed[original_name] = safe_name
+                skipped_count += 1
+                continue
+            
+            # Skip GIF if excluded
+            if is_gif and exclude_gif:
+                self.log(f"  ⏭️ Skipping GIF: {original_name}")
+                new_processed[original_name] = safe_name
+                skipped_count += 1
+                continue
+            
+            try:
+                if is_gif:
+                    # Compress GIF in place - optimize without changing format
+                    im = Image.open(img_path)
+                    if hasattr(im, 'n_frames') and im.n_frames > 1:
+                        # Animated GIF: save with optimization
+                        frames = []
+                        try:
+                            while True:
+                                frames.append(im.copy())
+                                im.seek(im.tell() + 1)
+                        except EOFError:
+                            pass
+                        if frames:
+                            frames[0].save(
+                                img_path, save_all=True, append_images=frames[1:],
+                                optimize=True, loop=im.info.get('loop', 0)
+                            )
+                    else:
+                        # Static GIF: optimize
+                        im.save(img_path, optimize=True)
+                    im.close()
+                    new_processed[original_name] = safe_name
+                    compressed_count += 1
+                else:
+                    # Convert to .webp
+                    webp_name = os.path.splitext(safe_name)[0] + '.webp'
+                    webp_path = os.path.join(self.images_dir, os.path.splitext(original_name)[0] + '.webp')
+                    
+                    im = Image.open(img_path)
+                    # Convert RGBA/P modes for webp compatibility
+                    if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+                        im = im.convert('RGBA')
+                    elif im.mode != 'RGB':
+                        im = im.convert('RGB')
+                    
+                    im.save(webp_path, 'WEBP', quality=quality, method=4)
+                    im.close()
+                    
+                    # Remove original if webp was created successfully and is different file
+                    if os.path.exists(webp_path) and webp_path != img_path:
+                        try:
+                            os.remove(img_path)
+                        except Exception:
+                            pass
+                    
+                    webp_original_key = os.path.splitext(original_name)[0] + '.webp'
+                    new_processed[webp_original_key] = webp_name
+                    compressed_count += 1
+                    
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to compress {original_name}: {e}")
+                new_processed[original_name] = safe_name
+                skipped_count += 1
+        
+        self.log(f"✅ Image compression complete: {compressed_count} compressed, {skipped_count} skipped")
+        return new_processed, new_cover
+
+    def _generate_pdf(self, html_files: List[str], chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                      processed_images: Dict[str, str], cover_file: Optional[str], metadata: dict):
+        """Generate PDF from the output folder using WeasyPrint"""
+        import time as _time
+        
+        # Ensure fontconfig is available on Windows for WeasyPrint
+        import tempfile as _tempfile
+        if not os.environ.get("FONTCONFIG_FILE"):
+            _fc_dir = _tempfile.mkdtemp(prefix="fontconfig_")
+            _fc_path = os.path.join(_fc_dir, "fonts.conf")
+            if not os.path.exists(_fc_path):
+                with open(_fc_path, "w", encoding="utf-8") as _f:
+                    _f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                             '<fontconfig><dir>WINDOWSFONTDIR</dir>'
+                             '<cachedir>~/.cache/fontconfig</cachedir></fontconfig>\n')
+            os.environ["FONTCONFIG_FILE"] = _fc_path
+            os.environ["FONTCONFIG_PATH"] = _fc_dir
+            os.environ["FC_CONFIG_FILE"] = _fc_path
+        
+        try:
+            from weasyprint import HTML as WeasyHTML
+        except ImportError:
+            self.log("⚠️ WeasyPrint not installed - PDF generation disabled. Install with: pip install weasyprint")
+            self.log("   Also requires GTK libraries. See: https://doc.courtbouillon.org/weasyprint/stable/first_steps.html")
+            return
+        
+        self.log("\n📄 Generating PDF...")
+        start_time = _time.time()
+        
+        settings = {
+            'page_numbers': os.environ.get('PDF_PAGE_NUMBERS', '1') == '1',
+            'page_number_alignment': os.environ.get('PDF_PAGE_NUMBER_ALIGNMENT', 'center'),
+            'toc': os.environ.get('PDF_GENERATE_TOC', '1') == '1',
+            'toc_numbers': os.environ.get('PDF_TOC_PAGE_NUMBERS', '1') == '1',
+        }
+        
+        # Determine PDF output path
+        book_title = metadata.get('title', os.path.basename(self.output_dir))
+        safe_title = FileUtils.sanitize_filename(book_title, allow_unicode=True)
+        pdf_path = os.path.join(self.output_dir, f"{safe_title}.pdf")
+        
+        self.log(f"  PDF output: {pdf_path}")
+        self.log(f"  Settings: page_numbers={settings['page_numbers']}, toc={settings['toc']}, "
+                 f"toc_numbers={settings['toc_numbers']}, alignment={settings['page_number_alignment']}")
+        
+        import base64
+        import re
+        
+        # Build image lookup from images directory
+        images_by_name = {}
+        if os.path.isdir(self.images_dir):
+            for fname in os.listdir(self.images_dir):
+                fpath = os.path.join(self.images_dir, fname)
+                if os.path.isfile(fpath):
+                    ctype, _ = mimetypes.guess_type(fpath)
+                    if ctype and ctype.startswith('image/'):
+                        images_by_name[fname] = (fpath, ctype)
+                        # Also index without extension for flexible matching
+                        base = os.path.splitext(fname)[0]
+                        images_by_name[base] = (fpath, ctype)
+        
+        def _data_uri_for_src(src_value):
+            """Convert image src to data URI"""
+            if not src_value or src_value.startswith('data:'):
+                return None
+            from urllib.parse import unquote
+            raw = unquote(src_value).replace('\\', '/')
+            filename = os.path.basename(raw)
+            
+            # Try exact match, then basename
+            for key in [raw, filename, os.path.splitext(filename)[0]]:
+                if key in images_by_name:
+                    fpath, ctype = images_by_name[key]
+                    try:
+                        with open(fpath, 'rb') as f:
+                            b64 = base64.b64encode(f.read()).decode('utf-8')
+                        return f"data:{ctype};base64,{b64}"
+                    except Exception:
+                        pass
+            return None
+        
+        def _embed_images_in_html(content):
+            """Replace image src attributes with data URIs"""
+            def replace_attr(match):
+                attr = match.group(1)
+                quote = match.group(2)
+                src_value = match.group(3)
+                data_uri = _data_uri_for_src(src_value)
+                if data_uri:
+                    return f'{attr}={quote}{data_uri}{quote}'
+                return match.group(0)
+            return re.sub(
+                r'(\b(?:src|href|xlink:href)\b)\s*=\s*([\'"])([^\'"]+)\2',
+                replace_attr, content, flags=re.IGNORECASE
+            )
+        
+        def _extract_body_content(html_content):
+            """Extract just the <body> inner content from a full HTML document to avoid nested HTML."""
+            body_match = re.search(r'<body[^>]*>(.*)</body>', html_content, re.DOTALL | re.IGNORECASE)
+            if body_match:
+                return body_match.group(1)
+            return html_content
+        
+        # Collect CSS
+        styles = ""
+        if os.path.isdir(self.css_dir):
+            for css_file in sorted(os.listdir(self.css_dir)):
+                if css_file.endswith('.css'):
+                    try:
+                        with open(os.path.join(self.css_dir, css_file), 'r', encoding='utf-8') as f:
+                            styles += f.read() + "\n"
+                    except Exception:
+                        pass
+        
+        # Add image styles for PDF rendering
+        styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
+        
+        # Page number CSS
+        alignment = settings['page_number_alignment']
+        page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
+        if settings['page_numbers']:
+            styles += f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
+        
+        # Process chapters
+        documents = []
+        chapter_page_map = {}
+        current_page = 0
+        
+        # TOC dry run to estimate page count
+        toc_page_count = 0
+        if settings['toc']:
+            self.log("  Calculating TOC size...")
+            dummy_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, None)
+            toc_css = ""
+            if settings['page_numbers']:
+                toc_css = f"<style>@page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }}</style>"
+            dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
+            try:
+                toc_doc = WeasyHTML(string=dummy_toc_html, base_url=self.output_dir).render()
+                toc_page_count = len(toc_doc.pages)
+            except Exception as e:
+                self.log(f"  ⚠️ TOC size estimation failed: {e}")
+                toc_page_count = 1
+            current_page = toc_page_count
+            self.log(f"  Estimated TOC: {toc_page_count} pages")
+        
+        # Render cover page if a cover image exists
+        if cover_file:
+            try:
+                # Find the actual cover file in the images directory
+                cover_path = None
+                for fname in os.listdir(self.images_dir):
+                    fpath = os.path.join(self.images_dir, fname)
+                    if os.path.isfile(fpath):
+                        # Match by safe name or by base name
+                        if fname == cover_file or os.path.splitext(fname)[0] == os.path.splitext(cover_file)[0]:
+                            cover_path = fpath
+                            break
+                
+                if cover_path:
+                    ctype, _ = mimetypes.guess_type(cover_path)
+                    if ctype and ctype.startswith('image/'):
+                        with open(cover_path, 'rb') as f:
+                            b64 = base64.b64encode(f.read()).decode('utf-8')
+                        cover_data_uri = f"data:{ctype};base64,{b64}"
+                        cover_html = (
+                            f'<html><head><style>'
+                            f'@page {{ margin: 0; }}'
+                            f'body {{ margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }}'
+                            f'img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}'
+                            f'</style></head><body>'
+                            f'<img src="{cover_data_uri}" alt="Cover" />'
+                            f'</body></html>'
+                        )
+                        cover_doc = WeasyHTML(string=cover_html, base_url=self.output_dir).render()
+                        documents.append(cover_doc)
+                        current_page += len(cover_doc.pages)
+                        self.log(f"  ✅ Added cover page to PDF")
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to add cover to PDF: {e}")
+        
+        self.log(f"  Rendering {len(html_files)} chapters...")
+        for i, html_file in enumerate(html_files):
+            if self.is_stopped():
+                self.log("🛑 PDF generation stopped by user")
+                return
+            
+            file_path = os.path.join(self.output_dir, html_file)
+            if not os.path.exists(file_path):
+                continue
+            
+            # Record page for TOC
+            chapter_page_map[html_file] = current_page + 1
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                content = _embed_images_in_html(content)
+                
+                # Extract just the body content to avoid nested <html><body> structures
+                body_content = _extract_body_content(content)
+                
+                # Build page reset CSS for continuous numbering
+                page_reset = f"body {{ counter-reset: page {current_page}; }}" if settings['page_numbers'] else ""
+                chapter_html = f"<html><head><style>{styles} {page_reset}</style></head><body>{body_content}</body></html>"
+                
+                doc = WeasyHTML(string=chapter_html, base_url=self.output_dir).render()
+                documents.append(doc)
+                current_page += len(doc.pages)
+                
+                if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
+                    self.log(f"  [{i+1}/{len(html_files)}] Rendered ({current_page} pages so far)")
+                    
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to render {html_file}: {e}")
+        
+        if not documents:
+            self.log("⚠️ No chapters rendered for PDF")
+            return
+        
+        # Generate final TOC with real page numbers
+        if settings['toc'] and chapter_titles_info:
+            self.log("  Generating TOC with page numbers...")
+            real_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map)
+            toc_css = ""
+            if settings['page_numbers']:
+                toc_css = f"<style>@page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }}</style>"
+            real_toc_html = real_toc_html.replace("</head>", f"{toc_css}</head>")
+            
+            try:
+                toc_doc = WeasyHTML(string=real_toc_html, base_url=self.output_dir).render()
+                documents.insert(0, toc_doc)
+            except Exception as e:
+                self.log(f"  ⚠️ TOC generation failed: {e}")
+        
+        # Merge and write PDF
+        self.log("  Merging all pages...")
+        all_pages = [page for doc in documents for page in doc.pages]
+        self.log(f"  Total pages: {len(all_pages)}")
+        self.log("  Writing PDF to disk...")
+        
+        documents[0].copy(all_pages).write_pdf(pdf_path)
+        
+        elapsed = _time.time() - start_time
+        if os.path.exists(pdf_path):
+            file_size = os.path.getsize(pdf_path)
+            self.log(f"✅ PDF created: {pdf_path}")
+            self.log(f"📊 PDF size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+            self.log(f"⏱️ PDF generation took {elapsed:.1f}s")
+        else:
+            self.log("❌ PDF file was not created")
+
+    def _build_pdf_toc_html(self, chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                            settings: dict, chapter_page_map: Optional[Dict[str, int]]) -> str:
+        """Build HTML for PDF table of contents"""
+        import html as _html
+        
+        toc_html = (
+            '<html><head><style>'
+            'body { font-family: serif; margin: 40px; }'
+            'h1 { text-align: center; margin-bottom: 30px; }'
+            'ul { list-style-type: none; padding: 0; margin: 0; }'
+            'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; display: flex; justify-content: space-between; }'
+            '.title { flex: 1; }'
+            '.page-num { font-weight: bold; min-width: 40px; text-align: right; }'
+            '</style></head><body>'
+            '<h1>Table of Contents</h1><ul>'
+        )
+        
+        for chap_num in sorted(chapter_titles_info.keys()):
+            title, confidence, source = chapter_titles_info[chap_num]
+            safe_title = _html.escape(title)
+            
+            page_num = ""
+            if settings.get('toc_numbers') and chapter_page_map:
+                # Find the file for this chapter
+                if isinstance(source, str) and os.path.exists(os.path.join(self.output_dir, source)):
+                    page_num = str(chapter_page_map.get(source, ""))
+                else:
+                    # Try to match by chapter number in file list
+                    for fname, page in chapter_page_map.items():
+                        # Match response_N_ pattern
+                        import re
+                        m = re.match(r'response_(\d+)_', fname)
+                        if m and int(m.group(1)) == chap_num:
+                            page_num = str(page)
+                            break
+            
+            page_span = f'<span class="page-num">{page_num}</span>' if page_num else ''
+            toc_html += f'<li><span class="title">{safe_title}</span>{page_span}</li>'
+        
+        toc_html += '</ul></body></html>'
+        return toc_html
 
 
 # Main entry point

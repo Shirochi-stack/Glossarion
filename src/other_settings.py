@@ -129,7 +129,7 @@ def setup_other_settings_methods(gui_instance):
         '_create_prompt_management_section', '_create_processing_options_section',
         '_create_image_translation_section', '_create_anti_duplicate_section',
         '_create_custom_api_endpoints_section', '_create_debug_controls_section',
-        '_create_danger_zone_section',
+        '_create_output_settings_section', '_create_danger_zone_section',
         # Helper methods
         '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
         '_open_backup_folder', '_backup_config_file', '_restore_config_from_backup',
@@ -861,6 +861,9 @@ def open_other_settings(self):
     # Add debug controls section at the bottom
     self._create_debug_controls_section(container)
     
+    # Add Output Settings section (PDF generation + Image Compression)
+    self._create_output_settings_section(container)
+    
     # Add Danger Zone section
     self._create_danger_zone_section(container)
     
@@ -967,6 +970,333 @@ def open_other_settings(self):
         if needed_width > dialog.width():
             dialog.resize(needed_width, dialog.height())
     QTimer.singleShot(0, adjust_width)
+
+def _create_output_settings_section(self, parent):
+    """Create output settings section (PDF generation + Image Compression)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QWidget, QFrame, QSpinBox
+    from PySide6.QtCore import Qt
+    
+    grid = parent.layout() if hasattr(parent, 'layout') else None
+    
+    section_box = QGroupBox("Output Settings")
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)
+    section_v.setSpacing(4)
+    
+    # ── PDF Settings ──────────────────────────────────────────
+    pdf_title = QLabel("PDF Settings")
+    pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(pdf_title)
+    
+    pdf_desc = QLabel("Generate a PDF from the output folder after EPUB conversion")
+    pdf_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    section_v.addWidget(pdf_desc)
+    
+    # Enable PDF Output
+    if not hasattr(self, 'enable_pdf_output_var'):
+        self.enable_pdf_output_var = self.config.get('enable_pdf_output', False)
+    
+    pdf_enable_cb = self._create_styled_checkbox("Enable PDF Output")
+    pdf_enable_cb.setToolTip(
+        "Adds an extra step after EPUB conversion to create a PDF\n"
+        "from the output folder, retaining all images."
+    )
+    try:
+        pdf_enable_cb.setChecked(bool(self.enable_pdf_output_var))
+    except Exception:
+        pass
+    
+    # Collect controls to enable/disable with the master toggle
+    pdf_controls = []
+    
+    def _on_pdf_enable_toggle(checked):
+        try:
+            self.enable_pdf_output_var = bool(checked)
+            self.config['enable_pdf_output'] = self.enable_pdf_output_var
+            os.environ['ENABLE_PDF_OUTPUT'] = '1' if checked else '0'
+            for ctrl in pdf_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    pdf_enable_cb.toggled.connect(_on_pdf_enable_toggle)
+    section_v.addWidget(pdf_enable_cb)
+    
+    # Generate Table of Contents
+    if not hasattr(self, 'pdf_generate_toc_var'):
+        self.pdf_generate_toc_var = self.config.get('pdf_generate_toc', False)
+    
+    toc_cb = self._create_styled_checkbox("Generate Table of Contents")
+    toc_cb.setToolTip("Creates a table of contents page after the cover page in the PDF")
+    try:
+        toc_cb.setChecked(bool(self.pdf_generate_toc_var))
+    except Exception:
+        pass
+    
+    # Sub-controls that depend on TOC being enabled
+    toc_sub_controls = []
+    
+    def _on_toc_toggle(checked):
+        try:
+            self.pdf_generate_toc_var = bool(checked)
+            self.config['pdf_generate_toc'] = self.pdf_generate_toc_var
+            os.environ['PDF_GENERATE_TOC'] = '1' if checked else '0'
+            for ctrl in toc_sub_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    toc_cb.toggled.connect(_on_toc_toggle)
+    toc_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(toc_cb)
+    pdf_controls.append(toc_cb)
+    
+    # Include Page Numbers in TOC
+    if not hasattr(self, 'pdf_toc_page_numbers_var'):
+        self.pdf_toc_page_numbers_var = self.config.get('pdf_toc_page_numbers', True)
+    
+    toc_numbers_cb = self._create_styled_checkbox("Include Page Numbers in TOC")
+    toc_numbers_cb.setToolTip("Show page numbers next to each entry in the table of contents")
+    try:
+        toc_numbers_cb.setChecked(bool(self.pdf_toc_page_numbers_var))
+    except Exception:
+        pass
+    def _on_toc_numbers_toggle(checked):
+        try:
+            self.pdf_toc_page_numbers_var = bool(checked)
+            self.config['pdf_toc_page_numbers'] = self.pdf_toc_page_numbers_var
+            os.environ['PDF_TOC_PAGE_NUMBERS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    toc_numbers_cb.toggled.connect(_on_toc_numbers_toggle)
+    toc_numbers_cb.setContentsMargins(40, 0, 0, 0)
+    section_v.addWidget(toc_numbers_cb)
+    pdf_controls.append(toc_numbers_cb)
+    toc_sub_controls.append(toc_numbers_cb)
+    
+    # Separator
+    sep_pdf1 = QFrame()
+    sep_pdf1.setFrameShape(QFrame.HLine)
+    sep_pdf1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_pdf1)
+    
+    # Page Numbers
+    if not hasattr(self, 'pdf_page_numbers_var'):
+        self.pdf_page_numbers_var = self.config.get('pdf_page_numbers', True)
+    
+    page_num_cb = self._create_styled_checkbox("Page Numbers")
+    page_num_cb.setToolTip("Adds a semi-transparent page number footer to each page")
+    try:
+        page_num_cb.setChecked(bool(self.pdf_page_numbers_var))
+    except Exception:
+        pass
+    
+    page_num_sub_controls = []
+    
+    def _on_page_num_toggle(checked):
+        try:
+            self.pdf_page_numbers_var = bool(checked)
+            self.config['pdf_page_numbers'] = self.pdf_page_numbers_var
+            os.environ['PDF_PAGE_NUMBERS'] = '1' if checked else '0'
+            for ctrl in page_num_sub_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    page_num_cb.toggled.connect(_on_page_num_toggle)
+    section_v.addWidget(page_num_cb)
+    pdf_controls.append(page_num_cb)
+    
+    # Alignment row
+    if not hasattr(self, 'pdf_page_number_alignment_var'):
+        self.pdf_page_number_alignment_var = self.config.get('pdf_page_number_alignment', 'center')
+    
+    alignment_row = QWidget()
+    alignment_h = QHBoxLayout(alignment_row)
+    alignment_h.setContentsMargins(40, 2, 0, 0)
+    
+    alignment_label = QLabel("Alignment:")
+    alignment_h.addWidget(alignment_label)
+    page_num_sub_controls.append(alignment_label)
+    
+    alignment_combo = QComboBox()
+    alignment_combo.addItems(["left", "center", "right"])
+    alignment_combo.setFixedWidth(100)
+    alignment_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(alignment_combo)
+    self._disable_combobox_mousewheel(alignment_combo)
+    try:
+        idx = alignment_combo.findText(self.pdf_page_number_alignment_var)
+        if idx >= 0:
+            alignment_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_alignment_changed(text):
+        try:
+            self.pdf_page_number_alignment_var = text
+            self.config['pdf_page_number_alignment'] = text
+            os.environ['PDF_PAGE_NUMBER_ALIGNMENT'] = text
+        except Exception:
+            pass
+    alignment_combo.currentTextChanged.connect(_on_alignment_changed)
+    alignment_h.addWidget(alignment_combo)
+    page_num_sub_controls.append(alignment_combo)
+    
+    alignment_h.addStretch()
+    section_v.addWidget(alignment_row)
+    pdf_controls.append(alignment_row)
+    
+    page_num_desc = QLabel("Page numbers appear as semi-transparent footer text")
+    page_num_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    page_num_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(page_num_desc)
+    
+    # ── Quality Settings ──────────────────────────────────────
+    sep_quality = QFrame()
+    sep_quality.setFrameShape(QFrame.HLine)
+    sep_quality.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_quality)
+    
+    quality_title = QLabel("Quality Settings")
+    quality_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(quality_title)
+    
+    # Enable Image Compression
+    if not hasattr(self, 'enable_image_compression_var'):
+        self.enable_image_compression_var = self.config.get('enable_image_compression', False)
+    
+    compress_cb = self._create_styled_checkbox("Enable Image Compression")
+    compress_cb.setToolTip(
+        "Compresses images and converts them to .webp for smaller file size.\n"
+        "• Applies during both EPUB and PDF generation"
+    )
+    try:
+        compress_cb.setChecked(bool(self.enable_image_compression_var))
+    except Exception:
+        pass
+    
+    compress_sub_controls = []
+    
+    def _on_compress_toggle(checked):
+        try:
+            self.enable_image_compression_var = bool(checked)
+            self.config['enable_image_compression'] = self.enable_image_compression_var
+            os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if checked else '0'
+            for ctrl in compress_sub_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    compress_cb.toggled.connect(_on_compress_toggle)
+    section_v.addWidget(compress_cb)
+    
+    # Quality percentage row
+    quality_row = QWidget()
+    quality_h = QHBoxLayout(quality_row)
+    quality_h.setContentsMargins(20, 2, 0, 0)
+    
+    quality_label = QLabel("Quality:")
+    quality_h.addWidget(quality_label)
+    compress_sub_controls.append(quality_label)
+    
+    quality_spin = QSpinBox()
+    quality_spin.setMinimum(1)
+    quality_spin.setMaximum(100)
+    quality_spin.setValue(self.config.get('image_compression_quality', 80))
+    quality_spin.setSuffix("%")
+    quality_spin.setFixedWidth(80)
+    quality_spin.setToolTip("Compression quality (1-100). Lower = smaller file, higher = better quality")
+    def _on_quality_changed(value):
+        try:
+            self.config['image_compression_quality'] = value
+            os.environ['IMAGE_COMPRESSION_QUALITY'] = str(value)
+        except Exception:
+            pass
+    quality_spin.valueChanged.connect(_on_quality_changed)
+    quality_h.addWidget(quality_spin)
+    compress_sub_controls.append(quality_spin)
+    
+    quality_h.addStretch()
+    section_v.addWidget(quality_row)
+    
+    # Exclude Cover Page Compression
+    exclude_cover_cb = self._create_styled_checkbox("Exclude Cover Page Compression")
+    exclude_cover_cb.setContentsMargins(20, 0, 0, 0)
+    exclude_cover_cb.setToolTip("Skip compression for the cover page image")
+    try:
+        exclude_cover_cb.setChecked(self.config.get('exclude_cover_compression', True))
+    except Exception:
+        exclude_cover_cb.setChecked(True)
+    def _on_exclude_cover_toggle(checked):
+        try:
+            self.config['exclude_cover_compression'] = bool(checked)
+            os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if checked else '0'
+        except Exception:
+            pass
+    exclude_cover_cb.toggled.connect(_on_exclude_cover_toggle)
+    section_v.addWidget(exclude_cover_cb)
+    compress_sub_controls.append(exclude_cover_cb)
+    
+    # Exclude GIF Compression
+    exclude_gif_cb = self._create_styled_checkbox("Exclude .gif Compression")
+    exclude_gif_cb.setContentsMargins(20, 0, 0, 0)
+    exclude_gif_cb.setToolTip("Skip compression for GIF images entirely")
+    try:
+        exclude_gif_cb.setChecked(self.config.get('exclude_gif_compression', True))
+    except Exception:
+        exclude_gif_cb.setChecked(True)
+    def _on_exclude_gif_toggle(checked):
+        try:
+            self.config['exclude_gif_compression'] = bool(checked)
+            os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if checked else '0'
+        except Exception:
+            pass
+    exclude_gif_cb.toggled.connect(_on_exclude_gif_toggle)
+    section_v.addWidget(exclude_gif_cb)
+    compress_sub_controls.append(exclude_gif_cb)
+    
+    compress_desc = QLabel(
+        "Converts images to .webp format. Applies to EPUB & PDF."
+    )
+    compress_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    compress_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(compress_desc)
+    
+    # Set initial env vars for compression sub-settings
+    os.environ['IMAGE_COMPRESSION_QUALITY'] = str(quality_spin.value())
+    os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if exclude_cover_cb.isChecked() else '0'
+    os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if exclude_gif_cb.isChecked() else '0'
+    
+    # Apply initial enabled state for compression sub-controls
+    initial_compress = compress_cb.isChecked()
+    for ctrl in compress_sub_controls:
+        ctrl.setEnabled(initial_compress)
+    
+    # Apply initial enabled state for PDF sub-controls
+    initial_pdf = pdf_enable_cb.isChecked()
+    for ctrl in pdf_controls:
+        ctrl.setEnabled(initial_pdf)
+    
+    initial_toc = toc_cb.isChecked() and initial_pdf
+    for ctrl in toc_sub_controls:
+        ctrl.setEnabled(initial_toc)
+    
+    initial_page_num = page_num_cb.isChecked() and initial_pdf
+    for ctrl in page_num_sub_controls:
+        ctrl.setEnabled(initial_page_num)
+    
+    # Place in grid spanning both columns
+    if isinstance(grid, QGridLayout):
+        row = grid.rowCount()
+        grid.addWidget(section_box, row, 0, 1, 2)
+    else:
+        if hasattr(parent, 'layout') and parent.layout():
+            parent.layout().addWidget(section_box)
+        else:
+            section_box.setParent(parent)
 
 def _create_danger_zone_section(self, parent):
     """Create danger zone section (Reset to Defaults)"""
@@ -5013,41 +5343,6 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_epub_desc)
-
-    # Halgakos icon (HiDPI-aware)
-    import os as _os_icon
-    _ico_path = _os_icon.path.join(_os_icon.path.dirname(_os_icon.path.abspath(__file__)), 'Halgakos.ico')
-    if _os_icon.path.exists(_ico_path):
-        from PySide6.QtGui import QIcon, QPixmap
-        from PySide6.QtCore import QSize
-        _icon_label = QLabel()
-        _icon_label.setStyleSheet("background-color: transparent;")
-        try:
-            _dpr = self.devicePixelRatioF()
-        except Exception:
-            _dpr = 1.0
-        _logical_px = 150
-        _dev_px = int(_logical_px * max(1.0, _dpr))
-        _icon = QIcon(_ico_path)
-        _pm = _icon.pixmap(QSize(_dev_px, _dev_px))
-        if _pm.isNull():
-            _raw = QPixmap(_ico_path)
-            _img = _raw.toImage().scaled(_dev_px, _dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            _pm = QPixmap.fromImage(_img)
-        try:
-            _pm.setDevicePixelRatio(_dpr)
-        except Exception:
-            pass
-        _pm_fitted = _pm.scaled(int(_logical_px * _dpr), int(_logical_px * _dpr),
-                                Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        try:
-            _pm_fitted.setDevicePixelRatio(_dpr)
-        except Exception:
-            pass
-        _icon_label.setPixmap(_pm_fitted)
-        _icon_label.setFixedSize(_logical_px, _logical_px)
-        _icon_label.setAlignment(Qt.AlignCenter)
-        left_v.addWidget(_icon_label, alignment=Qt.AlignCenter)
 
     # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
     empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
