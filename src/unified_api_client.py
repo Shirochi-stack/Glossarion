@@ -9009,7 +9009,8 @@ class UnifiedClient:
                     "valid range of max_tokens is" in resp.text.lower() or
                     "max_output_tokens" in resp.text or
                     "supports at most" in resp.text or
-                    "must be less than or equal to" in resp.text
+                    "must be less than or equal to" in resp.text or
+                    "which is the maximum allowed number of output tokens" in resp.text
                 ):
                     # Log the original error first
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1}/{max_retries})")
@@ -9038,6 +9039,12 @@ class UnifiedClient:
                         if m_range:
                             supported_min = int(m_range.group(1))
                             supported_max = int(m_range.group(2))
+                    
+                    # Pattern 4: "max_tokens: X > Y, which is the maximum allowed number of output tokens" (Anthropic)
+                    if not supported_max:
+                        m_anthropic = re.search(r'max_tokens:\s*\d+\s*>\s*(\d+)\s*,\s*which is the maximum allowed', resp.text)
+                        if m_anthropic:
+                            supported_max = int(m_anthropic.group(1))
                     
                     if supported_max:
                         # Try to find current output limit in the request body
@@ -11859,6 +11866,15 @@ class UnifiedClient:
                     "content": msg['content']
                 })
         
+        # Apply cached model limit if we've discovered it before
+        try:
+            with self.__class__._model_limits_lock:
+                cached_limit = self.__class__._model_token_limits.get(self.model)
+                if cached_limit and (max_tokens is None or max_tokens > cached_limit):
+                    max_tokens = cached_limit
+        except Exception:
+            pass
+        
         # Get user-configured anti-duplicate parameters
         anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
         data = self._build_anthropic_payload(formatted_messages, temperature, max_tokens, anti_dupe_params, system_message)
@@ -14249,6 +14265,15 @@ class UnifiedClient:
                     "role": msg['role'],
                     "content": msg['content']
                 })
+        
+        # Apply cached model limit if we've discovered it before
+        try:
+            with self.__class__._model_limits_lock:
+                cached_limit = self.__class__._model_token_limits.get(self.model)
+                if cached_limit and (max_tokens is None or max_tokens > cached_limit):
+                    max_tokens = cached_limit
+        except Exception:
+            pass
         
         data = {
             "model": self.model,

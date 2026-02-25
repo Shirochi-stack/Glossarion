@@ -21,10 +21,9 @@ def get_model_options() -> List[str]:
         "gemini-3-pro-preview","gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-3-pro-image-preview",
         
         # Anthropic Claude Models
-        "claude-opus-4-20250514", "claude-sonnet-4-20250514",
-        "claude-3-5-sonnet-20241022", "claude-3-7-sonnet-20250219",
-        "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
-        "claude-2.1", "claude-2", "claude-instant-1.2",
+        "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
+        "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514", "claude-3-7-sonnet-20250219", "claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022", 
+        "claude-3-haiku-20240307",       
         
         # Grok Models
         "grok-4-0709", "grok-4-fast", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning",  "grok-4-fast-reasoning-latest", "grok-3", "grok-3-mini",
