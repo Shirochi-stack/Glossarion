@@ -3844,7 +3844,7 @@ class UnifiedClient:
                         # Handle rate limit errors with key rotation
                         if e.error_type == "rate_limit" or self._is_rate_limit_error(e):
                             # If stop requested after the error, abort before rotation
-                            if self._is_stop_requested():
+                            if self._should_abort_retry():
                                 self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             attempt += 1
@@ -5044,7 +5044,7 @@ class UnifiedClient:
                 print(f"UnifiedClient error: {e}")
                 
                 # Abort all further handling if stop was requested during error processing
-                if self._is_stop_requested():
+                if self._should_abort_retry():
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
@@ -5168,7 +5168,7 @@ class UnifiedClient:
                         # Wait with cancellation check using comprehensive stop check
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._is_stop_requested():
+                            if self._should_abort_retry():
                                 self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)  # Check every 0.5 seconds
@@ -5188,7 +5188,7 @@ class UnifiedClient:
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._is_stop_requested():
+                            if self._should_abort_retry():
                                 self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
@@ -5213,7 +5213,7 @@ class UnifiedClient:
                     
                     wait_start = time.time()
                     while time.time() - wait_start < delay:
-                        if self._is_stop_requested():
+                        if self._should_abort_retry():
                             self._cancelled = True
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         time.sleep(0.5)
@@ -5262,7 +5262,7 @@ class UnifiedClient:
                 
                 # Check if it's a rate limit error - handle according to mode
                 if self._is_rate_limit_error(e):
-                    if self._is_stop_requested():
+                    if self._should_abort_retry():
                         self._cancelled = True
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     # In multi-key mode, always re-raise to let _send_core handle key rotation
@@ -5293,7 +5293,7 @@ class UnifiedClient:
                         # Wait with cancellation check using comprehensive stop check
                         wait_start = time.time()
                         while time.time() - wait_start < wait_time:
-                            if self._is_stop_requested():
+                            if self._should_abort_retry():
                                 self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
@@ -5351,7 +5351,7 @@ class UnifiedClient:
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._is_stop_requested():
+                            if self._should_abort_retry():
                                 self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
@@ -5380,7 +5380,7 @@ class UnifiedClient:
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
-                            if self._is_stop_requested():
+                            if self._should_abort_retry():
                                 self._cancelled = True
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
@@ -8725,7 +8725,7 @@ class UnifiedClient:
             return True
         slept = 0.0
         while slept < total:
-            if self._is_stop_requested() or getattr(self, '_cancelled', False):
+            if self._should_abort_retry() or getattr(self, '_cancelled', False):
                 self._cancelled = True
                 return False
             step = min(interval, total - slept)
@@ -10013,17 +10013,17 @@ class UnifiedClient:
     
     def _is_stop_requested(self) -> bool:
         """
-        Check if stop was requested by checking global flag, local cancelled flag, and class-level cancellation
+        Check if stop was requested by checking global flag, local cancelled flag, and class-level cancellation.
+        NOTE: This intentionally does NOT check TRANSLATION_CANCELLED, because that env var
+        is set on BOTH graceful and immediate stop. Checking it here would cause in-flight
+        API results to be discarded during graceful stop (the response is received but then
+        thrown away at the post-response cancellation check in _send_core_internal).
+        Use _should_abort_retry() for retry/wait contexts that should also bail on graceful stop.
         """
         global global_stop_flag
 
         # Module-level flag set by GUI
         if global_stop_flag:
-            self._cancelled = True
-            return True
-
-        # GUI sets this env var on BOTH graceful and immediate stop
-        if os.environ.get('TRANSLATION_CANCELLED') == '1':
             self._cancelled = True
             return True
 
@@ -10074,6 +10074,22 @@ class UnifiedClient:
             # Fallback if import fails
             return False
     
+    def _should_abort_retry(self) -> bool:
+        """Check if retry/wait operations should abort.
+
+        This extends _is_stop_requested() by also checking TRANSLATION_CANCELLED,
+        which the GUI sets on BOTH graceful and immediate stop.  Use this in
+        retry loops, backoff waits and _sleep_with_cancel — anywhere we want
+        graceful stop to bail out of repeated attempts, but NOT on the success
+        path where an in-flight result has already been received.
+        """
+        if self._is_stop_requested():
+            return True
+        # TRANSLATION_CANCELLED is set by the GUI on both graceful and immediate stop
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return True
+        return False
+
     def _get_anti_duplicate_params(self, temperature, log_key=None):
         """Get user-configured anti-duplicate parameters from GUI settings"""
         # Check if user enabled anti-duplicate
@@ -14052,8 +14068,8 @@ class UnifiedClient:
                 error_str = str(exc)
                 print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
-                # Bail out immediately on stop request
-                if self._is_stop_requested():
+                # Bail out immediately on stop request (includes graceful stop)
+                if self._should_abort_retry():
                     raise UnifiedClientError(
                         "AuthGPT: Translation stopped by user",
                         error_type="cancelled"
@@ -14083,8 +14099,8 @@ class UnifiedClient:
                 error_str = str(exc)
                 print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
-                # Bail out immediately on stop request
-                if self._is_stop_requested():
+                # Bail out immediately on stop request (includes graceful stop)
+                if self._should_abort_retry():
                     raise UnifiedClientError(
                         "AuthGPT: Translation stopped by user",
                         error_type="cancelled"
