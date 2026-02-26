@@ -4317,7 +4317,7 @@ class UnifiedClient:
                     "AuthGPT package not found. Make sure the 'authgpt' directory "
                     "exists under src/ with __init__.py, oauth.py, token_store.py, chatgpt_api.py."
                 )
-            logger.info("AuthGPT will use ChatGPT backend API with OAuth tokens")
+            # logger.info("AuthGPT will use ChatGPT backend API with OAuth tokens")
 
         elif self.client_type in ['yi', 'qwen', 'baichuan', 'zhipu', 'moonshot', 'baidu', 
                                   'tencent', 'iflytek', 'bytedance', 'minimax', 
