@@ -3353,6 +3353,12 @@ Recent translations to summarize:
         self._add_combobox_arrow(self.model_combo)
         self.frame.addWidget(self.model_combo, 1, 1, 1, 1)  # row, col, rowspan, colspan
         
+        # Container for info button + AuthGPT login (keeps them adjacent)
+        model_btn_container = QWidget()
+        model_btn_layout = QHBoxLayout(model_btn_container)
+        model_btn_layout.setContentsMargins(0, 0, 0, 0)
+        model_btn_layout.setSpacing(4)
+        
         # Add info button next to model field with spacing
         model_info_btn = QPushButton("ℹ️")
         model_info_btn.setFixedSize(28, 28)
@@ -3363,17 +3369,16 @@ Recent translations to summarize:
             "border: none; "
             "font-size: 18px; "
             "padding: 0px; "
-            "margin-left: 8px; "
             "}"
         )
         model_info_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Show API provider information and shortcuts.</p></qt>")
-        self.frame.addWidget(model_info_btn, 1, 2, Qt.AlignLeft)
+        model_btn_layout.addWidget(model_info_btn)
         
         # AuthGPT Login button (visible only for authgpt/ models)
         self.authgpt_login_btn = QPushButton("🔐 ChatGPT Login")
         self.authgpt_login_btn.setStyleSheet(
             "background-color: #10a37f; color: white; font-weight: bold; "
-            "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
         )
         self.authgpt_login_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
@@ -3382,7 +3387,10 @@ Recent translations to summarize:
         )
         self.authgpt_login_btn.clicked.connect(self._authgpt_login_clicked)
         self.authgpt_login_btn.hide()
-        self.frame.addWidget(self.authgpt_login_btn, 1, 3, Qt.AlignLeft)
+        model_btn_layout.addWidget(self.authgpt_login_btn)
+        
+        model_btn_layout.addStretch()
+        self.frame.addWidget(model_btn_container, 1, 2, 1, 2, Qt.AlignLeft)
         
         # Track previous text to make autocomplete less aggressive
         self._model_prev_text = default_model
