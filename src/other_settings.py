@@ -1202,16 +1202,6 @@ def _create_output_settings_section(self, parent):
             os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if checked else '0'
             for ctrl in compress_sub_controls:
                 ctrl.setEnabled(checked)
-            # Respect format dropdown: disable controls not relevant to current format
-            if checked:
-                fmt = pdf_format_combo.currentText().lower()
-                quality_spin.setEnabled(fmt == 'jpeg')
-                quality_label.setEnabled(fmt == 'jpeg')
-                quality_range_label.setEnabled(fmt == 'jpeg')
-                png_optimize_cb.setEnabled(fmt == 'png')
-                png_level_label.setEnabled(fmt == 'png')
-                png_level_spin.setEnabled(fmt == 'png')
-                png_level_range_label.setEnabled(fmt == 'png')
         except Exception:
             pass
     compress_cb.toggled.connect(_on_compress_toggle)
@@ -1328,16 +1318,6 @@ def _create_output_settings_section(self, parent):
             fmt = text.lower()
             self.config['pdf_image_format'] = fmt
             os.environ['PDF_IMAGE_FORMAT'] = fmt
-            checked = compress_cb.isChecked()
-            # Quality controls only relevant for JPEG
-            quality_spin.setEnabled(fmt == 'jpeg' and checked)
-            quality_label.setEnabled(fmt == 'jpeg' and checked)
-            quality_range_label.setEnabled(fmt == 'jpeg' and checked)
-            # PNG controls only relevant for PNG
-            png_optimize_cb.setEnabled(fmt == 'png' and checked)
-            png_level_label.setEnabled(fmt == 'png' and checked)
-            png_level_spin.setEnabled(fmt == 'png' and checked)
-            png_level_range_label.setEnabled(fmt == 'png' and checked)
         except Exception:
             pass
     pdf_format_combo.currentTextChanged.connect(_on_pdf_format_changed)
@@ -1423,17 +1403,6 @@ def _create_output_settings_section(self, parent):
     for ctrl in compress_sub_controls:
         ctrl.setEnabled(initial_compress)
     
-    # Apply format-dependent state AFTER the bulk enable/disable
-    # so JPEG controls are disabled when PNG is selected and vice versa
-    if initial_compress:
-        _initial_fmt = self.config.get('pdf_image_format', 'jpeg').lower()
-        quality_spin.setEnabled(_initial_fmt == 'jpeg')
-        quality_label.setEnabled(_initial_fmt == 'jpeg')
-        quality_range_label.setEnabled(_initial_fmt == 'jpeg')
-        png_optimize_cb.setEnabled(_initial_fmt == 'png')
-        png_level_label.setEnabled(_initial_fmt == 'png')
-        png_level_spin.setEnabled(_initial_fmt == 'png')
-        png_level_range_label.setEnabled(_initial_fmt == 'png')
     
     # Apply initial enabled state for PDF sub-controls
     initial_pdf = pdf_enable_cb.isChecked()
