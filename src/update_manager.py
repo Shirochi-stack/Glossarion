@@ -1120,13 +1120,13 @@ class UpdateManager(QObject):
         release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
         
         if release_to_check:
-            # Get exe files from the first/latest release
+            # Get downloadable files from the first/latest release (.exe for Windows, .dmg for macOS)
             exe_assets = [a for a in release_to_check.get('assets', []) 
-                         if a['name'].lower().endswith('.exe')]
+                         if a['name'].lower().endswith(('.exe', '.dmg'))]
             
-            print(f"[DEBUG] Found {len(exe_assets)} exe files in release {release_to_check.get('tag_name')}")
+            print(f"[DEBUG] Found {len(exe_assets)} downloadable files in release {release_to_check.get('tag_name')}")
             
-            # Show selection UI if there are exe files
+            # Show selection UI if there are downloadable files
             if exe_assets:
                 # Determine the title based on whether there are multiple variants
                 if len(exe_assets) > 1:
@@ -1165,7 +1165,13 @@ class UpdateManager(QObject):
                             else:
                                 variant_type = "Standard"
                         
-                        variant_label = f"{variant_type} - {filename} ({size_mb:.1f} MB)"
+                        # Add platform indicator for non-Windows files
+                        if filename.lower().endswith('.dmg'):
+                            platform_tag = " [macOS]"
+                        else:
+                            platform_tag = ""
+                        
+                        variant_label = f"{variant_type}{platform_tag} - {filename} ({size_mb:.1f} MB)"
                         
                         rb = QRadioButton(variant_label)
                         rb.setProperty("asset_index", i)
@@ -1416,12 +1422,12 @@ class UpdateManager(QObject):
             button_layout.addWidget(skip_btn)
         elif has_exe_files:
             # We're up to date but have downloadable files
-            # Check if there are multiple exe files
+            # Check if there are multiple downloadable files
             release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
             exe_count = 0
             if release_to_check:
                 exe_count = len([a for a in release_to_check.get('assets', []) 
-                               if a['name'].lower().endswith('.exe')])
+                               if a['name'].lower().endswith(('.exe', '.dmg'))])
             
             if exe_count > 1:
                 # Multiple versions available
