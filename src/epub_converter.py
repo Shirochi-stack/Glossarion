@@ -4561,17 +4561,19 @@ img {
         pdf_path = os.path.join(self.output_dir, f"{safe_title}.pdf")
         
         self.log(f"  PDF output: {pdf_path}")
-        pdf_img_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').upper()
-        if pdf_img_fmt == 'PNG':
-            png_lvl = os.environ.get('PDF_PNG_COMPRESS_LEVEL', '6')
-            png_opt = os.environ.get('PDF_PNG_OPTIMIZE', '1') == '1'
-            img_detail = f"format=PNG, compress_level={png_lvl}, optimize={png_opt}"
-        else:
-            img_quality = os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
-            img_detail = f"format=JPEG, quality={img_quality}"
         self.log(f"  Settings: page_numbers={settings['page_numbers']}, toc={settings['toc']}, "
                  f"toc_numbers={settings['toc_numbers']}, alignment={settings['page_number_alignment']}")
-        self.log(f"  Image: {img_detail}")
+        compression_enabled = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
+        if compression_enabled:
+            pdf_img_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').upper()
+            if pdf_img_fmt == 'PNG':
+                img_detail = f"format=PNG"
+            else:
+                img_quality = os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+                img_detail = f"format=JPEG, quality={img_quality}"
+            self.log(f"  Image: compression=enabled, {img_detail}")
+        else:
+            self.log(f"  Image: compression=disabled")
         
         import base64
         import re
