@@ -689,24 +689,21 @@ def send_chat_completion(
 
     resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
 
-    if resp.status_code == 401:
-        raise RuntimeError(
-            "AuthGPT: 401 Unauthorized – OAuth token may have expired. "
-            "Try clearing tokens and re-authenticating."
-        )
-    if resp.status_code == 403:
-        raise RuntimeError(
-            "AuthGPT: 403 Forbidden – your ChatGPT subscription may not "
-            "have access to this model or the backend API."
-        )
     if resp.status_code >= 400:
-        # Log the response body for debugging before raising
-        error_body = resp.text[:500] if hasattr(resp, 'text') else ''
-        logger.error(
-            "AuthGPT: HTTP %d from %s – body: %s",
-            resp.status_code, url, error_body,
+        # Read the error body so it can be included in the exception
+        try:
+            error_body = resp.text[:500]
+        except Exception:
+            error_body = ""
+        # Try to extract a detail message from JSON
+        detail = error_body
+        try:
+            detail = resp.json().get("detail", error_body)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"AuthGPT: {resp.status_code} – {detail}"
         )
-    resp.raise_for_status()
 
     # Read the SSE stream line by line
     raw_lines: List[str] = []

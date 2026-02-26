@@ -14012,6 +14012,7 @@ class UnifiedClient:
         # Send the request through the ChatGPT backend adapter
         max_retries = self._get_max_retries()
         last_error = None
+        print(f"🔐 AuthGPT: Sending request via Codex API (model={actual_model})")
         for attempt in range(max_retries):
             try:
                 result = _authgpt_send(
@@ -14027,6 +14028,9 @@ class UnifiedClient:
                 finish_reason = result.get("finish_reason", "stop")
                 usage = result.get("usage")
 
+                if content:
+                    print(f"✅ AuthGPT: Response received ({len(content)} chars)")
+
                 return UnifiedResponse(
                     content=content,
                     finish_reason=finish_reason,
@@ -14036,9 +14040,10 @@ class UnifiedClient:
 
             except RuntimeError as exc:
                 error_str = str(exc)
+                print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
                 # On 401, try refreshing the token once
                 if "401" in error_str and attempt == 0:
-                    logger.warning("AuthGPT: 401 received, attempting token refresh…")
+                    print("🔄 AuthGPT: 401 received, attempting token refresh…")
                     try:
                         access_token = store.get_valid_access_token(auto_login=True)
                         continue
@@ -14050,6 +14055,8 @@ class UnifiedClient:
                     continue
 
             except Exception as exc:
+                error_str = str(exc)
+                print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(self._get_send_interval())
