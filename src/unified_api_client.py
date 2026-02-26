@@ -10022,6 +10022,11 @@ class UnifiedClient:
             self._cancelled = True
             return True
 
+        # GUI sets this env var on BOTH graceful and immediate stop
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            self._cancelled = True
+            return True
+
         # Class-level global cancellation
         if self.is_globally_cancelled():
             self._cancelled = True
@@ -14052,6 +14057,13 @@ class UnifiedClient:
                     raise UnifiedClientError(
                         "AuthGPT: Translation stopped by user",
                         error_type="cancelled"
+                    )
+
+                # On 429 usage_limit_reached, don't retry
+                if "429" in error_str and "usage_limit_reached" in error_str:
+                    raise UnifiedClientError(
+                        f"AuthGPT: Usage limit reached — not retrying: {error_str}",
+                        error_type="rate_limit"
                     )
 
                 # On 401, try refreshing the token once
