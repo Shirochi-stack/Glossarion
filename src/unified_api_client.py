@@ -14022,6 +14022,7 @@ class UnifiedClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=self.request_timeout,
+                    log_fn=print,
                 )
 
                 content = result.get("content", "")

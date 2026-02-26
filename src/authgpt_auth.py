@@ -626,6 +626,178 @@ def _parse_sse_responses(raw_text: str) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# SSE stream processing helpers
+# ---------------------------------------------------------------------------
+
+def _process_sse_line(
+    line: str,
+    state: Dict,
+    _log,
+    log_stream: bool,
+    t_start: float,
+) -> bool:
+    """Process a single SSE line, updating *state* in-place.
+
+    Returns True when the stream should stop (saw [DONE] or response.completed).
+    """
+    state["raw_lines"].append(line)
+
+    if not state["got_first_data"] and line.startswith("data: "):
+        state["got_first_data"] = True
+        ttft = time.time() - t_start
+        _log(f"📡 AuthGPT: First token in {ttft:.1f}s, streaming…")
+
+    # Extract text deltas and display in real-time
+    if line.startswith("data: ") and '"response.output_text.delta"' in line:
+        try:
+            delta_data = json.loads(line[6:])
+            delta_text = delta_data.get("delta", "")
+            state["streamed_chars"] += len(delta_text)
+            if log_stream and delta_text:
+                log_buf = state["log_buf"]
+                combined = "".join(log_buf) + delta_text
+                for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
+                    combined = combined.replace(tag, tag + '\n')
+                if "\n" in combined:
+                    parts = combined.split("\n")
+                    for part in parts[:-1]:
+                        _log(part)
+                    state["log_buf"] = [parts[-1]]
+                else:
+                    log_buf.append(delta_text)
+                    if len("".join(log_buf)) > 150:
+                        _log("".join(log_buf))
+                        state["log_buf"] = []
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Stop signals
+    if line.strip() == "data: [DONE]":
+        return True
+    if '"type":"response.completed"' in line or '"type": "response.completed"' in line:
+        return True
+    return False
+
+
+def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dict:
+    """Flush log buffer, parse collected SSE lines, return result dict."""
+    if log_stream and state["log_buf"]:
+        remainder = "".join(state["log_buf"]).strip()
+        if remainder:
+            _log(remainder)
+    raw_text = "\n".join(state["raw_lines"])
+    t_total = time.time() - t_start
+    _log(f"📡 AuthGPT: Stream finished — {state['streamed_chars']} chars in {t_total:.1f}s")
+    result = _parse_sse_responses(raw_text)
+
+    content = result.get("content", "")
+    if content:
+        _log(f"✅ AuthGPT: Parsed {len(content)} chars (finish_reason={result.get('finish_reason')})")
+    else:
+        event_types = []
+        for rl in state["raw_lines"][:50]:
+            if rl.startswith("data: ") and rl[6:] != "[DONE]":
+                try:
+                    evt = json.loads(rl[6:])
+                    t = evt.get("type", "(no type)")
+                    if t not in event_types:
+                        event_types.append(t)
+                except Exception:
+                    pass
+        _log(f"⚠️ AuthGPT: Empty content after parsing. Event types seen: {event_types}")
+    return result
+
+
+def _new_stream_state() -> Dict:
+    return {
+        "raw_lines": [],
+        "got_first_data": False,
+        "streamed_chars": 0,
+        "log_buf": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# httpx-based SSE reader (preferred — real-time, no buffering)
+# ---------------------------------------------------------------------------
+
+def _stream_with_httpx(
+    _httpx,
+    url: str,
+    body: Dict,
+    headers: Dict,
+    timeout: int,
+    t_start: float,
+    _log,
+    log_stream: bool,
+) -> Dict:
+    """Stream SSE using httpx (same stack as the openai Python SDK)."""
+    state = _new_stream_state()
+    # httpx timeout: connect + read
+    _timeout = _httpx.Timeout(timeout, connect=30.0)
+    with _httpx.stream(
+        "POST", url,
+        json=body,
+        headers=headers,
+        timeout=_timeout,
+    ) as resp:
+        if resp.status_code >= 400:
+            error_body = resp.read().decode("utf-8", errors="replace")[:500]
+            detail = error_body
+            try:
+                detail = json.loads(error_body).get("detail", error_body)
+            except Exception:
+                pass
+            raise RuntimeError(f"AuthGPT: {resp.status_code} \u2013 {detail}")
+
+        # iter_lines() in httpx yields str lines as they arrive
+        for line in resp.iter_lines():
+            if _process_sse_line(line, state, _log, log_stream, t_start):
+                break
+
+    return _finalize_stream(state, _log, log_stream, t_start)
+
+
+# ---------------------------------------------------------------------------
+# requests-based SSE reader (fallback — may buffer due to urllib3/http.client)
+# ---------------------------------------------------------------------------
+
+def _stream_with_requests(
+    url: str,
+    body: Dict,
+    headers: Dict,
+    timeout: int,
+    t_start: float,
+    _log,
+    log_stream: bool,
+) -> Dict:
+    """Stream SSE using requests (fallback when httpx is not available)."""
+    state = _new_stream_state()
+    resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
+
+    if resp.status_code >= 400:
+        try:
+            error_body = resp.text[:500]
+        except Exception:
+            error_body = ""
+        detail = error_body
+        try:
+            detail = resp.json().get("detail", error_body)
+        except Exception:
+            pass
+        raise RuntimeError(f"AuthGPT: {resp.status_code} \u2013 {detail}")
+
+    for raw_line in resp.iter_lines(chunk_size=1):
+        if raw_line is None:
+            continue
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+        if _process_sse_line(line, state, _log, log_stream, t_start):
+            break
+
+    return _finalize_stream(state, _log, log_stream, t_start)
+
+
+# ---------------------------------------------------------------------------
 # Public API – send chat completion
 # ---------------------------------------------------------------------------
 
@@ -637,6 +809,7 @@ def send_chat_completion(
     max_tokens: Optional[int] = None,
     timeout: int = 600,
     base_url: Optional[str] = None,
+    log_fn: Optional[Any] = None,
 ) -> Dict:
     """Send a chat completion request via the ChatGPT Codex Responses API.
 
@@ -683,49 +856,35 @@ def send_chat_completion(
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",  # Disable gzip so SSE streams in real-time
     }
 
+    _log = log_fn or print
     logger.info("AuthGPT: POST %s  model=%s", url, model)
+    _log(f"🔐 AuthGPT: POST {url}  model={model}")
 
-    resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
+    # Determine if streaming log is enabled (same env vars as other providers)
+    env_stream = os.getenv("ENABLE_STREAMING", "0")
+    use_stream_log = env_stream not in ("0", "false", "False", "FALSE")
+    log_stream = use_stream_log and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+    if os.getenv("BATCH_TRANSLATION", "0") == "1" and os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() in ("0", "false"):
+        log_stream = False
 
-    if resp.status_code >= 400:
-        # Read the error body so it can be included in the exception
-        try:
-            error_body = resp.text[:500]
-        except Exception:
-            error_body = ""
-        # Try to extract a detail message from JSON
-        detail = error_body
-        try:
-            detail = resp.json().get("detail", error_body)
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"AuthGPT: {resp.status_code} – {detail}"
+    t_start = time.time()
+
+    # Use httpx for SSE streaming — its h11-based HTTP parser yields data as
+    # it arrives from the socket, unlike requests/urllib3 which buffers
+    # entire SSL records through http.client's internal BufferedIOBase.
+    # This is the same HTTP stack the official openai Python SDK uses.
+    try:
+        import httpx as _httpx
+        return _stream_with_httpx(
+            _httpx, url, body, headers, timeout, t_start,
+            _log, log_stream,
         )
-
-    # Read the SSE stream line by line with progress logging
-    raw_lines: List[str] = []
-    got_first_data = False
-    for raw_line in resp.iter_lines():
-        if raw_line is None:
-            continue
-        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
-        raw_lines.append(line)
-        if not got_first_data and line.startswith("data: "):
-            got_first_data = True
-            logger.info("AuthGPT: Stream started, receiving data…")
-        # Stop reading once we see [DONE] or response.completed
-        if line.strip() == "data: [DONE]":
-            break
-        if '"type":"response.completed"' in line or '"type": "response.completed"' in line:
-            break
-    raw_text = "\n".join(raw_lines)
-    logger.info("AuthGPT: Stream finished (%d lines received)", len(raw_lines))
-    result = _parse_sse_responses(raw_text)
-
-    if not result.get("content"):
-        logger.warning("AuthGPT: empty response from backend (model=%s)", model)
-
-    return result
+    except ImportError:
+        _log("⚠️ AuthGPT: httpx not installed, falling back to requests (streaming may be buffered)")
+        return _stream_with_requests(
+            url, body, headers, timeout, t_start,
+            _log, log_stream,
+        )
