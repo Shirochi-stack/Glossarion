@@ -1216,8 +1216,14 @@ def _create_output_settings_section(self, parent):
         except Exception:
             pass
     quality_spin.valueChanged.connect(_on_quality_changed)
+    self._disable_spinbox_mousewheel(quality_spin)
     quality_h.addWidget(quality_spin)
     compress_sub_controls.append(quality_spin)
+    
+    quality_range_label = QLabel("1 – 100")
+    quality_range_label.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 9pt;")
+    quality_h.addWidget(quality_range_label)
+    compress_sub_controls.append(quality_range_label)
     
     quality_h.addStretch()
     section_v.addWidget(quality_row)
@@ -1302,6 +1308,8 @@ def _create_output_settings_section(self, parent):
             quality_spin.setEnabled(fmt == 'jpeg' and compress_cb.isChecked())
             quality_label.setEnabled(fmt == 'jpeg' and compress_cb.isChecked())
             png_optimize_cb.setEnabled(fmt == 'png' and compress_cb.isChecked())
+            png_level_label.setEnabled(fmt == 'png' and compress_cb.isChecked())
+            png_level_spin.setEnabled(fmt == 'png' and compress_cb.isChecked())
         except Exception:
             pass
     pdf_format_combo.currentTextChanged.connect(_on_pdf_format_changed)
@@ -1323,9 +1331,54 @@ def _create_output_settings_section(self, parent):
     section_v.addWidget(png_optimize_cb)
     compress_sub_controls.append(png_optimize_cb)
     
+    # PNG Compression Level (0-9)
+    png_level_row = QWidget()
+    png_level_h = QHBoxLayout(png_level_row)
+    png_level_h.setContentsMargins(20, 2, 0, 0)
+    
+    png_level_label = QLabel("PNG Compression Level:")
+    png_level_h.addWidget(png_level_label)
+    compress_sub_controls.append(png_level_label)
+    
+    png_level_spin = QSpinBox()
+    png_level_spin.setRange(0, 9)
+    png_level_spin.setFixedWidth(60)
+    png_level_spin.setToolTip(
+        "Zlib deflate compression level for PNG (0-9).\n"
+        "0 = no compression (fastest, largest)\n"
+        "6 = default balance\n"
+        "9 = max compression (slowest, smallest)\n"
+        "This is lossless — no quality loss at any level."
+    )
+    try:
+        png_level_spin.setValue(int(self.config.get('pdf_png_compress_level', 6)))
+    except Exception:
+        png_level_spin.setValue(6)
+    
+    def _on_png_level_changed(val):
+        try:
+            self.config['pdf_png_compress_level'] = val
+            os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(val)
+        except Exception:
+            pass
+    png_level_spin.valueChanged.connect(_on_png_level_changed)
+    self._disable_spinbox_mousewheel(png_level_spin)
+    png_level_h.addWidget(png_level_spin)
+    compress_sub_controls.append(png_level_spin)
+    
+    png_level_range_label = QLabel("0 – 9")
+    png_level_range_label.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 9pt;")
+    png_level_h.addWidget(png_level_range_label)
+    compress_sub_controls.append(png_level_range_label)
+    
+    png_level_h.addStretch()
+    section_v.addWidget(png_level_row)
+    
     # Set initial enabled state for format-dependent controls
     _initial_fmt = self.config.get('pdf_image_format', 'jpeg').lower()
     png_optimize_cb.setEnabled(_initial_fmt == 'png')
+    png_level_label.setEnabled(_initial_fmt == 'png')
+    png_level_spin.setEnabled(_initial_fmt == 'png')
     
     compress_desc = QLabel(
         "EPUB always uses .webp. PDF uses the format selected above\n"
@@ -1341,6 +1394,7 @@ def _create_output_settings_section(self, parent):
     os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if exclude_gif_cb.isChecked() else '0'
     os.environ['PDF_IMAGE_FORMAT'] = self.config.get('pdf_image_format', 'jpeg')
     os.environ['PDF_PNG_OPTIMIZE'] = '1' if png_optimize_cb.isChecked() else '0'
+    os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(png_level_spin.value())
     
     # Apply initial enabled state for compression sub-controls
     initial_compress = compress_cb.isChecked()
