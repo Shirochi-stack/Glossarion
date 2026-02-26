@@ -133,7 +133,9 @@ app_files = [
 
 	# Environment variable size limit workaround
 	('large_env.py', '.'),
-	
+
+	# AuthGPT - ChatGPT subscription OAuth
+	('authgpt_auth.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -192,7 +194,7 @@ app_modules = [
 	'duplicate_detection_config',
 	'advanced_duplicate_detection',
 	'large_env',
-	
+	'authgpt_auth',  # ChatGPT subscription OAuth
 ]
 # GUI Framework
 gui_modules = [

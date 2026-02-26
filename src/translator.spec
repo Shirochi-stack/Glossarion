@@ -168,7 +168,10 @@ app_files = [
 	('ImageRenderer.py', '.'),
 
 	# Environment variable size limit workaround
-	('large_env.py', '.')
+	('large_env.py', '.'),
+
+	# AuthGPT - ChatGPT subscription OAuth
+	('authgpt_auth.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -247,6 +250,7 @@ app_modules = [
 	'hyphen_textwrap',
 	'ImageRenderer',
 	'large_env',
+	'authgpt_auth',  # ChatGPT subscription OAuth
 	
 	# MAT Inpainting Support
 	'torch_utils',
