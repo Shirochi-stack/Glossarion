@@ -1302,7 +1302,6 @@ def _create_output_settings_section(self, parent):
             pdf_format_combo.setCurrentIndex(idx)
     except Exception:
         pass
-    self._add_combobox_arrow(pdf_format_combo)
     self._disable_combobox_mousewheel(pdf_format_combo)
     
     # PNG optimize checkbox (sub-control of PDF format)
