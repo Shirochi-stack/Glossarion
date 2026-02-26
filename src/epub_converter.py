@@ -4757,6 +4757,12 @@ img {
             current_page += toc_page_count
             self.log(f"  Estimated TOC: {toc_page_count} pages")
         
+        # Create mapping from source filename to chapter number for TOC
+        source_to_chapter = {}
+        for chap_num, (title, conf, source) in chapter_titles_info.items():
+            if source:
+                source_to_chapter[source] = chap_num
+        
         self.log(f"  Rendering {len(html_files)} chapters...")
         for i, html_file in enumerate(html_files):
             if self.is_stopped():
@@ -4767,8 +4773,12 @@ img {
             if not os.path.exists(file_path):
                 continue
             
-            # Record page for TOC
+            # Record page for TOC using filename
             chapter_page_map[html_file] = current_page + 1
+            
+            # Also store by chapter number if we can determine it
+            chap_num = source_to_chapter.get(html_file, i + 1)  # Use index+1 as fallback
+            chapter_page_map[chap_num] = current_page + 1
             
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -4778,6 +4788,9 @@ img {
                 
                 # Extract just the body content to avoid nested <html><body> structures
                 body_content = _extract_body_content(content)
+                
+                # Add anchor ID for TOC linking
+                body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
                 
                 # Build page reset CSS for continuous numbering
                 page_reset = f"body {{ counter-reset: page {current_page}; }}" if settings['page_numbers'] else ""
@@ -4831,7 +4844,7 @@ img {
 
     def _build_pdf_toc_html(self, chapter_titles_info: Dict[int, Tuple[str, float, str]],
                             settings: dict, chapter_page_map: Optional[Dict[str, int]]) -> str:
-        """Build HTML for PDF table of contents"""
+        """Build HTML for PDF table of contents with clickable links and page numbers"""
         import html as _html
         
         toc_html = (
@@ -4839,9 +4852,11 @@ img {
             'body { font-family: serif; margin: 40px; }'
             'h1 { text-align: center; margin-bottom: 30px; }'
             'ul { list-style-type: none; padding: 0; margin: 0; }'
-            'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; display: flex; justify-content: space-between; }'
+            'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; }'
+            'a { text-decoration: none; color: #333; display: flex; justify-content: space-between; }'
+            'a:hover { color: #0066cc; text-decoration: underline; }'
             '.title { flex: 1; }'
-            '.page-num { font-weight: bold; min-width: 40px; text-align: right; }'
+            '.page-num { font-weight: bold; min-width: 40px; text-align: right; margin-left: 10px; }'
             '</style></head><body>'
             '<h1>Table of Contents</h1><ul>'
         )
@@ -4850,23 +4865,22 @@ img {
             title, confidence, source = chapter_titles_info[chap_num]
             safe_title = _html.escape(title)
             
+            # Get page number - try chapter number key directly first
             page_num = ""
             if settings.get('toc_numbers') and chapter_page_map:
-                # Find the file for this chapter
-                if isinstance(source, str) and os.path.exists(os.path.join(self.output_dir, source)):
-                    page_num = str(chapter_page_map.get(source, ""))
-                else:
-                    # Try to match by chapter number in file list
-                    for fname, page in chapter_page_map.items():
-                        # Match response_N_ pattern
-                        import re
-                        m = re.match(r'response_(\d+)_', fname)
-                        if m and int(m.group(1)) == chap_num:
-                            page_num = str(page)
-                            break
+                # Try chapter number directly (stored as integer key)
+                page_num = chapter_page_map.get(chap_num, "")
+                
+                # Fallback to source filename
+                if not page_num and source:
+                    page_num = chapter_page_map.get(source, "")
+                
+                page_num = str(page_num) if page_num else ""
             
             page_span = f'<span class="page-num">{page_num}</span>' if page_num else ''
-            toc_html += f'<li><span class="title">{safe_title}</span>{page_span}</li>'
+            
+            # Create clickable link
+            toc_html += f'<li><a href="#chapter-{chap_num}"><span class="title">{safe_title}</span>{page_span}</a></li>'
         
         toc_html += '</ul></body></html>'
         return toc_html
