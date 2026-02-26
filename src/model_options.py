@@ -149,8 +149,8 @@ def get_model_options() -> List[str]:
         # AuthGPT – ChatGPT subscription via OAuth (Codex Responses endpoint)
         # Only models supported by /backend-api/codex/responses are listed.
         # 'auto' and 'gpt-5.2-chat-latest' are NOT supported on this endpoint.
-        "authgpt/gpt-5.2", 
-        "authgpt/gpt-5.1", "authgpt/gpt-5.1-codex", "authgpt/gpt-5.1-codex-max",
+        "authgpt/gpt-5.2", "authgpt/gpt-5.1", "authgpt/gpt-5", 
+        "authgpt/gpt-5.1-codex", "authgpt/gpt-5.1-codex-max",
         "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex",
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
