@@ -46,6 +46,7 @@ Supported models and their prefixes (Updated July 2025):
 - OpenRouter: or/*, openrouter/* (e.g., or/anthropic/claude-4-opus, or/openai/gpt-4.5)
 - Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
 - Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
+- AuthGPT: authgpt/* (e.g., authgpt/gpt-4o, authgpt/o3) – ChatGPT subscription via OAuth
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
@@ -85,6 +86,8 @@ Environment Variables:
 - OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/Shirochi-stack/Glossarion)
 - OPENROUTER_APP_NAME: App name for OpenRouter (default: Glossarion Translation)
 - POE_API_KEY: API key for Poe platform
+- AUTHGPT_BASE_URL: Override ChatGPT backend URL (default: https://chatgpt.com/backend-api)
+- AUTHGPT_TOKEN_FILE: Custom path for OAuth token storage (default: ~/.glossarion/authgpt_tokens.json)
 - GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1) - Do NOT include /chat/completions
 - FIREWORKS_API_URL: Custom Fireworks AI endpoint (default: https://api.fireworks.ai/inference/v1)
 - DISABLE_GEMINI_SAFETY: Set to "true" to disable Gemini safety filters (respects GUI toggle)
@@ -791,6 +794,16 @@ try:
 except ImportError:
     google_translate = None
     GOOGLE_TRANSLATE_AVAILABLE = False
+
+# AuthGPT - ChatGPT subscription via OAuth (optional)
+try:
+    from authgpt.token_store import get_default_store as _authgpt_get_store
+    from authgpt.chatgpt_api import send_chat_completion as _authgpt_send
+    AUTHGPT_AVAILABLE = True
+except ImportError:
+    _authgpt_get_store = None
+    _authgpt_send = None
+    AUTHGPT_AVAILABLE = False
     
 from functools import lru_cache
 from datetime import datetime, timedelta
@@ -1475,6 +1488,8 @@ class UnifiedClient:
         'deepl': 'deepl',
         'google-translate-free': 'google_translate_free',
         'google-translate': 'google_translate',
+        'authgpt/': 'authgpt',
+        'authgpt': 'authgpt',
     }
     
     # Model-specific constraints
@@ -4295,6 +4310,15 @@ class UnifiedClient:
             # Vertex AI doesn't need a client created here
             logger.info("Vertex AI Model Garden will initialize on demand")
         
+        elif self.client_type == 'authgpt':
+            # AuthGPT uses ChatGPT backend via OAuth – no persistent SDK client
+            if not AUTHGPT_AVAILABLE:
+                raise ImportError(
+                    "AuthGPT package not found. Make sure the 'authgpt' directory "
+                    "exists under src/ with __init__.py, oauth.py, token_store.py, chatgpt_api.py."
+                )
+            logger.info("AuthGPT will use ChatGPT backend API with OAuth tokens")
+
         elif self.client_type in ['yi', 'qwen', 'baichuan', 'zhipu', 'moonshot', 'baidu', 
                                   'tencent', 'iflytek', 'bytedance', 'minimax', 
                                   'sensenova', 'internlm', 'tii', 'microsoft', 
@@ -9819,6 +9843,7 @@ class UnifiedClient:
             'deepl': self._send_deepl,  # DeepL translation service
             'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
+            'authgpt': self._send_authgpt,  # ChatGPT subscription via OAuth
         }
         
         # IMPORTANT: Use actual_provider for routing, not client_type
@@ -13948,6 +13973,91 @@ class UnifiedClient:
             base_url=base_url,
             response_name=response_name,
             provider="openai"
+        )
+
+    def _send_authgpt(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via ChatGPT backend API using OAuth subscription tokens.
+
+        Uses the authgpt package to obtain/refresh OAuth tokens and send
+        messages to the ChatGPT backend (chatgpt.com/backend-api/).
+        Model names should be prefixed with 'authgpt/' (e.g. authgpt/gpt-4o).
+        """
+        if not AUTHGPT_AVAILABLE or _authgpt_get_store is None or _authgpt_send is None:
+            raise UnifiedClientError(
+                "AuthGPT is not available. Ensure the authgpt package is installed "
+                "(src/authgpt/ with __init__.py, oauth.py, token_store.py, chatgpt_api.py).",
+                error_type="config_error"
+            )
+
+        # Strip the authgpt/ prefix to get the actual model name
+        actual_model = self.model
+        for prefix in ('authgpt/', 'authgpt'):
+            if actual_model.startswith(prefix):
+                actual_model = actual_model[len(prefix):].lstrip('/')
+                break
+        if not actual_model:
+            actual_model = 'gpt-5.2'  # sensible default
+
+        # Obtain a valid OAuth access token (auto-refreshes or triggers browser login)
+        try:
+            store = _authgpt_get_store()
+            access_token = store.get_valid_access_token(auto_login=True)
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"AuthGPT authentication failed: {exc}\n"
+                "Make sure you have a ChatGPT Plus/Pro subscription and try again.",
+                error_type="auth_error"
+            )
+
+        # Send the request through the ChatGPT backend adapter
+        max_retries = self._get_max_retries()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                result = _authgpt_send(
+                    access_token=access_token,
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=self.request_timeout,
+                )
+
+                content = result.get("content", "")
+                finish_reason = result.get("finish_reason", "stop")
+                usage = result.get("usage")
+
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+                # On 401, try refreshing the token once
+                if "401" in error_str and attempt == 0:
+                    logger.warning("AuthGPT: 401 received, attempting token refresh…")
+                    try:
+                        access_token = store.get_valid_access_token(auto_login=True)
+                        continue
+                    except Exception:
+                        pass
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+        raise UnifiedClientError(
+            f"AuthGPT request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
         )
 
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
