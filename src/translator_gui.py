@@ -8551,6 +8551,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'IMAGE_COMPRESSION_QUALITY': str(self.config.get('image_compression_quality', 80)),
             'EXCLUDE_COVER_COMPRESSION': '1' if self.config.get('exclude_cover_compression', True) else '0',
             'EXCLUDE_GIF_COMPRESSION': '1' if self.config.get('exclude_gif_compression', True) else '0',
+            'PDF_IMAGE_FORMAT': self.config.get('pdf_image_format', 'jpeg'),
+            'PDF_PNG_OPTIMIZE': '1' if self.config.get('pdf_png_optimize', True) else '0',
             'PRESERVE_ORIGINAL_FORMAT': "1" if self.config.get('preserve_original_format', False) else "0", 
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
@@ -14118,6 +14120,8 @@ Important rules:
                 ('IMAGE_COMPRESSION_QUALITY', str(self.config.get('image_compression_quality', 80))),
                 ('EXCLUDE_COVER_COMPRESSION', '1' if self.config.get('exclude_cover_compression', True) else '0'),
                 ('EXCLUDE_GIF_COMPRESSION', '1' if self.config.get('exclude_gif_compression', True) else '0'),
+                ('PDF_IMAGE_FORMAT', self.config.get('pdf_image_format', 'jpeg')),
+                ('PDF_PNG_OPTIMIZE', '1' if self.config.get('pdf_png_optimize', True) else '0'),
 
                 # Image compression settings
                 ('ENABLE_IMAGE_COMPRESSION', '1' if getattr(self, 'enable_image_compression_var', False) else '0'),

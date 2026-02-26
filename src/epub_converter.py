@@ -4587,6 +4587,41 @@ img {
                         base = os.path.splitext(fname)[0]
                         images_by_name[base] = (fpath, ctype)
         
+        def _read_image_as_pdf_compatible(fpath, ctype):
+            """Read image bytes, converting webp to JPEG/PNG since WeasyPrint doesn't support webp.
+            Respects PDF_IMAGE_FORMAT, IMAGE_COMPRESSION_QUALITY, and PDF_PNG_OPTIMIZE settings."""
+            if ctype == 'image/webp':
+                try:
+                    from PIL import Image
+                    from io import BytesIO
+                    pdf_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').lower()
+                    with Image.open(fpath) as img:
+                        buf = BytesIO()
+                        if pdf_fmt == 'png':
+                            # PNG: preserves transparency
+                            optimize = os.environ.get('PDF_PNG_OPTIMIZE', '1') == '1'
+                            if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                img = img.convert('RGBA')
+                            img.save(buf, format='PNG', optimize=optimize)
+                            return buf.getvalue(), 'image/png'
+                        else:
+                            # JPEG: lossy with quality control, flatten transparency
+                            quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                                background = Image.new('RGB', img.size, (255, 255, 255))
+                                if img.mode != 'RGBA':
+                                    img = img.convert('RGBA')
+                                background.paste(img, mask=img.split()[3])
+                                img = background
+                            elif img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            img.save(buf, format='JPEG', quality=quality, optimize=True)
+                            return buf.getvalue(), 'image/jpeg'
+                except Exception:
+                    pass
+            with open(fpath, 'rb') as f:
+                return f.read(), ctype
+        
         def _data_uri_for_src(src_value):
             """Convert image src to data URI"""
             if not src_value or src_value.startswith('data:'):
@@ -4600,9 +4635,9 @@ img {
                 if key in images_by_name:
                     fpath, ctype = images_by_name[key]
                     try:
-                        with open(fpath, 'rb') as f:
-                            b64 = base64.b64encode(f.read()).decode('utf-8')
-                        return f"data:{ctype};base64,{b64}"
+                        img_bytes, final_ctype = _read_image_as_pdf_compatible(fpath, ctype)
+                        b64 = base64.b64encode(img_bytes).decode('utf-8')
+                        return f"data:{final_ctype};base64,{b64}"
                     except Exception:
                         pass
             return None
@@ -4669,10 +4704,12 @@ img {
                 
                 if cover_path:
                     ctype, _ = mimetypes.guess_type(cover_path)
+                    if not ctype:
+                        ctype = _mime_fallback.get(os.path.splitext(cover_path)[1].lower())
                     if ctype and ctype.startswith('image/'):
-                        with open(cover_path, 'rb') as f:
-                            b64 = base64.b64encode(f.read()).decode('utf-8')
-                        cover_data_uri = f"data:{ctype};base64,{b64}"
+                        cover_bytes, cover_ctype = _read_image_as_pdf_compatible(cover_path, ctype)
+                        b64 = base64.b64encode(cover_bytes).decode('utf-8')
+                        cover_data_uri = f"data:{cover_ctype};base64,{b64}"
                         cover_html = (
                             f'<html><head><style>'
                             f'@page {{ margin: 0; }}'
