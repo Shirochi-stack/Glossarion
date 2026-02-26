@@ -151,8 +151,8 @@ def get_model_options() -> List[str]:
         # 'auto' and 'gpt-5.2-chat-latest' are NOT supported on this endpoint.
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-pro",
         "authgpt/gpt-5.1", "authgpt/gpt-5.1-codex", "authgpt/gpt-5.1-codex-max",
-        "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex",
-        "authgpt/gpt-5-mini", "authgpt/gpt-5-codex-mini",
+        "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex", "authgpt/gpt-5.3-codex-spark",
+        "authgpt/gpt-5-mini", "authgpt/gpt-5-nano", "authgpt/gpt-5-codex-mini",
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
         "nd/deepseek-ai/deepseek-v3.2",

@@ -705,9 +705,7 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
     result = _parse_sse_responses(raw_text)
 
     content = result.get("content", "")
-    if content:
-        _log(f"✅ AuthGPT: Parsed {len(content)} chars (finish_reason={result.get('finish_reason')})")
-    else:
+    if not content:
         event_types = []
         for rl in state["raw_lines"][:50]:
             if rl.startswith("data: ") and rl[6:] != "[DONE]":
