@@ -2107,6 +2107,48 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(streaming_warn)
     section_v.addWidget(self.allow_batch_stream_logs_checkbox)
 
+    # AuthGPT (ChatGPT Subscription) batch stream log toggle
+    section_v.addSpacing(6)
+    if not hasattr(self, 'allow_authgpt_batch_stream_logs_var'):
+        self.allow_authgpt_batch_stream_logs_var = bool(
+            self.config.get(
+                'allow_authgpt_batch_stream_logs',
+                str(os.environ.get('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '0')) == '1'
+            )
+        )
+    try:
+        self.config['allow_authgpt_batch_stream_logs'] = bool(self.allow_authgpt_batch_stream_logs_var)
+    except Exception:
+        pass
+    self.allow_authgpt_batch_stream_logs_checkbox = self._create_styled_checkbox(
+        "Allow ChatGPT Subscription batch mode stream log"
+    )
+    self.allow_authgpt_batch_stream_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "ChatGPT Subscription models (authgpt/) always stream because the API requires it. "
+        "During batch translation this can flood the log. Enable this to see streaming "
+        "tokens in the log during batch mode. Off by default.</p></qt>"
+    )
+    try:
+        self.allow_authgpt_batch_stream_logs_checkbox.setChecked(bool(self.allow_authgpt_batch_stream_logs_var))
+    except Exception:
+        pass
+    def _on_allow_authgpt_batch_stream_logs_toggle(checked):
+        try:
+            self.allow_authgpt_batch_stream_logs_var = bool(checked)
+            self.config['allow_authgpt_batch_stream_logs'] = self.allow_authgpt_batch_stream_logs_var
+            os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.allow_authgpt_batch_stream_logs_checkbox.toggled.connect(_on_allow_authgpt_batch_stream_logs_toggle)
+    section_v.addWidget(self.allow_authgpt_batch_stream_logs_checkbox)
+
+    authgpt_note = QLabel("🔐 ChatGPT Subscription (authgpt/) always uses streaming — this controls batch log visibility")
+    authgpt_note.setStyleSheet("color: #6b7280; font-size: 9pt; font-style: italic;")
+    authgpt_note.setWordWrap(True)
+    authgpt_note.setContentsMargins(20, 0, 0, 4)
+    section_v.addWidget(authgpt_note)
+
     # Separator
     sep_stream = QFrame()
     sep_stream.setFrameShape(QFrame.HLine)
@@ -2836,7 +2878,6 @@ def _create_response_handling_section(self, parent):
     
     http_main_v.addWidget(http_grid)
     
-    import os  # ensure os is in scope
     # Optional toggle: ignore server Retry-After header
     if not hasattr(self, 'ignore_retry_after_var'):
         self.ignore_retry_after_var = bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1'))

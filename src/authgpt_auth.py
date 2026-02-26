@@ -877,12 +877,12 @@ def send_chat_completion(
     logger.info("AuthGPT: POST %s  model=%s", url, model)
     _log(f"🔐 AuthGPT: POST {url}  model={model}")
 
-    # Determine if streaming log is enabled (same env vars as other providers)
-    env_stream = os.getenv("ENABLE_STREAMING", "0")
-    use_stream_log = env_stream not in ("0", "false", "False", "FALSE")
-    log_stream = use_stream_log and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-    if os.getenv("BATCH_TRANSLATION", "0") == "1" and os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() in ("0", "false"):
-        log_stream = False
+    # AuthGPT always streams (the API requires it), so streaming log is on
+    # by default.  During batch translation, silence it unless the user
+    # explicitly enabled the authgpt-specific batch log toggle.
+    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+        log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
 
     t_start = time.time()
 
