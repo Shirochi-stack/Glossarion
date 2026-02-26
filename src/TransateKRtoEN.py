@@ -9311,16 +9311,20 @@ def main(log_callback=None, stop_callback=None):
                                             # WAIT_FOR_CHUNKS=1: allow in-flight work to complete.
                                             should_wait = True
                                         else:
-                                            # WAIT_FOR_CHUNKS=0: do NOT wait just because something is in-flight.
-                                            # Only wait if ALL chunks were already sent to the API (i.e., nothing new would be started anyway).
-                                            should_wait = _glossary_all_chunks_submitted()
+                                            # WAIT_FOR_CHUNKS=0: wait if all chunks were already sent to the API.
+                                            # Also check the watchdog directly — the status file written by
+                                            # the subprocess _sent_monitor thread polls at 0.1s intervals and
+                                            # may lag behind the actual API state.  The watchdog file is
+                                            # updated synchronously when an API call goes in-flight, so it
+                                            # is the reliable ground truth.
+                                            should_wait = _glossary_all_chunks_submitted() or _glossary_any_in_flight()
 
                                     if should_wait:
                                         if not graceful_stop_notice_shown:
                                             if wait_for_chunks:
                                                 print("⏳ Graceful stop — waiting for glossary generation to finish...")
                                             else:
-                                                print("⏳ Graceful stop — waiting (all glossary chunks already sent to API)...")
+                                                print("⏳ Graceful stop — waiting (glossary API call in flight)...")
                                             graceful_stop_notice_shown = True
                                         continue
 

@@ -362,13 +362,22 @@ def set_stop_flag(value: bool):
 
 # Function to check if stop is requested (can be overridden)
 def is_stop_requested():
-    """Check if stop has been requested from any source."""
+    """Check if stop has been requested from any source.
+    
+    NOTE: TRANSLATION_CANCELLED is set on BOTH graceful and immediate stop.
+    During graceful stop we must let in-flight API calls finish, so we only
+    treat it as a stop signal when GRACEFUL_STOP is not active.  When
+    graceful stop IS active, the orchestrator in TransateKRtoEN handles the
+    decision of whether to wait or cancel.
+    """
     if _stop_requested:
         return True
 
     # Environment toggle (set by GUI stop button)
+    # Only treat as immediate stop when GRACEFUL_STOP is not active
     if os.environ.get("TRANSLATION_CANCELLED") == "1":
-        return True
+        if os.environ.get("GRACEFUL_STOP") != "1":
+            return True
 
     # File-based stop flag for cross-process cancellation
     try:
