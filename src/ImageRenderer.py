@@ -4429,6 +4429,12 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
             elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
                 model = self.main_gui.config.get('model')
             
+            # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+            if not api_key:
+                _ml = (model or '').lower()
+                if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                    api_key = 'own-auth'
+            
             if not api_key:
                 raise ValueError("No API key found in main GUI - cannot create MangaTranslator")
             
@@ -4613,6 +4619,12 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                 model = 'gpt-4o-mini'  # fallback
         elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
             model = self.main_gui.config.get('model')
+        
+        # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        if not api_key:
+            _ml = (model or '').lower()
+            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                api_key = 'own-auth'
         
         if not api_key:
             raise ValueError("No API key found in main GUI")
