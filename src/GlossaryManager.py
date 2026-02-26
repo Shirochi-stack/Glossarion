@@ -415,6 +415,14 @@ def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
     return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
 
+def _model_uses_own_auth(model: str) -> bool:
+    """Check if the model uses its own authentication (no API key needed).
+    authgpt/ uses OAuth tokens, vertex/ uses Google service account credentials."""
+    if not model:
+        return False
+    m = model.lower()
+    return m.startswith('authgpt/') or m.startswith('vertex/')
+
 def send_with_interrupt(*args, **kwargs):
     """Lazy wrapper to avoid circular import"""
     from TransateKRtoEN import send_with_interrupt as _send_with_interrupt
@@ -4284,7 +4292,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             print("📑 Traditional translation API selected - skipping automatic glossary extraction (pattern fallback disabled)")
             return {}
         
-        elif not API_KEY:
+        elif not API_KEY and not _model_uses_own_auth(MODEL):
             # Pattern fallback disabled; without an API key we can't run AI extraction.
             print("📑 No API key found - skipping automatic glossary extraction (pattern fallback disabled)")
             return {}
@@ -5785,7 +5793,7 @@ def _translate_terms_batch(term_list, profile_name, batch_size=50, output_dir=No
         if is_traditional_translation_api(MODEL):
             return
         
-        if not API_KEY:
+        if not API_KEY and not _model_uses_own_auth(MODEL):
             print(f"📑 No API key found, skipping translation")
             return {term: term for term in term_list}
         
