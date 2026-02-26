@@ -3091,6 +3091,119 @@ Recent translations to summarize:
             self.gcloud_button.setStyleSheet(self.gcloud_button_disabled_style)  # Apply disabled style
             self.vertex_location_entry.hide()
             self.gcloud_status_label.setText("")
+        
+        # Show/hide AuthGPT login button
+        if hasattr(self, 'authgpt_login_btn'):
+            if model.startswith('authgpt/') or model.startswith('authgpt'):
+                self.authgpt_login_btn.show()
+                self._update_authgpt_login_status()
+            else:
+                self.authgpt_login_btn.hide()
+
+    def _update_authgpt_login_status(self):
+        """Update the AuthGPT login button text based on current token state."""
+        try:
+            from authgpt.token_store import get_default_store
+            store = get_default_store()
+            if store.has_tokens:
+                info = store.account_info
+                email = info.get('email', '')
+                plan = info.get('plan_type', '')
+                label = "✅ ChatGPT"
+                if email:
+                    label += f" ({email})"
+                elif plan:
+                    label += f" ({plan})"
+                self.authgpt_login_btn.setText(label)
+                self.authgpt_login_btn.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+            else:
+                self.authgpt_login_btn.setText("🔐 ChatGPT Login")
+                self.authgpt_login_btn.setStyleSheet(
+                    "background-color: #10a37f; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+        except ImportError:
+            self.authgpt_login_btn.setText("🔐 ChatGPT Login (unavailable)")
+            self.authgpt_login_btn.setEnabled(False)
+
+    def _authgpt_login_clicked(self):
+        """Handle ChatGPT Login button click – run OAuth flow in background thread."""
+        try:
+            from authgpt.token_store import get_default_store
+            store = get_default_store()
+        except ImportError:
+            QMessageBox.critical(
+                self, "AuthGPT Unavailable",
+                "The authgpt module is not installed. Please check your installation."
+            )
+            return
+
+        # If already logged in, offer to log out
+        if store.has_tokens:
+            info = store.account_info
+            email = info.get('email', 'unknown')
+            reply = QMessageBox.question(
+                self, "ChatGPT Account",
+                f"Currently logged in as: {email}\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                store.clear_tokens()
+                self._update_authgpt_login_status()
+                self.append_log("🔓 ChatGPT: Logged out")
+            return
+
+        # Start login in background thread
+        self.authgpt_login_btn.setText("⏳ Logging in…")
+        self.authgpt_login_btn.setEnabled(False)
+        self.append_log("🔐 ChatGPT: Opening browser for login…")
+
+        def _do_login():
+            try:
+                from authgpt.oauth import run_oauth_flow
+                tokens = run_oauth_flow()
+                store.save_tokens(tokens)
+                # Signal back to GUI thread
+                QMetaObject.invokeMethod(
+                    self, "_authgpt_login_finished",
+                    Qt.QueuedConnection
+                )
+            except Exception as exc:
+                self._authgpt_login_error = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authgpt_login_failed",
+                    Qt.QueuedConnection
+                )
+
+        t = threading.Thread(target=_do_login, daemon=True)
+        t.start()
+
+    @Slot()
+    def _authgpt_login_finished(self):
+        """Called on GUI thread after successful AuthGPT login."""
+        self.authgpt_login_btn.setEnabled(True)
+        self._update_authgpt_login_status()
+        try:
+            from authgpt.token_store import get_default_store
+            info = get_default_store().account_info
+            email = info.get('email', '')
+            plan = info.get('plan_type', '')
+            detail = email or plan or 'success'
+            self.append_log(f"✅ ChatGPT: Logged in ({detail})")
+        except Exception:
+            self.append_log("✅ ChatGPT: Logged in")
+
+    @Slot()
+    def _authgpt_login_failed(self):
+        """Called on GUI thread after AuthGPT login failure."""
+        self.authgpt_login_btn.setEnabled(True)
+        self._update_authgpt_login_status()
+        err = getattr(self, '_authgpt_login_error', 'Unknown error')
+        self.append_log(f"❌ ChatGPT login failed: {err}")
+        QMessageBox.warning(self, "Login Failed", f"ChatGPT login failed:\n{err}")
 
     def _show_model_info_dialog(self):
         """Show information dialog about API provider shortcuts"""
@@ -3136,6 +3249,17 @@ Recent translations to summarize:
             <li><b>groq/openai/gpt-oss-120b</b> - GPT OSS 120B via Groq</li>
         </ul>
         
+        <h4>ChatGPT Subscription (authgpt/)</h4>
+        <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
+        <ul>
+            <li><b>authgpt/gpt-5.2</b> - GPT-5.2 via ChatGPT subscription</li>
+            <li><b>authgpt/gpt-5.2-pro</b> - GPT-5.2 Pro (Pro subscribers)</li>
+            <li><b>authgpt/gpt-5.2-codex</b> - Codex via ChatGPT subscription</li>
+        </ul>
+        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
+        </p>
+
         <h4>POE (poe/)</h4>
         <p>Access models through Poe platform <span style="color: #d9534f;">(likely not functional)</span></p>
         <ul>
@@ -3244,6 +3368,21 @@ Recent translations to summarize:
         )
         model_info_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Show API provider information and shortcuts.</p></qt>")
         self.frame.addWidget(model_info_btn, 1, 2, Qt.AlignLeft)
+        
+        # AuthGPT Login button (visible only for authgpt/ models)
+        self.authgpt_login_btn = QPushButton("🔐 ChatGPT Login")
+        self.authgpt_login_btn.setStyleSheet(
+            "background-color: #10a37f; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+        )
+        self.authgpt_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Log in with your ChatGPT Plus/Pro subscription via browser. "
+            "No API key needed.</p></qt>"
+        )
+        self.authgpt_login_btn.clicked.connect(self._authgpt_login_clicked)
+        self.authgpt_login_btn.hide()
+        self.frame.addWidget(self.authgpt_login_btn, 1, 3, Qt.AlignLeft)
         
         # Track previous text to make autocomplete less aggressive
         self._model_prev_text = default_model
