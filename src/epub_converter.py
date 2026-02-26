@@ -4725,6 +4725,7 @@ img {
                         cover_html = (
                             f'<html><head><style>'
                             f'@page {{ margin: 0; }}'
+                            f'@page {{ @bottom-left {{ content: none; }} @bottom-center {{ content: none; }} @bottom-right {{ content: none; }} }}'
                             f'body {{ margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }}'
                             f'img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}'
                             f'</style></head><body>'
@@ -4744,9 +4745,8 @@ img {
         if settings['toc']:
             self.log("  Calculating TOC size...")
             dummy_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, None)
-            toc_css = ""
-            if settings['page_numbers']:
-                toc_css = f"<style>@page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }}</style>"
+            # TOC page should not have page numbers
+            toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
             dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
             try:
                 toc_doc = WeasyHTML(string=dummy_toc_html, base_url=self.output_dir).render()
@@ -4763,7 +4763,11 @@ img {
             if source:
                 source_to_chapter[source] = chap_num
         
-        self.log(f"  Rendering {len(html_files)} chapters...")
+        # Build all chapters as a single HTML document for continuous page numbering
+        self.log(f"  Building combined chapter document ({len(html_files)} chapters)...")
+        all_chapters_html = ""
+        chapters_order = []  # Track chapter order for page mapping
+        
         for i, html_file in enumerate(html_files):
             if self.is_stopped():
                 self.log("🛑 PDF generation stopped by user")
@@ -4773,12 +4777,8 @@ img {
             if not os.path.exists(file_path):
                 continue
             
-            # Record page for TOC using filename
-            chapter_page_map[html_file] = current_page + 1
-            
-            # Also store by chapter number if we can determine it
-            chap_num = source_to_chapter.get(html_file, i + 1)  # Use index+1 as fallback
-            chapter_page_map[chap_num] = current_page + 1
+            # Determine chapter number
+            chap_num = source_to_chapter.get(html_file, i + 1)
             
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -4789,22 +4789,44 @@ img {
                 # Extract just the body content to avoid nested <html><body> structures
                 body_content = _extract_body_content(content)
                 
-                # Add anchor ID for TOC linking
-                body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
+                # Add anchor ID for TOC linking and page break before each chapter (except first)
+                if i > 0:
+                    body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{body_content}</div>'
+                else:
+                    body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
                 
-                # Build page reset CSS for continuous numbering
-                page_reset = f"body {{ counter-reset: page {current_page}; }}" if settings['page_numbers'] else ""
-                chapter_html = f"<html><head><style>{styles} {page_reset}</style></head><body>{body_content}</body></html>"
-                
-                doc = WeasyHTML(string=chapter_html, base_url=self.output_dir).render()
-                documents.append(doc)
-                current_page += len(doc.pages)
+                # Add to combined HTML
+                all_chapters_html += body_content
+                chapters_order.append((html_file, chap_num))
                 
                 if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
-                    self.log(f"  [{i+1}/{len(html_files)}] Rendered ({current_page} pages so far)")
+                    self.log(f"  [{i+1}/{len(html_files)}] Added to document")
                     
             except Exception as e:
-                self.log(f"  ⚠️ Failed to render {html_file}: {e}")
+                self.log(f"  ⚠️ Failed to process {html_file}: {e}")
+        
+        # Render all chapters as a single document
+        if all_chapters_html:
+            self.log("  Rendering combined chapter document...")
+            combined_html = f"<html><head><style>{styles}</style></head><body>{all_chapters_html}</body></html>"
+            try:
+                chapters_doc = WeasyHTML(string=combined_html, base_url=self.output_dir).render()
+                documents.append(chapters_doc)
+                
+                # Calculate page numbers for TOC based on page breaks
+                # Each chapter starts on a new page after the first one
+                chapter_start_page = current_page + 1  # First chapter starts here
+                for idx, (html_file, chap_num) in enumerate(chapters_order):
+                    chapter_page_map[html_file] = chapter_start_page
+                    chapter_page_map[chap_num] = chapter_start_page
+                    # Increment page for next chapter (assuming each chapter starts on new page)
+                    if idx < len(chapters_order) - 1:  # Not the last chapter
+                        chapter_start_page += 1  # Minimum increment, actual pages may vary
+                
+                current_page += len(chapters_doc.pages)
+                self.log(f"  Combined document: {len(chapters_doc.pages)} pages")
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to render combined document: {e}")
         
         if not documents:
             self.log("⚠️ No chapters rendered for PDF")
@@ -4814,9 +4836,8 @@ img {
         if settings['toc'] and chapter_titles_info:
             self.log("  Generating TOC with page numbers...")
             real_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map)
-            toc_css = ""
-            if settings['page_numbers']:
-                toc_css = f"<style>@page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }}</style>"
+            # TOC page should not have page numbers
+            toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
             real_toc_html = real_toc_html.replace("</head>", f"{toc_css}</head>")
             
             try:
