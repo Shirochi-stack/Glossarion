@@ -8332,7 +8332,7 @@ def main(log_callback=None, stop_callback=None):
 
     # Check if model needs API key
     model_needs_api_key = not (config.MODEL.lower() in ['google-translate', 'google-translate-free'] or 
-                              '@' in config.MODEL or config.MODEL.startswith('vertex/'))
+                              '@' in config.MODEL or config.MODEL.startswith('vertex/') or config.MODEL.startswith('authgpt/'))
     
     if model_needs_api_key and not config.API_KEY:
         print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")

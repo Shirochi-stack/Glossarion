@@ -9770,7 +9770,7 @@ Important rules:
             
             # Check if model needs API key
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/'))
             
             # Validate Vertex AI credentials if needed
             if '@' in model or model.startswith('vertex/'):
