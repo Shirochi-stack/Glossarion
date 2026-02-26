@@ -314,8 +314,20 @@ class AuthGPTTokenStore:
         )
         self._lock = threading.RLock()
         self._tokens: Optional[Dict] = None
+        self._on_change_callbacks: List = []  # called after save/clear
         # Eagerly load cached tokens from disk (if any)
         self._load_from_disk()
+
+    def on_token_change(self, callback):
+        """Register *callback* to be called (no args) after tokens change."""
+        self._on_change_callbacks.append(callback)
+
+    def _fire_change_callbacks(self):
+        for cb in self._on_change_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Persistence
@@ -348,6 +360,7 @@ class AuthGPTTokenStore:
                 logger.debug("AuthGPT tokens saved to %s", self._token_file)
             except Exception as exc:
                 logger.warning("Failed to save authgpt tokens: %s", exc)
+        self._fire_change_callbacks()
 
     def load_tokens(self) -> Optional[Dict]:
         """Return cached tokens (loading from disk if needed)."""
@@ -366,6 +379,7 @@ class AuthGPTTokenStore:
                     logger.info("AuthGPT tokens removed")
             except Exception as exc:
                 logger.warning("Failed to remove token file: %s", exc)
+        self._fire_change_callbacks()
 
     # ------------------------------------------------------------------
     # Token access

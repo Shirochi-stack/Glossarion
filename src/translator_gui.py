@@ -3182,6 +3182,11 @@ Recent translations to summarize:
         t.start()
 
     @Slot()
+    def _authgpt_login_status_changed(self):
+        """Called (thread-safe) whenever AuthGPT tokens are saved or cleared."""
+        self._update_authgpt_login_status()
+
+    @Slot()
     def _authgpt_login_finished(self):
         """Called on GUI thread after successful AuthGPT login."""
         self.authgpt_login_btn.setEnabled(True)
@@ -3388,6 +3393,18 @@ Recent translations to summarize:
         self.authgpt_login_btn.clicked.connect(self._authgpt_login_clicked)
         self.authgpt_login_btn.hide()
         model_btn_layout.addWidget(self.authgpt_login_btn)
+        
+        # Auto-update login button when tokens change (e.g. auto-login during translation)
+        try:
+            from authgpt_auth import get_default_store
+            get_default_store().on_token_change(
+                lambda: QMetaObject.invokeMethod(
+                    self, "_authgpt_login_status_changed",
+                    Qt.QueuedConnection,
+                )
+            )
+        except ImportError:
+            pass
         
         model_btn_layout.addStretch()
         self.frame.addWidget(model_btn_container, 1, 2, 1, 2, Qt.AlignLeft)
