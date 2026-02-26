@@ -4818,21 +4818,22 @@ img {
                 chapters_doc = WeasyHTML(string=combined_html, base_url=self.output_dir).render()
                 documents.append(chapters_doc)
                 
-                # Calculate page numbers for TOC based on page breaks
-                # Each chapter starts on a new page after the first one
-                chapter_start_page = current_page + 1  # First chapter starts here
-                self.log(f"  Mapping chapter page numbers (starting at page {chapter_start_page})...")
+                # Calculate page numbers for TOC (offset by cover + TOC pages)
+                # Page numbers in TOC should start from 1, not counting cover and TOC itself
+                toc_page_offset = current_page - len(chapters_doc.pages) + 1  # Pages before chapters start
+                chapter_toc_page = 1  # TOC page numbers start from 1
+                self.log(f"  Mapping chapter page numbers (TOC offset: {toc_page_offset}, starting at page 1 for TOC)...")
                 
                 for idx, (html_file, chap_num) in enumerate(chapters_order):
-                    chapter_page_map[html_file] = chapter_start_page
-                    chapter_page_map[chap_num] = chapter_start_page
+                    chapter_page_map[html_file] = chapter_toc_page
+                    chapter_page_map[chap_num] = chapter_toc_page
                     
                     # Debug log for first few chapters
                     if idx < 3:
-                        self.log(f"    Chapter {chap_num} ({html_file}): page {chapter_start_page}")
+                        self.log(f"    Chapter {chap_num} ({html_file}): TOC page {chapter_toc_page}")
                     
                     # Increment page for next chapter (each chapter starts on new page)
-                    chapter_start_page += 1
+                    chapter_toc_page += 1
                 
                 current_page += len(chapters_doc.pages)
                 self.log(f"  Combined document: {len(chapters_doc.pages)} pages")
