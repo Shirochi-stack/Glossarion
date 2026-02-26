@@ -797,8 +797,8 @@ except ImportError:
 
 # AuthGPT - ChatGPT subscription via OAuth (optional)
 try:
-    from authgpt.token_store import get_default_store as _authgpt_get_store
-    from authgpt.chatgpt_api import send_chat_completion as _authgpt_send
+    from authgpt_auth import get_default_store as _authgpt_get_store
+    from authgpt_auth import send_chat_completion as _authgpt_send
     AUTHGPT_AVAILABLE = True
 except ImportError:
     _authgpt_get_store = None

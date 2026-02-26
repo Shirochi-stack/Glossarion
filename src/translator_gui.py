@@ -3103,7 +3103,7 @@ Recent translations to summarize:
     def _update_authgpt_login_status(self):
         """Update the AuthGPT login button text based on current token state."""
         try:
-            from authgpt.token_store import get_default_store
+            from authgpt_auth import get_default_store
             store = get_default_store()
             if store.has_tokens:
                 info = store.account_info
@@ -3132,7 +3132,7 @@ Recent translations to summarize:
     def _authgpt_login_clicked(self):
         """Handle ChatGPT Login button click – run OAuth flow in background thread."""
         try:
-            from authgpt.token_store import get_default_store
+            from authgpt_auth import get_default_store
             store = get_default_store()
         except ImportError:
             QMessageBox.critical(
@@ -3163,7 +3163,7 @@ Recent translations to summarize:
 
         def _do_login():
             try:
-                from authgpt.oauth import run_oauth_flow
+                from authgpt_auth import run_oauth_flow
                 tokens = run_oauth_flow()
                 store.save_tokens(tokens)
                 # Signal back to GUI thread
@@ -3187,7 +3187,7 @@ Recent translations to summarize:
         self.authgpt_login_btn.setEnabled(True)
         self._update_authgpt_login_status()
         try:
-            from authgpt.token_store import get_default_store
+            from authgpt_auth import get_default_store
             info = get_default_store().account_info
             email = info.get('email', '')
             plan = info.get('plan_type', '')

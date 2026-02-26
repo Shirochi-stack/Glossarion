@@ -146,8 +146,10 @@ def get_model_options() -> List[str]:
         "eh/deepseek-v3.1:free", "eh/deepseek-v3.1", "eh/deepseek-v3.2-exp:free", "eh/deepseek-v3.2-exp" , "eh/deepseek-v3.2-exp-thinking" ,
         "eh/gemini-pro", "eh/deepseek-coder-33b", "eh/gemma-3-27b-it", "eh/glm-4.6", "eh/glm-4.7",
 
-        # AuthGPT – ChatGPT subscription via OAuth (no API key needed)
-        "authgpt/gpt-5.2", "authgpt/gpt-5.2-pro", "authgpt/gpt-5.2-chat-latest",
+        # AuthGPT – ChatGPT subscription via OAuth (Codex Responses endpoint)
+        # Only models supported by /backend-api/codex/responses are listed.
+        # 'auto' and 'gpt-5.2-chat-latest' are NOT supported on this endpoint.
+        "authgpt/gpt-5.2", "authgpt/gpt-5.2-pro",
         "authgpt/gpt-5.1", "authgpt/gpt-5.1-codex", "authgpt/gpt-5.1-codex-max",
         "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex",
         "authgpt/gpt-5-mini", "authgpt/gpt-5-codex-mini",
