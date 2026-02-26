@@ -1218,6 +1218,13 @@ class MangaTranslationTab(QObject):
             else:
                 has_api_key = False
             
+            # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+            if not has_api_key:
+                _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
+                _ml = (_model or '').lower()
+                if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                    has_api_key = True
+            
             if not has_api_key:
                 return False
             
@@ -3121,6 +3128,13 @@ class MangaTranslationTab(QObject):
         except:
             has_api_key = False
         
+        # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        if not has_api_key:
+            _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
+            _ml = (_model or '').lower()
+            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                has_api_key = True
+        
         # Get current provider
         provider = self.ocr_provider_value if hasattr(self, 'ocr_provider_value') else self.main_gui.config.get('manga_ocr_provider', 'custom-api')
         
@@ -3248,6 +3262,13 @@ class MangaTranslationTab(QObject):
                 has_api_key = False
         except:
             has_api_key = False
+        
+        # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        if not has_api_key:
+            _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
+            _ml = (_model or '').lower()
+            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                has_api_key = True
         
         # Get the saved OCR provider to check appropriate credentials
         saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
@@ -5301,6 +5322,13 @@ class MangaTranslationTab(QObject):
                 has_api_key = False
         except:
             has_api_key = False
+        
+        # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        if not has_api_key:
+            _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
+            _ml = (_model or '').lower()
+            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                has_api_key = True
             
         provider = self.ocr_provider_value
 
@@ -10700,6 +10728,13 @@ class MangaTranslationTab(QObject):
                 if not api_key and hasattr(self.main_gui, 'config'):
                     api_key = self.main_gui.config.get('api_key', '')
                 
+                # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+                if not api_key:
+                    _model = self.main_gui.config.get('model', '') if hasattr(self.main_gui, 'config') else ''
+                    _ml = (_model or '').lower()
+                    if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                        api_key = 'own-auth'  # placeholder — actual auth handled by provider
+                
                 if not api_key:
                     self._log("❌ API key not configured for translation", "error")
                     return False
@@ -11155,6 +11190,12 @@ class MangaTranslationTab(QObject):
                     model = 'gemini-2.5-flash'  # fallback
             elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
                 model = self.main_gui.config.get('model')
+            
+            # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+            if not api_key:
+                _ml = (model or '').lower()
+                if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                    api_key = 'own-auth'  # placeholder — actual auth handled by provider
             
             if not api_key:
                 self._log("❌ API key not found. Please configure your API key in the main settings.", "error")

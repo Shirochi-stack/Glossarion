@@ -9367,7 +9367,10 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
                 ocr_config = _get_ocr_config(self, )
                 api_key = self.main_gui.config.get('api_key', '') if hasattr(self, 'main_gui') else ''
                 model = self.main_gui.config.get('model', 'gpt-4o-mini') if hasattr(self, 'main_gui') else 'gpt-4o-mini'
-                if not api_key:
+                # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+                _model_lower = model.lower() if model else ''
+                _uses_own_auth = _model_lower.startswith('authgpt/') or _model_lower.startswith('vertex/')
+                if not api_key and not _uses_own_auth:
                     print(f"[RENDER] ERROR: No API key found!")
                     raise ValueError("No API key found")
                 unified_client = UnifiedClient(model=model, api_key=api_key)

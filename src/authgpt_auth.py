@@ -505,20 +505,74 @@ def _build_responses_body(
     instructions = ""
     input_items: List[Dict[str, Any]] = []
 
+    def _convert_content_parts(content) -> List[Dict[str, Any]]:
+        """Convert Chat Completions content to Responses API content parts.
+
+        Handles both plain strings and multi-modal lists (text + image_url).
+        """
+        if isinstance(content, str):
+            return [{"type": "input_text", "text": content}]
+
+        if not isinstance(content, list):
+            return [{"type": "input_text", "text": str(content)}]
+
+        parts: List[Dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append({"type": "input_text", "text": part})
+                continue
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type", "")
+            if ptype == "text":
+                parts.append({"type": "input_text", "text": part.get("text", "")})
+            elif ptype == "image_url":
+                # Chat Completions: {"type": "image_url", "image_url": {"url": "..."}}
+                # Responses API:    {"type": "input_image", "image_url": "..."}
+                img = part.get("image_url", {})
+                url = img.get("url", "") if isinstance(img, dict) else str(img)
+                if url:
+                    parts.append({"type": "input_image", "image_url": url})
+            elif ptype == "input_text":
+                # Already in Responses format
+                parts.append(part)
+            elif ptype == "input_image":
+                parts.append(part)
+            else:
+                # Unknown part type — pass text if present
+                text = part.get("text")
+                if text:
+                    parts.append({"type": "input_text", "text": str(text)})
+        return parts or [{"type": "input_text", "text": ""}]
+
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
 
         # System messages become the instructions blob
         if role == "system":
-            instructions = content
+            # instructions must be a string; extract text from multi-part content
+            if isinstance(content, str):
+                instructions = content
+            elif isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif isinstance(part, dict):
+                        t = part.get("text", "")
+                        if t:
+                            text_parts.append(str(t))
+                instructions = "\n".join(text_parts)
+            else:
+                instructions = str(content)
             continue
 
         # Map to Responses API structured message format
         input_items.append({
             "type": "message",
             "role": "developer" if role == "system" else role,
-            "content": [{"type": "input_text", "text": content}],
+            "content": _convert_content_parts(content),
         })
 
     body: Dict[str, Any] = {
