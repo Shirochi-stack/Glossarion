@@ -14014,6 +14014,13 @@ class UnifiedClient:
         last_error = None
         print(f"🔐 AuthGPT: Sending request via Codex API (model={actual_model})")
         for attempt in range(max_retries):
+            # Check stop flag before each attempt
+            if self._is_stop_requested():
+                raise UnifiedClientError(
+                    "AuthGPT: Translation stopped by user",
+                    error_type="cancelled"
+                )
+
             try:
                 result = _authgpt_send(
                     access_token=access_token,
@@ -14029,9 +14036,6 @@ class UnifiedClient:
                 finish_reason = result.get("finish_reason", "stop")
                 usage = result.get("usage")
 
-                if content:
-                    print(f"✅ AuthGPT: Response received ({len(content)} chars)")
-
                 return UnifiedResponse(
                     content=content,
                     finish_reason=finish_reason,
@@ -14042,6 +14046,14 @@ class UnifiedClient:
             except RuntimeError as exc:
                 error_str = str(exc)
                 print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
+
+                # Bail out immediately on stop request
+                if self._is_stop_requested():
+                    raise UnifiedClientError(
+                        "AuthGPT: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
                 # On 401, try refreshing the token once
                 if "401" in error_str and attempt == 0:
                     print("🔄 AuthGPT: 401 received, attempting token refresh…")
@@ -14058,6 +14070,14 @@ class UnifiedClient:
             except Exception as exc:
                 error_str = str(exc)
                 print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
+
+                # Bail out immediately on stop request
+                if self._is_stop_requested():
+                    raise UnifiedClientError(
+                        "AuthGPT: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(self._get_send_interval())
