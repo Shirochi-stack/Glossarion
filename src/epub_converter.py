@@ -4759,9 +4759,12 @@ img {
         
         # Create mapping from source filename to chapter number for TOC
         source_to_chapter = {}
+        self.log("  Building source->chapter mapping:")
         for chap_num, (title, conf, source) in chapter_titles_info.items():
             if source:
                 source_to_chapter[source] = chap_num
+                if chap_num <= 3:
+                    self.log(f"    Chapter {chap_num}: '{source}' -> '{title[:50]}...'")
         
         # Build all chapters as a single HTML document for continuous page numbering
         self.log(f"  Building combined chapter document ({len(html_files)} chapters)...")
@@ -4777,8 +4780,10 @@ img {
             if not os.path.exists(file_path):
                 continue
             
-            # Determine chapter number
-            chap_num = source_to_chapter.get(html_file, i + 1)
+            # Determine chapter number (use i as fallback since chapters are 0-indexed)
+            chap_num = source_to_chapter.get(html_file, i)
+            if i < 3:
+                self.log(f"  File '{html_file}' -> chapter {chap_num}")
             
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -4816,12 +4821,18 @@ img {
                 # Calculate page numbers for TOC based on page breaks
                 # Each chapter starts on a new page after the first one
                 chapter_start_page = current_page + 1  # First chapter starts here
+                self.log(f"  Mapping chapter page numbers (starting at page {chapter_start_page})...")
+                
                 for idx, (html_file, chap_num) in enumerate(chapters_order):
                     chapter_page_map[html_file] = chapter_start_page
                     chapter_page_map[chap_num] = chapter_start_page
-                    # Increment page for next chapter (assuming each chapter starts on new page)
-                    if idx < len(chapters_order) - 1:  # Not the last chapter
-                        chapter_start_page += 1  # Minimum increment, actual pages may vary
+                    
+                    # Debug log for first few chapters
+                    if idx < 3:
+                        self.log(f"    Chapter {chap_num} ({html_file}): page {chapter_start_page}")
+                    
+                    # Increment page for next chapter (each chapter starts on new page)
+                    chapter_start_page += 1
                 
                 current_page += len(chapters_doc.pages)
                 self.log(f"  Combined document: {len(chapters_doc.pages)} pages")
