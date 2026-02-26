@@ -705,12 +705,24 @@ def send_chat_completion(
             f"AuthGPT: {resp.status_code} – {detail}"
         )
 
-    # Read the SSE stream line by line
+    # Read the SSE stream line by line with progress logging
     raw_lines: List[str] = []
-    for line in resp.iter_lines(decode_unicode=True):
-        if line is not None:
-            raw_lines.append(line)
+    got_first_data = False
+    for raw_line in resp.iter_lines():
+        if raw_line is None:
+            continue
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+        raw_lines.append(line)
+        if not got_first_data and line.startswith("data: "):
+            got_first_data = True
+            logger.info("AuthGPT: Stream started, receiving data…")
+        # Stop reading once we see [DONE] or response.completed
+        if line.strip() == "data: [DONE]":
+            break
+        if '"type":"response.completed"' in line or '"type": "response.completed"' in line:
+            break
     raw_text = "\n".join(raw_lines)
+    logger.info("AuthGPT: Stream finished (%d lines received)", len(raw_lines))
     result = _parse_sse_responses(raw_text)
 
     if not result.get("content"):
