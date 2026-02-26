@@ -124,6 +124,7 @@ def get_model_options() -> List[str]:
         "or/deepseek/deepseek-r1:free","or/deepseek/deepseek-r1-0528:free", "or/deepseek/deepseek-chat-v3.1:free", "or/deepseek/deepseek-r1-0528-qwen3-8b:free",
         "or/tngtech/deepseek-r1t2-chimera:free","or/tngtech/deepseek-r1t-chimera:free",
         "or/google/gemma-3-27b-it:free", "or/google/gemma-3-27b-it",
+        "or/qwen/qwen3-235b-a22b", "or/qwen/qwen3-235b-a22b-thinking-2507",
         
         # For ElectronHub, prefix with 'eh/'
         "eh/claude-sonnet-4-5-20250929", "eh/claude-sonnet-4-5-20250929-thinking",        

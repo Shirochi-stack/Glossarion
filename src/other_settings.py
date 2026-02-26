@@ -979,6 +979,12 @@ def _create_output_settings_section(self, parent):
     grid = parent.layout() if hasattr(parent, 'layout') else None
     
     section_box = QGroupBox("Output Settings")
+    section_box.setStyleSheet("""
+        QLabel:disabled { color: rgba(255,255,255,0.25); }
+        QSpinBox:disabled { color: rgba(255,255,255,0.25); background-color: rgba(255,255,255,0.05); }
+        QComboBox:disabled { color: rgba(255,255,255,0.25); background-color: rgba(255,255,255,0.05); }
+        QCheckBox:disabled { color: rgba(255,255,255,0.25); }
+    """)
     section_v = QVBoxLayout(section_box)
     section_v.setContentsMargins(8, 8, 8, 8)
     section_v.setSpacing(4)
@@ -1016,6 +1022,14 @@ def _create_output_settings_section(self, parent):
             os.environ['ENABLE_PDF_OUTPUT'] = '1' if checked else '0'
             for ctrl in pdf_controls:
                 ctrl.setEnabled(checked)
+            # Respect child checkbox states when re-enabling
+            if checked:
+                toc_on = toc_cb.isChecked()
+                for ctrl in toc_sub_controls:
+                    ctrl.setEnabled(toc_on)
+                page_on = page_num_cb.isChecked()
+                for ctrl in page_num_sub_controls:
+                    ctrl.setEnabled(page_on)
         except Exception:
             pass
     pdf_enable_cb.toggled.connect(_on_pdf_enable_toggle)
@@ -1188,6 +1202,16 @@ def _create_output_settings_section(self, parent):
             os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if checked else '0'
             for ctrl in compress_sub_controls:
                 ctrl.setEnabled(checked)
+            # Respect format dropdown: disable controls not relevant to current format
+            if checked:
+                fmt = pdf_format_combo.currentText().lower()
+                quality_spin.setEnabled(fmt == 'jpeg')
+                quality_label.setEnabled(fmt == 'jpeg')
+                quality_range_label.setEnabled(fmt == 'jpeg')
+                png_optimize_cb.setEnabled(fmt == 'png')
+                png_level_label.setEnabled(fmt == 'png')
+                png_level_spin.setEnabled(fmt == 'png')
+                png_level_range_label.setEnabled(fmt == 'png')
         except Exception:
             pass
     compress_cb.toggled.connect(_on_compress_toggle)
@@ -1304,12 +1328,16 @@ def _create_output_settings_section(self, parent):
             fmt = text.lower()
             self.config['pdf_image_format'] = fmt
             os.environ['PDF_IMAGE_FORMAT'] = fmt
-            # Quality spinner only relevant for JPEG
-            quality_spin.setEnabled(fmt == 'jpeg' and compress_cb.isChecked())
-            quality_label.setEnabled(fmt == 'jpeg' and compress_cb.isChecked())
-            png_optimize_cb.setEnabled(fmt == 'png' and compress_cb.isChecked())
-            png_level_label.setEnabled(fmt == 'png' and compress_cb.isChecked())
-            png_level_spin.setEnabled(fmt == 'png' and compress_cb.isChecked())
+            checked = compress_cb.isChecked()
+            # Quality controls only relevant for JPEG
+            quality_spin.setEnabled(fmt == 'jpeg' and checked)
+            quality_label.setEnabled(fmt == 'jpeg' and checked)
+            quality_range_label.setEnabled(fmt == 'jpeg' and checked)
+            # PNG controls only relevant for PNG
+            png_optimize_cb.setEnabled(fmt == 'png' and checked)
+            png_level_label.setEnabled(fmt == 'png' and checked)
+            png_level_spin.setEnabled(fmt == 'png' and checked)
+            png_level_range_label.setEnabled(fmt == 'png' and checked)
         except Exception:
             pass
     pdf_format_combo.currentTextChanged.connect(_on_pdf_format_changed)
@@ -1374,12 +1402,6 @@ def _create_output_settings_section(self, parent):
     png_level_h.addStretch()
     section_v.addWidget(png_level_row)
     
-    # Set initial enabled state for format-dependent controls
-    _initial_fmt = self.config.get('pdf_image_format', 'jpeg').lower()
-    png_optimize_cb.setEnabled(_initial_fmt == 'png')
-    png_level_label.setEnabled(_initial_fmt == 'png')
-    png_level_spin.setEnabled(_initial_fmt == 'png')
-    
     compress_desc = QLabel(
         "EPUB always uses .webp. PDF uses the format selected above\n"
         "(JPEG for quality control, PNG for transparency)."
@@ -1400,6 +1422,18 @@ def _create_output_settings_section(self, parent):
     initial_compress = compress_cb.isChecked()
     for ctrl in compress_sub_controls:
         ctrl.setEnabled(initial_compress)
+    
+    # Apply format-dependent state AFTER the bulk enable/disable
+    # so JPEG controls are disabled when PNG is selected and vice versa
+    if initial_compress:
+        _initial_fmt = self.config.get('pdf_image_format', 'jpeg').lower()
+        quality_spin.setEnabled(_initial_fmt == 'jpeg')
+        quality_label.setEnabled(_initial_fmt == 'jpeg')
+        quality_range_label.setEnabled(_initial_fmt == 'jpeg')
+        png_optimize_cb.setEnabled(_initial_fmt == 'png')
+        png_level_label.setEnabled(_initial_fmt == 'png')
+        png_level_spin.setEnabled(_initial_fmt == 'png')
+        png_level_range_label.setEnabled(_initial_fmt == 'png')
     
     # Apply initial enabled state for PDF sub-controls
     initial_pdf = pdf_enable_cb.isChecked()
