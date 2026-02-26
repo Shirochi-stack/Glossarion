@@ -7643,11 +7643,7 @@ def _translate_this_text_background(self, message: str, region_index: int):
         if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
             api_key = self.main_gui.config.get('api_key')
         
-        if not api_key:
-            self._log("❌ No API key configured", "error")
-            return
-        
-        # Get model
+        # Get model (need it before API key check for prefix detection)
         model = 'gpt-4o-mini'  # default
         if hasattr(self.main_gui, 'model_var'):
             try:
@@ -7659,6 +7655,16 @@ def _translate_this_text_background(self, message: str, region_index: int):
                 pass
         elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
             model = self.main_gui.config.get('model')
+        
+        # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        if not api_key:
+            _ml = (model or '').lower()
+            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                api_key = 'own-auth'
+        
+        if not api_key:
+            self._log("❌ No API key configured", "error")
+            return
         
         # Apply GUI environment variables like Start Translation does
         from unified_api_client import UnifiedClient
