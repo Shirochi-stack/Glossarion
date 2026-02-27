@@ -1271,18 +1271,6 @@ class UnifiedClient:
                 else:
                     mt = min(mt, per_key_limit)
             return mt, None
-    def _apply_api_delay(self) -> None:
-        if getattr(self, '_in_cleanup', False):
-            # Suppress log in cleanup mode
-            # self._debug_log("⚡ Skipping API delay (cleanup mode)")
-            return
-        try:
-            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-        except Exception:
-            api_delay = 2.0
-        if api_delay > 0:
-            self._debug_log(f"⏳ Waiting {api_delay}s before next API call...")
-            time.sleep(api_delay)
 
     def _set_idempotency_context(self, request_id: str, attempt: int) -> None:
         tls = self._get_thread_local_client()
@@ -4597,8 +4585,8 @@ class UnifiedClient:
             # Attach usage info to the last payload for this thread
             self._attach_usage_to_last_payload(usage)
             
-            # API delay between calls (respects GUI setting)
-            self._apply_api_delay()
+            # Update stagger reference to end-of-call so next call waits from HERE
+            self._update_stagger_timestamp()
             
             return extracted_content, finish_reason
 
@@ -5020,14 +5008,6 @@ class UnifiedClient:
                     else:
                         print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
                 
-                # Apply API delay after successful call (even if truncated)
-                # SKIP DELAY DURING CLEANUP
-                
-                self._apply_api_delay()
-                
-                # Brief stability pause after API call completion
-                if not getattr(self, '_in_cleanup', False):
-                    time.sleep(0.1)  # System stability pause after API completion
                 
                 # If the provider signaled a content filter, elevate to prohibited_content to trigger retries
                 if finish_reason in ['content_filter', 'prohibited_content']:
@@ -5046,6 +5026,9 @@ class UnifiedClient:
                     self._get_thread_local_client().last_unified_response = response
                 except Exception:
                     pass
+                
+                # Update stagger reference to end-of-call so next call waits from HERE
+                self._update_stagger_timestamp()
                 
                 return extracted_content, finish_reason
                 
@@ -8735,6 +8718,17 @@ class UnifiedClient:
             else:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
+
+    def _update_stagger_timestamp(self):
+        """Push stagger reference to now (end of call) so the next call
+        waits SEND_INTERVAL_SECONDS from when this call FINISHED,
+        not from when it started."""
+        try:
+            if hasattr(self.__class__, '_api_stagger_lock'):
+                with self.__class__._api_stagger_lock:
+                    self.__class__._last_api_call_start = time.time()
+        except Exception:
+            pass
 
     def _sleep_with_cancel(self, duration: float, interval: float = 0.1) -> bool:
         """Sleep in small increments, aborting if stop/cancel is requested."""
