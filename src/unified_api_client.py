@@ -8701,7 +8701,7 @@ class UnifiedClient:
                 self.__class__._last_api_call_start = next_available
                 
                 # Check stop flag before logging stagger message
-                if not self._is_stop_requested():
+                if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                     self._debug_log(f"⏳ [{thread_name}] Staggering API call by {api_delay:.1f}s")
                 
                 # Sleep outside lock (interruptible)
