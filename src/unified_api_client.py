@@ -1513,6 +1513,22 @@ class UnifiedClient:
                 return True
         return False
     
+    # Models/prefixes that authenticate without a traditional API key
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/')
+    _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
+
+    @classmethod
+    def _model_needs_api_key(cls, model: str) -> bool:
+        """Return False for models that authenticate without an API key."""
+        model_lower = model.lower()
+        for prefix in cls._NO_API_KEY_PREFIXES:
+            if model_lower.startswith(prefix):
+                return False
+        for name in cls._NO_API_KEY_MODELS:
+            if model_lower.startswith(name):
+                return False
+        return True
+
     @classmethod
     def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared API key pool"""
@@ -1534,11 +1550,14 @@ class UnifiedClient:
                     continue
                     
                 api_key = key_data.get('api_key', '')
-                if not api_key:
+                model = key_data.get('model', '')
+                
+                # Allow empty API key for models that don't need one
+                if not api_key and cls._model_needs_api_key(model):
                     continue
                 
                 # Fix encrypted keys
-                if api_key.startswith('ENC:'):
+                if api_key and api_key.startswith('ENC:'):
                     try:
                         from api_key_encryption import get_handler
                         handler = get_handler()
@@ -1553,7 +1572,7 @@ class UnifiedClient:
                     except Exception:
                         continue
                 else:
-                    # Key is already decrypted
+                    # Key is already decrypted (or empty for keyless models)
                     validated_keys.append(key_data)
             
             if not validated_keys:
@@ -5476,7 +5495,9 @@ class UnifiedClient:
         # CHECK: Verify we have the necessary attributes (fall back to env if missing)
         main_api_key = getattr(self, 'original_api_key', None) or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
         main_model = getattr(self, 'original_model', None) or os.getenv("MODEL")
-        if not (main_api_key and main_model):
+        # Allow empty API key for models that don't need one (authgpt/, vertex/, google-translate, deepl)
+        main_key_needed = self._model_needs_api_key(main_model) if main_model else True
+        if not main_model or (not main_api_key and main_key_needed):
             print(f"[MAIN KEY RETRY] Missing original key/model attributes, skipping retry")
             return None
         

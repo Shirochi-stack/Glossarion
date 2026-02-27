@@ -49,6 +49,21 @@ except Exception:
     IndividualEndpointDialog = None
 
 logger = logging.getLogger(__name__)
+
+# Models/prefixes that don't require an API key
+_NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/')
+_NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
+
+def _model_needs_api_key(model: str) -> bool:
+    """Return False for models that authenticate without an API key."""
+    model_lower = model.lower()
+    for prefix in _NO_API_KEY_PREFIXES:
+        if model_lower.startswith(prefix):
+            return False
+    for name in _NO_API_KEY_MODELS:
+        if model_lower.startswith(name):
+            return False
+    return True
 class RateLimitCache:
     """Thread-safe rate limit cache"""
     def __init__(self):
@@ -2224,8 +2239,12 @@ class MultiAPIKeyDialog(QDialog):
         azure_endpoint = self.fallback_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.fallback_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
         
-        if not api_key or not model:
-            QMessageBox.critical(self, "Error", "Please enter both API key and model name")
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+        
+        if not api_key and _model_needs_api_key(model):
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
             return
         
         # Get current fallback keys
@@ -2283,6 +2302,9 @@ class MultiAPIKeyDialog(QDialog):
         
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_status(f"Added fallback key for model: {model}{extra_info}")
+        
+        # Re-evaluate AuthGPT login button visibility
+        self._notify_authgpt_visibility()
 
     def _move_fallback_key(self, direction):
         """Move selected fallback key up or down"""
@@ -2508,6 +2530,9 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_fallback_keys()
                 
                 self._show_status("Removed fallback key")
+                
+                # Re-evaluate AuthGPT login button visibility
+                self._notify_authgpt_visibility()
 
     def _clear_all_fallbacks(self):
         """Clear all fallback keys"""
@@ -2525,6 +2550,9 @@ class MultiAPIKeyDialog(QDialog):
             self._load_fallback_keys()
             
             self._show_status("Cleared all fallback keys")
+            
+            # Re-evaluate AuthGPT login button visibility
+            self._notify_authgpt_visibility()
 
     def _toggle_fallback_section(self):
         """Toggle fallback section - simply hide/show elements"""
@@ -2573,6 +2601,9 @@ class MultiAPIKeyDialog(QDialog):
                 self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
             else:
                 self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
+        
+        # Re-evaluate AuthGPT login button visibility
+        self._notify_authgpt_visibility()
 
     def _toggle_fallback_visibility(self):
         """Toggle fallback key visibility"""
@@ -3922,6 +3953,14 @@ class MultiAPIKeyDialog(QDialog):
             line_edit.textEdited.connect(on_text_edited)
             line_edit._prev_text = ""
 
+    def _notify_authgpt_visibility(self):
+        """Notify the translator GUI to re-evaluate AuthGPT login button visibility."""
+        try:
+            if hasattr(self.translator_gui, 'on_model_change'):
+                self.translator_gui.on_model_change()
+        except Exception:
+            pass
+
     def _toggle_key_visibility(self):
         """Toggle API key visibility"""
         if self.api_key_entry.echoMode() == QLineEdit.Password:
@@ -4005,6 +4044,9 @@ class MultiAPIKeyDialog(QDialog):
         # Show status message
         status = "enabled" if enabled else "disabled"
         self._show_status(f"Multi-Key Mode {status}")
+        
+        # Re-evaluate AuthGPT login button visibility
+        self._notify_authgpt_visibility()
     
     def _copy_current_settings(self):
         """Copy current API key and model from main GUI"""
@@ -4032,8 +4074,12 @@ class MultiAPIKeyDialog(QDialog):
         azure_endpoint = self.azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
         
-        if not api_key or not model:
-            QMessageBox.critical(self, "Error", "Please enter both API key and model name")
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+        
+        if not api_key and _model_needs_api_key(model):
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
             return
         
         # Determine per-key output token limit (0 = use global limit)
@@ -4087,6 +4133,9 @@ class MultiAPIKeyDialog(QDialog):
         
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_status(f"Added key for model: {model}{extra_info}")
+        
+        # Re-evaluate AuthGPT login button visibility
+        self._notify_authgpt_visibility()
     
     # Note: _refresh_key_list is defined earlier in the file (PySide6 version)
     
@@ -4785,6 +4834,9 @@ class MultiAPIKeyDialog(QDialog):
             
             self._refresh_key_list()
             self._show_status(f"Removed {len(selected)} key(s)")
+            
+            # Re-evaluate AuthGPT login button visibility
+            self._notify_authgpt_visibility()
     
     def _edit_cooldown(self):
         """Edit cooldown for selected key"""
@@ -4834,6 +4886,7 @@ class MultiAPIKeyDialog(QDialog):
                             imported_count += 1
                     
                     self._refresh_key_list()
+                    self._notify_authgpt_visibility()
                     QMessageBox.information(self, "Success", f"Imported {imported_count} API keys")
                 else:
                     QMessageBox.critical(self, "Error", "Invalid file format")

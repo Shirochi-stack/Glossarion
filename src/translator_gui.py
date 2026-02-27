@@ -3094,11 +3094,34 @@ Recent translations to summarize:
         
         # Show/hide AuthGPT login button
         if hasattr(self, 'authgpt_login_btn'):
-            if model.startswith('authgpt/') or model.startswith('authgpt'):
+            needs_authgpt = model.startswith('authgpt/') or model.startswith('authgpt')
+            
+            # Also check multi-key and fallback pools for authgpt models
+            if not needs_authgpt:
+                needs_authgpt = self._has_authgpt_in_key_pools()
+            
+            if needs_authgpt:
                 self.authgpt_login_btn.show()
                 self._update_authgpt_login_status()
             else:
                 self.authgpt_login_btn.hide()
+
+    def _has_authgpt_in_key_pools(self):
+        """Check if any enabled multi-key or fallback key pool contains an authgpt model."""
+        try:
+            if self.config.get('use_multi_api_keys', False):
+                for key_data in self.config.get('multi_api_keys', []):
+                    m = key_data.get('model', '')
+                    if m.startswith('authgpt/') or m.startswith('authgpt'):
+                        return True
+            if self.config.get('use_fallback_keys', False):
+                for key_data in self.config.get('fallback_keys', []):
+                    m = key_data.get('model', '')
+                    if m.startswith('authgpt/') or m.startswith('authgpt'):
+                        return True
+        except Exception:
+            pass
+        return False
 
     def _update_authgpt_login_status(self):
         """Update the AuthGPT login button text based on current token state."""
