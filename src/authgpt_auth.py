@@ -755,7 +755,7 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
             _log(remainder)
     raw_text = "\n".join(state["raw_lines"])
     t_total = time.time() - t_start
-    _log(f"📡 AuthGPT: Stream finished — {state['streamed_chars']} chars in {t_total:.1f}s")
+    _log(f"📡 AuthGPT: Stream finished in {t_total:.1f}s")
     result = _parse_sse_responses(raw_text)
 
     content = result.get("content", "")
