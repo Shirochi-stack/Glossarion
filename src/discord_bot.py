@@ -1414,7 +1414,7 @@ async def translate(
         os.environ['RETRY_TRUNCATED'] = '1'  # Enable auto-retry truncated responses by default
         os.environ['MAX_RETRY_TOKENS'] = str(max_output_tokens)  # Align retry token limit to output token limit
         os.environ['RETRY_TIMEOUT'] = '1' if config.get('retry_timeout', False) else '0'
-        os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 900))
+        os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 1800))
         os.environ['ENABLE_HTTP_TUNING'] = '1' if config.get('enable_http_tuning', False) else '0'
         os.environ['CONNECT_TIMEOUT'] = str(config.get('connect_timeout', 10))
         # Don't set READ_TIMEOUT for the bot; chunk timeout is the single source of truth.
@@ -2380,7 +2380,7 @@ async def extract(
         os.environ['SEND_INTERVAL_SECONDS'] = str(config.get('delay', 2.0))
         os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = str(config.get('thread_submission_delay', 0.5))
         os.environ['RETRY_TIMEOUT'] = '1' if config.get('retry_timeout', False) else '0'
-        os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 900))
+        os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 1800))
         os.environ['ENABLE_HTTP_TUNING'] = '1' if config.get('enable_http_tuning', False) else '0'
         os.environ['CONNECT_TIMEOUT'] = str(config.get('connect_timeout', 10))
         # Don't set READ_TIMEOUT for the bot; chunk timeout is the single source of truth.

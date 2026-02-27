@@ -1825,7 +1825,7 @@ class ImageTranslator:
         
         # Add retry info if enabled
         if os.getenv("RETRY_TIMEOUT", "1") == "1":
-            timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
+            timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "1800"))
             print(f"   ⏱️ Auto-retry enabled: Will retry if chunks take > {timeout_seconds}s")
         
         print(f"   ⏳ This may take {num_chunks * 30}-{num_chunks * 60} seconds to complete")
@@ -2077,7 +2077,7 @@ class ImageTranslator:
             self.client.set_output_filename(output_filename)        
 
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
-        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else None
+        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
         max_timeout_retries = 2
         
         # Store original values

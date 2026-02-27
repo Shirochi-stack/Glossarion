@@ -4408,7 +4408,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
                 chunk_timeout = None
                 if retry_timeout_enabled:
-                    env_ct = os.getenv("CHUNK_TIMEOUT", "900")
+                    env_ct = os.getenv("CHUNK_TIMEOUT", "1800")
                     try:
                         ct_val = float(env_ct)
                         chunk_timeout = None if ct_val <= 0 else ct_val
@@ -5833,7 +5833,7 @@ Provide translations in the same numbered format."""
         retry_env = os.getenv("RETRY_TIMEOUT")
         retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
         if retry_timeout_enabled:
-            env_ct = os.getenv("CHUNK_TIMEOUT", "900")  # legacy default when retry is on
+            env_ct = os.getenv("CHUNK_TIMEOUT", "1800")
             try:
                 ct_val = float(env_ct)
                 chunk_timeout = None if ct_val <= 0 else ct_val

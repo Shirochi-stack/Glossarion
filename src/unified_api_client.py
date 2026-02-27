@@ -1033,7 +1033,7 @@ class UnifiedClient:
 
     def _get_timeout_config(self) -> Tuple[bool, int]:
         enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-        window = int(os.getenv("CHUNK_TIMEOUT", "180"))
+        window = int(os.getenv("CHUNK_TIMEOUT", "1800"))
         return enabled, window
     def _with_attempt_suffix(self, payload_name: str, response_name: str, request_id: str, attempt: int, is_image: bool) -> Tuple[str, str]:
         base_payload, ext_payload = os.path.splitext(payload_name)
@@ -1807,7 +1807,7 @@ class UnifiedClient:
         
         # Timeout configuration
         enabled, window = self._get_timeout_config()
-        self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if enabled else 36000  # 10 hours
+        self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if enabled else 36000  # 10 hours
         
         # Initialize client references
         self.api_key = api_key
@@ -14064,6 +14064,11 @@ class UnifiedClient:
                 )
 
             try:
+                # Determine connect timeout: only apply a separate connect
+                # timeout when the user has HTTP tuning enabled.
+                _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+
                 result = _authgpt_send(
                     access_token=access_token,
                     messages=messages,
@@ -14072,6 +14077,7 @@ class UnifiedClient:
                     max_tokens=max_tokens,
                     timeout=self.request_timeout,
                     log_fn=print,
+                    connect_timeout=_connect_timeout,
                 )
 
                 content = result.get("content", "")

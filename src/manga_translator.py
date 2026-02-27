@@ -13727,7 +13727,7 @@ class MangaTranslator:
         # Not cached - try to check out from pool with polling
         # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
-        max_wait_time = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
+        max_wait_time = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else 1800
         
         poll_interval = 0.5  # Check every 0.5 seconds
         total_attempts = 2
@@ -14671,7 +14671,7 @@ class MangaTranslator:
                     # Get results with timing
                     # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
                     retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
-                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else 180
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else 1800
                     
                     try:
                         translate_ok = fut_translate.result(timeout=chunk_timeout)

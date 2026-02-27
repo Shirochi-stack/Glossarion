@@ -796,11 +796,13 @@ def _stream_with_httpx(
     t_start: float,
     _log,
     log_stream: bool,
+    connect_timeout: Optional[float] = None,
 ) -> Dict:
     """Stream SSE using httpx (same stack as the openai Python SDK)."""
     state = _new_stream_state()
-    # httpx timeout: connect + read
-    _timeout = _httpx.Timeout(timeout, connect=30.0)
+    # httpx timeout: connect + read.  When connect_timeout is None the connect
+    # timeout falls back to the main ``timeout`` value (no separate limit).
+    _timeout = _httpx.Timeout(timeout, connect=connect_timeout)
     with _httpx.stream(
         "POST", url,
         json=body,
@@ -876,6 +878,7 @@ def send_chat_completion(
     timeout: int = 600,
     base_url: Optional[str] = None,
     log_fn: Optional[Any] = None,
+    connect_timeout: Optional[float] = None,
 ) -> Dict:
     """Send a chat completion request via the ChatGPT Codex Responses API.
 
@@ -945,7 +948,7 @@ def send_chat_completion(
         import httpx as _httpx
         return _stream_with_httpx(
             _httpx, url, body, headers, timeout, t_start,
-            _log, log_stream,
+            _log, log_stream, connect_timeout=connect_timeout,
         )
     except ImportError:
         _log("⚠️ AuthGPT: httpx not installed, falling back to requests (streaming may be buffered)")

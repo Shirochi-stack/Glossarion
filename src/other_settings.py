@@ -2797,7 +2797,7 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'connect_timeout_var'):
         self.connect_timeout_var = str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10')))
     if not hasattr(self, 'read_timeout_var'):
-        self.read_timeout_var = str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180'))))
+        self.read_timeout_var = str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '1800'))))
     if not hasattr(self, 'http_pool_connections_var'):
         self.http_pool_connections_var = str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20')))
     if not hasattr(self, 'http_pool_maxsize_var'):

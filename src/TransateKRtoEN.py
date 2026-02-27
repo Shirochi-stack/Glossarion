@@ -557,7 +557,7 @@ class TranslationConfig:
             self.SPLIT_FAILED_RETRY_ATTEMPTS = 1
         self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1"
         self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
-        self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "900"))
+        self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "1800"))
         self.DISABLE_MERGE_FALLBACK = os.getenv("DISABLE_MERGE_FALLBACK", "0") == "1"
         self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
         self.DUPLICATE_LOOKBACK_CHAPTERS = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
@@ -4638,7 +4638,7 @@ class BatchTranslationProcessor:
                 
                 # Get chunk timeout from environment
                 retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-                chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if retry_timeout_enabled else None
+                chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
                 
                 # Timeout retry logic (same as sequential mode)
                 try:
