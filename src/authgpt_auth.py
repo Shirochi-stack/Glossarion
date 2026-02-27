@@ -927,7 +927,6 @@ def send_chat_completion(
 
     _log = log_fn or print
     logger.info("AuthGPT: POST %s  model=%s", url, model)
-    _log(f"🔐 AuthGPT: POST {url}  model={model}")
 
     # AuthGPT always streams (the API requires it), so streaming log is on
     # by default.  During batch translation, silence it unless the user
