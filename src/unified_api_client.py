@@ -6467,9 +6467,9 @@ class UnifiedClient:
                     log_label = self._extract_chapter_label(chapter_info) if chapter_info else None
                     
                     if log_label and log_label != "request":
-                        self._debug_log(f"   ✅ Received {log_label}: {len(response.content)} chars")
+                        print(f"   ✅ Received {log_label} response ({len(response.content):,} chars)")
                     else:
-                        self._debug_log(f"   ✅ Received response: {len(response.content)} chars")
+                        print(f"   ✅ Received response ({len(response.content):,} chars)")
                 else:
                     self._debug_log(f"   ⚠️ Model returned no text (finish_reason: {response.finish_reason})")
                 return response.content, response.finish_reason or 'stop'

@@ -5975,7 +5975,6 @@ class BatchTranslationProcessor:
                 if merged_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED!")
                 
-                print(f"   ✅ Received merged response ({len(merged_response):,} chars)")
                 
                 # Clean the merged response
                 cleaned = merged_response
