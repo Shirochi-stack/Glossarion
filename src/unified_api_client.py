@@ -5160,7 +5160,7 @@ class UnifiedClient:
                         # Add some jitter and cap the wait time
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
                         
-                        print(f"🔄 Rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        print(f"🔄 Rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt ∞)")
                         # Wait with cancellation check
                         if not self._sleep_with_cancel(wait_time, 0.5):
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -5380,7 +5380,7 @@ class UnifiedClient:
                         # Add some jitter and cap the wait time
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
                         
-                        print(f"🔄 Unexpected rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        print(f"🔄 Unexpected rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt ∞)")
                         
                         # Wait with cancellation check using comprehensive stop check
                         wait_start = time.time()
@@ -14223,12 +14223,6 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                # Special logging for rate limits without misleading retry counts
-                if "429" in error_str and "usage_limit_reached" in error_str:
-                    rate_limit_retry_count += 1
-                    print(f"⚠️ Rate limit: {error_str}")
-                else:
-                    print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
                 # Bail out immediately on stop request (includes graceful stop)
                 if self._should_abort_retry():
@@ -14242,7 +14236,7 @@ class UnifiedClient:
                     friendly_reset = _format_usage_reset_message(error_str)
                     friendly_suffix = f" {friendly_reset}." if friendly_reset else ""
                     raise UnifiedClientError(
-                        f"Usage limit reached.{friendly_suffix} Raw: {error_str}",
+                        f"⏳ ChatGPT usage limit reached.{friendly_suffix} Raw: {error_str}",
                         error_type="rate_limit"
                     )
 
@@ -14263,7 +14257,7 @@ class UnifiedClient:
                 error_str = str(exc)
                 if "429" in error_str and "usage_limit_reached" in error_str:
                     rate_limit_retry_count += 1
-                    print(f"⚠️ AuthGPT rate limit: {error_str}")
+                    print(f"⚠️ ChatGPT rate limit (retry #{rate_limit_retry_count}/{max_retries})")
                 else:
                     print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
