@@ -799,10 +799,14 @@ except ImportError:
 try:
     from authgpt_auth import get_default_store as _authgpt_get_store
     from authgpt_auth import send_chat_completion as _authgpt_send
+    from authgpt_auth import cancel_stream as _authgpt_cancel_stream
+    from authgpt_auth import reset_cancel as _authgpt_reset_cancel
     AUTHGPT_AVAILABLE = True
 except ImportError:
     _authgpt_get_store = None
     _authgpt_send = None
+    _authgpt_cancel_stream = None
+    _authgpt_reset_cancel = None
     AUTHGPT_AVAILABLE = False
     
 from functools import lru_cache
@@ -1685,6 +1689,12 @@ class UnifiedClient:
                     s.close()
                 except Exception:
                     pass
+        except Exception:
+            pass
+        # Cancel any in-flight AuthGPT SSE streams
+        try:
+            if _authgpt_cancel_stream is not None:
+                _authgpt_cancel_stream()
         except Exception:
             pass
     
@@ -14059,6 +14069,11 @@ class UnifiedClient:
                 )
 
             try:
+                # Reset AuthGPT cancel flag before each attempt so previous
+                # force-stop state doesn't block this new request.
+                if _authgpt_reset_cancel is not None:
+                    _authgpt_reset_cancel()
+
                 # Determine connect timeout: only apply a separate connect
                 # timeout when the user has HTTP tuning enabled.
                 _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"

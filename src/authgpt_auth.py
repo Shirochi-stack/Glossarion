@@ -32,6 +32,20 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Module-level cancellation flag — set by unified_api_client.hard_cancel_all()
+_cancel_event = threading.Event()
+
+def cancel_stream():
+    """Signal any active AuthGPT stream to abort immediately."""
+    _cancel_event.set()
+
+def reset_cancel():
+    """Clear the cancellation flag (call before starting a new request)."""
+    _cancel_event.clear()
+
+def is_cancelled() -> bool:
+    return _cancel_event.is_set()
+
 # ===========================================================================
 # Constants – mirror the values used by OpenAI's Codex CLI / OpenCode plugin
 # ===========================================================================
@@ -820,6 +834,9 @@ def _stream_with_httpx(
 
         # iter_lines() in httpx yields str lines as they arrive
         for line in resp.iter_lines():
+            if _cancel_event.is_set():
+                resp.close()
+                raise RuntimeError("AuthGPT: stream cancelled by user")
             if _process_sse_line(line, state, _log, log_stream, t_start):
                 break
 
@@ -856,6 +873,9 @@ def _stream_with_requests(
         raise RuntimeError(f"AuthGPT: {resp.status_code} \u2013 {detail}")
 
     for raw_line in resp.iter_lines(chunk_size=1):
+        if _cancel_event.is_set():
+            resp.close()
+            raise RuntimeError("AuthGPT: stream cancelled by user")
         if raw_line is None:
             continue
         line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
