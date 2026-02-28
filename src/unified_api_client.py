@@ -317,6 +317,7 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     if len(merged_nums) == 1:
                         merged_label = f"Merged {merged_nums[0]}"
                     else:
+                        rate_limit_retry_count += 1
                         merged_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
             except Exception:
                 pass
@@ -4723,6 +4724,7 @@ class UnifiedClient:
         # Internal retry logic for 500 errors - now optionally disabled (centralized retry handles it)
         internal_retries = self._get_max_retries()
         base_delay = 5  # Base delay for exponential backoff
+        rate_limit_retry_count = 0  # Track single-key rate-limit backoffs in this send
         
         # Track if we've tried main key for prohibited content
         main_key_attempted = False
@@ -5141,7 +5143,7 @@ class UnifiedClient:
                         raise
                     
                     # In single-key mode, check if indefinite retry is enabled
-                    indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                    indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "0") == "1"
                     
                     if indefinite_retry_enabled:
                         # Calculate wait time from Retry-After header if available
@@ -5168,8 +5170,14 @@ class UnifiedClient:
                         attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
                         continue  # Retry the attempt
                     else:
-                        print(f"❌ Rate limit error - single-key mode, indefinite retry disabled, re-raising")
-                        raise
+                        # Always back off at least once even when indefinite retry is disabled
+                        rate_limit_retry_count += 1
+                        wait_time = 60
+                        print(f"⚠️ Rate limited, sleeping {wait_time}s (single-key, indefinite retry disabled, rate-limit retry #{rate_limit_retry_count}/{internal_retries})")
+                        if not self._sleep_with_cancel(wait_time, 0.5):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        # Allow normal retry budget to proceed
+                        continue
                 
                 # Check for prohibited content — treat any HTTP 400 as prohibited to force fallback
                 if (
@@ -5387,8 +5395,15 @@ class UnifiedClient:
                         attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
                         continue  # Retry the attempt
                     else:
-                        print(f"❌ Unexpected rate limit error - single-key mode, indefinite retry disabled, re-raising")
-                        raise  # Re-raise for higher-level handling
+                        wait_time = 60
+                        print(f"⚠️ Rate limited, sleeping {wait_time}s (single-key, indefinite retry disabled, rate-limit retry #{rate_limit_retry_count})")
+                        wait_start = time.time()
+                        while time.time() - wait_start < wait_time:
+                            if self._should_abort_retry():
+                                self._cancelled = True
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        continue  # Retry using normal retry budget
                 
                 # Check for prohibited content in unexpected errors
                 if self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
@@ -14153,6 +14168,7 @@ class UnifiedClient:
 
         # Send the request through the ChatGPT backend adapter
         max_retries = self._get_max_retries()
+        rate_limit_retry_count = 0  # Track consecutive rate-limit retries for logging
         last_error = None
         print(f"🔐 AuthGPT: Sending request via Codex API (model={actual_model})")
         for attempt in range(max_retries):
@@ -14207,7 +14223,12 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
+                # Special logging for rate limits to show true retry count
+                if "429" in error_str and "usage_limit_reached" in error_str:
+                    rate_limit_retry_count += 1
+                    print(f"⚠️ AuthGPT rate limit (retry #{rate_limit_retry_count}): {error_str}")
+                else:
+                    print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
                 # Bail out immediately on stop request (includes graceful stop)
                 if self._should_abort_retry():
@@ -14221,7 +14242,7 @@ class UnifiedClient:
                     friendly_reset = _format_usage_reset_message(error_str)
                     friendly_suffix = f" {friendly_reset}." if friendly_reset else ""
                     raise UnifiedClientError(
-                        f"AuthGPT: Usage limit reached.{friendly_suffix} Raw: {error_str}",
+                        f"Usage limit reached.{friendly_suffix} Raw: {error_str}",
                         error_type="rate_limit"
                     )
 
@@ -14240,7 +14261,11 @@ class UnifiedClient:
 
             except Exception as exc:
                 error_str = str(exc)
-                print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
+                if "429" in error_str and "usage_limit_reached" in error_str:
+                    rate_limit_retry_count += 1
+                    print(f"⚠️ AuthGPT rate limit (retry #{rate_limit_retry_count}): {error_str}")
+                else:
+                    print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
                 # Bail out immediately on stop request (includes graceful stop)
                 if self._should_abort_retry():
