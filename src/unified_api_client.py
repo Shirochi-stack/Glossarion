@@ -13163,10 +13163,19 @@ class UnifiedClient:
                                     if not self._is_stop_requested():
                                         print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
                                 except Exception as retry_err:
+                                    if self._is_stop_requested():
+                                        self._cancelled = True
+                                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                                     print(f"🛑 [{provider}] SDK retry failed: {retry_err}")
                                     raise retry_err
                             else:
                                 # Catch-all for SDK errors - reduce verbosity for known errors
+                                # If the user requested stop while an SDK call was in-flight, treat any late error as cancellation
+                                # and suppress noisy logs from previous/stale translation runs.
+                                if self._is_stop_requested():
+                                    self._cancelled = True
+                                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+
                                 err_str = str(sdk_err)
                                 is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
                                 is_402 = "402" in err_str and "insufficient" in err_str.lower()
@@ -13180,18 +13189,22 @@ class UnifiedClient:
 
                                 if is_timeout:
                                     # Just log the error, skip full traceback for timeouts
-                                    print(f"🛑 [{provider}]{label_part} SDK call failed: Request timed out.")
+                                    if not self._is_stop_requested():
+                                        print(f"🛑 [{provider}]{label_part} SDK call failed: Request timed out.")
                                 elif is_402:
                                     # Just log the error, skip full traceback for 402 payment errors
-                                    print(f"🛑 [{provider}]{label_part} SDK error: {sdk_err}")
+                                    if not self._is_stop_requested():
+                                        print(f"🛑 [{provider}]{label_part} SDK error: {sdk_err}")
                                 elif "429" in err_str or "rate limit" in err_str or "quota" in err_str or "resource_exhausted" in err_str.lower() or "resource exhausted" in err_str.lower():
                                     # Rate limit: terse log, no traceback
-                                    print(f"🛑 [{provider}]{label_part} SDK rate limit: {sdk_err}")
+                                    if not self._is_stop_requested():
+                                        print(f"🛑 [{provider}]{label_part} SDK rate limit: {sdk_err}")
                                     raise UnifiedClientError(str(sdk_err), error_type="rate_limit")
                                 else:
                                     # Log the error without printing a traceback.
                                     # Some providers return full HTML pages for 5xx errors (e.g., 504); condense them.
-                                    print(f"🛑 [{provider}]{label_part} SDK call failed: {self._summarize_exception(sdk_err)}")
+                                    if not self._is_stop_requested():
+                                        print(f"🛑 [{provider}]{label_part} SDK call failed: {self._summarize_exception(sdk_err)}")
                                 raise
                     
                     # Enhanced extraction for Gemini endpoints
