@@ -14246,7 +14246,7 @@ class UnifiedClient:
                     friendly_reset = _format_usage_reset_message(error_str)
                     friendly_suffix = f" {friendly_reset}." if friendly_reset else ""
                     raise UnifiedClientError(
-                        f"⏳ ChatGPT usage limit reached.{friendly_suffix} Raw: {error_str}",
+                        f"⏳ ChatGPT usage limit reached.{friendly_suffix}",
                         error_type="rate_limit"
                     )
 
