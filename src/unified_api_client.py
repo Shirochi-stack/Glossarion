@@ -1716,10 +1716,14 @@ class UnifiedClient:
         self._cancelled = False
         # Reset stagger timestamp so a new translation run doesn't inherit
         # huge delays from a previous force-stopped run's queued slots.
+        # Use time.time() (not 0) so the first thread still respects the stagger interval.
+        # IMPORTANT: Only safe here in __init__ which runs once on the main thread
+        # before worker threads are spawned.  Do NOT reset in reset_cleanup_state()
+        # because that runs per-thread and would race with the stagger lock.
         try:
             if hasattr(self.__class__, '_api_stagger_lock'):
                 with self.__class__._api_stagger_lock:
-                    self.__class__._last_api_call_start = 0
+                    self.__class__._last_api_call_start = time.time()
         except Exception:
             pass
         # Reset AuthGPT cancel event so it doesn't block new requests
@@ -7769,14 +7773,11 @@ class UnifiedClient:
             self._cancelled = False
             # Reset global cancellation flag for new operations
             self.set_global_cancellation(False)
-            # Reset stagger timestamp so queued slots from a force-stopped run
-            # don't delay a fresh translation.
-            try:
-                if hasattr(self.__class__, '_api_stagger_lock'):
-                    with self.__class__._api_stagger_lock:
-                        self.__class__._last_api_call_start = 0
-            except Exception:
-                pass
+            # NOTE: Do NOT reset _last_api_call_start here — this method is called
+            # by every worker thread in translate_with_retry().  Resetting the stagger
+            # timestamp from worker threads races with the stagger lock and causes
+            # all threads to bypass the stagger.  The stagger is only reset once in
+            # __init__ (main thread, before workers are spawned).
             # Reset AuthGPT cancel event
             try:
                 if _authgpt_reset_cancel is not None:
