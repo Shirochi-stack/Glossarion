@@ -10179,7 +10179,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Handle empty chapters
             if is_empty_chapter:
-                print(f"📄 Empty chapter {chap_num} - will process individually")
+                print(f"📄 Empty chapter {actual_num} detected (preserving original content as-is)")
 
                 safe_title = make_safe_filename(c['title'], c['num'])
 
@@ -11118,7 +11118,7 @@ def main(log_callback=None, stop_callback=None):
             is_text_only = (not has_images and has_meaningful_text)
             
             if is_empty_chapter:
-                print(f"📄 Empty chapter {actual_num} detected")
+                print(f"📄 Empty chapter {actual_num} detected (preserving original content as-is)")
 
                 # Create filename for empty chapter
                 if isinstance(c['num'], float):
