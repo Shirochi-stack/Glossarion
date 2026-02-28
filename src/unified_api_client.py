@@ -12264,111 +12264,126 @@ class UnifiedClient:
     def _send_mistral(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Mistral API"""
         max_retries = self._get_max_retries()
-        api_delay = self._get_send_interval()
-        
-        if MistralClient and hasattr(self, 'mistral_client'):
-            # Use SDK if available
+
+        if MistralClient is not None and ChatMessage is not None:
+            # Use Mistral SDK, but do NOT reuse clients across calls.
             def _do():
-                chat_messages = []
-                for msg in messages:
-                    chat_messages.append(ChatMessage(role=msg['role'], content=msg['content']))
-                response = self.mistral_client.chat(
-                    model=self.model,
-                    messages=chat_messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                content = response.choices[0].message.content if response.choices else ""
-                finish_reason = response.choices[0].finish_reason if response.choices else 'stop'
-                return UnifiedResponse(
-                    content=content,
-                    finish_reason=finish_reason,
-                    raw_response=response
-                )
+                client = None
+                try:
+                    client = MistralClient(api_key=self.api_key)
+                    chat_messages = []
+                    for msg in messages:
+                        chat_messages.append(ChatMessage(role=msg['role'], content=msg['content']))
+                    response = client.chat(
+                        model=self.model,
+                        messages=chat_messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    content = response.choices[0].message.content if response.choices else ""
+                    finish_reason = response.choices[0].finish_reason if response.choices else 'stop'
+                    return UnifiedResponse(
+                        content=content,
+                        finish_reason=finish_reason,
+                        raw_response=response
+                    )
+                finally:
+                    try:
+                        if client is not None and hasattr(client, 'close'):
+                            client.close()
+                    except Exception:
+                        pass
+
             return self._with_sdk_retries("Mistral", max_retries, _do)
-        else:
-            # Use HTTP API
-            return self._send_openai_compatible(
-                messages, temperature, max_tokens,
-                base_url="https://api.mistral.ai/v1",
-                response_name=response_name,
-                provider="mistral"
-            )
+
+        # Fallback: Use OpenAI-compatible HTTP/SDK path (also configured for fresh OpenAI SDK client per call)
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.mistral.ai/v1",
+            response_name=response_name,
+            provider="mistral"
+        )
     
     def _send_cohere(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Cohere API"""
         max_retries = self._get_max_retries()
-        api_delay = self._get_send_interval()
-        
-        if cohere and hasattr(self, 'cohere_client'):
-            # Use SDK with standardized retry wrapper
+
+        if cohere is not None:
+            # Use Cohere SDK, but do NOT reuse clients across calls.
             def _do():
-                # Format messages for Cohere
-                chat_history = []
-                message = ""
-                for msg in messages:
-                    if msg['role'] == 'user':
-                        message = msg['content']
-                    elif msg['role'] == 'assistant':
-                        chat_history.append({"role": "CHATBOT", "message": msg['content']})
-                    elif msg['role'] == 'system':
-                        message = msg['content'] + "\n\n" + message
-                response = self.cohere_client.chat(
-                    model=self.model,
-                    message=message,
-                    chat_history=chat_history,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                content = response.text
-                finish_reason = 'stop'
-                return UnifiedResponse(
-                    content=content,
-                    finish_reason=finish_reason,
-                    raw_response=response
-                )
+                client = None
+                try:
+                    client = cohere.Client(self.api_key)
+                    chat_history = []
+                    message = ""
+                    for msg in messages:
+                        if msg['role'] == 'user':
+                            message = msg['content']
+                        elif msg['role'] == 'assistant':
+                            chat_history.append({"role": "CHATBOT", "message": msg['content']})
+                        elif msg['role'] == 'system':
+                            message = msg['content'] + "\n\n" + message
+                    response = client.chat(
+                        model=self.model,
+                        message=message,
+                        chat_history=chat_history,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    content = response.text
+                    finish_reason = 'stop'
+                    return UnifiedResponse(
+                        content=content,
+                        finish_reason=finish_reason,
+                        raw_response=response
+                    )
+                finally:
+                    try:
+                        if client is not None and hasattr(client, 'close'):
+                            client.close()
+                    except Exception:
+                        pass
+
             return self._with_sdk_retries("Cohere", max_retries, _do)
-        else:
-            # Use HTTP API with retry logic
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            # Format for HTTP API
-            chat_history = []
-            message = ""
-            
-            for msg in messages:
-                if msg['role'] == 'user':
-                    message = msg['content']
-                elif msg['role'] == 'assistant':
-                    chat_history.append({"role": "CHATBOT", "message": msg['content']})
-            
-            data = {
-                "model": self.model,
-                "message": message,
-                "chat_history": chat_history,
-                "temperature": temperature,
-                "max_tokens": max_tokens
-            }
-            
-            resp = self._http_request_with_retries(
-                method="POST",
-                url="https://api.cohere.ai/v1/chat",
-                headers=headers,
-                json=data,
-                expected_status=(200,),
-                max_retries=max_retries,
-                provider_name="Cohere"
-            )
-            json_resp = resp.json()
-            content = json_resp.get("text", "")
-            return UnifiedResponse(
-                content=content,
-                finish_reason='stop',
-                raw_response=json_resp
-            )
+
+        # HTTP fallback
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        chat_history = []
+        message = ""
+        for msg in messages:
+            if msg['role'] == 'user':
+                message = msg['content']
+            elif msg['role'] == 'assistant':
+                chat_history.append({"role": "CHATBOT", "message": msg['content']})
+
+        data = {
+            "model": self.model,
+            "message": message,
+            "chat_history": chat_history,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+
+        resp = self._http_request_with_retries(
+            method="POST",
+            url="https://api.cohere.ai/v1/chat",
+            headers=headers,
+            json=data,
+            expected_status=(200,),
+            max_retries=max_retries,
+            provider_name="Cohere"
+        )
+        json_resp = resp.json()
+        content = json_resp.get("text", "")
+        return UnifiedResponse(
+            content=content,
+            finish_reason='stop',
+            raw_response=json_resp
+        )
     
     def _send_ai21(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to AI21 API"""
@@ -12724,6 +12739,8 @@ class UnifiedClient:
             # Track if we've already auto-adjusted max_tokens to prevent infinite loops
             max_tokens_adjusted = False
             for attempt in range(max_retries):
+                client = None
+                fresh_sdk_client = False
                 try:
                     # Check all stop sources (global flag, class-level, instance-level, etc.)
                     if self._is_stop_requested():
@@ -12733,8 +12750,41 @@ class UnifiedClient:
                     # Fix empty base_url for Groq
                     if provider == 'groq' and (not base_url or base_url.strip() == ''):
                         base_url = "https://api.groq.com/openai/v1"
-                    
-                    client = self._get_openai_client(base_url=base_url, api_key=actual_api_key)
+
+                    # NOTE: Do not reuse SDK clients across calls.
+                    # We create a fresh OpenAI SDK client per attempt for ALL SDK providers (OpenAI + OpenAI-compatible),
+                    # then close it in finally. This avoids stale pooled connections after timeouts/cancellation.
+                    fresh_sdk_client = True
+
+                    # Normalize key for header safety
+                    try:
+                        if actual_api_key is None:
+                            api_key_clean = ""
+                        elif isinstance(actual_api_key, bytes):
+                            api_key_clean = actual_api_key.decode("utf-8", errors="replace")
+                        else:
+                            api_key_clean = str(actual_api_key)
+                        api_key_clean = api_key_clean.strip()
+                    except Exception:
+                        api_key_clean = actual_api_key
+
+                    timeout_obj = None
+                    try:
+                        if httpx is not None:
+                            connect, read = self._get_timeouts()
+                            timeout_obj = httpx.Timeout(connect=connect, read=read, write=read, pool=connect)
+                        else:
+                            _, read = self._get_timeouts()
+                            timeout_obj = float(read) if read is not None else None
+                    except Exception:
+                        timeout_obj = None
+
+                    client = openai.OpenAI(
+                        api_key=api_key_clean,
+                        base_url=base_url,
+                        timeout=timeout_obj,
+                        max_retries=0,
+                    )
                     
                     # Check if this is Gemini via OpenAI endpoint
                     is_gemini_endpoint = provider == "gemini-openai" or effective_model.lower().startswith('gemini')
@@ -13798,6 +13848,20 @@ class UnifiedClient:
                     elif self._multi_key_mode:
                         raise UnifiedClientError(f"{provider} error: {e}", error_type="api_error")
                     raise UnifiedClientError(f"{provider} SDK error: {e}")
+                finally:
+                    if fresh_sdk_client and client is not None:
+                        # Ensure no pooled connections are reused across calls (all SDK providers).
+                        try:
+                            if hasattr(client, "close"):
+                                client.close()
+                        except Exception:
+                            pass
+                        try:
+                            underlying = getattr(client, "_client", None)
+                            if underlying is not None and hasattr(underlying, "close"):
+                                underlying.close()
+                        except Exception:
+                            pass
         else:
             # Use HTTP API with retry logic
             headers = self._build_openai_headers(provider, actual_api_key, headers)
