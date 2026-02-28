@@ -22,6 +22,10 @@ except ImportError:
     pass
 from collections import Counter
 from unified_api_client import UnifiedClient, UnifiedClientError
+
+# Translation thread submission throttling (batch) to align queued logs with actual delay
+_translation_thread_submit_lock = threading.Lock()
+_translation_last_thread_submit = 0.0
 import hashlib
 import tempfile
 import unicodedata
@@ -7218,6 +7222,36 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 return
             result_queue.put(e)
     
+    # Pre-send submission spacing to align staggered logs with actual delay
+    try:
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.1")))
+    except Exception:
+        thread_delay = 0.1
+    try:
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+    except Exception:
+        api_delay = 2.0
+
+    enforce_delay = max(thread_delay, api_delay)
+
+    if enforce_delay > 0:
+        global _translation_thread_submit_lock, _translation_last_thread_submit
+        with _translation_thread_submit_lock:
+            now = time.time()
+            remaining = enforce_delay - (now - _translation_last_thread_submit)
+            if remaining > 0:
+                elapsed = 0.0
+                step = 0.1
+                while elapsed < remaining:
+                    if stop_check_fn():
+                        raise UnifiedClientError("Translation stopped by user during threading delay", error_type="cancelled")
+                    dt = min(step, remaining - elapsed)
+                    time.sleep(dt)
+                    elapsed += dt
+                _translation_last_thread_submit = time.time()
+            else:
+                _translation_last_thread_submit = now
+
     api_thread = threading.Thread(target=api_call)
     api_thread.daemon = True
     api_thread.start()
