@@ -8752,11 +8752,11 @@ class UnifiedClient:
         # Log AFTER stagger sleep completes — this is when the API call actually goes out
         if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             if sleep_time > 0:
-                # api_delay = gap between consecutive sends; sleep_time = how long THIS thread queued
+                # sleep_time = how long THIS thread actually queued
                 if sleep_time > api_delay + 0.5:
-                    self._debug_log(f"⏳ [{thread_name}] Sending API call in {api_delay:.1f}s (queued {sleep_time:.1f}s)")
+                    self._debug_log(f"⏳ [{thread_name}] Sending API call now (queued {sleep_time:.1f}s)")
                 else:
-                    self._debug_log(f"⏳ [{thread_name}] Sending API call in {api_delay:.1f}s")
+                    self._debug_log(f"⏳ [{thread_name}] Sending API call now")
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None)
@@ -10054,7 +10054,8 @@ class UnifiedClient:
                 thread_name = threading.current_thread().name
                 label = self._extract_chapter_label(messages)
                 ctx = context or 'translation'
-                print(f"📤 [{thread_name}] Sending {label} ({ctx}) — queuing staggered API call...")
+                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                print(f"📤 [{thread_name}] Queued {label} ({ctx}) — Sending API call in {api_delay:.1f}s")
             # Stash label so stagger logger can show what is being translated
             try:
                 tls = self._get_thread_local_client()
