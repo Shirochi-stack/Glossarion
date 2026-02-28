@@ -14223,10 +14223,10 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                # Special logging for rate limits to show true retry count
+                # Special logging for rate limits without misleading retry counts
                 if "429" in error_str and "usage_limit_reached" in error_str:
                     rate_limit_retry_count += 1
-                    print(f"⚠️ AuthGPT rate limit (retry #{rate_limit_retry_count}): {error_str}")
+                    print(f"⚠️ Rate limit: {error_str}")
                 else:
                     print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
@@ -14263,7 +14263,7 @@ class UnifiedClient:
                 error_str = str(exc)
                 if "429" in error_str and "usage_limit_reached" in error_str:
                     rate_limit_retry_count += 1
-                    print(f"⚠️ AuthGPT rate limit (retry #{rate_limit_retry_count}): {error_str}")
+                    print(f"⚠️ AuthGPT rate limit: {error_str}")
                 else:
                     print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
