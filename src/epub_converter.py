@@ -2034,6 +2034,19 @@ class EPUBCompiler:
                 file_size = os.path.getsize(path)
                 if is_problem_chapter:
                     self.log(f"[DEBUG] File size: {file_size} bytes")
+
+                # Skip truly empty (0-byte) junk files entirely (do not generate error placeholders)
+                if file_size == 0:
+                    title = chapter_titles_info.get(chapter_num, (f"Chapter {chapter_num}", 0, ""))[0]
+                    return {
+                        'num': chapter_num,
+                        'filename': filename,
+                        'title': title,
+                        'error': f"Skipped 0-byte file: {filename}",
+                        'success': False,
+                        'skipped': True,
+                        'skip_reason': 'zero_byte_file'
+                    }
                 
                 # Read and decode
                 raw_content = self._read_and_decode_html_file(path)
@@ -2197,21 +2210,32 @@ class EPUBCompiler:
         
         # Debug what we have
         self.log(f"\n[DEBUG] Processed {len(processed_chapters)} chapters")
-        failed_chapters = [c for c in processed_chapters if not c['success']]
+
+        skipped_chapters = [c for c in processed_chapters if (not c.get('success')) and c.get('skipped')]
+        failed_chapters = [c for c in processed_chapters if (not c.get('success')) and (not c.get('skipped'))]
+
+        if skipped_chapters:
+            self.log(f"[INFO] {len(skipped_chapters)} chapters skipped (0-byte junk files):")
+            for sc in skipped_chapters:
+                self.log(f"  - Chapter {sc['num']}: {sc['filename']} - {sc.get('skip_reason', 'skipped')}")
+
         if failed_chapters:
             self.log(f"[WARNING] {len(failed_chapters)} chapters failed:")
             for fc in failed_chapters:
                 self.log(f"  - Chapter {fc['num']}: {fc['filename']} - {fc.get('error', 'Unknown error')}")
-        
+
         # Add chapters to book in order (this must be sequential)
         self.log("\n📦 Adding chapters to EPUB structure...")
-        
+
+        # Skip 0-byte junk chapters entirely; only add real chapters + placeholders for true failures
+        chapters_to_add = [c for c in processed_chapters if not c.get('skipped')]
+
         # Use reduced logging for large EPUBs
-        total_to_add = len(processed_chapters)
+        total_to_add = len(chapters_to_add)
         use_reduced_logging = total_to_add > 50
         log_interval = max(1, total_to_add // 20) if use_reduced_logging else 1
-        
-        for idx, chapter_data in enumerate(processed_chapters, 1):
+
+        for idx, chapter_data in enumerate(chapters_to_add, 1):
             if chapter_data['success']:
                 try:
                     # Create EPUB chapter
@@ -2254,8 +2278,9 @@ class EPUBCompiler:
                     self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
                     chapters_added += 1
             else:
+                # Only add placeholders for real processing failures.
+                # 0-byte junk files are skipped earlier and not present in chapters_to_add.
                 self.log(f"  ⚠️ Adding error placeholder for chapter {chapter_data['num']}")
-                # Add error placeholder
                 self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
                 chapters_added += 1
         
