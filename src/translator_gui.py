@@ -7167,6 +7167,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
             except Exception:
                 pass
+            try:
+                allow_authgpt_logs = bool(self.config.get('allow_authgpt_batch_stream_logs', False))
+                os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
+            except Exception:
+                pass
 
             # SET GLOSSARY IN ENVIRONMENT
             if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
@@ -8936,6 +8941,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 allow_batch_logs = bool(self.config.get('allow_batch_stream_logs', False))
                 os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
+            except Exception:
+                pass
+            try:
+                allow_authgpt_logs = bool(self.config.get('allow_authgpt_batch_stream_logs', False))
+                os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
             except Exception:
                 pass
 
@@ -14059,6 +14069,7 @@ Important rules:
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
                 ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
+                ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if self.config.get('allow_authgpt_batch_stream_logs', False) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', False) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 

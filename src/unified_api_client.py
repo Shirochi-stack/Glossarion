@@ -14132,6 +14132,15 @@ class UnifiedClient:
 
             except RuntimeError as exc:
                 error_str = str(exc)
+
+                # Stream cancelled by force-stop — deduplicate across threads
+                if "stream cancelled" in error_str.lower():
+                    self._log_once("⏹️ AuthGPT: Stream cancelled by user")
+                    raise UnifiedClientError(
+                        "AuthGPT: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
                 print(f"⚠️ AuthGPT error (attempt {attempt+1}/{max_retries}): {error_str}")
 
                 # Bail out immediately on stop request (includes graceful stop)
