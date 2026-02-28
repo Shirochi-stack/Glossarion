@@ -4767,8 +4767,10 @@ class UnifiedClient:
                 if isinstance(response, UnifiedResponse):
                     usage = response.usage
                 
-                # Check for cancellation (from timeout or stop button) using comprehensive check
-                if self._is_stop_requested():
+                # Check for cancellation (from timeout or stop button) using comprehensive check.
+                # During graceful stop, allow completed results through — the API call already
+                # finished successfully and discarding it defeats the purpose of graceful stop.
+                if self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
