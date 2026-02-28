@@ -10833,15 +10833,16 @@ Important rules:
             except Exception as e:
                 print(f"Error setting stop flags: {e}")
             
-            # Terminate any background processes (like stuck streaming instances)
+            # Best-effort: terminate only known helper subprocesses we started.
+            # IMPORTANT: Do NOT kill multiprocessing spawn/worker processes here.
+            # In PyInstaller-frozen Windows builds, aggressively terminating spawn_main / --multiprocessing-fork
+            # children can lead to [WinError 87] crashes when the runtime hook tries to start/handshake.
             try:
                 import psutil
                 current_process = psutil.Process(os.getpid())
                 children = current_process.children(recursive=True)
-                
-                # Collect inpainter worker PIDs to protect from kill.
-                # These workers are expensive to restart (DLL + model reload);
-                # they survive stop/resume and are reused on next translation.
+
+                # Collect inpainter worker PIDs to protect from termination.
                 _protected_pids = set()
                 try:
                     from manga_translator import MangaTranslator
@@ -10858,79 +10859,69 @@ Important rules:
                                             pass
                 except Exception:
                     pass
-                
-                # Filter out important GUI processes we should keep
+
+                def _cmdline_s(proc) -> str:
+                    try:
+                        cmd = proc.cmdline()
+                        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                    except Exception:
+                        return ""
+
+                def _is_mp_internal(cmd_s: str) -> bool:
+                    cs = (cmd_s or "")
+                    return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
+
+                # Only terminate explicit helper modes (safe).
                 processes_to_terminate = []
                 for child in children:
                     try:
-                        # Get process name to avoid killing important processes
-                        name = child.name().lower()
-                        # Only terminate Python/script processes, not system processes
-                        # Skip inpainter workers — they survive stop and are reused
-                        if ('python' in name or 'glossarion' in name) and child.pid not in _protected_pids:
+                        if child.pid in _protected_pids:
+                            continue
+                        cmd_s = _cmdline_s(child)
+                        if _is_mp_internal(cmd_s):
+                            continue
+
+                        # Known helper flags / scripts
+                        if "--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s:
                             processes_to_terminate.append(child)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
-                
+
                 if processes_to_terminate:
-                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
-                    # Diagnostic: log what we're about to terminate (helps debug "stuck terminating")
+                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} helper process(es)...")
                     for proc in processes_to_terminate:
                         try:
                             pid = getattr(proc, 'pid', None)
+                            name = "<unknown>"
                             try:
                                 name = proc.name()
                             except Exception:
-                                name = "<unknown>"
-                            try:
-                                cmd = proc.cmdline()
-                                cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-                            except Exception:
-                                cmd_s = "<cmdline unavailable>"
-                            # Keep log short to avoid UI spam
+                                pass
+                            cmd_s = _cmdline_s(proc)
                             if isinstance(cmd_s, str) and len(cmd_s) > 300:
                                 cmd_s = cmd_s[:300] + "…"
                             self.append_log(f"   • pid={pid} name={name} cmd={cmd_s}")
                         except Exception:
                             pass
 
-                    # Kill spawn_main workers immediately; terminate others normally.
-                    remaining = []
                     for proc in processes_to_terminate:
                         try:
-                            cmd_s = ""
-                            try:
-                                cmd = proc.cmdline()
-                                cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-                            except Exception:
-                                cmd_s = ""
-
-                            is_spawn_worker = ("multiprocessing.spawn" in cmd_s) or ("spawn_main" in cmd_s) or ("--multiprocessing-fork" in cmd_s)
-                            if is_spawn_worker:
-                                try:
-                                    proc.kill()
-                                    self.append_log(f"   • hard-killed spawn worker pid={proc.pid}")
-                                    continue
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    continue
-
                             proc.terminate()
-                            remaining.append(proc)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
 
-                    # Wait briefly for remaining processes to terminate, then force kill if needed
                     try:
-                        gone, alive = psutil.wait_procs(remaining, timeout=1)
+                        gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
                     except Exception:
-                        gone, alive = ([], remaining)
+                        alive = processes_to_terminate
+
                     for proc in alive:
                         try:
                             proc.kill()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
             except Exception as e:
-                print(f"Error terminating child processes: {e}")
+                print(f"Error terminating helper child processes: {e}")
         
         # Set stop flag in epub_converter module
         try:
@@ -11110,13 +11101,13 @@ Important rules:
             except Exception:
                 pass
             
-            # Terminate any background processes (like stuck streaming instances)
+            # Best-effort: terminate only known helper subprocesses we started.
+            # See stop_translation(): avoid touching multiprocessing spawn/worker processes in frozen builds.
             try:
                 import psutil
                 current_process = psutil.Process(os.getpid())
                 children = current_process.children(recursive=True)
-                
-                # Collect inpainter worker PIDs to protect from kill.
+
                 _protected_pids = set()
                 try:
                     from manga_translator import MangaTranslator
@@ -11133,37 +11124,50 @@ Important rules:
                                             pass
                 except Exception:
                     pass
-                
-                # Filter out important GUI processes we should keep
+
+                def _cmdline_s(proc) -> str:
+                    try:
+                        cmd = proc.cmdline()
+                        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                    except Exception:
+                        return ""
+
+                def _is_mp_internal(cmd_s: str) -> bool:
+                    cs = (cmd_s or "")
+                    return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
+
                 processes_to_terminate = []
                 for child in children:
                     try:
-                        # Get process name to avoid killing important processes
-                        name = child.name().lower()
-                        # Only terminate Python/script processes, not system processes
-                        # Skip inpainter workers — they survive stop and are reused
-                        if ('python' in name or 'glossarion' in name) and child.pid not in _protected_pids:
+                        if child.pid in _protected_pids:
+                            continue
+                        cmd_s = _cmdline_s(child)
+                        if _is_mp_internal(cmd_s):
+                            continue
+                        if "--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s:
                             processes_to_terminate.append(child)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
-                
+
                 if processes_to_terminate:
-                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} background process(es)...")
+                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} helper process(es)...")
                     for proc in processes_to_terminate:
                         try:
                             proc.terminate()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-                    
-                    # Wait for processes to terminate, then force kill if needed
-                    gone, alive = psutil.wait_procs(processes_to_terminate, timeout=2)
+
+                    try:
+                        gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
+                    except Exception:
+                        alive = processes_to_terminate
                     for proc in alive:
                         try:
                             proc.kill()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
             except Exception as e:
-                print(f"Error terminating child processes: {e}")
+                print(f"Error terminating helper child processes: {e}")
 
             # Touch stop file for GlossaryManager subprocesses
             try:
