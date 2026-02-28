@@ -8678,7 +8678,6 @@ class UnifiedClient:
         # _update_stagger_timestamp for threads that had already received their
         # API response, causing conversion+saving to be deferred in bulk.
         sleep_time = 0.0
-        should_log_stagger = False
         with self.__class__._api_stagger_lock:
             current_time = time.time()
             
@@ -8693,19 +8692,12 @@ class UnifiedClient:
                     sleep_time = max(0.0, float(next_available - current_time))
                 except Exception:
                     sleep_time = float(api_delay)
-                
-                # Check stop flag before logging stagger message
-                if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
-                    should_log_stagger = True
             else:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
         # Lock released — sleep outside lock (interruptible)
         
         if sleep_time > 0:
-            if should_log_stagger:
-                self._debug_log(f"⏳ [{thread_name}] Staggering API call by {api_delay:.1f}s")
-            
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
@@ -8718,16 +8710,18 @@ class UnifiedClient:
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
                 elapsed += dt
-            
-            # Immediately after stagger completes, indicate what is being sent
-            if not self._is_stop_requested():
-                try:
-                    tls = self._get_thread_local_client()
-                    label = getattr(tls, 'current_request_label', None)
-                    if label:
-                        self._debug_log(f"📤 [{thread_name}] Sending {label} to API...")
-                except Exception:
-                    pass
+        
+        # Log AFTER stagger sleep completes — this is when the API call actually goes out
+        if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+            if sleep_time > 0:
+                self._debug_log(f"⏳ [{thread_name}] Staggered {sleep_time:.1f}s — sending API call now")
+            try:
+                tls = self._get_thread_local_client()
+                label = getattr(tls, 'current_request_label', None)
+                if label:
+                    self._debug_log(f"📤 [{thread_name}] Sending {label} to API...")
+            except Exception:
+                pass
 
     def _update_stagger_timestamp(self):
         """Push stagger reference to now (end of call) so the next call
