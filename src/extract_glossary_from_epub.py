@@ -18,6 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COM
 from typing import List, Dict, Tuple
 from unified_api_client import UnifiedClient, UnifiedClientError
 
+# Thread submission throttling (glossary batch) — mirrors translation behavior
+_glossary_thread_submit_lock = threading.Lock()
+_glossary_last_thread_submit = 0.0
+
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
     try:
@@ -141,6 +145,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     Args:
         merged_chapters: Optional list of chapter numbers that were merged into this request
     """
+    global _glossary_last_thread_submit, _glossary_thread_submit_lock
     # Mark that an API call is now active (for graceful stop logic)
     os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
     
@@ -194,7 +199,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 pass
     
     while True:  # Retry loop for timeout and cancelled errors
-    
         def api_call():
             try:
                 # Apply chapter/chunk context in THIS thread so UnifiedClient's
@@ -245,7 +249,39 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 result_queue.put((result, elapsed, raw_obj))
             except Exception as e:
                 result_queue.put(e)
-    
+        # Apply submission delay shared across glossary batch threads to space out API launches.
+        # Use the larger of explicit thread submission delay and SEND_INTERVAL_SECONDS so
+        # glossary logs respect the configured stagger even before UnifiedClient runs.
+        try:
+            thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.1")))
+        except Exception:
+            thread_delay = 0.1
+        try:
+            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        except Exception:
+            api_delay = 2.0
+
+        enforce_delay = max(thread_delay, api_delay)
+
+        if enforce_delay > 0:
+            with _glossary_thread_submit_lock:
+                now = time.time()
+                elapsed_since_last = now - _glossary_last_thread_submit
+                remaining = enforce_delay - elapsed_since_last
+                if remaining > 0:
+                    # Emit queued log with the actual remaining sleep time
+                    if not stop_check_fn() and os.environ.get('GRACEFUL_STOP') != '1':
+                        try:
+                            thread_name = threading.current_thread().name
+                        except Exception:
+                            thread_name = "thread"
+                        print(f"📤 [{thread_name}] Queued {chapter_label} — Sending API call in {remaining:.1f}s")
+                    interruptible_sleep(remaining, stop_check_fn, interval=0.1)
+                    _glossary_last_thread_submit = time.time()
+                else:
+                    _glossary_last_thread_submit = now
+
+        api_thread = threading.Thread(target=api_call)
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
         api_thread.start()
@@ -2509,7 +2545,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     thread_name = threading.current_thread().name
                     
                     # PRINT BEFORE THE DELAY STARTS
-                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {idx+1}")
+                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.3f}s for Chapter {idx+1}")
                     
                     # Interruptible sleep - check stop flag every 0.1 seconds
                     elapsed = 0

@@ -1065,7 +1065,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.anthropic_thinking_budget_var = str(self.config.get('anthropic_thinking_budget', '10000'))
         self.anthropic_force_adaptive_var = self.config.get('anthropic_force_adaptive', False)
         self.anthropic_effort_var = self.config.get('anthropic_effort', 'medium')
-        self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.5))
+        self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.1))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
         self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
@@ -8555,7 +8555,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
-            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.5',
+            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.1',
             'MAX_OUTPUT_TOKENS': str(current_max_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
@@ -9865,7 +9865,7 @@ Important rules:
                     'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
-                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.5',
+                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.1',
                     'CONTEXTUAL': '1' if self.contextual_var else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
@@ -13251,7 +13251,7 @@ Important rules:
                 
                 # Numeric settings
                 ('delay', ['delay_entry'], 2.0, lambda v: safe_float(v, 2.0)),
-                ('thread_submission_delay', ['thread_delay_entry'], 0.5, lambda v: safe_float(v, 0.5)),
+                ('thread_submission_delay', ['thread_delay_entry'], 0.1, lambda v: safe_float(v, 0.1)),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
                 ('reinforcement_frequency', ['reinforcement_freq_var'], 10, lambda v: safe_int(v, 10)),
