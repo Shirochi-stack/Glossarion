@@ -791,6 +791,65 @@ class XHTMLConverter:
             
             parser = lxml_html.HTMLParser(recover=True)
             doc = lxml_html.document_fromstring(f"<div>{html_content}</div>", parser=parser)
+
+            # Fix common malformed link attributes produced by some EPUB sources/LLM output:
+            #   href="<part0008.html#id>"  -> href="part0008.html#id"
+            #   href="&lt;part0008.html#id&gt;" -> href="part0008.html#id"
+            # If left as-is, XML serialization will escape the angle brackets, breaking navigation.
+            def _strip_angle_wrapped_url(v: str) -> str:
+                try:
+                    if v is None:
+                        return v
+                    s = str(v).strip()
+                    if not s:
+                        return s
+                    sl = s.lower()
+
+                    # Full wrapper (entities)
+                    if sl.startswith('&lt;') and sl.endswith('&gt;') and len(s) >= 8:
+                        return s[4:-4].strip()
+
+                    # Full wrapper (literal)
+                    if s.startswith('<') and s.endswith('>') and len(s) >= 2:
+                        return s[1:-1].strip()
+
+                    # One-sided wrappers (best-effort)
+                    if sl.startswith('&lt;'):
+                        s = s[4:]
+                    if sl.endswith('&gt;') and len(s) >= 4:
+                        s = s[:-4]
+                    if s.startswith('<'):
+                        s = s[1:]
+                    if s.endswith('>'):
+                        s = s[:-1]
+                    return s.strip()
+                except Exception:
+                    return v
+
+            try:
+                for el in doc.iter():
+                    # Common link attributes
+                    for attr in ('href', 'src'):
+                        try:
+                            if attr in el.attrib:
+                                old = el.attrib.get(attr)
+                                new = _strip_angle_wrapped_url(old)
+                                if new != old:
+                                    el.attrib[attr] = new
+                        except Exception:
+                            pass
+                    # Namespaced link attributes (e.g., SVG)
+                    try:
+                        for attr in ("{http://www.w3.org/1999/xlink}href", 'xlink:href'):
+                            if attr in el.attrib:
+                                old = el.attrib.get(attr)
+                                new = _strip_angle_wrapped_url(old)
+                                if new != old:
+                                    el.attrib[attr] = new
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             
             # Get the content back
             # Use HTML method if enabled (better whitespace preservation for buggy readers like Freda)
