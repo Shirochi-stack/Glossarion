@@ -834,7 +834,12 @@ def _stream_with_httpx(
             if not detail:
                 detail = "empty-body"
             summary = detail or reason or "Bad Request"
-            _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
+            try:
+                suppress = (resp.status_code == 429) and ("usage_limit_reached" in str(error_body).lower())
+            except Exception:
+                suppress = False
+            if not suppress:
+                _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
             raise RuntimeError(
                 f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]"
             )
@@ -884,7 +889,12 @@ def _stream_with_requests(
         if not detail:
             detail = "empty-body"
         summary = detail or reason or "Bad Request"
-        _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
+        try:
+            suppress = (resp.status_code == 429) and ("usage_limit_reached" in str(error_body).lower())
+        except Exception:
+            suppress = False
+        if not suppress:
+            _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
         raise RuntimeError(
             f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]"
         )
