@@ -4189,6 +4189,9 @@ def main(log_callback=None, stop_callback=None):
                 chapter_content = "\n\n".join(merged_contents)
                 print(f"   📊 Merged content: {len(chapter_content):,} characters")
             
+            # Build merged chapter nums for watchdog progress bar
+            merged_chapter_nums = [g_idx + 1 for g_idx, _ in merge_groups[idx]] if idx in merge_groups else None
+
             # Check if history will reset on this chapter
             if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
                 print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
@@ -4382,7 +4385,8 @@ def main(log_callback=None, stop_callback=None):
                                 chunk_timeout=chunk_timeout,
                                 chapter_idx=idx,
                                 chunk_idx=chunk_idx,
-                                total_chunks=total_chunks
+                                total_chunks=total_chunks,
+                                merged_chapters=merged_chapter_nums
                             )
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
@@ -4534,7 +4538,8 @@ def main(log_callback=None, stop_callback=None):
                             max_tokens=mtoks,
                             stop_check_fn=check_stop,
                             chunk_timeout=chunk_timeout,
-                            chapter_idx=idx
+                            chapter_idx=idx,
+                            merged_chapters=merged_chapter_nums
                         )
                                 
                     except UnifiedClientError as e:
