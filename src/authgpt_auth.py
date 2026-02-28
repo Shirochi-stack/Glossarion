@@ -826,8 +826,6 @@ def _stream_with_httpx(
         if resp.status_code >= 400:
             error_body = resp.read().decode("utf-8", errors="replace")
             reason = getattr(resp, "reason_phrase", "") or ""
-            ct = resp.headers.get("content-type", "")
-            clen = resp.headers.get("content-length", "")
             detail = error_body
             try:
                 detail = json.loads(error_body).get("detail", error_body)
@@ -836,9 +834,9 @@ def _stream_with_httpx(
             if not detail:
                 detail = "empty-body"
             summary = detail or reason or "Bad Request"
-            _log(f"❌ AuthGPT HTTP {resp.status_code} detail={summary} ct={ct} len={clen} body={error_body}")
+            _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
             raise RuntimeError(
-                f"AuthGPT: {resp.status_code} \u2013 {summary} [reason={reason}] [ct={ct}] [len={clen}] [body={error_body}]"
+                f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]"
             )
 
         # iter_lines() in httpx yields str lines as they arrive
@@ -878,8 +876,6 @@ def _stream_with_requests(
             reason = resp.reason or ""
         except Exception:
             reason = ""
-        ct = resp.headers.get("content-type", "")
-        clen = resp.headers.get("content-length", "")
         detail = error_body
         try:
             detail = resp.json().get("detail", error_body)
@@ -888,9 +884,9 @@ def _stream_with_requests(
         if not detail:
             detail = "empty-body"
         summary = detail or reason or "Bad Request"
-        _log(f"❌ AuthGPT HTTP {resp.status_code} detail={summary} ct={ct} len={clen} body={error_body}")
+        _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
         raise RuntimeError(
-            f"AuthGPT: {resp.status_code} \u2013 {summary} [reason={reason}] [ct={ct}] [len={clen}] [body={error_body}]"
+            f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]"
         )
 
     for raw_line in resp.iter_lines(chunk_size=1):
