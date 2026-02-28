@@ -824,13 +824,22 @@ def _stream_with_httpx(
         timeout=_timeout,
     ) as resp:
         if resp.status_code >= 400:
-            error_body = resp.read().decode("utf-8", errors="replace")[:500]
+            error_body = resp.read().decode("utf-8", errors="replace")
+            reason = getattr(resp, "reason_phrase", "") or ""
+            ct = resp.headers.get("content-type", "")
+            clen = resp.headers.get("content-length", "")
             detail = error_body
             try:
                 detail = json.loads(error_body).get("detail", error_body)
             except Exception:
                 pass
-            raise RuntimeError(f"AuthGPT: {resp.status_code} \u2013 {detail}")
+            if not detail:
+                detail = "empty-body"
+            summary = detail or reason or "Bad Request"
+            _log(f"❌ AuthGPT HTTP {resp.status_code} detail={summary} ct={ct} len={clen} body={error_body}")
+            raise RuntimeError(
+                f"AuthGPT: {resp.status_code} \u2013 {summary} [reason={reason}] [ct={ct}] [len={clen}] [body={error_body}]"
+            )
 
         # iter_lines() in httpx yields str lines as they arrive
         for line in resp.iter_lines():
@@ -862,15 +871,27 @@ def _stream_with_requests(
 
     if resp.status_code >= 400:
         try:
-            error_body = resp.text[:500]
+            error_body = resp.text
         except Exception:
             error_body = ""
+        try:
+            reason = resp.reason or ""
+        except Exception:
+            reason = ""
+        ct = resp.headers.get("content-type", "")
+        clen = resp.headers.get("content-length", "")
         detail = error_body
         try:
             detail = resp.json().get("detail", error_body)
         except Exception:
             pass
-        raise RuntimeError(f"AuthGPT: {resp.status_code} \u2013 {detail}")
+        if not detail:
+            detail = "empty-body"
+        summary = detail or reason or "Bad Request"
+        _log(f"❌ AuthGPT HTTP {resp.status_code} detail={summary} ct={ct} len={clen} body={error_body}")
+        raise RuntimeError(
+            f"AuthGPT: {resp.status_code} \u2013 {summary} [reason={reason}] [ct={ct}] [len={clen}] [body={error_body}]"
+        )
 
     for raw_line in resp.iter_lines(chunk_size=1):
         if _cancel_event.is_set():

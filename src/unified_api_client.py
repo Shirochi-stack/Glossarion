@@ -5137,9 +5137,13 @@ class UnifiedClient:
                     # Re-raise so send_with_interrupt can handle it
                     raise
                 
-                # Suppress noisy unified-client error log for AuthGPT rate-limit/related errors
+                # For usage-limit messages, show without the "UnifiedClient error:" prefix.
+                # For all other errors (including other AuthGPT errors), keep the prefix.
                 try:
-                    if not str(e).startswith("AuthGPT"):
+                    e_str = str(e)
+                    if "usage limit" in e_str.lower():
+                        print(e_str)
+                    else:
                         print(f"UnifiedClient error: {e}")
                 except Exception:
                     print(f"UnifiedClient error: {e}")
