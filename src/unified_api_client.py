@@ -7556,21 +7556,18 @@ class UnifiedClient:
         
         IMPORTANT: Called by send_with_interrupt when timeout occurs
         """
-        self._cancelled = True
-        self._in_cleanup = True  # Set cleanup flag correctly
-        # Show a single cancellation message
-        # print("🛑 Operation cancelled (timeout or user stop)")  # Redundant - other logs show this
-        # Set global cancellation to affect all instances
-        self.set_global_cancellation(True)
-        
-        # During graceful stop, skip HTTP connection closure to avoid "Server disconnected" errors
-        # Let in-flight requests complete naturally
+        # During graceful stop, do NOT set cancellation flags — let in-flight
+        # requests complete naturally.  Only suppress noisy HTTP logs.
         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
         if graceful_stop_active:
-            # Suppress logs and mark graceful stop mode
             os.environ['GRACEFUL_STOP_HTTP_SUPPRESS'] = '1'
             self._suppress_http_logs()
             return
+        
+        self._cancelled = True
+        self._in_cleanup = True  # Set cleanup flag correctly
+        # Set global cancellation to affect all instances
+        self.set_global_cancellation(True)
         
         # Close all active streaming responses first
         try:

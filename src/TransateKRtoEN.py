@@ -4015,11 +4015,11 @@ class TranslationProcessor:
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
-                    # During graceful stop, don't retry - just return to fail fast
+                    # During graceful stop, don't retry - skip this chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if graceful_stop_active:
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
-                        return "[TIMEOUT]", "timeout", None
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
+                        return None, "graceful_stop", None
                     
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
@@ -4056,10 +4056,10 @@ class TranslationProcessor:
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
-                    # During graceful stop, don't retry - just return to fail fast
+                    # During graceful stop, don't retry - skip this chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if graceful_stop_active:
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
                         return "[TIMEOUT]", "timeout", None
                     
                     if timeout_retry_count < max_timeout_retries:
@@ -4082,10 +4082,10 @@ class TranslationProcessor:
                         print("❌ Translation stopped by user during timeout retry")
                         return None, None, None
                     
-                    # During graceful stop, don't retry - just return to fail fast
+                    # During graceful stop, don't retry - skip
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if graceful_stop_active:
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
                         return "[TIMEOUT]", "timeout", None
                     
                     if timeout_retry_count < max_timeout_retries:
@@ -4671,11 +4671,11 @@ class BatchTranslationProcessor:
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 return None, chunk_idx, None, False, "cancelled"
                             
-                            # During graceful stop, don't retry - return timeout to trigger chapter abort
+                            # During graceful stop, don't retry - skip this chunk
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
-                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
-                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
+                                return None, chunk_idx, None, False, "graceful_stop"
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
@@ -4715,10 +4715,10 @@ class BatchTranslationProcessor:
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 return None, chunk_idx, None, False, "cancelled"
                             
-                            # During graceful stop, don't retry - return timeout to trigger chapter abort
+                            # During graceful stop, don't retry - skip this chunk
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
-                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping timeout retry")
+                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
                                 return "[TIMEOUT]", chunk_idx, None, False, "timeout"
                             
                             if timeout_retry_count < max_timeout_retries:
@@ -4864,8 +4864,8 @@ class BatchTranslationProcessor:
 
                                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                                     if graceful_stop_active:
-                                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Graceful stop active - skipping char-ratio retry")
-                                        return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped char-ratio retry (graceful stop)")
+                                        return None, chunk_idx, None, False, "graceful_stop"
 
                                     print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry failed due to API cancellation")
                                     return "[TIMEOUT]", chunk_idx, None, False, "timeout"
@@ -5125,6 +5125,16 @@ class BatchTranslationProcessor:
                     # With graceful stop ON, we should save completed work before stopping
                     try:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
+
+                        # Handle graceful-stop skipped chunks — reset to pending, not failed
+                        if finish_reason == "graceful_stop":
+                            chunk_abort_event.set()
+                            chunk_executor.shutdown(wait=False, cancel_futures=True)
+                            # Let the outer handler mark the chapter as pending/skipped
+                            raise UnifiedClientError(
+                                "Graceful stop active - not starting new API call",
+                                error_type="cancelled"
+                            )
 
                         # Handle cancelled chunks (skipped due to stop request)
                         if finish_reason == "cancelled" or (result is None and finish_reason != "stop"):
@@ -7265,7 +7275,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             should_stop = stop_check_fn()
             graceful_active = os.environ.get('GRACEFUL_STOP') == '1'
             
-            if should_stop and (bypass_graceful_stop or not graceful_active):
+            # Hard cancellation (e.g. double-click force stop via hard_cancel_all)
+            # overrides graceful stop protection for in-flight calls.
+            hard_cancelled = hasattr(client, 'is_globally_cancelled') and client.is_globally_cancelled()
+            
+            # During graceful stop, protect in-flight calls unless hard-cancelled.
+            should_cancel = hard_cancelled or (should_stop and not graceful_active)
+            
+            if should_cancel:
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
@@ -11709,6 +11726,15 @@ def main(log_callback=None, stop_callback=None):
                     chunk_abort = True
                     break
                 
+                # Handle graceful-stop skipped chunks — reset to pending, not failed
+                if finish_reason == "graceful_stop":
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="pending")
+                    progress_manager.save()
+                    print(f"⏸️ Chapter {actual_num} skipped (graceful stop)")
+                    chunk_abort = True
+                    break
+
                 # Check if result is None or contains failure markers
                 # Only check for failure markers if response is short (< 50 chars)
                 # Longer responses are likely legitimate translations even if they contain error keywords
