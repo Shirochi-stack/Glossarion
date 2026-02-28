@@ -8752,7 +8752,11 @@ class UnifiedClient:
         # Log AFTER stagger sleep completes — this is when the API call actually goes out
         if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             if sleep_time > 0:
-                self._debug_log(f"⏳ [{thread_name}] Staggered {sleep_time:.1f}s — sending API call now")
+                # Log the configured interval (gap between consecutive calls), NOT the
+                # total time this thread waited in the queue.  Multiple threads queue
+                # up and each sleeps for a different total, but the gap between any
+                # two consecutive sends is always api_delay.
+                self._debug_log(f"⏳ [{thread_name}] Staggered {api_delay:.1f}s — sending API call now")
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None)
