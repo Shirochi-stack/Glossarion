@@ -12075,11 +12075,31 @@ class UnifiedClient:
                 raise
                 
             except Exception as e:
-                print(f"Gemini attempt {attempt+1} failed: {e}")
-                error_details[f'attempt_{attempt+1}'] = str(e)
-                
+                raw_err = str(e)
+                # Keep full raw error details for debugging/output files
+                error_details[f'attempt_{attempt+1}'] = raw_err
+
+                # Sanitize noisy HTML error pages (common on 502s)
+                display_err = raw_err
+                try:
+                    lower = raw_err.lower()
+                    if "<!doctype html" in lower or "<html" in lower:
+                        # Try extract a <title>…</title>
+                        m = re.search(r"<title>(.*?)</title>", raw_err, flags=re.IGNORECASE | re.DOTALL)
+                        title = (m.group(1).strip() if m else "").replace("\n", " ")
+                        title = re.sub(r"\s+", " ", title).strip()
+                        if title:
+                            display_err = f"HTML error page: {title}"
+                        else:
+                            display_err = "HTML error page (details suppressed)"
+                except Exception:
+                    # If sanitization fails, fall back to raw
+                    display_err = raw_err
+
+                print(f"Gemini attempt {attempt+1} failed: {display_err}")
+
                 # Check if this is a prohibited content error
-                error_str = str(e).lower()
+                error_str = raw_err.lower()
                 if any(indicator in error_str for indicator in [
                     "content blocked", "prohibited_content", "blockedreason",
                     "content_filter", "safety filter", "harmful content"
