@@ -8754,9 +8754,9 @@ class UnifiedClient:
             if sleep_time > 0:
                 # api_delay = gap between consecutive sends; sleep_time = how long THIS thread queued
                 if sleep_time > api_delay + 0.5:
-                    self._debug_log(f"⏳ [{thread_name}] Staggered {api_delay:.1f}s (queued {sleep_time:.1f}s) — sending API call now")
+                    self._debug_log(f"⏳ [{thread_name}] Sending API call in {api_delay:.1f}s (queued {sleep_time:.1f}s)")
                 else:
-                    self._debug_log(f"⏳ [{thread_name}] Staggered {api_delay:.1f}s — sending API call now")
+                    self._debug_log(f"⏳ [{thread_name}] Sending API call in {api_delay:.1f}s")
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None)
