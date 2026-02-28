@@ -187,14 +187,23 @@ _api_watchdog_last_model = None
 _api_watchdog_entries = {}
 
 def _parse_error_json(error_str: str) -> Dict:
-    """Extract JSON payload from an AuthGPT error string like 'AuthGPT: 429 – {...}'."""
+    """Extract JSON payload from an AuthGPT error string like 'AuthGPT: 429 – {...}'.
+
+    Note: the error string may contain extra suffixes (e.g., "[reason=Too Many Requests]")
+    after the JSON. We therefore parse only the JSON object substring.
+    """
     if not error_str:
         return {}
     try:
         idx = error_str.find("{")
         if idx == -1:
             return {}
-        return json.loads(error_str[idx:])
+        end = error_str.rfind("}")
+        if end != -1 and end > idx:
+            candidate = error_str[idx : end + 1]
+        else:
+            candidate = error_str[idx:]
+        return json.loads(candidate)
     except Exception:
         return {}
 
@@ -203,6 +212,8 @@ def _format_usage_reset_message(error_str: str) -> str:
     """Return a user-friendly local-time reset message from usage_limit_reached errors."""
     data = _parse_error_json(error_str)
     err = data.get("error") if isinstance(data, dict) else {}
+    if not isinstance(err, dict):
+        err = {}
     resets_at = err.get("resets_at")
     resets_in = err.get("resets_in_seconds")
     if resets_at is None:
