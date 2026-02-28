@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.7.5"
+        __version__ = "7.7.6"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.7.5')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.7.6')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1424,7 +1424,6 @@ Text to analyze:
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
-                "- Convert all Korean family/kinship terms to romanized Korean. (e.g., 누나 = Nuna; 오빠 = Oppa; 언니 = Eonni; 형 = Hyeong; 동생 = Dongsaeng; 엄마 = Eomma; 아빠 = Appa; 어머니 = Eomeoni; 아버지 = Abeoji; 할머니 = Halmeoni; 할아버지 = Harabeoji)\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
                 "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
@@ -1440,7 +1439,6 @@ Text to analyze:
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
-                "- Convert all family/kinship terms to Romaji. (e.g., お姉ちゃん = Onee-Chan; お姉さま = Onee-sama; お姉たん = Onee-tan; お兄ちゃん = Onii-Chan; お母さん = Okaa-San; お父さん = Otou-San; おばあちゃん = Obaa-Chan; おじいちゃん = Ojiisan; 兄 = Ani; 姉 = Ane; 妹 = Imouto; 弟 = Otouto)\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
                 "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
@@ -1471,9 +1469,8 @@ Text to analyze:
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
-                "- Convert all Korean family/kinship terms to romanized Korean. (e.g., 누나 = Nuna; 오빠 = Oppa; 언니 = Eonni; 형 = Hyeong; 동생 = Dongsaeng; 엄마 = Eomma; 아빠 = Appa; 어머니 = Eomeoni; 아버지 = Abeoji; 할머니 = Halmeoni; 할아버지 = Harabeoji)\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1489,7 +1486,6 @@ Text to analyze:
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
-                "- Convert all family/kinship terms to Romaji. (e.g., お姉ちゃん = Onee-Chan; お姉さま = Onee-sama; お姉たん = Onee-tan; お兄ちゃん = Onii-Chan; お母さん = Okaa-San; お父さん = Otou-San; おばあちゃん = Obaa-Chan; おじいちゃん = Ojiisan; 兄 = Ani; 姉 = Ane; 妹 = Imouto; 弟 = Otouto)\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
                 "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
@@ -2660,7 +2656,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.7.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.7.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -14561,7 +14557,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.7.5...")
+    print("🚀 Starting Glossarion v7.7.6...")
     
     # Initialize splash screen
     splash_manager = None
