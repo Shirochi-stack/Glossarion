@@ -1732,16 +1732,23 @@ class UnifiedClient:
 
     @classmethod
     def hard_cancel_all(cls):
-        """Force-cancel all in-flight requests by closing HTTP sessions and streaming responses."""
+        """Force-cancel all in-flight requests by closing HTTP sessions and streaming responses.
+
+        NOTE: This is intentionally aggressive and is used by the GUI's immediate Stop button.
+        It must close BOTH requests.Session objects AND OpenAI-SDK/httpx transports to abort
+        OpenAI-compatible providers (e.g., ElectronHub).
+        """
         try:
             cls.set_global_cancellation(True)
         except Exception:
             pass
+
         # Reset watchdog so UI clears counts immediately
         try:
             _api_watchdog_reset()
         except Exception:
             pass
+
         # Close all active streaming responses
         try:
             with cls._active_streams_lock:
@@ -1754,7 +1761,8 @@ class UnifiedClient:
                     pass
         except Exception:
             pass
-        # Close all HTTP sessions
+
+        # Close all HTTP sessions (requests)
         try:
             with cls._all_sessions_lock:
                 sessions = list(cls._all_sessions)
@@ -1765,6 +1773,47 @@ class UnifiedClient:
                     pass
         except Exception:
             pass
+
+        # Force-close any underlying httpx clients (OpenAI SDK and others)
+        try:
+            with cls._all_httpx_clients_lock:
+                httpx_clients = list(cls._all_httpx_clients)
+            for hc in httpx_clients:
+                try:
+                    if hasattr(hc, 'close'):
+                        hc.close()
+                except Exception:
+                    pass
+            # Best-effort clear to avoid holding dead clients
+            try:
+                with cls._all_httpx_clients_lock:
+                    cls._all_httpx_clients.clear()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Close any OpenAI SDK client objects (best-effort)
+        try:
+            with cls._all_openai_clients_lock:
+                oai_clients = list(cls._all_openai_clients)
+            for oc in oai_clients:
+                try:
+                    if hasattr(oc, 'close'):
+                        oc.close()
+                    # Some versions expose underlying client at _client
+                    elif hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                        oc._client.close()
+                except Exception:
+                    pass
+            try:
+                with cls._all_openai_clients_lock:
+                    cls._all_openai_clients.clear()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         # Cancel any in-flight AuthGPT SSE streams
         try:
             if _authgpt_cancel_stream is not None:
