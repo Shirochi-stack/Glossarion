@@ -7586,6 +7586,8 @@ class UnifiedClient:
         
         IMPORTANT: Called by send_with_interrupt when timeout occurs
         """
+        # In batch translation/glossary mode, avoid global teardown that kills sibling requests.
+        batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
         # During graceful stop, do NOT set cancellation flags — let in-flight
         # requests complete naturally.  Only suppress noisy HTTP logs.
         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -7596,61 +7598,64 @@ class UnifiedClient:
         
         self._cancelled = True
         self._in_cleanup = True  # Set cleanup flag correctly
-        # Set global cancellation to affect all instances
-        self.set_global_cancellation(True)
+        # In batch mode, keep cancellation local to this client/thread to avoid terminating other in-flight calls.
+        if not batch_mode:
+            # Set global cancellation to affect all instances
+            self.set_global_cancellation(True)
         
-        # Close all active streaming responses first
-        try:
-            with self._active_streams_lock:
-                streams = list(self._active_streams)
-            for stream in streams:
-                try:
-                    if hasattr(stream, 'close'):
-                        stream.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # Try to close any active HTTP sessions to abort in-flight requests
-        try:
-            with self._all_sessions_lock:
-                sessions = list(self._all_sessions)
-            for s in sessions:
-                try:
-                    s.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if not batch_mode:
+            # Close all active streaming responses first
+            try:
+                with self._active_streams_lock:
+                    streams = list(self._active_streams)
+                for stream in streams:
+                    try:
+                        if hasattr(stream, 'close'):
+                            stream.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Try to close any active HTTP sessions to abort in-flight requests
+            try:
+                with self._all_sessions_lock:
+                    sessions = list(self._all_sessions)
+                for s in sessions:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-        # Force-close any underlying httpx clients (OpenAI SDK and others)
-        try:
-            with self._all_httpx_clients_lock:
-                httpx_clients = list(self._all_httpx_clients)
-            for hc in httpx_clients:
-                try:
-                    if hasattr(hc, 'close'):
-                        hc.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            # Force-close any underlying httpx clients (OpenAI SDK and others)
+            try:
+                with self._all_httpx_clients_lock:
+                    httpx_clients = list(self._all_httpx_clients)
+                for hc in httpx_clients:
+                    try:
+                        if hasattr(hc, 'close'):
+                            hc.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-        # Also close any OpenAI SDK client objects (best-effort)
-        try:
-            with self._all_openai_clients_lock:
-                oai_clients = list(self._all_openai_clients)
-            for oc in oai_clients:
-                try:
-                    if hasattr(oc, 'close'):
-                        oc.close()
-                    # Some versions expose underlying client at _client
-                    elif hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                        oc._client.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            # Also close any OpenAI SDK client objects (best-effort)
+            try:
+                with self._all_openai_clients_lock:
+                    oai_clients = list(self._all_openai_clients)
+                for oc in oai_clients:
+                    try:
+                        if hasattr(oc, 'close'):
+                            oc.close()
+                        # Some versions expose underlying client at _client
+                        elif hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                            oc._client.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         # Close thread-local OpenAI clients for THIS thread as well
         try:
