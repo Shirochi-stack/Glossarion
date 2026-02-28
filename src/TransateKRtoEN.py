@@ -4745,7 +4745,10 @@ class BatchTranslationProcessor:
                 # if raw_obj:
                 #     print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
                 
-                print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
+                if total_chunks and int(total_chunks) > 1:
+                    print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
+                else:
+                    print(f"📥 Received Chapter {actual_num} response, finish_reason: {finish_reason}")
 
                 # Char-ratio truncation retry (silent truncation)
                 char_ratio_exhausted = False
