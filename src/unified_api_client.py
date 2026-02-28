@@ -1714,6 +1714,20 @@ class UnifiedClient:
         except Exception:
             pass
         self._cancelled = False
+        # Reset stagger timestamp so a new translation run doesn't inherit
+        # huge delays from a previous force-stopped run's queued slots.
+        try:
+            if hasattr(self.__class__, '_api_stagger_lock'):
+                with self.__class__._api_stagger_lock:
+                    self.__class__._last_api_call_start = 0
+        except Exception:
+            pass
+        # Reset AuthGPT cancel event so it doesn't block new requests
+        try:
+            if _authgpt_reset_cancel is not None:
+                _authgpt_reset_cancel()
+        except Exception:
+            pass
         
         # Store original values
         self.original_api_key = api_key
@@ -7755,6 +7769,20 @@ class UnifiedClient:
             self._cancelled = False
             # Reset global cancellation flag for new operations
             self.set_global_cancellation(False)
+            # Reset stagger timestamp so queued slots from a force-stopped run
+            # don't delay a fresh translation.
+            try:
+                if hasattr(self.__class__, '_api_stagger_lock'):
+                    with self.__class__._api_stagger_lock:
+                        self.__class__._last_api_call_start = 0
+            except Exception:
+                pass
+            # Reset AuthGPT cancel event
+            try:
+                if _authgpt_reset_cancel is not None:
+                    _authgpt_reset_cancel()
+            except Exception:
+                pass
             # Reset logging levels for new operations
             self._reset_http_logs()
 
