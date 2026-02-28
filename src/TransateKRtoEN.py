@@ -10180,15 +10180,26 @@ def main(log_callback=None, stop_callback=None):
             # Handle empty chapters
             if is_empty_chapter:
                 print(f"📄 Empty chapter {chap_num} - will process individually")
-                
+
                 safe_title = make_safe_filename(c['title'], c['num'])
-                
+
                 if isinstance(c['num'], float):
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
                 else:
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
+
+                # IMPORTANT: For completed_empty, preserve the ORIGINAL XHTML/HTML markup.
+                # In enhanced/html2text extraction modes, c['body'] may be empty because it contains only extracted text.
+                original_markup = (
+                    c.get("original_html")
+                    or c.get("source_html")
+                    or c.get("raw_html")
+                    or c.get("body")
+                    or ""
+                )
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c["body"])
+                    f.write(original_markup)
+
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
@@ -11108,22 +11119,30 @@ def main(log_callback=None, stop_callback=None):
             
             if is_empty_chapter:
                 print(f"📄 Empty chapter {actual_num} detected")
-                
+
                 # Create filename for empty chapter
                 if isinstance(c['num'], float):
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
                 else:
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                
-                # Save original content
+
+                # Save ORIGINAL markup for empty chapters.
+                # In enhanced/html2text extraction modes, c['body'] can be blank (it may only contain extracted text).
+                original_markup = (
+                    c.get("original_html")
+                    or c.get("source_html")
+                    or c.get("raw_html")
+                    or c.get("body")
+                    or ""
+                )
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c["body"])
-                
+                    f.write(original_markup)
+
                 # Update progress tracking
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
-                
+
                 # CRITICAL: Skip translation!
                 continue
 
