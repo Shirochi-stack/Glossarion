@@ -13238,9 +13238,41 @@ class UnifiedClient:
                                 label_part = f" [{req_label}]" if req_label else ""
 
                                 if is_timeout:
-                                    # Just log the error, skip full traceback for timeouts
+                                    # Timeout diagnostics: include exception type + HTTP status (if available) + configured timeouts.
                                     if not self._is_stop_requested():
-                                        print(f"🛑 [{provider}]{label_part} SDK call failed: Request timed out.")
+                                        http_status = None
+                                        try:
+                                            http_status = self._extract_http_status_from_exception(sdk_err)
+                                        except Exception:
+                                            http_status = None
+
+                                        connect_t = None
+                                        read_t = None
+                                        try:
+                                            connect_t, read_t = self._get_timeouts()
+                                        except Exception:
+                                            connect_t, read_t = None, None
+
+                                        try:
+                                            enabled_http_tuning = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                                        except Exception:
+                                            enabled_http_tuning = False
+
+                                        etype = type(sdk_err).__name__
+                                        detail = self._summarize_exception(sdk_err)
+
+                                        # If we have an HTTP status, it's almost certainly an upstream/server timeout.
+                                        if http_status is not None:
+                                            print(
+                                                f"🛑 [{provider}]{label_part} SDK timeout (HTTP {http_status}): {detail} "
+                                                f"(type={etype}, http_tuning={'on' if enabled_http_tuning else 'off'}, connect={connect_t}, read={read_t})"
+                                            )
+                                        else:
+                                            # No status: could be a local socket/read timeout or an SDK-level timeout wrapper.
+                                            print(
+                                                f"🛑 [{provider}]{label_part} SDK timeout: {detail} "
+                                                f"(type={etype}, http_tuning={'on' if enabled_http_tuning else 'off'}, connect={connect_t}, read={read_t})"
+                                            )
                                 elif is_402:
                                     # Just log the error, skip full traceback for 402 payment errors
                                     if not self._is_stop_requested():
