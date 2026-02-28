@@ -5137,7 +5137,12 @@ class UnifiedClient:
                     # Re-raise so send_with_interrupt can handle it
                     raise
                 
-                print(f"UnifiedClient error: {e}")
+                # Suppress noisy unified-client error log for AuthGPT rate-limit/related errors
+                try:
+                    if not str(e).startswith("AuthGPT"):
+                        print(f"UnifiedClient error: {e}")
+                except Exception:
+                    print(f"UnifiedClient error: {e}")
                 
                 # Abort all further handling if stop was requested during error processing
                 if self._should_abort_retry():
