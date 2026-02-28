@@ -7167,7 +7167,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
 
     # Honor RETRY_TIMEOUT toggle: when off, disable chunk timeout entirely
     retry_env = os.getenv("RETRY_TIMEOUT")
-    retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
+    # Default: wrapper chunk timeout is OFF unless RETRY_TIMEOUT is explicitly truthy
+    retry_timeout_enabled = bool(retry_env) and retry_env.strip().lower() not in ("0", "false", "off", "")
     if not retry_timeout_enabled:
         chunk_timeout = None
     
