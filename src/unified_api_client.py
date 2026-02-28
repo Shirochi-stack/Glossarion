@@ -8736,6 +8736,16 @@ class UnifiedClient:
         # Lock released — sleep outside lock (interruptible)
         
         if sleep_time > 0:
+            # Log queued status before sleeping
+            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                try:
+                    tls = self._get_thread_local_client()
+                    _label = getattr(tls, 'current_request_label', None) or 'request'
+                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+                except Exception:
+                    _label = 'request'
+                    _ctx = 'translation'
+                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
@@ -8749,21 +8759,24 @@ class UnifiedClient:
                 time.sleep(dt)
                 elapsed += dt
         
-        # Log AFTER stagger sleep completes — this is when the API call actually goes out
+        # Log stagger status — shows queued+delay or immediate in-progress
         if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
-            if sleep_time > 0:
-                # sleep_time = how long THIS thread actually queued
-                if sleep_time > api_delay + 0.5:
-                    self._debug_log(f"⏳ [{thread_name}] Sending API call now (queued {sleep_time:.1f}s)")
-                else:
-                    self._debug_log(f"⏳ [{thread_name}] Sending API call now")
             try:
                 tls = self._get_thread_local_client()
-                label = getattr(tls, 'current_request_label', None)
-                if label:
-                    self._debug_log(f"📤 [{thread_name}] Sending {label} to API...")
+                label = getattr(tls, 'current_request_label', None) or 'request'
+                ctx = getattr(tls, 'current_request_context', None) or 'translation'
             except Exception:
-                pass
+                label = 'request'
+                ctx = 'translation'
+            if sleep_time > 0:
+                # Thread had to wait — show queued log before sleep already happened, now confirm in-progress
+                if sleep_time > api_delay + 0.5:
+                    self._debug_log(f"⏳ [{thread_name}] {label} API call in progress (queued {sleep_time:.1f}s)")
+                else:
+                    self._debug_log(f"⏳ [{thread_name}] {label} API call in progress")
+            else:
+                # No wait needed — goes immediately
+                self._debug_log(f"📤 [{thread_name}] {label} ({ctx}) API call in progress")
 
     def _update_stagger_timestamp(self):
         """Push stagger reference to now (end of call) so the next call
@@ -9978,13 +9991,13 @@ class UnifiedClient:
                                     base_label = f"Merged {merged_nums[0]}"
                                 else:
                                     base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
-                                if chunk and total:
+                                if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
                                     return f"{base_label} (chunk {chunk}/{total})"
                                 return base_label
                         except Exception:
                             pass
                     
-                    if chap is not None and chunk and total:
+                    if chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
                         return f"Chapter {chap} (chunk {chunk}/{total})"
                     if chap is not None:
                         return f"Chapter {chap}"
@@ -10047,24 +10060,13 @@ class UnifiedClient:
             pass
 
     def _log_pre_stagger(self, messages, context: Optional[str] = None) -> None:
-        """Emit a pre-stagger log line so users see what's being sent before delay."""
+        """Stash label and context for stagger logger. Actual log is emitted by _apply_api_call_stagger."""
         try:
-            # Suppress log if stop is requested to avoid clutter after summary
-            if not self._is_stop_requested():
-                thread_name = threading.current_thread().name
-                label = self._extract_chapter_label(messages)
-                ctx = context or 'translation'
-                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                print(f"📤 [{thread_name}] Queued {label} ({ctx}) — Sending API call in {api_delay:.1f}s")
-            # Stash label so stagger logger can show what is being translated
-            try:
-                tls = self._get_thread_local_client()
-                label = self._extract_chapter_label(messages)
-                tls.current_request_label = label
-            except Exception:
-                pass
+            tls = self._get_thread_local_client()
+            label = self._extract_chapter_label(messages)
+            tls.current_request_label = label
+            tls.current_request_context = context or 'translation'
         except Exception:
-            # Never block on logging
             pass
 
     def _is_gemini_request(self) -> bool:
