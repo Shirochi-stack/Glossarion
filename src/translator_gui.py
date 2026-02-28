@@ -6875,6 +6875,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.graceful_stop_active = False  # Reset graceful stop state
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
+
+        # Assign a new run id so transport logs (httpx) can be suppressed for stale previous runs
+        try:
+            import uuid as _uuid
+            os.environ['GLOSSARION_RUN_ID'] = _uuid.uuid4().hex[:10]
+        except Exception:
+            os.environ['GLOSSARION_RUN_ID'] = str(int(time.time()))
+
         if translation_stop_flag:
             translation_stop_flag(False)
         

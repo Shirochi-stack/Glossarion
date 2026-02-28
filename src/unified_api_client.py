@@ -115,6 +115,7 @@ based on your region or deployment.
 import os
 import json
 import requests
+import contextvars
 from requests.adapters import HTTPAdapter
 try:
     from urllib3.util.retry import Retry
@@ -161,6 +162,40 @@ import uuid
 from threading import RLock
 from collections import defaultdict
 logger = logging.getLogger(__name__)
+
+# --- Run-id context for suppressing stale transport logs (httpx/openai SDK) ---
+# The GUI sets GLOSSARION_RUN_ID at the start of each translation run.
+# We store that run id in a ContextVar per worker thread before starting each request.
+# A logging.Filter on the httpx logger then drops logs from threads that belong to an older run.
+_RUN_ID_CVAR = contextvars.ContextVar("glossarion_run_id", default="")
+
+def _get_current_run_id() -> str:
+    try:
+        return str(os.environ.get("GLOSSARION_RUN_ID", "") or "")
+    except Exception:
+        return ""
+
+def _set_thread_run_id_from_env() -> None:
+    """Bind the current process run id to this thread context (best-effort)."""
+    try:
+        rid = _get_current_run_id()
+        if rid:
+            _RUN_ID_CVAR.set(rid)
+    except Exception:
+        pass
+
+class _RunIdFilter(logging.Filter):
+    """Allow transport logs only for the currently-active run id (when configured)."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            current = _get_current_run_id()
+            thread_rid = _RUN_ID_CVAR.get("")
+            # If run-id is not configured, do not suppress anything.
+            if not current or not thread_rid:
+                return True
+            return thread_rid == current
+        except Exception:
+            return True
 
 # IMPORTANT: This client respects GUI settings via environment variables:
 # - SEND_INTERVAL_SECONDS: Delay between API calls (set by GUI)
@@ -546,35 +581,45 @@ def get_api_watchdog_state() -> Dict[str, Any]:
 def setup_http_logging():
     """Enable detailed HTTP request/response logging for debugging"""
     import logging
-    
+
     # Suppress HTTP logs during graceful stop
     if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_HTTP_SUPPRESS') == '1':
         httpx_logger = logging.getLogger("httpx")
         httpx_logger.setLevel(logging.CRITICAL)
         return
-    
+
     # Enable httpx logging (used by OpenAI SDK)
     httpx_logger = logging.getLogger("httpx")
     httpx_logger.setLevel(logging.INFO)
     # Enable requests logging (fallback HTTP calls)
     requests_logger = logging.getLogger("requests.packages.urllib3")
     requests_logger.setLevel(logging.INFO)
-    
+
     # Enable OpenAI SDK logging
     openai_logger = logging.getLogger("openai")
     openai_logger.setLevel(logging.DEBUG)
-    
+
+    # Add a filter to suppress stale logs from previous runs (safe even if run id not set)
+    try:
+        # Avoid adding duplicates
+        if not any(isinstance(f, _RunIdFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
+            httpx_logger.addFilter(_RunIdFilter())
+        if not any(isinstance(f, _RunIdFilter) for f in (getattr(openai_logger, 'filters', None) or [])):
+            openai_logger.addFilter(_RunIdFilter())
+    except Exception:
+        pass
+
     # Create console handler if not exists
     if not any(isinstance(h, logging.StreamHandler) for h in logging.root.handlers):
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
         formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
         console_handler.setFormatter(formatter)
-        
+
         httpx_logger.addHandler(console_handler)
         requests_logger.addHandler(console_handler)
         openai_logger.addHandler(console_handler)
-        
+
         # Prevent duplicate logs
         httpx_logger.propagate = False
         requests_logger.propagate = False
@@ -1790,6 +1835,14 @@ class UnifiedClient:
                     cls._all_httpx_clients.clear()
             except Exception:
                 pass
+        except Exception:
+            pass
+
+        # Suppress noisy transport logs after a force-stop (applies to this process).
+        try:
+            import logging
+            for logger_name in ['httpx', 'openai', 'urllib3']:
+                logging.getLogger(logger_name).setLevel(logging.CRITICAL)
         except Exception:
             pass
 
@@ -9056,6 +9109,7 @@ class UnifiedClient:
         - Handles cancellation, rate limits (429 with Retry-After), 5xx with backoff, and generic errors.
         - Returns the requests.Response object when a successful status is received.
         """
+        _set_thread_run_id_from_env()
         api_delay = self._get_send_interval()
         provider = provider_name or "HTTP"
         
@@ -9943,9 +9997,8 @@ class UnifiedClient:
         return client
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
-        """
-        Route to appropriate AI provider and get response
-        
+        """Route to appropriate AI provider and get response.
+
         Args:
             messages: List of message dicts
             temperature: Sampling temperature
@@ -9953,6 +10006,9 @@ class UnifiedClient:
             max_completion_tokens: Maximum completion tokens (for o-series models)
             response_name: Name for saving response
         """
+        # Bind current run id to this thread so transport logs can be suppressed for stale runs.
+        _set_thread_run_id_from_env()
+
         self._apply_api_call_stagger()
 
         # If graceful stop is active, do not transition queued work to in-flight and do not send.
@@ -12834,6 +12890,21 @@ class UnifiedClient:
                         timeout=timeout_obj,
                         max_retries=0,
                     )
+
+                    # Track this per-attempt SDK client so GUI stop (hard_cancel_all) can abort it cross-thread.
+                    # Note: we also discard it in finally; this is best-effort.
+                    try:
+                        with self._all_openai_clients_lock:
+                            self._all_openai_clients.add(client)
+                    except Exception:
+                        pass
+                    try:
+                        underlying = getattr(client, '_client', None)
+                        if underlying is not None:
+                            with self._all_httpx_clients_lock:
+                                self._all_httpx_clients.add(underlying)
+                    except Exception:
+                        pass
                     
                     # Check if this is Gemini via OpenAI endpoint
                     is_gemini_endpoint = provider == "gemini-openai" or effective_model.lower().startswith('gemini')
@@ -13941,6 +14012,19 @@ class UnifiedClient:
                             underlying = getattr(client, "_client", None)
                             if underlying is not None and hasattr(underlying, "close"):
                                 underlying.close()
+                        except Exception:
+                            pass
+
+                        # Remove from global tracking sets (best-effort)
+                        try:
+                            with self._all_openai_clients_lock:
+                                self._all_openai_clients.discard(client)
+                        except Exception:
+                            pass
+                        try:
+                            if underlying is not None:
+                                with self._all_httpx_clients_lock:
+                                    self._all_httpx_clients.discard(underlying)
                         except Exception:
                             pass
         else:
