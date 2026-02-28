@@ -207,13 +207,23 @@ def _format_usage_reset_message(error_str: str) -> str:
     resets_in = err.get("resets_in_seconds")
     if resets_at is None:
         return ""
+    def _ordinal(n: int) -> str:
+        if 10 <= n % 100 <= 20:
+            suf = "th"
+        else:
+            suf = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suf}"
+
     try:
         local_dt = datetime.fromtimestamp(resets_at).astimezone()
-        local_fmt = local_dt.strftime("%Y-%m-%d %I:%M:%S %p %Z").strip()
+        day_ord = _ordinal(local_dt.day)
+        tz = local_dt.tzname() or ""
+        local_fmt = f"{local_dt:%B} {day_ord}, {local_dt:%Y %I:%M:%S %p} {tz}".strip()
     except Exception:
         try:
             local_dt = datetime.fromtimestamp(resets_at)
-            local_fmt = local_dt.strftime("%Y-%m-%d %I:%M:%S %p")
+            day_ord = _ordinal(local_dt.day)
+            local_fmt = f"{local_dt:%B} {day_ord}, {local_dt:%Y %I:%M:%S %p}"
         except Exception:
             return ""
 
