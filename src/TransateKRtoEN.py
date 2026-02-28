@@ -7938,9 +7938,24 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
-    # Pre-process: Convert all angle brackets that are html tags into html entities
-    # This prevents markdown converters from stripping or malforming them
-    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', r'&lt;\1&gt;', plain_text)
+    # Pre-process: Convert angle-bracket "tag-like" sequences into HTML entities.
+    # This prevents markdown converters from stripping/mangling them.
+    # IMPORTANT: Preserve real anchor tags (<a ...> and </a>) so EPUB TOC links remain clickable.
+    def _escape_tag_like(m):
+        inner = m.group(1)  # e.g. 'a href="..."' or '/a'
+        try:
+            mname = re.match(r'\s*/?\s*([a-zA-Z0-9]+)', inner)
+            tag = (mname.group(1) if mname else "").lower()
+        except Exception:
+            tag = ""
+
+        # Allowlist: tags we must keep as real HTML in enhanced mode
+        if tag in ("a",):
+            return "<" + inner + ">"
+
+        return "&lt;" + inner + "&gt;"
+
+    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
     
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'

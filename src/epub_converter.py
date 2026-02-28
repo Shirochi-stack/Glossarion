@@ -742,18 +742,18 @@ class XHTMLConverter:
                     # Check for start chars /!? or if it has attributes (=)
                     if '=' in inner or inner.strip().startswith(('/', '!', '?')):
                         return m.group(0)
-                    
+
                     # If the first token is a known HTML tag name, keep it
                     tokens = inner.strip().split()
                     if not tokens:
                         return m.group(0)
-                        
+
                     first = tokens[0].lower()
-                    
+
                     # Handle self-closing tags like <br/> by removing trailing slash
                     if first.endswith('/'):
                         first = first[:-1]
-                    
+
                     known = {
                         'html','head','body','title','meta','link','style','script','noscript',
                         'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
@@ -771,17 +771,50 @@ class XHTMLConverter:
                     }
                     if first in known:
                         return m.group(0)
-                        
+
                     # Otherwise, treat as narrative text in angle brackets and escape
                     return f'&lt;{inner}&gt;'
-                
+
                 # Match <...> where content matches non-brackets.
                 # Allow single words without spaces (e.g. <luck>)
                 pattern = r'<([^<>]+)>'
                 txt = re.sub(pattern, repl, txt)
-                # Also handle cases where closing bracket is already an entity
+
+                # Also handle cases where closing bracket is already an entity.
+                # IMPORTANT: Don't let this match across *real tags* like:
+                #   <a href="&lt;part0009.html#id&gt;">...
+                # because it will convert the *start tag* into literal text (&lt;a ...), breaking TOC links.
+                def repl_gt(m):
+                    inner = m.group(1)
+                    if '=' in inner or inner.strip().startswith(('/', '!', '?')):
+                        return m.group(0)
+                    tokens = inner.strip().split()
+                    if not tokens:
+                        return m.group(0)
+                    first = tokens[0].lower()
+                    if first.endswith('/'):
+                        first = first[:-1]
+                    known = {
+                        'html','head','body','title','meta','link','style','script','noscript',
+                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
+                        'ul','ol','li','dl','dt','dd',
+                        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
+                        'table','thead','tbody','tr','td','th','caption','col','colgroup',
+                        'blockquote','q','cite',
+                        'section','article','header','footer','nav','main','aside','details','summary',
+                        'figure','figcaption',
+                        'form','input','button','select','option','textarea','label','fieldset','legend',
+                        'iframe','canvas','svg','math',
+                        'video','audio','source','track','embed','object','param',
+                        'map','area',
+                        'center', 'font', 'base'
+                    }
+                    if first in known:
+                        return m.group(0)
+                    return f'&lt;{inner}&gt;'
+
                 pattern_gt = r'<([^<>]+)&gt;'
-                txt = re.sub(pattern_gt, lambda m: f'&lt;{m.group(1)}&gt;', txt)
+                txt = re.sub(pattern_gt, repl_gt, txt)
                 return txt
 
             html_content = _escape_plaintext_angle_brackets(html_content)
