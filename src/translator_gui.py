@@ -2393,7 +2393,7 @@ Recent translations to summarize:
             # NEW: QA scanning helpers
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
             ('scan_phase_enabled_var', 'scan_phase_enabled', True),
-            ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', True),
+            ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', False),
             # Keep existing variables intact
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),
@@ -14228,7 +14228,7 @@ Important rules:
 
                 # QA/meta preferences
                 ('QA_AUTO_SEARCH_OUTPUT', '1' if getattr(self, 'qa_auto_search_output_var', True) else '0'),
-                ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', True) else '0'),
+                ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', False) else '0'),
                 ('REINFORCEMENT_FREQUENCY', str(getattr(self, 'reinforcement_freq_var', '10'))),
                 # Post-translation scanning phase
                 ('SCAN_PHASE_ENABLED', '1' if getattr(self, 'scan_phase_enabled_var', False) else '0'),

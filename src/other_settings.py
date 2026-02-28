@@ -3023,7 +3023,7 @@ def _create_response_handling_section(self, parent):
     retries_desc.setContentsMargins(20, 2, 0, 10)
     section_v.addWidget(retries_desc)
     
-    # Indefinite Rate Limit Retry toggle
+    # Indefinite Rate Limit Retry toggle (default OFF)
     indefinite_retry_cb = self._create_styled_checkbox("Indefinite Rate Limit Retry")
     indefinite_retry_cb.setContentsMargins(20, 0, 0, 0)
     try:

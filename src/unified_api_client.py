@@ -186,6 +186,58 @@ _api_watchdog_last_context = None
 _api_watchdog_last_model = None
 _api_watchdog_entries = {}
 
+def _parse_error_json(error_str: str) -> Dict:
+    """Extract JSON payload from an AuthGPT error string like 'AuthGPT: 429 – {...}'."""
+    if not error_str:
+        return {}
+    try:
+        idx = error_str.find("{")
+        if idx == -1:
+            return {}
+        return json.loads(error_str[idx:])
+    except Exception:
+        return {}
+
+
+def _format_usage_reset_message(error_str: str) -> str:
+    """Return a user-friendly local-time reset message from usage_limit_reached errors."""
+    data = _parse_error_json(error_str)
+    err = data.get("error") if isinstance(data, dict) else {}
+    resets_at = err.get("resets_at")
+    resets_in = err.get("resets_in_seconds")
+    if resets_at is None:
+        return ""
+    try:
+        local_dt = datetime.fromtimestamp(resets_at).astimezone()
+        local_fmt = local_dt.strftime("%Y-%m-%d %I:%M:%S %p %Z").strip()
+    except Exception:
+        try:
+            local_dt = datetime.fromtimestamp(resets_at)
+            local_fmt = local_dt.strftime("%Y-%m-%d %I:%M:%S %p")
+        except Exception:
+            return ""
+
+    parts = [f"resets at {local_fmt}"]
+    if resets_in is not None:
+        try:
+            remaining = int(resets_in)
+            days, rem = divmod(remaining, 86400)
+            hours, rem = divmod(rem, 3600)
+            minutes, seconds = divmod(rem, 60)
+            dur_parts = []
+            if days:
+                dur_parts.append(f"{days}d")
+            if hours or days:
+                dur_parts.append(f"{hours}h")
+            if minutes or hours or days:
+                dur_parts.append(f"{minutes}m")
+            dur_parts.append(f"{seconds}s")
+            parts.append(f"(~{' '.join(dur_parts)} remaining)")
+        except Exception:
+            pass
+    return " ".join(parts)
+
+
 def _api_watchdog_norm_chapter(val):
     try:
         if val is None:
@@ -14164,10 +14216,12 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                # On 429 usage_limit_reached, don't retry
+                # On 429 usage_limit_reached, surface reset time in a friendly way
                 if "429" in error_str and "usage_limit_reached" in error_str:
+                    friendly_reset = _format_usage_reset_message(error_str)
+                    friendly_suffix = f" {friendly_reset}." if friendly_reset else ""
                     raise UnifiedClientError(
-                        f"AuthGPT: Usage limit reached — not retrying: {error_str}",
+                        f"AuthGPT: Usage limit reached.{friendly_suffix} Raw: {error_str}",
                         error_type="rate_limit"
                     )
 
