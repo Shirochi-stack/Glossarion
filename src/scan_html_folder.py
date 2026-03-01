@@ -224,6 +224,41 @@ TRANSLATION_ARTIFACTS = {
         re.IGNORECASE | re.DOTALL
     )
 }
+
+# AI artifact detection patterns (mirrors ContentProcessor.clean_ai_artifacts)
+AI_ARTIFACT_FIRSTLINE_PATTERNS = [
+    re.compile(r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)\b', re.IGNORECASE),
+    re.compile(r'^(?:I\'ll|I will|Let me)\s+(?:translate|help|assist)\b', re.IGNORECASE),
+    re.compile(r'^(?:System|Assistant|AI|User|Human|Model)\s*:', re.IGNORECASE),
+    re.compile(r'^\[PART\s+\d+/\d+\]', re.IGNORECASE),
+    re.compile(r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)\b', re.IGNORECASE),
+    re.compile(r'^```(?:html|xml|text)?\s*$', re.IGNORECASE),
+    re.compile(r'^<!DOCTYPE', re.IGNORECASE),
+]
+
+AI_SINGLE_WORD_HEADERS = {
+    'html', 'text', 'content', 'translation', 'output'
+}
+
+THINKING_TAG_PATTERNS = [
+    (re.compile(r'<thinking>.*?</thinking>', re.IGNORECASE | re.DOTALL), 'thinking'),
+    (re.compile(r'<think>.*?</think>', re.IGNORECASE | re.DOTALL), 'think'),
+    (re.compile(r'<thoughts>.*?</thoughts>', re.IGNORECASE | re.DOTALL), 'thoughts'),
+    (re.compile(r'<reasoning>.*?</reasoning>', re.IGNORECASE | re.DOTALL), 'reasoning'),
+    (re.compile(r'<analysis>.*?</analysis>', re.IGNORECASE | re.DOTALL), 'analysis'),
+    (re.compile(r'<reflection>.*?</reflection>', re.IGNORECASE | re.DOTALL), 'reflection'),
+    (re.compile(r'<\|thinking\|>.*?</\|thinking\|>', re.IGNORECASE | re.DOTALL), 'o1-thinking'),
+    (re.compile(r'\[thinking\].*?\[/thinking\]', re.IGNORECASE | re.DOTALL), 'claude-thinking'),
+    (re.compile(r'\[THINKING\].*?\[/THINKING\]', re.IGNORECASE | re.DOTALL), 'bracketed-thinking'),
+    (re.compile(r'\[ANALYSIS\].*?\[/ANALYSIS\]', re.IGNORECASE | re.DOTALL), 'bracketed-analysis'),
+]
+
+AI_CODE_FENCE_LINE = re.compile(r'^```(?:\w+)?\s*$', re.IGNORECASE | re.MULTILINE)
+
+AI_JSON_LINE_MARKERS = [
+    '"role":', '"content":', '"messages":',
+    '{"role"', '{"content"', '[{', '}]'
+]
 # Cache configuration - will be updated by configure_qa_cache()
 _cache_config = {
     "enabled": True,
@@ -967,6 +1002,83 @@ def detect_translation_artifacts(text):
                 'examples': list(set(matches))[:3]
             })
     
+    return artifacts_found
+
+def detect_ai_artifacts(text):
+    """Detect AI response artifacts (when removal is enabled in translation pipeline)"""
+    artifacts_found = []
+    if not isinstance(text, str) or not text.strip():
+        return artifacts_found
+
+    lines = text.splitlines()
+    first_line = ""
+    for line in lines:
+        if line.strip():
+            first_line = line.strip()
+            break
+
+    if first_line:
+        for pattern in AI_ARTIFACT_FIRSTLINE_PATTERNS:
+            if pattern.search(first_line):
+                artifacts_found.append({
+                    'type': 'ai_artifact_leading_line',
+                    'count': 1,
+                    'examples': [first_line],
+                    'severity': 'medium'
+                })
+                break
+
+        if first_line.lower() in AI_SINGLE_WORD_HEADERS:
+            artifacts_found.append({
+                'type': 'ai_artifact_single_word',
+                'count': 1,
+                'examples': [first_line],
+                'severity': 'low'
+            })
+
+    # Thinking tags anywhere in the content
+    thinking_count = 0
+    thinking_examples = []
+    for pattern, label in THINKING_TAG_PATTERNS:
+        matches = pattern.findall(text)
+        if matches:
+            thinking_count += len(matches)
+            if label not in thinking_examples:
+                thinking_examples.append(label)
+
+    if thinking_count > 0:
+        artifacts_found.append({
+            'type': 'ai_thinking_tags',
+            'count': thinking_count,
+            'examples': thinking_examples[:3],
+            'severity': 'high'
+        })
+
+    # Code fence markers left in output
+    code_fence_matches = AI_CODE_FENCE_LINE.findall(text)
+    if code_fence_matches:
+        artifacts_found.append({
+            'type': 'ai_code_fence_markers',
+            'count': len(code_fence_matches),
+            'examples': list(set(code_fence_matches))[:3],
+            'severity': 'low'
+        })
+
+    # JSON artifacts at start of output
+    json_lines = []
+    for line in lines[:5]:
+        if line.strip() and any(marker in line for marker in AI_JSON_LINE_MARKERS):
+            json_lines.append(line.strip())
+        else:
+            break
+    if json_lines:
+        artifacts_found.append({
+            'type': 'ai_json_artifacts',
+            'count': len(json_lines),
+            'examples': json_lines[:3],
+            'severity': 'medium'
+        })
+
     return artifacts_found
     
 def detect_glossary_leakage(text, threshold=2):
@@ -5467,8 +5579,10 @@ def process_html_file_batch(args):
         
         # Detect translation artifacts
         artifacts = []
+        check_translation_artifacts = qa_settings.get('check_translation_artifacts', False)
+        check_ai_artifacts = qa_settings.get('check_ai_artifacts', False)
         # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)
-        if qa_settings.get('check_translation_artifacts', False):
+        if check_translation_artifacts:
             artifacts = detect_translation_artifacts(raw_text)
             
             # Check for empty attribute tags in RAW content (these are tags, so stripped from raw_text)
@@ -5514,6 +5628,10 @@ def process_html_file_batch(args):
                             'examples': list(set(split_matches))[:5],
                             'severity': 'high'
                         })
+        if check_ai_artifacts:
+            ai_artifacts = detect_ai_artifacts(raw_text)
+            if ai_artifacts:
+                artifacts.extend(ai_artifacts)
             
         # Filter out encoding_issues if disabled
         if not qa_settings.get('check_encoding_issues', True):
@@ -6934,6 +7052,61 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             issues.append(f"LLM_token_issue: '{display_ex}'")
                     else:
                         issues.append(f"LLM_token_issue_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_artifact_leading_line':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:60] if len(examples[0]) > 60 else examples[0]
+                        log(f"   🤖 AI artifact (leading line): '{first_example}'")
+                        issue_text = f"ai_artifact_leading_line: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_artifact_leading_line_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_artifact_single_word':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:30] if len(examples[0]) > 30 else examples[0]
+                        log(f"   🤖 AI artifact (single word): '{first_example}'")
+                        issue_text = f"ai_artifact_single_word: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_artifact_single_word_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_thinking_tags':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:40] if len(str(examples[0])) > 40 else str(examples[0])
+                        log(f"   🤖 AI thinking tag(s) detected: '{first_example}'")
+                        issue_text = f"ai_thinking_tags: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_thinking_tags_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_code_fence_markers':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:10] if len(str(examples[0])) > 10 else str(examples[0])
+                        log(f"   🤖 AI code fence marker detected: '{first_example}'")
+                        issue_text = f"ai_code_fence_marker: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_code_fence_markers_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_json_artifacts':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:60] if len(str(examples[0])) > 60 else str(examples[0])
+                        log(f"   🤖 AI JSON artifact line: '{first_example}'")
+                        issue_text = f"ai_json_artifact: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_json_artifacts_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
                     severity = artifact.get('severity', 'medium')
                     examples = artifact.get('examples', [])

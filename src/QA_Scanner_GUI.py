@@ -317,6 +317,7 @@ class QAScannerMixin:
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,
+            'check_ai_artifacts': False,
             'check_punctuation_mismatch': False,
             'punctuation_loss_threshold': 49,
             'flag_excess_punctuation': False,
@@ -2343,6 +2344,12 @@ class QAScannerMixin:
         check_artifacts_checkbox = self._create_styled_checkbox("Check for translation artifacts (MTL notes, watermarks)")
         check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', False))
         detection_layout.addWidget(check_artifacts_checkbox)
+
+        # Separate toggle for AI artifacts
+        check_ai_artifacts_checkbox = self._create_styled_checkbox("Check for AI artifacts (\"Sure, here’s…\", thinking tags, JSON)")
+        check_ai_artifacts_checkbox.setChecked(qa_settings.get('check_ai_artifacts', False))
+        check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
+        detection_layout.addWidget(check_ai_artifacts_checkbox)
         
         check_punctuation_checkbox = self._create_styled_checkbox("Check ?! punctuation mismatches (compares with source file)")
         check_punctuation_checkbox.setChecked(qa_settings.get('check_punctuation_mismatch', False))
@@ -3315,6 +3322,7 @@ class QAScannerMixin:
                     'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
+                    'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
                     'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                     'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                     'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
@@ -3531,6 +3539,7 @@ class QAScannerMixin:
                         ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
                         ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
                         ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
+                        ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
                         ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
                         ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                         ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
@@ -3628,6 +3637,7 @@ class QAScannerMixin:
                 check_encoding_checkbox.setChecked(False)
                 check_repetition_checkbox.setChecked(True)
                 check_artifacts_checkbox.setChecked(False)
+                check_ai_artifacts_checkbox.setChecked(False)
                 check_punctuation_checkbox.setChecked(False)
                 punct_threshold_spinbox.setValue(49)
                 excess_punct_checkbox.setChecked(False)
