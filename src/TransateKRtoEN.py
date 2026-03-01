@@ -5192,8 +5192,20 @@ class BatchTranslationProcessor:
                     try:
                         result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
 
-                        # Handle graceful-stop skipped chunks — reset to pending, not failed
+                        # Handle graceful-stop skipped chunks
                         if finish_reason == "graceful_stop":
+                            save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
+                            if save_partial_results:
+                                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                                with self.progress_lock:
+                                    self.update_progress_fn(
+                                        idx, actual_num, content_hash, fname,
+                                        status="qa_failed",
+                                        qa_issues_found=["PARTIAL"],
+                                        chapter_obj=chapter
+                                    )
+                                    self.save_progress_fn()
+                                print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                             chunk_abort_event.set()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             # Let the outer handler mark the chapter as pending/skipped
@@ -5213,6 +5225,21 @@ class BatchTranslationProcessor:
                             # Signal other chunk workers to abort quickly (chapter-local only)
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                            save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
+                            if save_partial_results:
+                                # Preserve original markup when blocked (no translated output)
+                                original_markup = (
+                                    chapter.get("original_html")
+                                    or chapter.get("source_html")
+                                    or chapter.get("raw_html")
+                                    or chapter.get("body")
+                                    or ""
+                                )
+                                try:
+                                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                        f.write(original_markup)
+                                except Exception:
+                                    pass
                             with self.progress_lock:
                                 self.update_progress_fn(
                                     idx, actual_num, content_hash, fname,
@@ -11880,21 +11907,49 @@ def main(log_callback=None, stop_callback=None):
                 # If this chunk was blocked/prohibited, stop remaining chunks and mark QA fail
                 if finish_reason in ("content_filter", "prohibited_content", "error"):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    progress_manager.update(idx, actual_num, content_hash, fname,
-                                             status="qa_failed",
-                                             qa_issues_found=["PROHIBITED_CONTENT"],
-                                             chapter_obj=c)
+                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+                    if save_partial_results:
+                        # Preserve original markup when blocked (no translated output)
+                        original_markup = (
+                            c.get("original_html")
+                            or c.get("source_html")
+                            or c.get("raw_html")
+                            or c.get("body")
+                            or ""
+                        )
+                        try:
+                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                f.write(original_markup)
+                        except Exception:
+                            pass
+                    progress_manager.update(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed",
+                        qa_issues_found=["PROHIBITED_CONTENT"],
+                        chapter_obj=c
+                    )
                     progress_manager.save()
                     print(f"❌ Chunk {chunk_idx}/{total_chunks} hit content filter/prohibited; aborting chapter {actual_num}")
                     chunk_abort = True
                     break
                 
-                # Handle graceful-stop skipped chunks — reset to pending, not failed
+                # Handle graceful-stop skipped chunks
                 if finish_reason == "graceful_stop":
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="pending")
-                    progress_manager.save()
-                    print(f"⏸️ Chapter {actual_num} skipped (graceful stop)")
+                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+                    if save_partial_results:
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=["PARTIAL"],
+                            chapter_obj=c
+                        )
+                        progress_manager.save()
+                        print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
+                    else:
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="pending")
+                        progress_manager.save()
+                        print(f"⏸️ Chapter {actual_num} skipped (graceful stop)")
                     chunk_abort = True
                     break
 

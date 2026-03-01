@@ -13438,6 +13438,7 @@ Important rules:
                 # Stop behavior
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
                 ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
+                ('save_partial_results', ['save_partial_results_checkbox', 'save_partial_results_var'], False, bool),
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 1800, lambda v: safe_int(v, 1800)),
@@ -13651,6 +13652,7 @@ Important rules:
             default_qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': False, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
+            self.config.setdefault('save_partial_results', False)
             # Image compression defaults
             compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
             for key, val in compression_defaults.items():
@@ -14241,6 +14243,7 @@ Important rules:
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
+                ('SAVE_PARTIAL_RESULTS', '1' if getattr(self, 'save_partial_results_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
                 ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
                 # Char-ratio truncation (silent truncation detector)

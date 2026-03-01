@@ -3197,19 +3197,55 @@ def _create_response_handling_section(self, parent):
     wait_chunks_desc.setContentsMargins(60, 2, 0, 5)
     section_v.addWidget(wait_chunks_desc)
     
+    # Save partial results toggle (child of graceful stop)
+    if not hasattr(self, 'save_partial_results_var'):
+        self.save_partial_results_var = self.config.get('save_partial_results', False)
+    
+    self.save_partial_results_checkbox = self._create_styled_checkbox("Save partial results on graceful stop")
+    self.save_partial_results_checkbox.setContentsMargins(40, 0, 0, 0)
+    self.save_partial_results_checkbox.setToolTip(
+        "When enabled, chapters interrupted by graceful stop or blocked for prohibited content\n"
+        "are saved and marked as QA failed (PARTIAL/PROHIBITED) instead of staying pending."
+    )
+    try:
+        self.save_partial_results_checkbox.setChecked(bool(self.save_partial_results_var))
+    except Exception:
+        pass
+    def _on_save_partial_results_toggle(checked):
+        try:
+            self.save_partial_results_var = bool(checked)
+        except Exception:
+            pass
+    self.save_partial_results_checkbox.toggled.connect(_on_save_partial_results_toggle)
+    section_v.addWidget(self.save_partial_results_checkbox)
+    
+    save_partial_desc = QLabel("When enabled, a graceful stop will mark the current chapter as QA failed (PARTIAL)\ninstead of pending if it gets interrupted.")
+    save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    save_partial_desc.setContentsMargins(60, 2, 0, 5)
+    section_v.addWidget(save_partial_desc)
+    
     # Enable/disable based on graceful stop state
     def _update_wait_for_chunks_state(graceful_checked):
         self.wait_for_chunks_checkbox.setEnabled(graceful_checked)
         wait_chunks_desc.setEnabled(graceful_checked)
+        self.save_partial_results_checkbox.setEnabled(graceful_checked)
+        save_partial_desc.setEnabled(graceful_checked)
         if graceful_checked:
             self.wait_for_chunks_checkbox.setStyleSheet("none")
             self.wait_for_chunks_checkbox.setStyleSheet("")
             self.wait_for_chunks_checkbox.style().unpolish(self.wait_for_chunks_checkbox)
             self.wait_for_chunks_checkbox.style().polish(self.wait_for_chunks_checkbox)
             wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+            self.save_partial_results_checkbox.setStyleSheet("none")
+            self.save_partial_results_checkbox.setStyleSheet("")
+            self.save_partial_results_checkbox.style().unpolish(self.save_partial_results_checkbox)
+            self.save_partial_results_checkbox.style().polish(self.save_partial_results_checkbox)
+            save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
         else:
             self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
             wait_chunks_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+            self.save_partial_results_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
+            save_partial_desc.setStyleSheet("color: #606060; font-size: 10pt;")
     
     self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
     _update_wait_for_chunks_state(self.graceful_stop_checkbox.isChecked())
