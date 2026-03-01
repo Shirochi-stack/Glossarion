@@ -1250,10 +1250,22 @@ class EPUBCompiler:
         self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
         # Legacy EPUB2-style internal structure toggle (OEBPS/Text)
         self.legacy_epub_structure = os.getenv('LEGACY_EPUB_STRUCTURE', '0') == '1'
+
+        # Source toc.ncx options
+        self.use_toc_ncx = os.getenv('USE_TOC_NCX', '0') == '1'
+        self.translate_toc_ncx = os.getenv('TRANSLATE_TOC_NCX', '0') == '1'
+        if self.translate_toc_ncx and not self.use_toc_ncx:
+            # Translation implies we must read the source toc.ncx
+            self.use_toc_ncx = True
+
         self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
         self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
         if self.legacy_epub_structure:
             self.log("[INFO] Legacy structure enabled: EPUB2 layout (OEBPS/Text)")
+        if self.use_toc_ncx:
+            self.log("[INFO] Use toc.ncx enabled: TOC will be built from the source EPUB's toc.ncx")
+        if self.translate_toc_ncx:
+            self.log("[INFO] Translate toc.ncx enabled: TOC entries will be translated in one API call and cached to TOC.txt")
         
         # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
         self.auxiliary_html_files: set[str] = set()
@@ -1275,7 +1287,7 @@ class EPUBCompiler:
         
         # Initialize API client if needed
         self.api_client = None
-        if self.translate_titles or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1':
+        if (self.translate_titles or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1' or getattr(self, 'translate_toc_ncx', False)):
             model = os.getenv('MODEL')
             api_key = os.getenv('API_KEY')
             if model and api_key and UnifiedClient:
@@ -1743,7 +1755,18 @@ class EPUBCompiler:
             if self.is_stopped():
                 self.log("🛑 EPUB converter stopped by user")
                 return
-            
+
+            # Optional: Build TOC from the source EPUB's toc.ncx (and optionally translate it)
+            if getattr(self, 'use_toc_ncx', False):
+                try:
+                    toc = self._build_toc_from_source_toc_ncx(
+                        spine=spine,
+                        existing_toc=toc,
+                        metadata=metadata
+                    )
+                except Exception as e:
+                    self.log(f"⚠️ Failed to build TOC from source toc.ncx: {e}")
+
             # Finalize book
             self._finalize_book(book, spine, toc, cover_file)
             
@@ -4257,7 +4280,280 @@ img {
         
         book.add_item(gallery_page)
         return gallery_page
-            
+
+    # --- toc.ncx support (source TOC) ---
+    def _strip_all_ext(self, name: str) -> str:
+        core = name
+        while True:
+            base, ext = os.path.splitext(core)
+            if ext and ext.lower() in ['.html', '.htm', '.xhtml', '.xml']:
+                core = base
+            else:
+                break
+        return core
+
+    def _normalize_core_name(self, filename_or_href: str) -> str:
+        """Normalize a filename/href for matching (strip fragment, response_ prefix, and all extensions)."""
+        if not filename_or_href:
+            return ''
+        href = str(filename_or_href)
+        if '#' in href:
+            href = href.split('#', 1)[0]
+        base = os.path.basename(href)
+        if base.startswith('response_'):
+            base = base[9:]
+        base = self._strip_all_ext(base)
+        return base.lower().strip()
+
+    def _extract_source_toc_ncx_entries(self, source_epub_path: str) -> List[Dict[str, str]]:
+        """Extract ordered navPoint entries from the source EPUB's toc.ncx.
+
+        Returns list of dicts: {'label': str, 'src': str}
+        """
+        entries: List[Dict[str, str]] = []
+        if not source_epub_path or not os.path.exists(source_epub_path):
+            return entries
+
+        try:
+            import zipfile
+            with zipfile.ZipFile(source_epub_path, 'r') as zf:
+                ncx_path = None
+
+                # 1) Try container.xml -> OPF -> manifest item media-type application/x-dtbncx+xml
+                opf_path = None
+                try:
+                    container = zf.read('META-INF/container.xml')
+                    tree = ET.fromstring(container)
+                    rootfile = tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                    if rootfile is not None:
+                        opf_path = rootfile.get('full-path')
+                except Exception:
+                    opf_path = None
+
+                if not opf_path:
+                    for name in zf.namelist():
+                        if name.lower().endswith('.opf'):
+                            opf_path = name
+                            break
+
+                if opf_path:
+                    try:
+                        opf_bytes = zf.read(opf_path)
+                        root = ET.fromstring(opf_bytes)
+                        ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                        if root.tag.startswith('{'):
+                            default_ns = root.tag[1:root.tag.index('}')]
+                            ns = {'opf': default_ns}
+
+                        for item in root.findall('.//opf:manifest/opf:item', ns):
+                            mt = (item.get('media-type') or '').strip().lower()
+                            item_id = (item.get('id') or '').strip().lower()
+                            href = item.get('href')
+                            if not href:
+                                continue
+                            if mt == 'application/x-dtbncx+xml' or item_id == 'ncx':
+                                base_dir = os.path.dirname(opf_path)
+                                candidate = os.path.join(base_dir, href).replace('\\', '/') if base_dir else href
+                                if candidate in zf.namelist():
+                                    ncx_path = candidate
+                                    break
+                    except Exception:
+                        ncx_path = None
+
+                # 2) Fallback: find toc.ncx by name
+                if not ncx_path:
+                    for name in zf.namelist():
+                        if name.lower().endswith('toc.ncx'):
+                            ncx_path = name
+                            break
+
+                if not ncx_path:
+                    return entries
+
+                ncx_bytes = zf.read(ncx_path)
+
+            # Parse outside zip context
+            root = ET.fromstring(ncx_bytes)
+            ns_uri = ''
+            if root.tag.startswith('{'):
+                ns_uri = root.tag[1:root.tag.index('}')]
+            ns = {'ncx': ns_uri} if ns_uri else {}
+
+            navpoints = root.findall('.//ncx:navPoint', ns) if ns else root.findall('.//navPoint')
+            for np in navpoints:
+                label = ''
+                src = ''
+
+                nav_text = np.find('ncx:navLabel/ncx:text', ns) if ns else np.find('navLabel/text')
+                if nav_text is not None and nav_text.text:
+                    label = nav_text.text.strip()
+
+                content = np.find('ncx:content', ns) if ns else np.find('content')
+                if content is not None:
+                    src = (content.get('src') or '').strip()
+
+                if label or src:
+                    entries.append({'label': label, 'src': src})
+
+        except Exception as e:
+            self.log(f"⚠️ Failed to parse source toc.ncx: {e}")
+            return []
+
+        return entries
+
+    def _save_toc_translations_file(self, output_path: str, original: Dict[int, str], translated: Dict[int, str], refs: Dict[int, str]):
+        """Save TOC translations in the same block format as translated_headers.txt (robust parsing)."""
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write("TOC Translations\n")
+                f.write("=" * 50 + "\n\n")
+
+                nums = list(original.keys())
+                for num in nums:
+                    orig = original.get(num, "")
+                    trans = translated.get(num, orig)
+                    f.write(f"Chapter {num}:\n")
+                    f.write(f"  Original:   {orig}\n")
+                    f.write(f"  Translated: {trans}\n")
+                    if refs and num in refs and refs[num]:
+                        f.write(f"  Output File: {refs[num]}\n")
+                    if num not in translated:
+                        f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                    f.write("-" * 40 + "\n")
+
+                f.write("\nSummary:\n")
+                f.write(f"Total entries: {len(nums)}\n")
+                if nums:
+                    f.write(f"Entry range: {min(nums)} to {max(nums)}\n")
+                f.write(f"Successfully translated: {len(translated)}\n")
+
+        except Exception as e:
+            self.log(f"⚠️ Failed to save TOC.txt: {e}")
+
+    def _load_toc_translations_file(self, toc_txt_path: str) -> Dict[int, str]:
+        """Load TOC translations from TOC.txt (same parser as translated_headers.txt)."""
+        try:
+            from translate_headers_standalone import load_translations_from_file
+            _, translated, _ = load_translations_from_file(toc_txt_path, self.log)
+            return translated or {}
+        except Exception:
+            return {}
+
+    def _build_toc_from_source_toc_ncx(self, spine: List, existing_toc: List, metadata: dict) -> List:
+        """Build TOC from source toc.ncx, optionally translating navLabels and caching to TOC.txt."""
+        source_epub_path = os.getenv('EPUB_PATH')
+        if not source_epub_path or not os.path.exists(source_epub_path):
+            self.log("⚠️ USE_TOC_NCX enabled but EPUB_PATH is missing or invalid; using generated TOC")
+            return existing_toc
+
+        entries = self._extract_source_toc_ncx_entries(source_epub_path)
+        if not entries:
+            self.log("⚠️ USE_TOC_NCX enabled but no toc.ncx entries were found; using generated TOC")
+            return existing_toc
+
+        # Build mapping from normalized core name -> actual spine href
+        spine_href_by_core: Dict[str, str] = {}
+        spine_items_for_order = []
+        for it in spine:
+            if not hasattr(it, 'file_name'):
+                continue
+            # Skip cover for mapping
+            if hasattr(it, 'title') and str(getattr(it, 'title', '')).strip().lower() == 'cover':
+                continue
+            # Skip gallery for mapping
+            if os.path.basename(it.file_name).lower() == 'gallery.xhtml':
+                continue
+            spine_items_for_order.append(it)
+            core = self._normalize_core_name(it.file_name)
+            if core and core not in spine_href_by_core:
+                spine_href_by_core[core] = it.file_name
+
+        # Fallback: map by OPF order (source filename order -> spine chapter order)
+        try:
+            opf_order = self._get_chapter_order_from_opf() or {}
+            if opf_order and spine_items_for_order:
+                ordered_source = [fn for fn, _ in sorted(opf_order.items(), key=lambda x: x[1])]
+                limit = min(len(ordered_source), len(spine_items_for_order))
+                for i in range(limit):
+                    src_core = self._normalize_core_name(ordered_source[i])
+                    if src_core and src_core not in spine_href_by_core:
+                        spine_href_by_core[src_core] = spine_items_for_order[i].file_name
+        except Exception:
+            pass
+
+        # Optional translation (single API call) with caching to TOC.txt
+        translations: Dict[int, str] = {}
+        original: Dict[int, str] = {}
+        refs: Dict[int, str] = {}
+        for idx, ent in enumerate(entries, 1):
+            original[idx] = ent.get('label', '') or ''
+            refs[idx] = ent.get('src', '') or ''
+
+        if getattr(self, 'translate_toc_ncx', False):
+            toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
+            if os.path.exists(toc_txt_path):
+                self.log("📁 Found existing TOC.txt - using cached toc.ncx translations")
+                translations = self._load_toc_translations_file(toc_txt_path)
+            else:
+                if not getattr(self, 'api_client', None):
+                    self.log("⚠️ TRANSLATE_TOC_NCX enabled but API client is not initialized; using original toc.ncx labels")
+                    translations = {}
+                else:
+                    self.log(f"🌐 Translating {len(original)} toc.ncx entries in ONE API call...")
+                    try:
+                        from metadata_batch_translator import BatchHeaderTranslator
+                        tr = BatchHeaderTranslator(self.api_client, {})
+                        translations = tr.translate_headers_batch(original, batch_size=len(original)) or {}
+                        self._save_toc_translations_file(toc_txt_path, original, translations, refs)
+                        self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
+                    except Exception as e:
+                        self.log(f"⚠️ toc.ncx translation failed: {e}")
+                        translations = {}
+
+        # Build toc links in source toc.ncx order
+        toc_links = []
+        missing = 0
+        for idx, ent in enumerate(entries, 1):
+            src = (ent.get('src') or '').strip()
+            label = translations.get(idx) or (ent.get('label') or '').strip()
+            if not src:
+                continue
+
+            frag = ''
+            src_base = src
+            if '#' in src:
+                src_base, frag = src.split('#', 1)
+
+            core = self._normalize_core_name(src_base)
+            target_base = spine_href_by_core.get(core)
+            if not target_base:
+                missing += 1
+                continue
+
+            target_href = target_base
+            if frag:
+                target_href = f"{target_href}#{frag}"
+
+            try:
+                toc_links.append(epub.Link(target_href, label or os.path.basename(target_base), f"toc_{idx}"))
+            except Exception:
+                # If Link construction fails for any reason, skip
+                missing += 1
+
+        # Preserve any non-chapter TOC entries we added (e.g., gallery)
+        extras = []
+        for it in existing_toc:
+            try:
+                if hasattr(it, 'file_name') and os.path.basename(it.file_name).lower() == 'gallery.xhtml':
+                    extras.append(it)
+            except Exception:
+                continue
+
+        if missing:
+            self.log(f"⚠️ toc.ncx mapping: skipped {missing} entry(ies) that couldn't be matched to output chapters")
+        self.log(f"✅ Built TOC from source toc.ncx: {len(toc_links)} entries")
+        return toc_links + extras
+
     def _create_nav_content(self, toc_items, book_title="Book"):
         """Create navigation content manually"""
         # Use the same primary language as the rest of the book for nav.xhtml
@@ -4277,8 +4573,20 @@ img {
         # The toc_items are already sorted properly by _finalize_book
         # Don't re-sort them here - just use them as-is
         for item in toc_items:
+            href = None
+            title = None
+
+            # EpubHtml
             if hasattr(item, 'title') and hasattr(item, 'file_name'):
-                nav_content += f'\n<li><a href="{item.file_name}">{ContentProcessor.safe_escape(item.title)}</a></li>'
+                href = item.file_name
+                title = item.title
+            # epub.Link
+            elif hasattr(item, 'title') and hasattr(item, 'href'):
+                href = item.href
+                title = item.title
+
+            if href and title is not None:
+                nav_content += f'\n<li><a href="{href}">{ContentProcessor.safe_escape(str(title))}</a></li>'
         
         nav_content += '''
     </ol>
@@ -4337,6 +4645,20 @@ img {
                 cover_item = first_item
                 spine = spine[1:]  # Remove cover from spine temporarily
         
+        def _href_without_fragment(h: str) -> str:
+            if not h:
+                return ''
+            return h.split('#', 1)[0]
+
+        def _get_toc_href(it):
+            # EpubHtml
+            if hasattr(it, 'file_name'):
+                return getattr(it, 'file_name', '')
+            # epub.Link
+            if hasattr(it, 'href'):
+                return getattr(it, 'href', '')
+            return ''
+
         # DEBUG: Log what we have before sorting (only if debug mode is enabled)
         debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
         if debug_mode_enabled:
@@ -4345,47 +4667,58 @@ img {
             for idx, item in enumerate(spine):
                 if hasattr(item, 'file_name') and hasattr(item, 'title'):
                     self.log(f"  Spine[{idx}]: {item.file_name} -> {item.title}")
-            
+
+            self.log("TOC order:")
             for idx, item in enumerate(toc):
-                if hasattr(item, 'file_name') and hasattr(item, 'title'):
-                    self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
-        
+                href = _get_toc_href(item)
+                title = getattr(item, 'title', '') if hasattr(item, 'title') else ''
+                if href:
+                    self.log(f"  TOC[{idx}]: {href} -> {title}")
+
         # CRITICAL FIX: Sort TOC to match spine order
-        # Create a mapping of file_name to spine position
-        spine_order = {}
+        # Create a mapping of target href to spine position
+        spine_order_full = {}
+        spine_order_base = {}
         for idx, item in enumerate(spine):
             if hasattr(item, 'file_name'):
-                spine_order[item.file_name] = idx
-        
+                full = getattr(item, 'file_name', '')
+                if not full:
+                    continue
+                full_base = _href_without_fragment(full)
+                spine_order_full[full_base] = idx
+                spine_order_base[os.path.basename(full_base)] = idx
+
         # Sort the TOC based on spine order
         sorted_toc = []
         unsorted_items = []
-        
+
         for toc_item in toc:
-            if hasattr(toc_item, 'file_name'):
-                if toc_item.file_name in spine_order:
-                    sorted_toc.append((spine_order[toc_item.file_name], toc_item))
-                else:
-                    # Items not in spine (like gallery) go at the end
-                    unsorted_items.append(toc_item)
+            href = _href_without_fragment(_get_toc_href(toc_item))
+            if href and href in spine_order_full:
+                sorted_toc.append((spine_order_full[href], toc_item))
+            elif href and os.path.basename(href) in spine_order_base:
+                sorted_toc.append((spine_order_base[os.path.basename(href)], toc_item))
             else:
+                # Items not in spine (like gallery) go at the end
                 unsorted_items.append(toc_item)
-        
+
         # Sort by spine position
         sorted_toc.sort(key=lambda x: x[0])
-        
+
         # Extract just the items (remove the sort key)
         final_toc = [item for _, item in sorted_toc]
-        
+
         # Add any unsorted items at the end (like gallery)
         final_toc.extend(unsorted_items)
-        
+
         # DEBUG: Log after sorting (only if debug mode is enabled)
         if debug_mode_enabled:
             self.log("\nTOC order (after sorting to match spine):")
             for idx, item in enumerate(final_toc):
-                if hasattr(item, 'file_name') and hasattr(item, 'title'):
-                    self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
+                href = _get_toc_href(item)
+                title = getattr(item, 'title', '') if hasattr(item, 'title') else ''
+                if href:
+                    self.log(f"  TOC[{idx}]: {href} -> {title}")
         
         # Set the sorted TOC
         book.toc = final_toc
@@ -4758,7 +5091,7 @@ img {
                         images_by_name[base] = (fpath, ctype)
         
         def _read_image_as_pdf_compatible(fpath, ctype):
-            """Read image bytes, converting webp to JPEG/PNG since WeasyPrint doesn't support webp.
+            """Read image bytes, converting webp to JPEG/PNG since WeasyPrint does not support webp.
             Respects PDF_IMAGE_FORMAT, IMAGE_COMPRESSION_QUALITY, and PDF_PNG_OPTIMIZE settings."""
             if ctype == 'image/webp':
                 try:

@@ -1024,6 +1024,71 @@ def _create_output_settings_section(self, parent):
     legacy_cb.toggled.connect(_on_legacy_structure_toggle)
     section_v.addWidget(legacy_cb)
 
+    # Use source toc.ncx
+    if not hasattr(self, 'use_toc_ncx_var'):
+        self.use_toc_ncx_var = self.config.get('use_toc_ncx', False)
+
+    use_toc_cb = self._create_styled_checkbox("Use toc.ncx")
+    use_toc_cb.setToolTip(
+        "Use the toc.ncx from the source EPUB to build the Table of Contents.\n"
+        "This can preserve the original TOC structure and anchor links."  # e.g. chapter.xhtml#id
+    )
+    try:
+        use_toc_cb.setChecked(bool(self.use_toc_ncx_var))
+    except Exception:
+        pass
+
+    # Translate source toc.ncx (single API call)
+    if not hasattr(self, 'translate_toc_ncx_var'):
+        self.translate_toc_ncx_var = self.config.get('translate_toc_ncx', False)
+
+    translate_toc_cb = self._create_styled_checkbox("Translate toc.ncx")
+    translate_toc_cb.setToolTip(
+        "Translate ALL toc.ncx entries in ONE API call and save a TOC.txt cache file\n"
+        "in the same robust format as translated_headers.txt (Original/Translated blocks)."
+    )
+    try:
+        translate_toc_cb.setChecked(bool(self.translate_toc_ncx_var))
+    except Exception:
+        pass
+
+    # Enable/disable translate checkbox based on master
+    translate_toc_cb.setEnabled(use_toc_cb.isChecked())
+
+    def _on_use_toc_ncx_toggle(checked):
+        try:
+            self.use_toc_ncx_var = bool(checked)
+            self.config['use_toc_ncx'] = self.use_toc_ncx_var
+            os.environ['USE_TOC_NCX'] = '1' if checked else '0'
+
+            # Child depends on master
+            translate_toc_cb.setEnabled(bool(checked))
+            if not checked:
+                # If master is off, force child off
+                translate_toc_cb.setChecked(False)
+                self.translate_toc_ncx_var = False
+                self.config['translate_toc_ncx'] = False
+                os.environ['TRANSLATE_TOC_NCX'] = '0'
+        except Exception:
+            pass
+
+    def _on_translate_toc_ncx_toggle(checked):
+        try:
+            # If user turns on translate, ensure master is on
+            if checked and not use_toc_cb.isChecked():
+                use_toc_cb.setChecked(True)
+            self.translate_toc_ncx_var = bool(checked)
+            self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
+            os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
+    translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)
+
+    section_v.addWidget(use_toc_cb)
+    section_v.addWidget(translate_toc_cb)
+
     # Separator
     sep_epub_struct = QFrame()
     sep_epub_struct.setFrameShape(QFrame.HLine)

@@ -14275,6 +14275,9 @@ Important rules:
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
                 # New: Legacy EPUB2-style internal folder structure (OEBPS/Text)
                 ('LEGACY_EPUB_STRUCTURE', '1' if getattr(self, 'legacy_structure_var', self.config.get('legacy_structure', False)) else '0'),
+                # New: Use/translate source toc.ncx
+                ('USE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),
+                ('TRANSLATE_TOC_NCX', '1' if getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False)) else '0'),
                 # New: Translate special files (cover, nav, toc, message, etc.)
                 ('TRANSLATE_SPECIAL_FILES', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
                 # Backward compatibility: Also set the old TRANSLATE_COVER_HTML for any legacy code
