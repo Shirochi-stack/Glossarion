@@ -1115,6 +1115,43 @@ def _create_output_settings_section(self, parent):
     dedup_toc_cb.setContentsMargins(20, 0, 0, 0)
     section_v.addWidget(dedup_toc_cb)
 
+    # Deduplicate TOC based on translated titles (only if Deduplicate TOC enabled)
+    if not hasattr(self, 'deduplicate_toc_use_translated_var'):
+        self.deduplicate_toc_use_translated_var = self.config.get('deduplicate_toc_use_translated', False)
+
+    dedup_toc_translated_cb = self._create_styled_checkbox("Deduplicate using translated titles")
+    dedup_toc_translated_cb.setToolTip(
+        "When Deduplicate TOC is enabled, use translated titles for exact-match deduplication\n"
+        "instead of the raw source entries."
+    )
+    try:
+        dedup_toc_translated_cb.setChecked(bool(self.deduplicate_toc_use_translated_var))
+    except Exception:
+        pass
+
+    def _on_dedup_toc_translated_toggle(checked):
+        try:
+            self.deduplicate_toc_use_translated_var = bool(checked)
+            self.config['deduplicate_toc_use_translated'] = self.deduplicate_toc_use_translated_var
+            os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    dedup_toc_translated_cb.toggled.connect(_on_dedup_toc_translated_toggle)
+    dedup_toc_translated_cb.setContentsMargins(40, 0, 0, 0)
+    dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
+    section_v.addWidget(dedup_toc_translated_cb)
+
+    # Keep translated-based toggle in sync with master
+    def _sync_dedup_child(master_checked):
+        dedup_toc_translated_cb.setEnabled(bool(master_checked))
+        if not master_checked:
+            dedup_toc_translated_cb.setChecked(False)
+            self.deduplicate_toc_use_translated_var = False
+            self.config['deduplicate_toc_use_translated'] = False
+            os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '0'
+    dedup_toc_cb.toggled.connect(_sync_dedup_child)
+
     # Use <p> tag as TOC fallback
     if not hasattr(self, 'use_p_tag_toc_fallback_var'):
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)

@@ -4553,6 +4553,7 @@ img {
         missing = 0
         seen_labels = set()
         dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
         for idx, ent in enumerate(entries, 1):
             if toc_filter_nums is not None and idx not in toc_filter_nums:
                 # Entry was removed from TOC.txt by user; skip it entirely
@@ -4563,9 +4564,10 @@ img {
             if not src:
                 continue
             if dedup_enabled:
-                if raw_label in seen_labels:
+                key = label if dedup_use_translated else raw_label
+                if key in seen_labels:
                     continue
-                seen_labels.add(raw_label)
+                seen_labels.add(key)
 
             frag = ''
             src_base = src
