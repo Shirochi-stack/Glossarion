@@ -4430,14 +4430,14 @@ img {
         except Exception as e:
             self.log(f"⚠️ Failed to save TOC.txt: {e}")
 
-    def _load_toc_translations_file(self, toc_txt_path: str) -> Dict[int, str]:
+    def _load_toc_translations_file(self, toc_txt_path: str) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
         """Load TOC translations from TOC.txt (same parser as translated_headers.txt)."""
         try:
             from translate_headers_standalone import load_translations_from_file
-            _, translated, _ = load_translations_from_file(toc_txt_path, self.log)
-            return translated or {}
+            source_headers, translated, output_files = load_translations_from_file(toc_txt_path, self.log)
+            return source_headers or {}, translated or {}, output_files or {}
         except Exception:
-            return {}
+            return {}, {}, {}
 
     def _build_toc_from_source_toc_ncx(self, spine: List, existing_toc: List, metadata: dict) -> List:
         """Build TOC from source toc.ncx, optionally translating navLabels and caching to TOC.txt."""
@@ -4483,9 +4483,13 @@ img {
 
         # Optional translation (single API call) with caching to TOC.txt
         translations: Dict[int, str] = {}
+        toc_filter_nums: Optional[Set[int]] = None
         original: Dict[int, str] = {}
         refs: Dict[int, str] = {}
         for idx, ent in enumerate(entries, 1):
+            if toc_filter_nums is not None and idx not in toc_filter_nums:
+                # Entry was removed from TOC.txt by user; skip it entirely
+                continue
             original[idx] = ent.get('label', '') or ''
             refs[idx] = ent.get('src', '') or ''
 
@@ -4493,7 +4497,10 @@ img {
             toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
             if os.path.exists(toc_txt_path):
                 self.log("📁 Found existing TOC.txt - using cached toc.ncx translations")
-                translations = self._load_toc_translations_file(toc_txt_path)
+                toc_source_headers, translations, _ = self._load_toc_translations_file(toc_txt_path)
+                # If TOC.txt exists, treat it as authoritative: only include entries present in the file.
+                if toc_source_headers:
+                    toc_filter_nums = set(toc_source_headers.keys())
             else:
                 if not getattr(self, 'api_client', None):
                     self.log("⚠️ TRANSLATE_TOC_NCX enabled but API client is not initialized; using original toc.ncx labels")
@@ -4514,8 +4521,11 @@ img {
         toc_links = []
         missing = 0
         for idx, ent in enumerate(entries, 1):
+            if toc_filter_nums is not None and idx not in toc_filter_nums:
+                # Entry was removed from TOC.txt by user; skip it entirely
+                continue
             src = (ent.get('src') or '').strip()
-            label = translations.get(idx) or (ent.get('label') or '').strip()
+            label = translations.get(idx) or original.get(idx) or (ent.get('label') or '').strip()
             if not src:
                 continue
 
@@ -4527,6 +4537,12 @@ img {
             core = self._normalize_core_name(src_base)
             target_base = spine_href_by_core.get(core)
             if not target_base:
+                missing += 1
+                continue
+
+            # Ensure the target HTML actually exists before linking
+            target_path = os.path.normpath(os.path.join(self.output_dir, target_base))
+            if not os.path.exists(target_path):
                 missing += 1
                 continue
 
