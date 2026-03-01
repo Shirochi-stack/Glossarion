@@ -10,6 +10,7 @@ import sys
 import time
 import subprocess
 import tempfile
+import shutil
 from typing import Callable, Iterable, Optional
 
 
@@ -132,6 +133,34 @@ def _taskkill_self_tree() -> None:
         pass
 
 
+def _cleanup_pyinstaller_temp_dir(retries: int = 4, delay: float = 0.2) -> None:
+    """Best-effort cleanup of PyInstaller temp dir to avoid warning popups."""
+    try:
+        if not getattr(sys, "frozen", False):
+            return
+        temp_dir = getattr(sys, "_MEIPASS", None)
+        if not temp_dir or not os.path.isdir(temp_dir):
+            return
+
+        def _onerror(func, path, _exc):
+            try:
+                os.chmod(path, 0o700)
+                func(path)
+            except Exception:
+                pass
+
+        for _ in range(max(1, retries)):
+            try:
+                shutil.rmtree(temp_dir, onerror=_onerror)
+                if not os.path.exists(temp_dir):
+                    return
+            except Exception:
+                pass
+            time.sleep(delay)
+    except Exception:
+        pass
+
+
 def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[], None]]] = None) -> None:
     """
     Best-effort cleanup then forcefully exit the current process.
@@ -141,6 +170,7 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     code = _normalize_exit_code(exit_code)
     _ensure_safe_tempdir()
     _run_cleanup_fns(cleanup_fns)
+    _cleanup_pyinstaller_temp_dir()
     _terminate_multiprocessing_children()
     _terminate_psutil_children()
     _taskkill_self_tree()
