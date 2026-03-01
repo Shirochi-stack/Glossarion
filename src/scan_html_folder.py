@@ -187,6 +187,8 @@ KOREAN_SEPARATOR_CHARS = {
 
 # Translation artifacts patterns
 TRANSLATION_ARTIFACTS = {
+    # Exact marker for hard failures
+    'translation_failed_marker': re.compile(r'\[TRANSLATION FAILED\]'),
     'machine_translation': re.compile(r'(MTL note|TN:|Translator:|T/N:|TL note:|Translator\'s note:)', re.IGNORECASE),
     'encoding_issues': re.compile(r'[�□◇]{2,}'),
     'repeated_watermarks': re.compile(r'(\[[\w\s]+\.(?:com|net|org)\])\s*\1{2,}', re.IGNORECASE),
@@ -6975,6 +6977,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         # Translation artifacts
         if result.get('translation_artifacts'):
             for artifact in result['translation_artifacts']:
+                if artifact['type'] == 'translation_failed_marker':
+                    # Gate to very short files only
+                    if isinstance(raw_text, str) and len(raw_text.strip()) < 50:
+                        examples = artifact.get('examples', [])
+                        if examples:
+                            log(f"   ⚠️ Translation failed marker detected")
+                            issues.append("translation_failed_marker_found")
+                        else:
+                            issues.append(f"translation_failed_marker_{artifact['count']}_found")
                 if artifact['type'] == 'machine_translation':
                     # Log with details about what was found
                     examples = artifact.get('examples', [])
