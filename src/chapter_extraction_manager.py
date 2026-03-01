@@ -33,6 +33,23 @@ class ChapterExtractionManager:
         self.result = None
         self.is_running = False
         self.stop_requested = False
+        self._suppress_subprocess_errors = False
+
+    def _should_suppress_subprocess_errors(self, stderr_text: str, returncode: int) -> bool:
+        """Return True when stderr should be suppressed due to intentional stop/termination."""
+        try:
+            if self.stop_requested:
+                return True
+            # Common termination code when force-stopping on Windows
+            if returncode in (15, -15):
+                return True
+            if stderr_text:
+                t = stderr_text.lower()
+                if "multiprocessing\\spawn.py" in t and "winerror 5" in t:
+                    return True
+        except Exception:
+            pass
+        return False
         
     def extract_chapters_async(self, epub_path, output_dir, extraction_mode="smart", 
                               progress_callback=None, completion_callback=None):
@@ -261,13 +278,14 @@ class ChapterExtractionManager:
                             self._log(line)
                 
                 # Check for errors
-                if remaining_error:
+                suppress_errors = self._should_suppress_subprocess_errors(remaining_error, self.process.returncode)
+                if remaining_error and not suppress_errors:
                     for line in remaining_error.strip().split('\n'):
                         if line:
                             self._log(f"⚠️ {line}")
                 
                 # Check final status
-                if self.process.returncode != 0:
+                if self.process.returncode != 0 and not suppress_errors:
                     self._log(f"⚠️ Process exited with code {self.process.returncode}")
             else:
                 # If stopped, just clean up without processing output
