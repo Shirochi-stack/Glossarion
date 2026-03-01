@@ -5267,6 +5267,13 @@ class BatchTranslationProcessor:
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Truncated - aborting chapter")
+                            save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
+                            if save_partial_results:
+                                try:
+                                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                        f.write(result if isinstance(result, str) else "")
+                                except Exception:
+                                    pass
                             with self.progress_lock:
                                 self.update_progress_fn(
                                     idx, actual_num, content_hash, fname,
@@ -12025,6 +12032,13 @@ def main(log_callback=None, stop_callback=None):
                                     # All retries exhausted - mark as QA_failed with TRUNCATED
                                     print(f"    ❌ All char-ratio retries ({char_ratio_retry_limit}) exhausted for Chapter {actual_num} Chunk {chunk_idx}/{total_chunks} - marking as QA_failed")
                                     fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+                                    if save_partial_results:
+                                        try:
+                                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                                f.write(result if isinstance(result, str) else "")
+                                        except Exception:
+                                            pass
                                     progress_manager.update(idx, actual_num, content_hash, fname,
                                                             status="qa_failed",
                                                             qa_issues_found=["TRUNCATED"],
