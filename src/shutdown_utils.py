@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import subprocess
+import tempfile
 from typing import Callable, Iterable, Optional
 
 
@@ -46,6 +47,49 @@ def _terminate_multiprocessing_children(timeout: float = 1.5) -> None:
                 p.join(timeout=timeout)
             except Exception:
                 pass
+    except Exception:
+        pass
+
+
+def _ensure_safe_tempdir() -> None:
+    """
+    Ensure a writable temp directory is set to avoid hangs when the default temp
+    location is inaccessible (common on locked-down Windows environments).
+    """
+    try:
+        candidates = []
+        for var in ("TMPDIR", "TEMP", "TMP"):
+            val = os.environ.get(var)
+            if val:
+                candidates.append(val)
+        try:
+            candidates.append(os.path.join(os.getcwd(), "_tmp"))
+        except Exception:
+            pass
+        try:
+            candidates.append(os.path.join(os.path.expanduser("~"), ".glossarion_tmp"))
+        except Exception:
+            pass
+
+        for path in candidates:
+            try:
+                if not path:
+                    continue
+                os.makedirs(path, exist_ok=True)
+                test_path = os.path.join(path, ".__tmp_test__")
+                with open(test_path, "wb") as f:
+                    f.write(b"x")
+                try:
+                    os.remove(test_path)
+                except Exception:
+                    pass
+                os.environ["TMPDIR"] = path
+                os.environ["TEMP"] = path
+                os.environ["TMP"] = path
+                tempfile.tempdir = path
+                return
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -95,6 +139,7 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     falls back to taskkill on Windows to ensure no background process remains.
     """
     code = _normalize_exit_code(exit_code)
+    _ensure_safe_tempdir()
     _run_cleanup_fns(cleanup_fns)
     _terminate_multiprocessing_children()
     _terminate_psutil_children()
