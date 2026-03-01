@@ -305,7 +305,9 @@ class TitleExtractor:
                     candidates.append((text, confidence, f"h3_tag_{i+1}"))
             
             # Strategy 5: Bold text in first elements (lower confidence)
-            first_elements = soup.find_all(['p', 'div'])[:5]
+            # If paragraph fallback is disabled, avoid using <p> tags as title sources
+            body_title_tags = ['div'] if not allow_paragraph_fallback else ['p', 'div']
+            first_elements = soup.find_all(body_title_tags)[:5]
             for elem in first_elements:
                 for bold in elem.find_all(['b', 'strong'])[:2]:  # Limit to first 2 bold items
                     bold_text = HTMLEntityDecoder.decode(bold.get_text(strip=True))
@@ -313,9 +315,10 @@ class TitleExtractor:
                         candidates.append((bold_text, 0.6, "bold_text"))
             
             # Strategy 6: Center-aligned text (common for chapter titles)
-            center_elements = soup.find_all(['center', 'div', 'p'], 
+            center_tags = ['center', 'div'] if not allow_paragraph_fallback else ['center', 'div', 'p']
+            center_elements = soup.find_all(center_tags, 
                                            attrs={'align': 'center'}) or \
-                             soup.find_all(['div', 'p'], 
+                             soup.find_all(center_tags if not allow_paragraph_fallback else ['div', 'p'], 
                                          style=lambda x: x and 'text-align' in x and 'center' in x)
             
             for center in center_elements[:3]:  # Check first 3 centered elements
@@ -324,7 +327,8 @@ class TitleExtractor:
                     candidates.append((text, 0.65, "centered_text"))
             
             # Strategy 7: All-caps text (common for titles in older books)
-            for elem in soup.find_all(['h1', 'h2', 'h3', 'p', 'div'])[:10]:
+            all_caps_tags = ['h1', 'h2', 'h3', 'div'] if not allow_paragraph_fallback else ['h1', 'h2', 'h3', 'p', 'div']
+            for elem in soup.find_all(all_caps_tags)[:10]:
                 text = elem.get_text(strip=True)
                 # Check if text is mostly uppercase
                 if text and len(text) > 2 and text.isupper():
