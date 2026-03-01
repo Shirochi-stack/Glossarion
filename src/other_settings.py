@@ -1001,7 +1001,7 @@ def _create_output_settings_section(self, parent):
     if not hasattr(self, 'legacy_structure_var'):
         self.legacy_structure_var = self.config.get('legacy_structure', False)
 
-    legacy_cb = self._create_styled_checkbox("Legacy Structure")
+    legacy_cb = self._create_styled_checkbox("EPUB2 Folder Layout (OEBPS/Text)")
     legacy_cb.setToolTip(
         "Use a legacy EPUB2-style folder structure inside the .epub:\n"
         "• OEBPS/Text/ (XHTML/HTML chapter files)\n\n"
