@@ -1086,17 +1086,12 @@ def _create_output_settings_section(self, parent):
 
             # Child depends on master
             translate_toc_cb.setEnabled(bool(checked))
+            # If master is turned on, re-evaluate skip-duplicate enablement based on translate toggle
+            if checked:
+                skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
             if not checked:
-                # If master is off, force child off
-                translate_toc_cb.setChecked(False)
-                self.translate_toc_ncx_var = False
-                self.config['translate_toc_ncx'] = False
-                os.environ['TRANSLATE_TOC_NCX'] = '0'
-                # If translate is off, force skip-duplicates off
-                skip_dup_toc_cb.setChecked(False)
-                self.skip_duplicate_toc_translation_var = False
-                self.config['skip_duplicate_toc_translation'] = False
-                os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '0'
+                # Disable children without forcing them off
+                skip_dup_toc_cb.setEnabled(False)
         except Exception:
             pass
 
@@ -1110,11 +1105,6 @@ def _create_output_settings_section(self, parent):
             os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
             # Child depends on translate
             skip_dup_toc_cb.setEnabled(bool(checked))
-            if not checked:
-                skip_dup_toc_cb.setChecked(False)
-                self.skip_duplicate_toc_translation_var = False
-                self.config['skip_duplicate_toc_translation'] = False
-                os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '0'
         except Exception:
             pass
 
@@ -1183,11 +1173,6 @@ def _create_output_settings_section(self, parent):
     # Keep translated-based toggle in sync with master
     def _sync_dedup_child(master_checked):
         dedup_toc_translated_cb.setEnabled(bool(master_checked))
-        if not master_checked:
-            dedup_toc_translated_cb.setChecked(False)
-            self.deduplicate_toc_use_translated_var = False
-            self.config['deduplicate_toc_use_translated'] = False
-            os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '0'
     dedup_toc_cb.toggled.connect(_sync_dedup_child)
 
     # Use <p> tag as TOC fallback
