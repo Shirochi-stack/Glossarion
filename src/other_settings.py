@@ -1004,10 +1004,9 @@ def _create_output_settings_section(self, parent):
     legacy_cb = self._create_styled_checkbox("Legacy Structure")
     legacy_cb.setToolTip(
         "Use a legacy EPUB2-style folder structure inside the .epub:\n"
-        "• OEBPS/Text/ (XHTML/HTML chapter files)\n"
-        "• OEBPS/Styles/ (CSS)\n"
-        "• OEBPS/Images/ (images)\n\n"
-        "This can improve compatibility with older EPUB readers."
+        "• OEBPS/Text/ (XHTML/HTML chapter files)\n\n"
+        "Note: Resource folders (css/images/fonts) keep their existing names; only chapter HTML/XHTML\n"
+        "files are moved under OEBPS/Text/ for compatibility with EPUB2-style readers."
     )
     try:
         legacy_cb.setChecked(bool(self.legacy_structure_var))

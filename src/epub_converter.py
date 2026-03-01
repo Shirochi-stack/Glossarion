@@ -1248,8 +1248,12 @@ class EPUBCompiler:
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
         self.metadata_path = os.path.join(self.output_dir, "metadata.json")
         self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
+        # Legacy EPUB2-style internal structure toggle (OEBPS/Text)
+        self.legacy_epub_structure = os.getenv('LEGACY_EPUB_STRUCTURE', '0') == '1'
         self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
         self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
+        if self.legacy_epub_structure:
+            self.log("[INFO] Legacy structure enabled: EPUB2 layout (OEBPS/Text)")
         
         # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
         self.auxiliary_html_files: set[str] = set()
@@ -2332,9 +2336,13 @@ class EPUBCompiler:
                 try:
                     # Create EPUB chapter
                     import html
+                    text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+                    chapter_file_name = os.path.basename(chapter_data['filename'])
+                    if text_dirname:
+                        chapter_file_name = f"{text_dirname}/{chapter_file_name}"
                     chapter = epub.EpubHtml(
                         title=html.unescape(chapter_data['title']),
-                        file_name=os.path.basename(chapter_data['filename']),
+                        file_name=chapter_file_name,
                         lang=metadata.get("language", "en")
                     )
                     chapter.content = FileUtils.ensure_bytes(chapter_data['content'])
@@ -2387,9 +2395,13 @@ class EPUBCompiler:
         """Helper to add an error placeholder chapter"""
         try:
             title = chapter_data.get('title', f"Chapter {chapter_data['num']}")
+            text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+            err_file = f"chapter_{chapter_data['num']:03d}.xhtml"
+            if text_dirname:
+                err_file = f"{text_dirname}/{err_file}"
             chapter = epub.EpubHtml(
                 title=title,
-                file_name=f"chapter_{chapter_data['num']:03d}.xhtml",
+                file_name=err_file,
                 lang=metadata.get("language", "en")
             )
             
@@ -2883,7 +2895,8 @@ class EPUBCompiler:
                     self.log(f"[WARNING] Using generic title, couldn't extract proper title")
             
             # Prepare CSS links
-            css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+            css_prefix = "../css/" if getattr(self, 'legacy_epub_structure', False) else "css/"
+            css_links = [f"{css_prefix}{item.file_name.split('/')[-1]}" for item in css_items]
             if is_problem_chapter:
                 self.log(f"[DEBUG] CSS links: {css_links}")
             
@@ -2926,9 +2939,13 @@ class EPUBCompiler:
             
             # Create chapter object
             import html
+            text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+            chapter_file_name = os.path.basename(filename)
+            if text_dirname:
+                chapter_file_name = f"{text_dirname}/{chapter_file_name}"
             chapter = epub.EpubHtml(
                 title=html.unescape(title),
-                file_name=os.path.basename(filename),
+                file_name=chapter_file_name,
                 lang=metadata.get("language", "en")
             )
             
@@ -4000,15 +4017,18 @@ img {
             book.add_metadata('http://purl.org/dc/elements/1.1/', 'cover', 'cover-image')
             
             # Create cover page
+            text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+            cover_page_name = f"{text_dirname}/cover.xhtml" if text_dirname else "cover.xhtml"
             cover_page = epub.EpubHtml(
                 title="Cover",
-                file_name="cover.xhtml",
+                file_name=cover_page_name,
                 lang=metadata.get("language", "en")
             )
             
             # Build cover HTML directly without going through ensure_compliance
             # Since it's simple and controlled, we can build it directly
             lang = metadata.get("language", "en")
+            img_href = f"../images/{cover_file}" if getattr(self, 'legacy_epub_structure', False) else f"images/{cover_file}"
             cover_content = f'''<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
     <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
@@ -4018,7 +4038,7 @@ img {
     </head>
     <body>
     <div style="text-align: center;">
-    <img src="images/{cover_file}" alt="Cover" style="max-width: 100%; height: auto;" />
+    <img src="{img_href}" alt="Cover" style="max-width: 100%; height: auto;" />
     </div>
     </body>
     </html>'''
@@ -4069,7 +4089,8 @@ img {
                 # Look up the safe name
                 if basename in processed_images:
                     safe_name = processed_images[basename]
-                    new_src = f"images/{safe_name}"
+                    img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                    new_src = f"{img_prefix}{safe_name}"
                     
                     if src != new_src:
                         img['src'] = new_src
@@ -4081,7 +4102,8 @@ img {
                     found = False
                     for original_name, safe_name in processed_images.items():
                         if os.path.splitext(original_name)[0] == name_without_ext:
-                            new_src = f"images/{safe_name}"
+                            img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                            new_src = f"{img_prefix}{safe_name}"
                             img['src'] = new_src
                             changed = True
                             found = True
@@ -4091,8 +4113,9 @@ img {
                     if not found:
                         missing_images.append(basename)
                         # Still update the path to use images/ prefix if it doesn't have it
-                        if not src.startswith('images/'):
-                            img['src'] = f"images/{basename}"
+                        img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                        if not src.startswith(('images/', '../images/')):
+                            img['src'] = f"{img_prefix}{basename}"
                             changed = True
                 
                 # Ensure alt attribute exists (required for XHTML)
@@ -4124,7 +4147,8 @@ img {
                                     if os.path.splitext(orig)[0] == name_wo:
                                         safe_name = safe
                                         break
-                            new_src = f"images/{safe_name}" if safe_name else f"images/{basename}"
+                            img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                            new_src = f"{img_prefix}{safe_name}" if safe_name else f"{img_prefix}{basename}"
                             new_img = soup.new_tag('img')
                             new_img['src'] = new_src
                             new_img['alt'] = svg_tag.get('aria-label') or svg_tag.get('title') or ''
@@ -4175,18 +4199,21 @@ img {
     def _create_gallery_page(self, book: epub.EpubBook, images: List[str],
                             css_items: List[epub.EpubItem], metadata: dict) -> epub.EpubHtml:
         """Create image gallery page - FIXED to avoid escaping HTML tags"""
+        text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+        gallery_page_name = f"{text_dirname}/gallery.xhtml" if text_dirname else "gallery.xhtml"
         gallery_page = epub.EpubHtml(
             title="Gallery",
-            file_name="gallery.xhtml",
+            file_name=gallery_page_name,
             lang=metadata.get("language", "en")
         )
         
         # Build the gallery body content
         gallery_body_parts = ['<h1>Image Gallery</h1>']
+        img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
         for img in images:
             gallery_body_parts.append(
                 f'<div style="text-align: center; margin: 20px;">'
-                f'<img src="images/{img}" alt="{img}" />'
+                f'<img src="{img_prefix}{img}" alt="{img}" />'
                 f'</div>'
             )
         
@@ -4194,7 +4221,8 @@ img {
         
         # Build XHTML directly without going through ensure_compliance
         # which might escape our HTML tags
-        css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+        css_prefix = "../css/" if getattr(self, 'legacy_epub_structure', False) else "css/"
+        css_links = [f"{css_prefix}{item.file_name.split('/')[-1]}" for item in css_items]
         
         # Build the complete XHTML document manually
         lang = metadata.get("language", "en")
@@ -4295,8 +4323,9 @@ img {
     def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
                       cover_file: Optional[str]):
         """Finalize book structure"""
+        legacy = getattr(self, 'legacy_epub_structure', False)
         # Check if we should use NCX-only
-        use_ncx_only = os.environ.get('FORCE_NCX_ONLY', '0') == '1'
+        use_ncx_only = legacy or (os.environ.get('FORCE_NCX_ONLY', '0') == '1')
         
         # Check if first item in spine is a cover
         has_cover = False
@@ -4376,7 +4405,10 @@ img {
             
             book.spine = final_spine
             
-            self.log("📖 Using EPUB 3.3 with NCX navigation only")
+            if legacy:
+                self.log("📖 Using EPUB2 (legacy OEBPS/Text structure)")
+            else:
+                self.log("📖 Using EPUB 3.3 with NCX navigation only")
             if has_cover:
                 self.log("📖 Reading order: Cover → Chapters")
             else:
@@ -4466,9 +4498,10 @@ img {
         logger_thread = threading.Thread(target=progress_logger, daemon=True)
         logger_thread.start()
         
-        # Always write as EPUB3
+        # Write as EPUB2 when legacy structure is enabled, otherwise EPUB3
         try:
-            opts = {'epub3': True}
+            legacy = getattr(self, 'legacy_epub_structure', False)
+            opts = {'epub3': (not legacy)}
             epub.write_epub(out_path, book, opts)
             write_completed.set()  # Signal completion
             logger_thread.join(timeout=1)  # Wait for logger to finish
@@ -4476,11 +4509,17 @@ img {
             # Check if stop was requested during write
             if self.is_stopped():
                 elapsed = time.time() - start_time
-                self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s) - Write completed before stop")
+                if legacy:
+                    self.log(f"[SUCCESS] Written as EPUB2 (took {elapsed:.1f}s) - Write completed before stop")
+                else:
+                    self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s) - Write completed before stop")
                 self.log("🛑 Note: Stop was requested but write operation finished normally")
             else:
                 elapsed = time.time() - start_time
-                self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
+                if legacy:
+                    self.log(f"[SUCCESS] Written as EPUB2 (took {elapsed:.1f}s)")
+                else:
+                    self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
             
         except Exception as e:
             self.log(f"[ERROR] Write failed: {e}")
@@ -4492,7 +4531,10 @@ img {
             if file_size > 0:
                 self.log(f"✅ EPUB created: {out_path}")
                 self.log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-                self.log("📝 Format: EPUB 3.3")
+                if getattr(self, 'legacy_epub_structure', False):
+                    self.log("📝 Format: EPUB2 (legacy OEBPS/Text structure)")
+                else:
+                    self.log("📝 Format: EPUB 3.3")
             else:
                 raise Exception("EPUB file is empty")
         else:
