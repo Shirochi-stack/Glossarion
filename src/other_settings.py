@@ -1089,6 +1089,32 @@ def _create_output_settings_section(self, parent):
     section_v.addWidget(use_toc_cb)
     section_v.addWidget(translate_toc_cb)
 
+    # Deduplicate TOC entries (exact match)
+    if not hasattr(self, 'deduplicate_toc_var'):
+        self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
+
+    dedup_toc_cb = self._create_styled_checkbox("Deduplicate TOC")
+    dedup_toc_cb.setToolTip(
+        "Skip duplicate TOC entries with the exact same title. Example: if 10 entries are named\n"
+        "\"Chapter 1: Peanuts\", only the first one is kept. No fuzzy matching."
+    )
+    try:
+        dedup_toc_cb.setChecked(bool(self.deduplicate_toc_var))
+    except Exception:
+        pass
+
+    def _on_dedup_toc_toggle(checked):
+        try:
+            self.deduplicate_toc_var = bool(checked)
+            self.config['deduplicate_toc'] = self.deduplicate_toc_var
+            os.environ['DEDUPLICATE_TOC'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    dedup_toc_cb.toggled.connect(_on_dedup_toc_toggle)
+    dedup_toc_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(dedup_toc_cb)
+
     # Use <p> tag as TOC fallback
     if not hasattr(self, 'use_p_tag_toc_fallback_var'):
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)

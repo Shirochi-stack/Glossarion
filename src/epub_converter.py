@@ -4551,14 +4551,21 @@ img {
         # Build toc links in source toc.ncx order
         toc_links = []
         missing = 0
+        seen_labels = set()
+        dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
         for idx, ent in enumerate(entries, 1):
             if toc_filter_nums is not None and idx not in toc_filter_nums:
                 # Entry was removed from TOC.txt by user; skip it entirely
                 continue
             src = (ent.get('src') or '').strip()
-            label = translations.get(idx) or original.get(idx) or (ent.get('label') or '').strip()
+            raw_label = original.get(idx) or (ent.get('label') or '').strip()
+            label = translations.get(idx) or raw_label
             if not src:
                 continue
+            if dedup_enabled:
+                if raw_label in seen_labels:
+                    continue
+                seen_labels.add(raw_label)
 
             frag = ''
             src_base = src

@@ -1050,8 +1050,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.auto_update_check_var = self.config.get('auto_update_check', True)
         self.force_ncx_only_var = self.config.get('force_ncx_only', True)
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
+        self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
         try:
             os.environ['USE_P_TAG_TOC_FALLBACK'] = '1' if self.use_p_tag_toc_fallback_var else '0'
+        except Exception:
+            pass
+        try:
+            os.environ['DEDUPLICATE_TOC'] = '1' if self.deduplicate_toc_var else '0'
         except Exception:
             pass
         self.single_api_image_chunks_var = False
@@ -8696,6 +8701,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
             'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', False) else "0",
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
+            'DEDUPLICATE_TOC': "1" if getattr(self, 'deduplicate_toc_var', False) else "0",
             'DUPLICATE_DETECTION_MODE': str(self.duplicate_detection_mode_var),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var), 
             'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var else "0",
@@ -13295,6 +13301,7 @@ Important rules:
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
                 ('use_p_tag_toc_fallback', ['use_p_tag_toc_fallback_var'], False, bool),
+                ('deduplicate_toc', ['deduplicate_toc_var'], False, bool),
                 ('duplicate_detection_mode', ['duplicate_detection_mode_var'], 'off', str),
                 ('use_header_as_output', ['use_header_as_output_var'], False, bool),
                 ('enable_decimal_chapters', ['enable_decimal_chapters_var'], False, bool),
