@@ -1018,6 +1018,12 @@ def detect_ai_artifacts(text):
             break
 
     if first_line:
+        # Guard against false positives like "Sure enough, ..." in normal prose
+        if re.search(r'^(sure|okay|understood|of course|got it|alright|certainly|here\'s|here is)\b', first_line, re.IGNORECASE):
+            word_count = len(first_line.split())
+            if word_count > 6 and not re.search(r'\b(translation|translate|here\'s|here is|i\'ll|i will|let me)\b', first_line, re.IGNORECASE):
+                # Looks like regular narrative, not an AI preface
+                first_line = ""
         for pattern in AI_ARTIFACT_FIRSTLINE_PATTERNS:
             if pattern.search(first_line):
                 artifacts_found.append({

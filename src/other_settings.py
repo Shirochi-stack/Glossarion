@@ -1089,6 +1089,32 @@ def _create_output_settings_section(self, parent):
     section_v.addWidget(use_toc_cb)
     section_v.addWidget(translate_toc_cb)
 
+    # Use <p> tag as TOC fallback
+    if not hasattr(self, 'use_p_tag_toc_fallback_var'):
+        self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
+
+    p_fallback_cb = self._create_styled_checkbox("Allow TOC fallback titles when headers are missing")
+    p_fallback_cb.setToolTip(
+        "When enabled, the TOC may fall back to the first <p> tag and generic Chapter N titles\n"
+        "if no header tags are present. Disable to avoid any fallback titles."
+    )
+    try:
+        p_fallback_cb.setChecked(bool(self.use_p_tag_toc_fallback_var))
+    except Exception:
+        pass
+
+    def _on_p_tag_toc_fallback_toggle(checked):
+        try:
+            self.use_p_tag_toc_fallback_var = bool(checked)
+            self.config['use_p_tag_toc_fallback'] = self.use_p_tag_toc_fallback_var
+            os.environ['USE_P_TAG_TOC_FALLBACK'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    p_fallback_cb.toggled.connect(_on_p_tag_toc_fallback_toggle)
+    p_fallback_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(p_fallback_cb)
+
     # Delete TOC.txt button (same style as Delete Header Files)
     delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
     delete_toc_btn.setFixedWidth(210)

@@ -261,7 +261,8 @@ class TitleExtractor:
     
     @staticmethod
     def extract_from_html(html_content: str, chapter_num: Optional[int] = None, 
-                         filename: Optional[str] = None) -> Tuple[str, float]:
+                         filename: Optional[str] = None, allow_paragraph_fallback: bool = True,
+                         allow_generic_chapter_fallback: bool = True) -> Tuple[str, float]:
         """Extract title from HTML content with confidence score - KEEP ALL HEADERS INCLUDING NUMBERS"""
         try:
             # Decode entities first - PRESERVES UNICODE
@@ -331,27 +332,28 @@ class TitleExtractor:
                     # Keep it as-is (don't convert to title case automatically)
                     candidates.append((decoded_text, 0.55, "all_caps_text"))
             
-            # Strategy 8: Patterns in first paragraph
-            first_p = soup.find('p')
-            if first_p:
-                p_text = HTMLEntityDecoder.decode(first_p.get_text(strip=True))
-                
-                # Look for "Chapter X: Title" patterns
-                chapter_pattern = re.match(
-                    r'^(Chapter\s+[\dIVXLCDM]+\s*[:\-\u2013\u2014]\s*)(.{2,100})(?:\.|$)',
-                    p_text, re.IGNORECASE
-                )
-                if chapter_pattern:
-                    # Extract just the title part after "Chapter X:"
-                    title_part = chapter_pattern.group(2).strip()
-                    if title_part:
-                        candidates.append((title_part, 0.8, "paragraph_pattern_title"))
-                    # Also add the full "Chapter X: Title" as a lower confidence option
-                    full_title = chapter_pattern.group(0).strip().rstrip('.')
-                    candidates.append((full_title, 0.75, "paragraph_pattern_full"))
-                elif len(p_text) <= 100 and len(p_text) > 2:
-                    # Short first paragraph might be the title
-                    candidates.append((p_text, 0.4, "paragraph_standalone"))
+            # Strategy 8: Patterns in first paragraph (optional)
+            if allow_paragraph_fallback:
+                first_p = soup.find('p')
+                if first_p:
+                    p_text = HTMLEntityDecoder.decode(first_p.get_text(strip=True))
+                    
+                    # Look for "Chapter X: Title" patterns
+                    chapter_pattern = re.match(
+                        r'^(Chapter\s+[\dIVXLCDM]+\s*[:\-\u2013\u2014]\s*)(.{2,100})(?:\.|$)',
+                        p_text, re.IGNORECASE
+                    )
+                    if chapter_pattern:
+                        # Extract just the title part after "Chapter X:"
+                        title_part = chapter_pattern.group(2).strip()
+                        if title_part:
+                            candidates.append((title_part, 0.8, "paragraph_pattern_title"))
+                        # Also add the full "Chapter X: Title" as a lower confidence option
+                        full_title = chapter_pattern.group(0).strip().rstrip('.')
+                        candidates.append((full_title, 0.75, "paragraph_pattern_full"))
+                    elif len(p_text) <= 100 and len(p_text) > 2:
+                        # Short first paragraph might be the title
+                        candidates.append((p_text, 0.4, "paragraph_standalone"))
             
             # Strategy 9: Filename
             if filename:
@@ -387,14 +389,14 @@ class TitleExtractor:
                     
                     return best_title, best_confidence
             
-            # Fallback - only use generic chapter number if we really found nothing
-            if chapter_num:
+            # Fallback - only use generic chapter number if allowed and nothing found
+            if allow_generic_chapter_fallback and chapter_num:
                 return f"Chapter {chapter_num}", 0.1
             return "Untitled Chapter", 0.0
             
         except Exception as e:
             log(f"[WARNING] Error extracting title: {e}")
-            if chapter_num:
+            if allow_generic_chapter_fallback and chapter_num:
                 return f"Chapter {chapter_num}", 0.1
             return "Untitled Chapter", 0.0
     
@@ -2040,8 +2042,11 @@ class EPUBCompiler:
                 html_content = HTMLEntityDecoder.decode(html_content)
                 
                 # Extract title
+                allow_p_fallback = os.getenv('USE_P_TAG_TOC_FALLBACK', '0') == '1'
                 title, confidence = TitleExtractor.extract_from_html(
-                    html_content, idx, filename
+                    html_content, idx, filename,
+                    allow_paragraph_fallback=allow_p_fallback,
+                    allow_generic_chapter_fallback=allow_p_fallback
                 )
                 
                 return idx, (title, confidence, filename)
@@ -3041,7 +3046,12 @@ class EPUBCompiler:
         
         # Re-extract if low confidence or missing
         if not title or confidence < 0.5:
-            backup_title, backup_confidence = TitleExtractor.extract_from_html(content, num, filename)
+            allow_p_fallback = os.getenv('USE_P_TAG_TOC_FALLBACK', '0') == '1'
+            backup_title, backup_confidence = TitleExtractor.extract_from_html(
+                content, num, filename,
+                allow_paragraph_fallback=allow_p_fallback,
+                allow_generic_chapter_fallback=allow_p_fallback
+            )
             if backup_confidence > confidence:
                 title = backup_title
                 confidence = backup_confidence
@@ -3057,9 +3067,14 @@ class EPUBCompiler:
             # Try enhanced extraction methods for web-scraped content
             title = self._fallback_title_extraction(content, filename, num)
         
-        # Final fallback - use position-based chapter number
+        # Final fallback - use position-based chapter number only if toggle allows it
         if not title:
-            title = f"Chapter {num}"
+            if os.getenv('USE_P_TAG_TOC_FALLBACK', '0') == '1':
+                title = f"Chapter {num}"
+            else:
+                # Avoid generic Chapter N titles; use filename stem if available
+                base = os.path.splitext(os.path.basename(filename))[0] if filename else ""
+                title = base or "Untitled Chapter"
         
         return title
 
