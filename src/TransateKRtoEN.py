@@ -3047,6 +3047,65 @@ class ContentProcessor:
         except Exception as e:
             print(f"Warning: Error checking text content: {e}")
             return True
+
+    @staticmethod
+    def is_only_image_links(html_content):
+        """Return True if content contains only image links/paths (no meaningful text)."""
+        try:
+            if not html_content:
+                return False
+
+            content_stripped = html_content.strip()
+            if not content_stripped:
+                return False
+
+            # Prefer HTML text extraction when it looks like HTML
+            if content_stripped.startswith('<') or '<' in content_stripped[:200]:
+                try:
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    text = soup.get_text(separator='\n', strip=True)
+                except Exception:
+                    text = content_stripped
+            else:
+                text = content_stripped
+
+            if not text:
+                return False
+
+            image_ext = r'(?:png|jpe?g|gif|webp|svg|bmp)'
+            md_img = re.compile(r'!\[[^\]]*\]\(([^)]+)\)', re.IGNORECASE)
+            url_pat = re.compile(r'https?://[^\s)>\"]+\.' + image_ext + r'(?:\?[^\s)>\"]*)?', re.IGNORECASE)
+            path_pat = re.compile(r'(?:[A-Za-z]:)?[^\s)>\"]+\.' + image_ext + r'(?:\?[^\s)>\"]*)?', re.IGNORECASE)
+
+            found_any = False
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if not lines:
+                return False
+
+            for line in lines:
+                line_work = line
+
+                # Markdown image syntax
+                for m in md_img.findall(line_work):
+                    if url_pat.search(m) or path_pat.search(m):
+                        found_any = True
+                line_work = md_img.sub(' ', line_work)
+
+                if url_pat.search(line_work):
+                    found_any = True
+                line_work = url_pat.sub(' ', line_work)
+
+                if path_pat.search(line_work):
+                    found_any = True
+                line_work = path_pat.sub(' ', line_work)
+
+                # If any meaningful text remains, it's not image-only
+                if re.sub(r'[\s\.,;:\(\)\[\]<>\"\'\-\u200b]+', '', line_work):
+                    return False
+
+            return found_any
+        except Exception:
+            return False
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -10204,7 +10263,8 @@ def main(log_callback=None, stop_callback=None):
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
             text_size = c.get('file_size', 0)
             
-            is_empty_chapter = (not has_images and text_size < 1)
+            is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
+            is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
             is_image_only_chapter = (has_images and not has_meaningful_text)
             
             # Handle empty chapters
@@ -10979,7 +11039,8 @@ def main(log_callback=None, stop_callback=None):
                 has_images = c.get('has_images', False)
                 has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
                 text_size = c.get('file_size', 0)
-                is_empty_chapter = (not has_images and text_size < 1)
+                is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
+                is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
                 is_image_only_chapter = (has_images and not has_meaningful_text)
                 
                 if needs_translation and not is_empty_chapter and not is_image_only_chapter:
@@ -11141,8 +11202,9 @@ def main(log_callback=None, stop_callback=None):
             has_images = c.get('has_images', False)
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
             text_size = c.get('file_size', 0)
-            
-            is_empty_chapter = (not has_images and text_size < 1)
+
+            is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
+            is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
             is_image_only_chapter = (has_images and not has_meaningful_text)
             is_mixed_content = (has_images and has_meaningful_text)
             is_text_only = (not has_images and has_meaningful_text)
