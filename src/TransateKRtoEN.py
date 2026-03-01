@@ -7171,6 +7171,30 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     retry_timeout_enabled = bool(retry_env) and retry_env.strip().lower() not in ("0", "false", "off", "")
     if not retry_timeout_enabled:
         chunk_timeout = None
+
+    def _clear_watchdog_for_chapter_context() -> None:
+        """Best-effort cleanup so the GUI watchdog doesn't stay stuck when this wrapper abandons a call."""
+        try:
+            import unified_api_client
+            clear_fn = getattr(unified_api_client, '_api_watchdog_clear_chapter', None)
+            if not callable(clear_fn):
+                return
+            chap = None
+            merged = None
+            if isinstance(chapter_context, dict):
+                chap = chapter_context.get('chapter')
+                merged = chapter_context.get('merged_chapters')
+            if chap is not None:
+                clear_fn(chap)
+            if merged:
+                try:
+                    for mc in merged:
+                        if mc is not None:
+                            clear_fn(mc)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     def api_call():
         try:
@@ -7296,6 +7320,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     cancel_event.set()
                     if hasattr(client, 'cancel_current_operation'):
                         client.cancel_current_operation()
+                    # Clear watchdog entries for this chapter since we're abandoning the result.
+                    _clear_watchdog_for_chapter_context()
                     try:
                         api_thread.join(timeout=2.0)
                     except Exception:
@@ -7326,6 +7352,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 cancel_event.set()
                 if hasattr(client, 'cancel_current_operation'):
                     client.cancel_current_operation()
+                # Clear watchdog entries for this chapter since we're abandoning the result.
+                _clear_watchdog_for_chapter_context()
                 try:
                     api_thread.join(timeout=2.0)
                 except Exception:
@@ -7338,6 +7366,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 cancel_event.set()
                 if hasattr(client, 'cancel_current_operation'):
                     client.cancel_current_operation()
+                # Clear watchdog entries for this chapter since we're abandoning the result.
+                _clear_watchdog_for_chapter_context()
                 # Give the background thread a brief chance to unwind after transport closure
                 try:
                     api_thread.join(timeout=2.0)

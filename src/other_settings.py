@@ -988,7 +988,49 @@ def _create_output_settings_section(self, parent):
     section_v = QVBoxLayout(section_box)
     section_v.setContentsMargins(8, 8, 8, 8)
     section_v.setSpacing(4)
-    
+
+    # ── EPUB Structure ─────────────────────────────────────────
+    epub_struct_title = QLabel("EPUB Structure")
+    epub_struct_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(epub_struct_title)
+
+    epub_struct_desc = QLabel("Control how files are arranged inside the generated .epub")
+    epub_struct_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    section_v.addWidget(epub_struct_desc)
+
+    if not hasattr(self, 'legacy_structure_var'):
+        self.legacy_structure_var = self.config.get('legacy_structure', False)
+
+    legacy_cb = self._create_styled_checkbox("Legacy Structure")
+    legacy_cb.setToolTip(
+        "Use a legacy EPUB2-style folder structure inside the .epub:\n"
+        "• OEBPS/Text/ (XHTML/HTML chapter files)\n"
+        "• OEBPS/Styles/ (CSS)\n"
+        "• OEBPS/Images/ (images)\n\n"
+        "This can improve compatibility with older EPUB readers."
+    )
+    try:
+        legacy_cb.setChecked(bool(self.legacy_structure_var))
+    except Exception:
+        pass
+
+    def _on_legacy_structure_toggle(checked):
+        try:
+            self.legacy_structure_var = bool(checked)
+            self.config['legacy_structure'] = self.legacy_structure_var
+            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    legacy_cb.toggled.connect(_on_legacy_structure_toggle)
+    section_v.addWidget(legacy_cb)
+
+    # Separator
+    sep_epub_struct = QFrame()
+    sep_epub_struct.setFrameShape(QFrame.HLine)
+    sep_epub_struct.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_epub_struct)
+
     # ── PDF Settings ──────────────────────────────────────────
     pdf_title = QLabel("PDF Settings")
     pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")

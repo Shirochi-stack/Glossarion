@@ -2239,6 +2239,7 @@ class UnifiedClient:
             self._thread_local.mistral_client = None
             self._thread_local.cohere_client = None
             self._thread_local.client_type = None
+            self._thread_local.current_request_id = None
             self._thread_local.current_request_label = None
             self._thread_local.chapter_context = None
             self._thread_local.output_token_limit = None
@@ -4716,6 +4717,16 @@ class UnifiedClient:
         # Use appropriate context default
         if context is None:
             context = 'image_translation' if is_image_request else 'translation'
+
+        # Ensure request_id is always set so watchdog/payload metadata stays consistent,
+        # even if _send_internal is called directly (not via _send_core).
+        if not request_id:
+            request_id = str(uuid.uuid4())[:8]
+        try:
+            tls = self._get_thread_local_client()
+            tls.current_request_id = request_id
+        except Exception:
+            pass
         
         # Always ensure per-request key assignment/rotation for multi-key mode
         # This guarantees forced rotation when rotation_frequency == 1
@@ -4769,7 +4780,7 @@ class UnifiedClient:
             self._save_payload(messages, payload_name, retry_reason=retry_reason, request_params=request_params)
             
             # Get response via provider router
-            response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
+            response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name, request_id=request_id)
             
             # Capture usage if UnifiedResponse
             if isinstance(response, UnifiedResponse):
@@ -4938,7 +4949,7 @@ class UnifiedClient:
                 
                 # Unified provider dispatch: for image requests, messages already embed the image.
                 # Route via the same _get_response used for text; Gemini handler internally detects images.
-                response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
+                response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name, request_id=request_id)
                 
                 # Capture usage if UnifiedResponse
                 if isinstance(response, UnifiedResponse):
@@ -9996,7 +10007,7 @@ class UnifiedClient:
                 pass
         return client
     
-    def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
+    def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name, request_id: Optional[str] = None) -> UnifiedResponse:
         """Route to appropriate AI provider and get response.
 
         Args:
@@ -10023,8 +10034,10 @@ class UnifiedClient:
 
         # Mark queued watchdog entry as in-flight now that we're about to send
         try:
-            tls = self._get_thread_local_client()
-            rid = getattr(tls, 'current_request_id', None)
+            rid = request_id
+            if not rid:
+                tls = self._get_thread_local_client()
+                rid = getattr(tls, 'current_request_id', None)
             _api_watchdog_mark_in_flight(rid, getattr(self, 'model', None))
         except Exception:
             pass
