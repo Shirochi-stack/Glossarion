@@ -2406,6 +2406,7 @@ Recent translations to summarize:
             ('retry_split_failed_var', 'retry_split_failed', True),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
+            ('save_partial_results_var', 'save_partial_results', False),
             ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', False),
             ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
             ('disable_refusal_checks_var', 'disable_refusal_checks', False),
