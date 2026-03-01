@@ -4603,10 +4603,18 @@ img {
             def _path_exists_with_fallback(rel_path: str) -> bool:
                 if not rel_path:
                     return False
+                # Try with/without a leading Text/ folder
+                candidates = [rel_path]
+                norm_rel = rel_path.replace('\\', '/')
+                if norm_rel.lower().startswith('text/'):
+                    candidates.append(norm_rel[5:])
+                else:
+                    candidates.append(f"Text/{norm_rel}")
                 # Direct path
-                direct = os.path.normpath(os.path.join(self.output_dir, rel_path))
-                if os.path.exists(direct):
-                    return True
+                for cand in candidates:
+                    direct = os.path.normpath(os.path.join(self.output_dir, cand))
+                    if os.path.exists(direct):
+                        return True
                 # Dynamically discover likely roots by locating any HTML/XHTML files
                 roots = set()
                 try:
@@ -4618,9 +4626,10 @@ img {
                 except Exception:
                     candidate_roots = []
                 for root_dir in candidate_roots:
-                    candidate = os.path.normpath(os.path.join(root_dir, rel_path))
-                    if os.path.exists(candidate):
-                        return True
+                    for cand in candidates:
+                        candidate = os.path.normpath(os.path.join(root_dir, cand))
+                        if os.path.exists(candidate):
+                            return True
                 return False
 
             if not _path_exists_with_fallback(target_base):
