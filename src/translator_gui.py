@@ -1052,6 +1052,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
         self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
         self.deduplicate_toc_use_translated_var = self.config.get('deduplicate_toc_use_translated', False)
+        self.skip_duplicate_toc_translation_var = self.config.get('skip_duplicate_toc_translation', False)
         try:
             os.environ['USE_P_TAG_TOC_FALLBACK'] = '1' if self.use_p_tag_toc_fallback_var else '0'
         except Exception:
@@ -1062,6 +1063,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             pass
         try:
             os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '1' if self.deduplicate_toc_use_translated_var else '0'
+        except Exception:
+            pass
+        try:
+            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if self.skip_duplicate_toc_translation_var else '0'
         except Exception:
             pass
         self.single_api_image_chunks_var = False
@@ -8708,6 +8713,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
             'DEDUPLICATE_TOC': "1" if getattr(self, 'deduplicate_toc_var', False) else "0",
             'DEDUPLICATE_TOC_USE_TRANSLATED': "1" if getattr(self, 'deduplicate_toc_use_translated_var', False) else "0",
+            'SKIP_DUPLICATE_TOC_TRANSLATION': "1" if getattr(self, 'skip_duplicate_toc_translation_var', False) else "0",
             'DUPLICATE_DETECTION_MODE': str(self.duplicate_detection_mode_var),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var), 
             'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var else "0",
@@ -13309,6 +13315,7 @@ Important rules:
                 ('use_p_tag_toc_fallback', ['use_p_tag_toc_fallback_var'], False, bool),
                 ('deduplicate_toc', ['deduplicate_toc_var'], False, bool),
                 ('deduplicate_toc_use_translated', ['deduplicate_toc_use_translated_var'], False, bool),
+                ('skip_duplicate_toc_translation', ['skip_duplicate_toc_translation_var'], False, bool),
                 ('duplicate_detection_mode', ['duplicate_detection_mode_var'], 'off', str),
                 ('use_header_as_output', ['use_header_as_output_var'], False, bool),
                 ('enable_decimal_chapters', ['enable_decimal_chapters_var'], False, bool),
@@ -14299,6 +14306,7 @@ Important rules:
                 # New: Use/translate source toc.ncx
                 ('USE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),
                 ('TRANSLATE_TOC_NCX', '1' if getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False)) else '0'),
+                ('SKIP_DUPLICATE_TOC_TRANSLATION', '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'),
                 ('USE_P_TAG_TOC_FALLBACK', '1' if getattr(self, 'use_p_tag_toc_fallback_var', self.config.get('use_p_tag_toc_fallback', False)) else '0'),
                 # New: Translate special files (cover, nav, toc, message, etc.)
                 ('TRANSLATE_SPECIAL_FILES', '1' if getattr(self, 'translate_special_files_var', False) else '0'),

@@ -4541,7 +4541,26 @@ img {
                     try:
                         from metadata_batch_translator import BatchHeaderTranslator
                         tr = BatchHeaderTranslator(self.api_client, {})
-                        translations = tr.translate_headers_batch(original, batch_size=len(original)) or {}
+                        skip_dup_translate = os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1'
+                        if skip_dup_translate:
+                            unique_original: Dict[int, str] = {}
+                            first_idx_by_label: Dict[str, int] = {}
+                            for idx, label in original.items():
+                                key = (label or '').strip()
+                                if key in first_idx_by_label:
+                                    continue
+                                first_idx_by_label[key] = idx
+                                unique_original[idx] = label
+                            self.log(f"🔁 Skip duplicate translation enabled: {len(unique_original)}/{len(original)} unique labels")
+                            unique_translations = tr.translate_headers_batch(unique_original, batch_size=len(unique_original)) or {}
+                            translations = {}
+                            for idx, label in original.items():
+                                key = (label or '').strip()
+                                first_idx = first_idx_by_label.get(key, idx)
+                                if first_idx in unique_translations:
+                                    translations[idx] = unique_translations[first_idx]
+                        else:
+                            translations = tr.translate_headers_batch(original, batch_size=len(original)) or {}
                         self._save_toc_translations_file(toc_txt_path, original, translations, refs)
                         self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
                     except Exception as e:

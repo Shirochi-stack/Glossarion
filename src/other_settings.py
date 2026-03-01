@@ -1021,6 +1021,14 @@ def _create_output_settings_section(self, parent):
         except Exception:
             pass
 
+    def _on_skip_dup_toc_toggle(checked):
+        try:
+            self.skip_duplicate_toc_translation_var = bool(checked)
+            self.config['skip_duplicate_toc_translation'] = self.skip_duplicate_toc_translation_var
+            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
     legacy_cb.toggled.connect(_on_legacy_structure_toggle)
     section_v.addWidget(legacy_cb)
 
@@ -1052,8 +1060,23 @@ def _create_output_settings_section(self, parent):
     except Exception:
         pass
 
+    # Skip duplicate translations (only when translating toc.ncx)
+    if not hasattr(self, 'skip_duplicate_toc_translation_var'):
+        self.skip_duplicate_toc_translation_var = self.config.get('skip_duplicate_toc_translation', False)
+
+    skip_dup_toc_cb = self._create_styled_checkbox("Skip duplicate translation")
+    skip_dup_toc_cb.setToolTip(
+        "When Translate toc.ncx is enabled, identical source labels are translated once and\n"
+        "duplicates reuse the first translation. Saves tokens and API time."
+    )
+    try:
+        skip_dup_toc_cb.setChecked(bool(self.skip_duplicate_toc_translation_var))
+    except Exception:
+        pass
+
     # Enable/disable translate checkbox based on master
     translate_toc_cb.setEnabled(use_toc_cb.isChecked())
+    skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
 
     def _on_use_toc_ncx_toggle(checked):
         try:
@@ -1069,6 +1092,11 @@ def _create_output_settings_section(self, parent):
                 self.translate_toc_ncx_var = False
                 self.config['translate_toc_ncx'] = False
                 os.environ['TRANSLATE_TOC_NCX'] = '0'
+                # If translate is off, force skip-duplicates off
+                skip_dup_toc_cb.setChecked(False)
+                self.skip_duplicate_toc_translation_var = False
+                self.config['skip_duplicate_toc_translation'] = False
+                os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '0'
         except Exception:
             pass
 
@@ -1080,14 +1108,24 @@ def _create_output_settings_section(self, parent):
             self.translate_toc_ncx_var = bool(checked)
             self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
             os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
+            # Child depends on translate
+            skip_dup_toc_cb.setEnabled(bool(checked))
+            if not checked:
+                skip_dup_toc_cb.setChecked(False)
+                self.skip_duplicate_toc_translation_var = False
+                self.config['skip_duplicate_toc_translation'] = False
+                os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '0'
         except Exception:
             pass
 
     use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
     translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)
+    skip_dup_toc_cb.toggled.connect(_on_skip_dup_toc_toggle)
 
     section_v.addWidget(use_toc_cb)
     section_v.addWidget(translate_toc_cb)
+    skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(skip_dup_toc_cb)
 
     # Deduplicate TOC entries (exact match)
     if not hasattr(self, 'deduplicate_toc_var'):
