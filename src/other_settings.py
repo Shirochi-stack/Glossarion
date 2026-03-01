@@ -3197,55 +3197,35 @@ def _create_response_handling_section(self, parent):
     wait_chunks_desc.setContentsMargins(60, 2, 0, 5)
     section_v.addWidget(wait_chunks_desc)
     
-    # Save partial results toggle (child of graceful stop)
-    if not hasattr(self, 'save_partial_results_var'):
-        self.save_partial_results_var = self.config.get('save_partial_results', False)
-    
-    self.save_partial_results_checkbox = self._create_styled_checkbox("Save partial results on graceful stop")
-    self.save_partial_results_checkbox.setContentsMargins(40, 0, 0, 0)
-    self.save_partial_results_checkbox.setToolTip(
-        "When enabled, chapters interrupted by graceful stop or blocked for prohibited content\n"
-        "are saved and marked as QA failed (PARTIAL/PROHIBITED) instead of staying pending."
-    )
-    try:
-        self.save_partial_results_checkbox.setChecked(bool(self.save_partial_results_var))
-    except Exception:
-        pass
-    def _on_save_partial_results_toggle(checked):
-        try:
-            self.save_partial_results_var = bool(checked)
-        except Exception:
-            pass
-    self.save_partial_results_checkbox.toggled.connect(_on_save_partial_results_toggle)
-    section_v.addWidget(self.save_partial_results_checkbox)
-    
-    save_partial_desc = QLabel("When enabled, a graceful stop will mark the current chapter as QA failed (PARTIAL)\ninstead of pending if it gets interrupted.")
-    save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    save_partial_desc.setContentsMargins(60, 2, 0, 5)
-    section_v.addWidget(save_partial_desc)
     
     # Enable/disable based on graceful stop state
     def _update_wait_for_chunks_state(graceful_checked):
         self.wait_for_chunks_checkbox.setEnabled(graceful_checked)
         wait_chunks_desc.setEnabled(graceful_checked)
-        self.save_partial_results_checkbox.setEnabled(graceful_checked)
-        save_partial_desc.setEnabled(graceful_checked)
+        if hasattr(self, 'save_partial_results_checkbox'):
+            self.save_partial_results_checkbox.setEnabled(graceful_checked)
+        if 'save_partial_desc' in locals():
+            save_partial_desc.setEnabled(graceful_checked)
         if graceful_checked:
             self.wait_for_chunks_checkbox.setStyleSheet("none")
             self.wait_for_chunks_checkbox.setStyleSheet("")
             self.wait_for_chunks_checkbox.style().unpolish(self.wait_for_chunks_checkbox)
             self.wait_for_chunks_checkbox.style().polish(self.wait_for_chunks_checkbox)
             wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
-            self.save_partial_results_checkbox.setStyleSheet("none")
-            self.save_partial_results_checkbox.setStyleSheet("")
-            self.save_partial_results_checkbox.style().unpolish(self.save_partial_results_checkbox)
-            self.save_partial_results_checkbox.style().polish(self.save_partial_results_checkbox)
-            save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
+            if hasattr(self, 'save_partial_results_checkbox'):
+                self.save_partial_results_checkbox.setStyleSheet("none")
+                self.save_partial_results_checkbox.setStyleSheet("")
+                self.save_partial_results_checkbox.style().unpolish(self.save_partial_results_checkbox)
+                self.save_partial_results_checkbox.style().polish(self.save_partial_results_checkbox)
+            if 'save_partial_desc' in locals():
+                save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
         else:
             self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
             wait_chunks_desc.setStyleSheet("color: #606060; font-size: 10pt;")
-            self.save_partial_results_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
-            save_partial_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+            if hasattr(self, 'save_partial_results_checkbox'):
+                self.save_partial_results_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
+            if 'save_partial_desc' in locals():
+                save_partial_desc.setStyleSheet("color: #606060; font-size: 10pt;")
     
     self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
     _update_wait_for_chunks_state(self.graceful_stop_checkbox.isChecked())
@@ -3816,9 +3796,41 @@ def _create_response_handling_section(self, parent):
     sep_preserve.setFrameShape(QFrame.HLine)
     sep_preserve.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(sep_preserve)
+    # Save interrupted/blocked chapters
+    if not hasattr(self, 'save_partial_results_var'):
+        self.save_partial_results_var = self.config.get('save_partial_results', False)
+    
+    self.save_partial_results_checkbox = self._create_styled_checkbox("Save interrupted/blocked chapters")
+    self.save_partial_results_checkbox.setContentsMargins(20, 5, 0, 0)
+    self.save_partial_results_checkbox.setToolTip(
+        "When enabled, chapters interrupted by graceful stop or blocked for prohibited content\n"
+        "are saved and marked as QA failed (PARTIAL/PROHIBITED) instead of staying pending."
+    )
+    try:
+        self.save_partial_results_checkbox.setChecked(bool(self.save_partial_results_var))
+    except Exception:
+        pass
+    def _on_save_partial_results_toggle(checked):
+        try:
+            self.save_partial_results_var = bool(checked)
+        except Exception:
+            pass
+    self.save_partial_results_checkbox.toggled.connect(_on_save_partial_results_toggle)
+    section_v.addWidget(self.save_partial_results_checkbox)
+    
+    save_partial_desc = QLabel(
+        "Saves the original content when a chapter is interrupted or blocked, and marks it QA failed."
+    )
+    save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    save_partial_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(save_partial_desc)
 
     # Preserve Original Text on Failure
     preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
+    preserve_cb.setToolTip(
+        "When enabled, failed translation responses (timeouts, rate limits, extraction failures, etc.)\n"
+        "return the original source text inside a failure marker instead of an empty/blocked response."
+    )
     try:
         preserve_cb.setChecked(bool(self.preserve_original_text_var))
     except Exception:
