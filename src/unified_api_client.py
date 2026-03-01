@@ -12955,16 +12955,87 @@ class UnifiedClient:
                     except Exception:
                         pass
 
-                    params = {
-                        "model": effective_model,
-                        "messages": messages,
-                        "temperature": req_temperature,
-                        **anti_dupe_params
-                    }
-                    if norm_max_completion_tokens is not None:
-                        params["max_completion_tokens"] = norm_max_completion_tokens
-                    elif norm_max_tokens is not None:
-                        params["max_tokens"] = norm_max_tokens
+                    # Decide endpoint: chat vs Responses API (GPT-*-pro on OpenAI)
+                    use_responses_api = False
+                    try:
+                        ml = (effective_model or "").lower().strip()
+                        model_leaf = ml.split("/")[-1]
+                        import re as _re
+                        if provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
+                            use_responses_api = True
+                    except Exception:
+                        use_responses_api = False
+
+                    if use_responses_api:
+                        # Build Responses API payload
+                        instructions_parts: list = []
+                        input_items: list = []
+                        try:
+                            for msg in (messages or []):
+                                role = (msg.get('role') or 'user')
+                                content = msg.get('content', '')
+
+                                # Prefer putting system/developer prompts into the dedicated `instructions` field.
+                                if role in ('system', 'developer'):
+                                    if isinstance(content, list):
+                                        for part in content:
+                                            if isinstance(part, dict) and part.get('type') == 'text':
+                                                instructions_parts.append(str(part.get('text', '')))
+                                    else:
+                                        instructions_parts.append(str(content))
+                                    continue
+
+                                # Convert content to Responses input blocks
+                                blocks: list = []
+                                if isinstance(content, list):
+                                    for part in content:
+                                        if not isinstance(part, dict):
+                                            continue
+                                        ptype = part.get('type')
+                                        if ptype == 'text':
+                                            blocks.append({"type": "input_text", "text": str(part.get('text', ''))})
+                                        elif ptype == 'image_url':
+                                            image_url = part.get('image_url') or {}
+                                            url = image_url.get('url') if isinstance(image_url, dict) else str(image_url)
+                                            if url:
+                                                blocks.append({"type": "input_image", "image_url": url})
+                                else:
+                                    blocks.append({"type": "input_text", "text": str(content)})
+
+                                if not blocks:
+                                    blocks = [{"type": "input_text", "text": ""}]
+
+                                input_items.append({"role": role, "content": blocks})
+                        except Exception:
+                            # Fallback: send as a single text prompt
+                            input_items = [{
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": self._format_prompt(messages, style='ai21')}]
+                            }]
+
+                        params = {
+                            "model": effective_model,
+                            "input": input_items,
+                            "temperature": req_temperature,
+                        }
+                        if instructions_parts:
+                            params["instructions"] = "\n\n".join([p for p in instructions_parts if p is not None])
+
+                        # Responses API uses max_output_tokens
+                        response_max_tokens = norm_max_completion_tokens if norm_max_completion_tokens is not None else norm_max_tokens
+                        if response_max_tokens is not None:
+                            params["max_output_tokens"] = response_max_tokens
+                    else:
+                        params = {
+                            "model": effective_model,
+                            "messages": messages,
+                            "temperature": req_temperature,
+                            **anti_dupe_params
+                        }
+                        if norm_max_completion_tokens is not None:
+                            params["max_completion_tokens"] = norm_max_completion_tokens
+                        elif norm_max_tokens is not None:
+                            params["max_tokens"] = norm_max_tokens
                     
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
@@ -13128,7 +13199,7 @@ class UnifiedClient:
                         
                         # Override engine_args to enforce max token limit
                         # Chutes defaults to ~4k-8k tokens on some models, this attempts to override it
-                        token_limit = params.get("max_tokens") or params.get("max_completion_tokens")
+                        token_limit = params.get("max_output_tokens") or params.get("max_tokens") or params.get("max_completion_tokens")
                         if token_limit:
                             if "engine_args" not in extra_body:
                                 extra_body["engine_args"] = []
@@ -13167,6 +13238,9 @@ class UnifiedClient:
                     log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false") if use_streaming else False
                     if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
                         log_stream = False
+                    # Responses API streaming is not currently handled by this SDK path; disable to avoid breakage.
+                    if use_responses_api and use_streaming:
+                        use_streaming = False
                     if use_streaming:
                         call_kwargs["stream"] = True
 
@@ -13178,7 +13252,10 @@ class UnifiedClient:
                         start_ts = _t.time()
                         if use_streaming and not self._is_stop_requested():
                             print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})")
-                        resp = client.chat.completions.create(**call_kwargs)
+                        if use_responses_api:
+                            resp = client.responses.create(**call_kwargs)
+                        else:
+                            resp = client.chat.completions.create(**call_kwargs)
                         # Register streaming response for proper cleanup
                         if use_streaming:
                             with self._active_streams_lock:
@@ -13191,7 +13268,10 @@ class UnifiedClient:
                             if use_streaming:
                                 print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
                             else:
-                                print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
+                                if use_responses_api:
+                                    print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s (responses)")
+                                else:
+                                    print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
                     except Exception as sdk_err:
                         # Special handling: provider context length errors (e.g., OpenRouter 32768 window)
                         # Example:
@@ -13281,13 +13361,17 @@ class UnifiedClient:
                                                 except Exception:
                                                     sleep_s = 0.0
                                                 if sleep_s > 0 and not self._is_stop_requested():
-                                                    print(f"Retrying request to /chat/completions in {sleep_s:.6f} seconds")
+                                                    endpoint_name = "/responses" if use_responses_api else "/chat/completions"
+                                                    print(f"Retrying request to {endpoint_name} in {sleep_s:.6f} seconds")
                                                 if sleep_s > 0:
                                                     if not self._sleep_with_cancel(sleep_s, 0.1):
                                                         raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                                                 import time as _t
                                                 start_ts = _t.time()
-                                                resp = client.chat.completions.create(**call_kwargs)
+                                                if use_responses_api:
+                                                    resp = client.responses.create(**call_kwargs)
+                                                else:
+                                                    resp = client.chat.completions.create(**call_kwargs)
                                                 context_auto_adjust_succeeded = True
                                                 if use_streaming:
                                                     with self._active_streams_lock:
@@ -13325,6 +13409,7 @@ class UnifiedClient:
                             if (provider in ('chutes', 'openai') and 
                                 "max_completion_tokens" in err_str and 
                                 "streaming mode allows" in err_str and 
+                                not use_responses_api and
                                 not call_kwargs.get("stream", False)):
                                 
                                 print(f"⚠️ {provider} token limit error: Auto-enabling streaming to bypass non-streaming limit")
@@ -13338,7 +13423,10 @@ class UnifiedClient:
                                     start_ts = _t.time()
                                     if not self._is_stop_requested():
                                         print(f"🛰️ [{provider}] Retrying with streaming enabled...")
-                                    resp = client.chat.completions.create(**call_kwargs)
+                                    if use_responses_api:
+                                        resp = client.responses.create(**call_kwargs)
+                                    else:
+                                        resp = client.chat.completions.create(**call_kwargs)
                                     dur = _t.time() - start_ts
                                     if use_streaming:
                                         with self._active_streams_lock:
@@ -13593,6 +13681,30 @@ class UnifiedClient:
                             raw_response=None
                         )
                     # Non-streaming extraction with Gemini awareness
+                    if use_responses_api:
+                        try:
+                            body = None
+                            if hasattr(resp, 'model_dump_json'):
+                                import json as _json
+                                body = _json.loads(resp.model_dump_json())
+                            elif hasattr(resp, 'to_dict'):
+                                body = resp.to_dict()
+                            elif hasattr(resp, '__dict__'):
+                                body = resp.__dict__
+                            elif isinstance(resp, dict):
+                                body = resp
+                        except Exception:
+                            body = {}
+                        content, finish_reason, usage = self._extract_openai_responses_json(body or {})
+                        if content is None:
+                            content = ""
+                        self._save_response(content, response_name)
+                        return UnifiedResponse(
+                            content=content,
+                            finish_reason=finish_reason,
+                            usage=usage,
+                            raw_response=resp
+                        )
                     if hasattr(resp, 'choices') and resp.choices:
                         choice = resp.choices[0]
                         
