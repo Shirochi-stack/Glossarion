@@ -12986,6 +12986,8 @@ class UnifiedClient:
                                     continue
 
                                 # Convert content to Responses input blocks
+                                # Assistant role must use output_text (Responses API schema).
+                                text_type = "output_text" if role == "assistant" else "input_text"
                                 blocks: list = []
                                 if isinstance(content, list):
                                     for part in content:
@@ -12993,17 +12995,17 @@ class UnifiedClient:
                                             continue
                                         ptype = part.get('type')
                                         if ptype == 'text':
-                                            blocks.append({"type": "input_text", "text": str(part.get('text', ''))})
+                                            blocks.append({"type": text_type, "text": str(part.get('text', ''))})
                                         elif ptype == 'image_url':
                                             image_url = part.get('image_url') or {}
                                             url = image_url.get('url') if isinstance(image_url, dict) else str(image_url)
                                             if url:
                                                 blocks.append({"type": "input_image", "image_url": url})
                                 else:
-                                    blocks.append({"type": "input_text", "text": str(content)})
+                                    blocks.append({"type": text_type, "text": str(content)})
 
                                 if not blocks:
-                                    blocks = [{"type": "input_text", "text": ""}]
+                                    blocks = [{"type": text_type, "text": ""}]
 
                                 input_items.append({"role": role, "content": blocks})
                         except Exception:
@@ -14237,6 +14239,8 @@ class UnifiedClient:
                             continue
 
                         # Convert content to Responses input blocks
+                        # Assistant role must use output_text (Responses API schema).
+                        text_type = "output_text" if role == "assistant" else "input_text"
                         blocks: list = []
                         if isinstance(content, list):
                             for part in content:
@@ -14244,17 +14248,17 @@ class UnifiedClient:
                                     continue
                                 ptype = part.get('type')
                                 if ptype == 'text':
-                                    blocks.append({"type": "input_text", "text": str(part.get('text', ''))})
+                                    blocks.append({"type": text_type, "text": str(part.get('text', ''))})
                                 elif ptype == 'image_url':
                                     image_url = part.get('image_url') or {}
                                     url = image_url.get('url') if isinstance(image_url, dict) else str(image_url)
                                     if url:
                                         blocks.append({"type": "input_image", "image_url": url})
                         else:
-                            blocks.append({"type": "input_text", "text": str(content)})
+                            blocks.append({"type": text_type, "text": str(content)})
 
                         if not blocks:
-                            blocks = [{"type": "input_text", "text": ""}]
+                            blocks = [{"type": text_type, "text": ""}]
 
                         input_items.append({"role": role, "content": blocks})
                 except Exception:
