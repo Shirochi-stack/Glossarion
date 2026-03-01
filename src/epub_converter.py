@@ -4571,9 +4571,31 @@ img {
                 missing += 1
                 continue
 
-            # Ensure the target HTML actually exists before linking
-            target_path = os.path.normpath(os.path.join(self.output_dir, target_base))
-            if not os.path.exists(target_path):
+            # Ensure the target HTML actually exists before linking (dynamic fallback roots)
+            def _path_exists_with_fallback(rel_path: str) -> bool:
+                if not rel_path:
+                    return False
+                # Direct path
+                direct = os.path.normpath(os.path.join(self.output_dir, rel_path))
+                if os.path.exists(direct):
+                    return True
+                # Dynamically discover likely roots by locating any HTML/XHTML files
+                roots = set()
+                try:
+                    for root_dir, _, files in os.walk(self.output_dir):
+                        if any(f.lower().endswith(('.html', '.htm', '.xhtml')) for f in files):
+                            roots.add(root_dir)
+                    # Prefer shorter paths first
+                    candidate_roots = sorted(roots, key=lambda p: len(p))
+                except Exception:
+                    candidate_roots = []
+                for root_dir in candidate_roots:
+                    candidate = os.path.normpath(os.path.join(root_dir, rel_path))
+                    if os.path.exists(candidate):
+                        return True
+                return False
+
+            if not _path_exists_with_fallback(target_base):
                 missing += 1
                 continue
 
