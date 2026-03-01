@@ -2388,7 +2388,11 @@ class EPUBCompiler:
                     if hasattr(self, 'auxiliary_html_files') and base_name in self.auxiliary_html_files:
                         self.log(f"  🛈 Added auxiliary page to spine (not in TOC): {base_name}")
                     else:
-                        toc.append(chapter)
+                        title_lower = str(chapter_data.get('title', '')).strip().lower()
+                        if title_lower in ('untitled chapter', 'untitled'):
+                            self.log(f"  🛈 Skipped TOC entry for untitled chapter: {base_name}")
+                        else:
+                            toc.append(chapter)
                     chapters_added += 1
                     
                     # Log auxiliary files always, or at intervals for regular chapters
@@ -2449,7 +2453,11 @@ class EPUBCompiler:
             chapter.content = error_content.encode('utf-8')
             book.add_item(chapter)
             spine.append(chapter)
-            toc.append(chapter)
+            title_lower = str(title).strip().lower()
+            if title_lower in ('untitled chapter', 'untitled'):
+                self.log(f"  🛈 Skipped TOC entry for untitled error chapter: {err_file}")
+            else:
+                toc.append(chapter)
             
         except Exception as e:
             self.log(f"  ❌ Failed to add error placeholder: {e}")
@@ -2993,7 +3001,11 @@ class EPUBCompiler:
             # Add to book
             book.add_item(chapter)
             spine.append(chapter)
-            toc.append(chapter)
+            title_lower = str(title).strip().lower()
+            if title_lower in ('untitled chapter', 'untitled'):
+                self.log(f"  🛈 Skipped TOC entry for untitled chapter: {chapter_file_name}")
+            else:
+                toc.append(chapter)
             
             if is_problem_chapter:
                 self.log(f"[SUCCESS] Problem chapter {num} successfully added to EPUB!")

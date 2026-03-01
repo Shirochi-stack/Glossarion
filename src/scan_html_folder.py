@@ -232,6 +232,13 @@ AI_ARTIFACT_FIRSTLINE_PATTERNS = [
     re.compile(r'^(?:System|Assistant|AI|User|Human|Model)\s*:', re.IGNORECASE),
     re.compile(r'^\[PART\s+\d+/\d+\]', re.IGNORECASE),
     re.compile(r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)\b', re.IGNORECASE),
+    re.compile(r'^Translated\\s*[:;]\\s*$', re.IGNORECASE),
+    re.compile(r'^(?:I\s+couldn\'t|I\s+couldn’t|I\s+could\s+not|I\s+can\'t|I\s+can’t)\s+translate\b', re.IGNORECASE),
+    re.compile(r'^(?:Please\s+provide|Please\s+paste)\s+.*\btranslate\b', re.IGNORECASE),
+    re.compile(r'^(?:Please\s+provide|Please\s+paste)\s+.*\btext\b', re.IGNORECASE),
+    re.compile(r'^Please\s+provide\s+the\s+text\s+you\s+would\s+like\s+me\s+to\s+translate\b', re.IGNORECASE),
+    re.compile(r'^(?:I\s+couldn\'t|I\s+can\'t)\s+translate.*\bimage\b', re.IGNORECASE),
+    re.compile(r'^Please\s+paste\s+the\s+\w+\s+text\b', re.IGNORECASE),
     re.compile(r'^```(?:html|xml|text)?\s*$', re.IGNORECASE),
     re.compile(r'^<!DOCTYPE', re.IGNORECASE),
 ]
