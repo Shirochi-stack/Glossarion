@@ -432,6 +432,106 @@ def _model_uses_own_auth(model: str) -> bool:
     m = model.lower()
     return m.startswith('authgpt/') or m.startswith('vertex/')
 
+def _ensure_multi_key_config_loaded():
+    """Best-effort load of multi-key config when running in subprocesses.
+
+    In subprocesses, in-memory key lists are not inherited. If multi-key mode is
+    enabled via env but no keys are present, load them from config.json and
+    initialize UnifiedClient's in-memory pool.
+    """
+    try:
+        if os.getenv('USE_MULTI_API_KEYS', '0') != '1':
+            return
+    except Exception:
+        return
+
+    # If keys are already present in env or in-memory, nothing to do.
+    try:
+        mk_env = os.getenv('MULTI_API_KEYS', '')
+        if mk_env and str(mk_env).strip() not in ('', '[]', 'null', 'None'):
+            return
+    except Exception:
+        pass
+
+    try:
+        import unified_api_client as _uac
+        with _uac.UnifiedClient._in_memory_multi_keys_lock:
+            if _uac.UnifiedClient._in_memory_multi_keys:
+                return
+    except Exception:
+        pass
+
+    # Try to load from config.json in common locations.
+    cfg_paths = []
+    try:
+        cfg_env = os.getenv('CONFIG_FILE')
+        if cfg_env:
+            cfg_paths.append(cfg_env)
+    except Exception:
+        pass
+    try:
+        cfg_paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
+    except Exception:
+        pass
+    try:
+        cfg_paths.append(os.path.join(os.getcwd(), "config.json"))
+    except Exception:
+        pass
+
+    # Deduplicate while preserving order
+    seen = set()
+    candidates = []
+    for p in cfg_paths:
+        if not p:
+            continue
+        p_norm = os.path.abspath(p)
+        if p_norm in seen:
+            continue
+        seen.add(p_norm)
+        candidates.append(p_norm)
+
+    cfg = None
+    cfg_path = None
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                cfg_path = p
+                break
+            except Exception:
+                continue
+
+    if not isinstance(cfg, dict):
+        return
+
+    keys = cfg.get('multi_api_keys') or []
+    if not keys:
+        return
+
+    force_rotation = bool(cfg.get('force_key_rotation', True))
+    rotation_frequency = int(cfg.get('rotation_frequency', 1))
+    try:
+        os.environ.setdefault('FORCE_KEY_ROTATION', '1' if force_rotation else '0')
+        os.environ.setdefault('ROTATION_FREQUENCY', str(rotation_frequency))
+        os.environ.setdefault('USE_MULTI_KEYS', '1')  # backward-compat
+    except Exception:
+        pass
+
+    try:
+        import unified_api_client as _uac
+        _uac.UnifiedClient.set_in_memory_multi_keys(
+            keys,
+            force_rotation=force_rotation,
+            rotation_frequency=rotation_frequency,
+        )
+        if cfg_path:
+            print(f"[DEBUG] Loaded multi-key config from {os.path.basename(cfg_path)} ({len(keys)} keys)")
+        else:
+            print(f"[DEBUG] Loaded multi-key config ({len(keys)} keys)")
+    except Exception as e:
+        print(f"[DEBUG] Failed to initialize multi-key config from file: {e}")
+
 def send_with_interrupt(*args, **kwargs):
     """Lazy wrapper to avoid circular import"""
     from TransateKRtoEN import send_with_interrupt as _send_with_interrupt
@@ -4308,6 +4408,8 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
         else:
             print(f"📑 Using AI-assisted extraction with custom prompt")
             
+            # Ensure multi-key config is available in this process if enabled
+            _ensure_multi_key_config_loaded()
             from unified_api_client import UnifiedClient, UnifiedClientError
             client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
             
@@ -5808,6 +5910,8 @@ def _translate_terms_batch(term_list, profile_name, batch_size=50, output_dir=No
         
         print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
         
+        # Ensure multi-key config is available in this process if enabled
+        _ensure_multi_key_config_loaded()
         from unified_api_client import UnifiedClient, UnifiedClientError
         client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
         if hasattr(client, 'reset_cleanup_state'):
