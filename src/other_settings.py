@@ -111,7 +111,7 @@ def setup_other_settings_methods(gui_instance):
         'toggle_gpt_reasoning_controls', 'toggle_anthropic_thinking_controls',
         'open_other_settings',
         'open_multi_api_key_manager', 'show_ai_hunter_settings',
-        'delete_translated_headers_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
+        'delete_translated_headers_file', 'delete_toc_txt_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
         'show_header_help_dialog',
         'on_extraction_method_change', 'on_extraction_mode_change',
         # Toggle methods
@@ -1088,6 +1088,21 @@ def _create_output_settings_section(self, parent):
 
     section_v.addWidget(use_toc_cb)
     section_v.addWidget(translate_toc_cb)
+
+    # Delete TOC.txt button (same style as Delete Header Files)
+    delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
+    delete_toc_btn.setFixedWidth(210)
+    delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
+    delete_toc_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #dc3545; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+    )
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(icon_path):
+        delete_toc_btn.setIcon(QIcon(icon_path))
+    delete_toc_btn.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(delete_toc_btn)
 
     # Separator
     sep_epub_struct = QFrame()
@@ -5281,6 +5296,7 @@ def _create_prompt_management_section(self, parent):
     if os.path.exists(icon_path):
         delete_btn.setIcon(QIcon(icon_path))
     buttons_h.addWidget(delete_btn)
+
     buttons_h.addStretch()
     
     section_v.addWidget(buttons_row)
@@ -8836,6 +8852,114 @@ def run_standalone_translate_headers(self):
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
+def validate_epub_structure_gui(self):
+    """GUI wrapper for EPUB structure validation"""
+    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QIcon
+    import os
+    
+    # Get icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    
+    input_path = ''
+    if hasattr(self, 'entry_epub'):
+        if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
+            input_path = self.entry_epub.text()
+        elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
+            input_path = self.entry_epub.get()
+    if not input_path:
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText("Please select a file first.")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+        return
+    
+    if input_path.lower().endswith('.txt'):
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Info")
+        msg_box.setText("Structure validation is only available for EPUB files.")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+        return
+    
+    epub_base = os.path.splitext(os.path.basename(input_path))[0]
+    output_dir = epub_base
+    
+    if not os.path.exists(output_dir):
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Info")
+        msg_box.setText(f"No output directory found: {output_dir}")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+        return
+    
+    self.append_log("🔍 Validating EPUB structure...")
+    
+    try:
+        from TransateKRtoEN import validate_epub_structure, check_epub_readiness
+        
+        structure_ok = validate_epub_structure(output_dir)
+        readiness_ok = check_epub_readiness(output_dir)
+        
+        if structure_ok and readiness_ok:
+            self.append_log("✅ EPUB validation PASSED - Ready for compilation!")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("Validation Passed")
+            msg_box.setText("✅ All EPUB structure files are present!\n\n"
+                              "Your translation is ready for EPUB compilation.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+        elif structure_ok:
+            self.append_log("⚠️ EPUB structure OK, but some issues found")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Validation Warning")
+            msg_box.setText("⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
+                                 "Check the log for details.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+        else:
+            self.append_log("❌ EPUB validation FAILED - Missing critical files")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Validation Failed")
+            msg_box.setText("❌ Missing critical EPUB files!\n\n"
+                               "container.xml and/or OPF files are missing.\n"
+                               "Try re-running the translation to extract them.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+    
+    except ImportError as e:
+        self.append_log(f"❌ Could not import validation functions: {e}")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText("Validation functions not available.")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+    except Exception as e:
+        self.append_log(f"❌ Validation error: {e}")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Validation failed: {e}")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+
 def delete_translated_headers_file(self):
     """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
     from PySide6.QtWidgets import QMessageBox
@@ -9039,110 +9163,208 @@ def delete_translated_headers_file(self):
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
-def validate_epub_structure_gui(self):
-    """GUI wrapper for EPUB structure validation"""
+
+def delete_toc_txt_file(self):
+    """Delete the TOC.txt (toc.txt) file from the output directory for all selected EPUBs"""
     from PySide6.QtWidgets import QMessageBox
-    from PySide6.QtGui import QIcon
-    import os
     
     # Get icon path
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
     
-    input_path = ''
-    if hasattr(self, 'entry_epub'):
-        if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
-            input_path = self.entry_epub.text()
-        elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
-            input_path = self.entry_epub.get()
-    if not input_path:
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle("Error")
-        msg_box.setText("Please select a file first.")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
-        return
-    
-    if input_path.lower().endswith('.txt'):
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowTitle("Info")
-        msg_box.setText("Structure validation is only available for EPUB files.")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
-        return
-    
-    epub_base = os.path.splitext(os.path.basename(input_path))[0]
-    output_dir = epub_base
-    
-    if not os.path.exists(output_dir):
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowTitle("Info")
-        msg_box.setText(f"No output directory found: {output_dir}")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
-        return
-    
-    self.append_log("🔍 Validating EPUB structure...")
-    
     try:
-        from TransateKRtoEN import validate_epub_structure, check_epub_readiness
+        # Get all selected EPUB files using the same logic as QA scanner
+        epub_files_to_process = []
         
-        structure_ok = validate_epub_structure(output_dir)
-        readiness_ok = check_epub_readiness(output_dir)
+        # First check if current selection actually contains EPUBs
+        if hasattr(self, 'selected_files') and self.selected_files:
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+            if current_epub_files:
+                epub_files_to_process = current_epub_files
+                self.append_log(f"📚 Found {len(epub_files_to_process)} EPUB files in current selection")
         
-        if structure_ok and readiness_ok:
-            self.append_log("✅ EPUB validation PASSED - Ready for compilation!")
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Information)
-            msg_box.setWindowTitle("Validation Passed")
-            msg_box.setText("✅ All EPUB structure files are present!\n\n"
-                              "Your translation is ready for EPUB compilation.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
-        elif structure_ok:
-            self.append_log("⚠️ EPUB structure OK, but some issues found")
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Warning)
-            msg_box.setWindowTitle("Validation Warning")
-            msg_box.setText("⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
-                                 "Check the log for details.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
-        else:
-            self.append_log("❌ EPUB validation FAILED - Missing critical files")
+        # If no EPUBs in selection, try single EPUB methods
+        if not epub_files_to_process:
+            epub_path = self.get_current_epub_path()
+            if not epub_path:
+                entry_path = ''
+                if hasattr(self, 'entry_epub'):
+                    if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
+                        entry_path = self.entry_epub.text().strip()
+                    elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
+                        entry_path = self.entry_epub.get().strip()
+                if entry_path and entry_path != "No file selected" and os.path.exists(entry_path):
+                    epub_path = entry_path
+            
+            if epub_path:
+                epub_files_to_process = [epub_path]
+        
+        if not epub_files_to_process:
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setWindowTitle("Validation Failed")
-            msg_box.setText("❌ Missing critical EPUB files!\n\n"
-                               "container.xml and/or OPF files are missing.\n"
-                               "Try re-running the translation to extract them.")
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("No EPUB file(s) selected. Please select EPUB file(s) first.")
             msg_box.setWindowIcon(icon)
             _center_messagebox_buttons(msg_box)
             msg_box.exec()
-    
-    except ImportError as e:
-        self.append_log(f"❌ Could not import validation functions: {e}")
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle("Error")
-        msg_box.setText("Validation functions not available.")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
+            return
+        
+        # Process each EPUB file to find and delete TOC.txt
+        files_found = []
+        files_not_found = []
+        files_deleted = []
+        errors = []
+        
+        current_dir = os.getcwd()
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # First pass: scan for files
+        for epub_path in epub_files_to_process:
+            try:
+                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                self.append_log(f"🔍 Processing EPUB: {epub_base}")
+                
+                # Check the most common locations in order of priority (same as QA scanner)
+                candidates = [
+                    os.path.join(current_dir, epub_base),        # current working directory
+                    os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
+                    os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
+                ]
+                
+                # Add output directory override if configured (matches QA scanner behavior)
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    candidates.insert(0, os.path.join(override_dir, epub_base))
+                    self.append_log(f"  🔍 Checking override directory: {override_dir}")
+                
+                output_dir = None
+                for candidate in candidates:
+                    if os.path.isdir(candidate):
+                        # Verify the folder actually contains HTML/XHTML files
+                        try:
+                            files = os.listdir(candidate)
+                            html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                            if html_files:
+                                output_dir = candidate
+                                break
+                        except Exception:
+                            continue
+                
+                if not output_dir:
+                    self.append_log(f"  ⚠️ No output directory found for {epub_base}")
+                    files_not_found.append((epub_base, "No output directory found"))
+                    continue
+                
+                # Look for TOC.txt (case-insensitive)
+                toc_upper = os.path.join(output_dir, "TOC.txt")
+                toc_lower = os.path.join(output_dir, "toc.txt")
+                toc_file = toc_upper if os.path.exists(toc_upper) else (toc_lower if os.path.exists(toc_lower) else None)
+                
+                if toc_file:
+                    files_found.append((epub_base, toc_file))
+                    self.append_log(f"  ✓ Found {os.path.basename(toc_file)} in {os.path.basename(output_dir)}")
+                else:
+                    files_not_found.append((epub_base, "TOC.txt not found"))
+                    self.append_log(f"  ⚠️ No TOC.txt in {os.path.basename(output_dir)}")
+                    
+            except Exception as e:
+                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                errors.append((epub_base, str(e)))
+                self.append_log(f"  ❌ Error processing {epub_base}: {e}")
+        
+        # Show summary and get user confirmation
+        if not files_found and not files_not_found and not errors:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Files")
+            msg_box.setText("No EPUB files were processed.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+            return
+        
+        summary_text = f"Summary for {len(epub_files_to_process)} EPUB file(s):\n\n"
+        
+        if files_found:
+            summary_text += f"✅ Files to delete ({len(files_found)}):\n"
+            for epub_base, file_path in files_found:
+                summary_text += f"  • {epub_base}\n"
+            summary_text += "\n"
+        
+        if files_not_found:
+            summary_text += f"⚠️ Files not found ({len(files_not_found)}):\n"
+            for epub_base, reason in files_not_found:
+                summary_text += f"  • {epub_base}: {reason}\n"
+            summary_text += "\n"
+        
+        if errors:
+            summary_text += f"❌ Errors ({len(errors)}):\n"
+            for epub_base, error in errors:
+                summary_text += f"  • {epub_base}: {error}\n"
+            summary_text += "\n"
+        
+        if files_found:
+            summary_text += "This will allow TOC entries to be re-translated on the next run."
+            
+            # Confirm deletion
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Confirm Deletion")
+            msg_box.setText(summary_text)
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.No)
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            result = msg_box.exec()
+            
+            if result == QMessageBox.Yes:
+                # Delete the files
+                for epub_base, toc_file in files_found:
+                    try:
+                        os.remove(toc_file)
+                        files_deleted.append(epub_base)
+                        self.append_log(f"✅ Deleted {os.path.basename(toc_file)} from {epub_base}")
+                    except Exception as e:
+                        errors.append((epub_base, f"Delete failed: {e}"))
+                        self.append_log(f"❌ Failed to delete TOC.txt from {epub_base}: {e}")
+                
+                # Show final results
+                if files_deleted:
+                    success_msg = f"Successfully deleted {len(files_deleted)} file(s):\n"
+                    success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
+                    if errors:
+                        success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Information)
+                    msg_box.setWindowTitle("Success")
+                    msg_box.setText(success_msg)
+                    msg_box.setWindowIcon(icon)
+                    _center_messagebox_buttons(msg_box)
+                    msg_box.exec()
+                else:
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Critical)
+                    msg_box.setWindowTitle("Error")
+                    msg_box.setText("No files were successfully deleted.")
+                    msg_box.setWindowIcon(icon)
+                    _center_messagebox_buttons(msg_box)
+                    msg_box.exec()
+        else:
+            # No files to delete
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Files to Delete")
+            msg_box.setText(summary_text)
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+        
     except Exception as e:
-        self.append_log(f"❌ Validation error: {e}")
+        self.append_log(f"❌ Error deleting TOC.txt: {e}")
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setWindowTitle("Error")
-        msg_box.setText(f"Validation failed: {e}")
+        msg_box.setText(f"Failed to delete file: {e}")
         msg_box.setWindowIcon(icon)
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
