@@ -5227,17 +5227,10 @@ class BatchTranslationProcessor:
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
                             if save_partial_results:
-                                # Preserve original markup when blocked (no translated output)
-                                original_markup = (
-                                    chapter.get("original_html")
-                                    or chapter.get("source_html")
-                                    or chapter.get("raw_html")
-                                    or chapter.get("body")
-                                    or ""
-                                )
+                                # Do NOT preserve original; save AI output if any, otherwise empty
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                        f.write(original_markup)
+                                        f.write(result if isinstance(result, str) else "")
                                 except Exception:
                                     pass
                             with self.progress_lock:
@@ -11909,17 +11902,10 @@ def main(log_callback=None, stop_callback=None):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
                     if save_partial_results:
-                        # Preserve original markup when blocked (no translated output)
-                        original_markup = (
-                            c.get("original_html")
-                            or c.get("source_html")
-                            or c.get("raw_html")
-                            or c.get("body")
-                            or ""
-                        )
+                        # Do NOT preserve original; save AI output if any, otherwise empty
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                f.write(original_markup)
+                                f.write(result if isinstance(result, str) else "")
                         except Exception:
                             pass
                     progress_manager.update(
