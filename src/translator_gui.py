@@ -10296,7 +10296,29 @@ Important rules:
             # Set prompts
             import large_env
             large_env.set_env('SYSTEM_PROMPT', self.prompt_text.toPlainText().strip())
-            
+
+            # PDF output settings
+            os.environ['ENABLE_PDF_OUTPUT'] = '1' if getattr(self, 'enable_pdf_output_var', self.config.get('enable_pdf_output', False)) else '0'
+            os.environ['PDF_GENERATE_TOC'] = '1' if self.config.get('pdf_generate_toc', False) else '0'
+            os.environ['PDF_TOC_PAGE_NUMBERS'] = '1' if self.config.get('pdf_toc_page_numbers', True) else '0'
+            os.environ['PDF_PAGE_NUMBERS'] = '1' if self.config.get('pdf_page_numbers', True) else '0'
+            os.environ['PDF_PAGE_NUMBER_ALIGNMENT'] = self.config.get('pdf_page_number_alignment', 'center')
+            os.environ['PDF_IMAGE_FORMAT'] = self.config.get('pdf_image_format', 'jpeg')
+            os.environ['PDF_PNG_OPTIMIZE'] = '1' if self.config.get('pdf_png_optimize', True) else '0'
+            os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(self.config.get('pdf_png_compress_level', 6))
+
+            # EPUB structure settings
+            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if getattr(self, 'legacy_structure_var', self.config.get('legacy_structure', False)) else '0'
+            os.environ['USE_TOC_NCX'] = '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'
+            os.environ['TRANSLATE_TOC_NCX'] = '1' if getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False)) else '0'
+            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'
+            os.environ['DEDUPLICATE_TOC'] = '1' if getattr(self, 'deduplicate_toc_var', self.config.get('deduplicate_toc', False)) else '0'
+            os.environ['FORCE_NCX_ONLY'] = '1' if getattr(self, 'force_ncx_only_var', True) else '0'
+            os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if self.config.get('enable_image_compression', False) else '0'
+            os.environ['IMAGE_COMPRESSION_QUALITY'] = str(self.config.get('image_compression_quality', 80))
+            os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if self.config.get('exclude_cover_compression', True) else '0'
+            os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if self.config.get('exclude_gif_compression', True) else '0'
+
             fallback_compile_epub(folder, log_callback=self.append_log)
             
             if not self.stop_requested:

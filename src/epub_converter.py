@@ -1816,9 +1816,9 @@ class EPUBCompiler:
                 else:
                     try:
                         self._generate_pdf(html_files, chapter_titles_info, processed_images, cover_file, metadata)
-                    except Exception as e:
-                        self.log(f"⚠️ PDF generation failed: {e}")
+                    except BaseException as e:
                         import traceback
+                        self.log(f"⚠️ PDF generation failed: {type(e).__name__}: {e}")
                         self.log(f"[DEBUG] {traceback.format_exc()}")
             
             # Persist updated metadata (including translated fields/language)
@@ -5331,6 +5331,9 @@ img {
         
         # Add image styles for PDF rendering
         styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
+        # Suppress all heading-generated sidebar bookmarks; only .pdf-bm elements create them
+        styles += " h1, h2, h3, h4, h5, h6 { bookmark-level: none; } "
+        styles += " h1.pdf-bm { bookmark-level: 1; font-size: 0 !important; line-height: 0 !important; margin: 0 !important; padding: 0 !important; height: 0 !important; overflow: hidden !important; } "
         
         # Page number CSS
         alignment = settings['page_number_alignment']
@@ -5432,10 +5435,13 @@ img {
                 body_content = _extract_body_content(content)
                 
                 # Add anchor ID for TOC linking and page break before each chapter (except first)
+                _bm_title = chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+                _bm_h1 = (f'<h1 class="pdf-bm">{html_module.escape(str(_bm_title))}</h1>'
+                          if _bm_title else '')
                 if i > 0:
-                    body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{body_content}</div>'
+                    body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
                 else:
-                    body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
+                    body_content = f'<div id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
                 
                 # Add to combined HTML
                 all_chapters_html += body_content
@@ -5493,8 +5499,13 @@ img {
         all_pages = [page for doc in documents for page in doc.pages]
         self.log(f"  Total pages: {len(all_pages)}")
         self.log("  Writing PDF to disk...")
-        
-        documents[0].copy(all_pages).write_pdf(pdf_path)
+        try:
+            documents[0].copy(all_pages).write_pdf(pdf_path)
+        except BaseException as e:
+            import traceback
+            self.log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")
+            self.log(f"  [DEBUG] {traceback.format_exc()}")
+            raise
         
         elapsed = _time.time() - start_time
         if os.path.exists(pdf_path):
