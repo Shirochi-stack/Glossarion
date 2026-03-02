@@ -4913,6 +4913,17 @@ def _create_prompt_management_section(self, parent):
     if not hasattr(self, 'translate_toc_ncx_var'):
         self.translate_toc_ncx_var = self.config.get('translate_toc_ncx', False)
 
+    # TOC batch limit definitions (moved up for toggle logic)
+    toc_batch_label = QLabel("TOC entries per batch:")
+    
+    toc_batch_entry = QLineEdit()
+    toc_batch_entry.setFixedWidth(60)
+    toc_batch_entry.setText(str(getattr(self, 'toc_ncx_per_batch_var', '400')))
+    def _on_toc_batch_changed(text):
+        if text.isdigit():
+            self.toc_ncx_per_batch_var = text
+    toc_batch_entry.textChanged.connect(_on_toc_batch_changed)
+
     translate_toc_cb = self._create_styled_checkbox("Translate toc.ncx")
     translate_toc_cb.setToolTip(
         "Translate ALL toc.ncx entries in ONE API call and save a TOC.txt cache file\n"
@@ -4940,6 +4951,8 @@ def _create_prompt_management_section(self, parent):
     # Enable/disable translate checkbox based on master
     translate_toc_cb.setEnabled(use_toc_cb.isChecked())
     skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
+    toc_batch_label.setEnabled(translate_toc_cb.isChecked())
+    toc_batch_entry.setEnabled(translate_toc_cb.isChecked())
 
     def _on_use_toc_ncx_toggle(checked):
         try:
@@ -4948,9 +4961,14 @@ def _create_prompt_management_section(self, parent):
             os.environ['USE_TOC_NCX'] = '1' if checked else '0'
             translate_toc_cb.setEnabled(bool(checked))
             if checked:
-                skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
+                enabled = translate_toc_cb.isChecked()
+                skip_dup_toc_cb.setEnabled(enabled)
+                toc_batch_label.setEnabled(enabled)
+                toc_batch_entry.setEnabled(enabled)
             else:
                 skip_dup_toc_cb.setEnabled(False)
+                toc_batch_label.setEnabled(False)
+                toc_batch_entry.setEnabled(False)
             # Deduplicate TOC and its child also depend on use_toc_ncx
             dedup_toc_cb.setEnabled(bool(checked))
             if checked:
@@ -4968,6 +4986,8 @@ def _create_prompt_management_section(self, parent):
             self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
             os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
             skip_dup_toc_cb.setEnabled(bool(checked))
+            toc_batch_label.setEnabled(bool(checked))
+            toc_batch_entry.setEnabled(bool(checked))
         except Exception:
             pass
 
@@ -5106,26 +5126,7 @@ def _create_prompt_management_section(self, parent):
     _toc_btn_h.addWidget(delete_toc_btn)
     
     _toc_btn_h.addSpacing(20)
-    toc_batch_label = QLabel("TOC entries per batch:")
-    toc_batch_label.setStyleSheet("font-size: 13px; color: #ced4da;")
     _toc_btn_h.addWidget(toc_batch_label)
-    
-    toc_batch_entry = QLineEdit()
-    toc_batch_entry.setFixedWidth(60)
-    toc_batch_entry.setText(str(getattr(self, 'toc_ncx_per_batch_var', '400')))
-    toc_batch_entry.setStyleSheet("""
-        QLineEdit {
-            background-color: #2b2b2b;
-            color: #e0e0e0;
-            border: 1px solid #444;
-            border-radius: 4px;
-            padding: 2px 5px;
-        }
-    """)
-    def _on_toc_batch_changed(text):
-        if text.isdigit():
-            self.toc_ncx_per_batch_var = text
-    toc_batch_entry.textChanged.connect(_on_toc_batch_changed)
     _toc_btn_h.addWidget(toc_batch_entry)
     _toc_btn_h.addStretch()
     
