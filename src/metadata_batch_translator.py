@@ -2907,7 +2907,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                             break
                 
                 if not current_title:
-                    current_title = f"Chapter {chapter_num}"
+                    continue
                 
                 current_titles[chapter_num] = {
                     'title': current_title,
@@ -2940,7 +2940,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                             break
                 
                 if not current_title:
-                    current_title = f"Chapter {chapter_num}"
+                    continue
                 
                 current_titles[chapter_num] = {
                     'title': current_title,
