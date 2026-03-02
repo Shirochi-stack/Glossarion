@@ -4559,10 +4559,29 @@ img {
                                 first_idx = first_idx_by_label.get(key, idx)
                                 if first_idx in unique_translations:
                                     translations[idx] = unique_translations[first_idx]
-                        else:
+                    else:
                             translations = tr.translate_headers_batch(original, batch_size=len(original)) or {}
-                        self._save_toc_translations_file(toc_txt_path, original, translations, refs)
-                        self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
+                        if translations:
+                            # Pre-compute actual output paths so "Output File" shows
+                            # the path in the built EPUB, not the raw NCX src.
+                            output_refs: Dict[int, str] = {}
+                            for _idx, _ent in enumerate(entries, 1):
+                                _src = (_ent.get('src') or '').strip()
+                                if not _src:
+                                    output_refs[_idx] = refs.get(_idx, '')
+                                    continue
+                                _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
+                                _core = self._normalize_core_name(_src_base)
+                                _target = spine_href_by_core.get(_core)
+                                if _target:
+                                    output_refs[_idx] = _target  # file path only, no fragment
+                                else:
+                                    # fallback: strip fragment from source path
+                                    output_refs[_idx] = _src_base
+                            self._save_toc_translations_file(toc_txt_path, original, translations, output_refs)
+                            self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
+                        else:
+                            self.log(f"⚠️ toc.ncx translation returned no results - skipping cache (will retry next run)")
                     except Exception as e:
                         self.log(f"⚠️ toc.ncx translation failed: {e}")
                         translations = {}
