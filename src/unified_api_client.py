@@ -6717,8 +6717,39 @@ class UnifiedClient:
                 # Always return the content from UnifiedResponse
                 if len(response.content) > 0:
                     # Extract chapter info for better logging
-                    # Prefer explicit log label or chapter_context passed in kwargs
-                    log_label = kwargs.get('log_label', None)
+                    # Prefer thread-local label/context, then kwargs, then message parsing
+                    log_label = None
+                    try:
+                        tls = self._get_thread_local_client()
+                        log_label = getattr(tls, 'current_request_label', None)
+                        if not log_label:
+                            ctx = getattr(tls, 'chapter_context', None)
+                            if isinstance(ctx, dict):
+                                chap = ctx.get("chapter")
+                                chunk = ctx.get("chunk")
+                                total = ctx.get("total_chunks")
+                                merged = ctx.get("merged_chapters")
+                                if merged and len(merged) > 0:
+                                    merged_nums = sorted([int(c) for c in merged if c is not None])
+                                    if merged_nums:
+                                        if len(merged_nums) == 1:
+                                            base_label = f"Merged {merged_nums[0]}"
+                                        else:
+                                            base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+                                        if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
+                                            log_label = f"{base_label} (chunk {chunk}/{total})"
+                                        else:
+                                            log_label = base_label
+                                if not log_label and chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
+                                    log_label = f"Chapter {chap} (chunk {chunk}/{total})"
+                                if not log_label and chap is not None:
+                                    log_label = f"Chapter {chap}"
+                    except Exception:
+                        log_label = None
+
+                    if not log_label:
+                        # Prefer explicit log label or chapter_context passed in kwargs
+                        log_label = kwargs.get('log_label', None)
                     if not log_label:
                         ctx = kwargs.get('chapter_context', None)
                         if isinstance(ctx, dict):
