@@ -4848,7 +4848,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(title_w)
     
     title_desc = QLabel("When enabled: Book titles and selected metadata will be translated")
-    title_desc.setStyleSheet("color: gray; font-size: 11pt;")
+    title_desc.setStyleSheet("color: gray; font-size: 9pt;")
     title_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(title_desc)
     
@@ -5111,7 +5111,7 @@ def _create_prompt_management_section(self, parent):
     
     header_row1 = QWidget()
     header_h1 = QHBoxLayout(header_row1)
-    header_h1.setContentsMargins(0, 5, 0, 10)
+    header_h1.setContentsMargins(0, 0, 0, 0)
     
     # Master toggle for batch header translation
     batch_toggle_cb = self._create_styled_checkbox("Batch Translate Headers")
