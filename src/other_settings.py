@@ -989,239 +989,6 @@ def _create_output_settings_section(self, parent):
     section_v.setContentsMargins(8, 8, 8, 8)
     section_v.setSpacing(4)
 
-    # ── EPUB Structure ─────────────────────────────────────────
-    epub_struct_title = QLabel("EPUB Structure")
-    epub_struct_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
-    section_v.addWidget(epub_struct_title)
-
-    epub_struct_desc = QLabel("Control how files are arranged inside the generated .epub")
-    epub_struct_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    section_v.addWidget(epub_struct_desc)
-
-    if not hasattr(self, 'legacy_structure_var'):
-        self.legacy_structure_var = self.config.get('legacy_structure', False)
-
-    legacy_cb = self._create_styled_checkbox("EPUB2 Folder Layout (OEBPS/Text)")
-    legacy_cb.setToolTip(
-        "Use a legacy EPUB2-style folder structure inside the .epub:\n"
-        "• OEBPS/Text/ (XHTML/HTML chapter files)\n\n"
-        "Note: Resource folders (css/images/fonts) keep their existing names; only chapter HTML/XHTML\n"
-        "files are moved under OEBPS/Text/ for compatibility with EPUB2-style readers."
-    )
-    try:
-        legacy_cb.setChecked(bool(self.legacy_structure_var))
-    except Exception:
-        pass
-
-    def _on_legacy_structure_toggle(checked):
-        try:
-            self.legacy_structure_var = bool(checked)
-            self.config['legacy_structure'] = self.legacy_structure_var
-            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if checked else '0'
-        except Exception:
-            pass
-
-    def _on_skip_dup_toc_toggle(checked):
-        try:
-            self.skip_duplicate_toc_translation_var = bool(checked)
-            self.config['skip_duplicate_toc_translation'] = self.skip_duplicate_toc_translation_var
-            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if checked else '0'
-        except Exception:
-            pass
-
-    legacy_cb.toggled.connect(_on_legacy_structure_toggle)
-    section_v.addWidget(legacy_cb)
-
-    # Use source toc.ncx
-    if not hasattr(self, 'use_toc_ncx_var'):
-        self.use_toc_ncx_var = self.config.get('use_toc_ncx', False)
-
-    use_toc_cb = self._create_styled_checkbox("Use toc.ncx")
-    use_toc_cb.setToolTip(
-        "Use the toc.ncx from the source EPUB to build the Table of Contents.\n"
-        "This can preserve the original TOC structure and anchor links."  # e.g. chapter.xhtml#id
-    )
-    try:
-        use_toc_cb.setChecked(bool(self.use_toc_ncx_var))
-    except Exception:
-        pass
-
-    # Translate source toc.ncx (single API call)
-    if not hasattr(self, 'translate_toc_ncx_var'):
-        self.translate_toc_ncx_var = self.config.get('translate_toc_ncx', False)
-
-    translate_toc_cb = self._create_styled_checkbox("Translate toc.ncx")
-    translate_toc_cb.setToolTip(
-        "Translate ALL toc.ncx entries in ONE API call and save a TOC.txt cache file\n"
-        "in the same robust format as translated_headers.txt (Original/Translated blocks)."
-    )
-    try:
-        translate_toc_cb.setChecked(bool(self.translate_toc_ncx_var))
-    except Exception:
-        pass
-
-    # Skip duplicate translations (only when translating toc.ncx)
-    if not hasattr(self, 'skip_duplicate_toc_translation_var'):
-        self.skip_duplicate_toc_translation_var = self.config.get('skip_duplicate_toc_translation', False)
-
-    skip_dup_toc_cb = self._create_styled_checkbox("Skip duplicate translation")
-    skip_dup_toc_cb.setToolTip(
-        "When Translate toc.ncx is enabled, identical source labels are translated once and\n"
-        "duplicates reuse the first translation. Saves tokens and API time."
-    )
-    try:
-        skip_dup_toc_cb.setChecked(bool(self.skip_duplicate_toc_translation_var))
-    except Exception:
-        pass
-
-    # Enable/disable translate checkbox based on master
-    translate_toc_cb.setEnabled(use_toc_cb.isChecked())
-    skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
-
-    def _on_use_toc_ncx_toggle(checked):
-        try:
-            self.use_toc_ncx_var = bool(checked)
-            self.config['use_toc_ncx'] = self.use_toc_ncx_var
-            os.environ['USE_TOC_NCX'] = '1' if checked else '0'
-
-            # Child depends on master
-            translate_toc_cb.setEnabled(bool(checked))
-            # If master is turned on, re-evaluate skip-duplicate enablement based on translate toggle
-            if checked:
-                skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
-            if not checked:
-                # Disable children without forcing them off
-                skip_dup_toc_cb.setEnabled(False)
-        except Exception:
-            pass
-
-    def _on_translate_toc_ncx_toggle(checked):
-        try:
-            # If user turns on translate, ensure master is on
-            if checked and not use_toc_cb.isChecked():
-                use_toc_cb.setChecked(True)
-            self.translate_toc_ncx_var = bool(checked)
-            self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
-            os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
-            # Child depends on translate
-            skip_dup_toc_cb.setEnabled(bool(checked))
-        except Exception:
-            pass
-
-    use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
-    translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)
-    skip_dup_toc_cb.toggled.connect(_on_skip_dup_toc_toggle)
-
-    section_v.addWidget(use_toc_cb)
-    section_v.addWidget(translate_toc_cb)
-    skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(skip_dup_toc_cb)
-
-    # Deduplicate TOC entries (exact match)
-    if not hasattr(self, 'deduplicate_toc_var'):
-        self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
-
-    dedup_toc_cb = self._create_styled_checkbox("Deduplicate TOC")
-    dedup_toc_cb.setToolTip(
-        "Skip duplicate TOC entries with the exact same title. Example: if 10 entries are named\n"
-        "\"Chapter 1: Peanuts\", only the first one is kept. No fuzzy matching."
-    )
-    try:
-        dedup_toc_cb.setChecked(bool(self.deduplicate_toc_var))
-    except Exception:
-        pass
-
-    def _on_dedup_toc_toggle(checked):
-        try:
-            self.deduplicate_toc_var = bool(checked)
-            self.config['deduplicate_toc'] = self.deduplicate_toc_var
-            os.environ['DEDUPLICATE_TOC'] = '1' if checked else '0'
-        except Exception:
-            pass
-
-    dedup_toc_cb.toggled.connect(_on_dedup_toc_toggle)
-    dedup_toc_cb.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(dedup_toc_cb)
-
-    # Deduplicate TOC based on translated titles (only if Deduplicate TOC enabled)
-    if not hasattr(self, 'deduplicate_toc_use_translated_var'):
-        self.deduplicate_toc_use_translated_var = self.config.get('deduplicate_toc_use_translated', False)
-
-    dedup_toc_translated_cb = self._create_styled_checkbox("Deduplicate using translated titles")
-    dedup_toc_translated_cb.setToolTip(
-        "When Deduplicate TOC is enabled, use translated titles for exact-match deduplication\n"
-        "instead of the raw source entries."
-    )
-    try:
-        dedup_toc_translated_cb.setChecked(bool(self.deduplicate_toc_use_translated_var))
-    except Exception:
-        pass
-
-    def _on_dedup_toc_translated_toggle(checked):
-        try:
-            self.deduplicate_toc_use_translated_var = bool(checked)
-            self.config['deduplicate_toc_use_translated'] = self.deduplicate_toc_use_translated_var
-            os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '1' if checked else '0'
-        except Exception:
-            pass
-
-    dedup_toc_translated_cb.toggled.connect(_on_dedup_toc_translated_toggle)
-    dedup_toc_translated_cb.setContentsMargins(40, 0, 0, 0)
-    dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
-    section_v.addWidget(dedup_toc_translated_cb)
-
-    # Keep translated-based toggle in sync with master
-    def _sync_dedup_child(master_checked):
-        dedup_toc_translated_cb.setEnabled(bool(master_checked))
-    dedup_toc_cb.toggled.connect(_sync_dedup_child)
-
-    # Use <p> tag as TOC fallback
-    if not hasattr(self, 'use_p_tag_toc_fallback_var'):
-        self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
-
-    p_fallback_cb = self._create_styled_checkbox("Allow TOC fallback titles when headers are missing")
-    p_fallback_cb.setToolTip(
-        "When enabled, the TOC may fall back to the first <p> tag and generic Chapter N titles\n"
-        "if no header tags are present. Disable to avoid any fallback titles."
-    )
-    try:
-        p_fallback_cb.setChecked(bool(self.use_p_tag_toc_fallback_var))
-    except Exception:
-        pass
-
-    def _on_p_tag_toc_fallback_toggle(checked):
-        try:
-            self.use_p_tag_toc_fallback_var = bool(checked)
-            self.config['use_p_tag_toc_fallback'] = self.use_p_tag_toc_fallback_var
-            os.environ['USE_P_TAG_TOC_FALLBACK'] = '1' if checked else '0'
-        except Exception:
-            pass
-
-    p_fallback_cb.toggled.connect(_on_p_tag_toc_fallback_toggle)
-    p_fallback_cb.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(p_fallback_cb)
-
-    # Delete TOC.txt button (same style as Delete Header Files)
-    delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
-    delete_toc_btn.setFixedWidth(210)
-    delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
-    delete_toc_btn.setStyleSheet(
-        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
-        "QPushButton:hover { background-color: #dc3545; } "
-        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
-    )
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-    if os.path.exists(icon_path):
-        delete_toc_btn.setIcon(QIcon(icon_path))
-    delete_toc_btn.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(delete_toc_btn)
-
-    # Separator
-    sep_epub_struct = QFrame()
-    sep_epub_struct.setFrameShape(QFrame.HLine)
-    sep_epub_struct.setFrameShadow(QFrame.Sunken)
-    section_v.addWidget(sep_epub_struct)
-
     # ── PDF Settings ──────────────────────────────────────────
     pdf_title = QLabel("PDF Settings")
     pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
@@ -5103,6 +4870,203 @@ def _create_prompt_management_section(self, parent):
     sep1.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(sep1)
     
+    # ── Table of Contents Translation ────────────────────────────
+    toc_struct_title = QLabel("Table of Contents Translation:")
+    toc_struct_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(toc_struct_title)
+
+    def _on_skip_dup_toc_toggle(checked):
+        try:
+            self.skip_duplicate_toc_translation_var = bool(checked)
+            self.config['skip_duplicate_toc_translation'] = self.skip_duplicate_toc_translation_var
+            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    # Use source toc.ncx
+    if not hasattr(self, 'use_toc_ncx_var'):
+        self.use_toc_ncx_var = self.config.get('use_toc_ncx', False)
+
+    use_toc_cb = self._create_styled_checkbox("Use toc.ncx")
+    use_toc_cb.setToolTip(
+        "Use the toc.ncx from the source EPUB to build the Table of Contents.\n"
+        "This can preserve the original TOC structure and anchor links."
+    )
+    try:
+        use_toc_cb.setChecked(bool(self.use_toc_ncx_var))
+    except Exception:
+        pass
+
+    # Translate source toc.ncx (single API call)
+    if not hasattr(self, 'translate_toc_ncx_var'):
+        self.translate_toc_ncx_var = self.config.get('translate_toc_ncx', False)
+
+    translate_toc_cb = self._create_styled_checkbox("Translate toc.ncx")
+    translate_toc_cb.setToolTip(
+        "Translate ALL toc.ncx entries in ONE API call and save a TOC.txt cache file\n"
+        "in the same robust format as translated_headers.txt (Original/Translated blocks)."
+    )
+    try:
+        translate_toc_cb.setChecked(bool(self.translate_toc_ncx_var))
+    except Exception:
+        pass
+
+    # Skip duplicate translations (only when translating toc.ncx)
+    if not hasattr(self, 'skip_duplicate_toc_translation_var'):
+        self.skip_duplicate_toc_translation_var = self.config.get('skip_duplicate_toc_translation', False)
+
+    skip_dup_toc_cb = self._create_styled_checkbox("Skip duplicate translation")
+    skip_dup_toc_cb.setToolTip(
+        "When Translate toc.ncx is enabled, identical source labels are translated once and\n"
+        "duplicates reuse the first translation. Saves tokens and API time."
+    )
+    try:
+        skip_dup_toc_cb.setChecked(bool(self.skip_duplicate_toc_translation_var))
+    except Exception:
+        pass
+
+    # Enable/disable translate checkbox based on master
+    translate_toc_cb.setEnabled(use_toc_cb.isChecked())
+    skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
+
+    def _on_use_toc_ncx_toggle(checked):
+        try:
+            self.use_toc_ncx_var = bool(checked)
+            self.config['use_toc_ncx'] = self.use_toc_ncx_var
+            os.environ['USE_TOC_NCX'] = '1' if checked else '0'
+            translate_toc_cb.setEnabled(bool(checked))
+            if checked:
+                skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
+            if not checked:
+                skip_dup_toc_cb.setEnabled(False)
+        except Exception:
+            pass
+
+    def _on_translate_toc_ncx_toggle(checked):
+        try:
+            if checked and not use_toc_cb.isChecked():
+                use_toc_cb.setChecked(True)
+            self.translate_toc_ncx_var = bool(checked)
+            self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
+            os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
+            skip_dup_toc_cb.setEnabled(bool(checked))
+        except Exception:
+            pass
+
+    use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
+    translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)
+    skip_dup_toc_cb.toggled.connect(_on_skip_dup_toc_toggle)
+
+    section_v.addWidget(use_toc_cb)
+    section_v.addWidget(translate_toc_cb)
+    skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(skip_dup_toc_cb)
+
+    # Deduplicate TOC entries (exact match)
+    if not hasattr(self, 'deduplicate_toc_var'):
+        self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
+
+    dedup_toc_cb = self._create_styled_checkbox("Deduplicate TOC")
+    dedup_toc_cb.setToolTip(
+        "Skip duplicate TOC entries with the exact same title. Example: if 10 entries are named\n"
+        "\"Chapter 1: Peanuts\", only the first one is kept. No fuzzy matching."
+    )
+    try:
+        dedup_toc_cb.setChecked(bool(self.deduplicate_toc_var))
+    except Exception:
+        pass
+
+    def _on_dedup_toc_toggle(checked):
+        try:
+            self.deduplicate_toc_var = bool(checked)
+            self.config['deduplicate_toc'] = self.deduplicate_toc_var
+            os.environ['DEDUPLICATE_TOC'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    dedup_toc_cb.toggled.connect(_on_dedup_toc_toggle)
+    dedup_toc_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(dedup_toc_cb)
+
+    # Deduplicate TOC based on translated titles (only if Deduplicate TOC enabled)
+    if not hasattr(self, 'deduplicate_toc_use_translated_var'):
+        self.deduplicate_toc_use_translated_var = self.config.get('deduplicate_toc_use_translated', False)
+
+    dedup_toc_translated_cb = self._create_styled_checkbox("Deduplicate using translated titles")
+    dedup_toc_translated_cb.setToolTip(
+        "When Deduplicate TOC is enabled, use translated titles for exact-match deduplication\n"
+        "instead of the raw source entries."
+    )
+    try:
+        dedup_toc_translated_cb.setChecked(bool(self.deduplicate_toc_use_translated_var))
+    except Exception:
+        pass
+
+    def _on_dedup_toc_translated_toggle(checked):
+        try:
+            self.deduplicate_toc_use_translated_var = bool(checked)
+            self.config['deduplicate_toc_use_translated'] = self.deduplicate_toc_use_translated_var
+            os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    dedup_toc_translated_cb.toggled.connect(_on_dedup_toc_translated_toggle)
+    dedup_toc_translated_cb.setContentsMargins(40, 0, 0, 0)
+    dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
+    section_v.addWidget(dedup_toc_translated_cb)
+
+    def _sync_dedup_child(master_checked):
+        dedup_toc_translated_cb.setEnabled(bool(master_checked))
+    dedup_toc_cb.toggled.connect(_sync_dedup_child)
+
+    # Use <p> tag as TOC fallback
+    if not hasattr(self, 'use_p_tag_toc_fallback_var'):
+        self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
+
+    p_fallback_cb = self._create_styled_checkbox("Allow TOC fallback titles when headers are missing")
+    p_fallback_cb.setToolTip(
+        "When enabled, the TOC may fall back to the first <p> tag and generic Chapter N titles\n"
+        "if no header tags are present. Disable to avoid any fallback titles."
+    )
+    try:
+        p_fallback_cb.setChecked(bool(self.use_p_tag_toc_fallback_var))
+    except Exception:
+        pass
+
+    def _on_p_tag_toc_fallback_toggle(checked):
+        try:
+            self.use_p_tag_toc_fallback_var = bool(checked)
+            self.config['use_p_tag_toc_fallback'] = self.use_p_tag_toc_fallback_var
+            os.environ['USE_P_TAG_TOC_FALLBACK'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    p_fallback_cb.toggled.connect(_on_p_tag_toc_fallback_toggle)
+    p_fallback_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(p_fallback_cb)
+
+    # Delete TOC.txt button
+    delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
+    delete_toc_btn.setFixedWidth(210)
+    delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
+    delete_toc_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #dc3545; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+    )
+    _toc_icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(_toc_icon_path):
+        from PySide6.QtGui import QIcon as _QIcon
+        delete_toc_btn.setIcon(_QIcon(_toc_icon_path))
+    delete_toc_btn.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(delete_toc_btn)
+
+    # Separator
+    sep_toc_struct = QFrame()
+    sep_toc_struct.setFrameShape(QFrame.HLine)
+    sep_toc_struct.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_toc_struct)
+
     # Batch Header Translation Section
     header_title = QLabel("Chapter Header Translation:")
     header_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
@@ -5568,8 +5532,34 @@ def _create_prompt_management_section(self, parent):
         "Use for older readers that choke on EPUB3 navigation documents."
     )
     section_v.addWidget(ncx_cb)
-    
-    # CSS Attachment toggle + Load CSS button
+
+    if not hasattr(self, 'legacy_structure_var'):
+        self.legacy_structure_var = self.config.get('legacy_structure', False)
+
+    legacy_cb = self._create_styled_checkbox("EPUB2 Folder Layout (OEBPS/Text)")
+    legacy_cb.setToolTip(
+        "Use a legacy EPUB2-style folder structure inside the .epub:\n"
+        "• OEBPS/Text/ (XHTML/HTML chapter files)\n\n"
+        "Note: Resource folders (css/images/fonts) keep their existing names; only chapter HTML/XHTML\n"
+        "files are moved under OEBPS/Text/ for compatibility with EPUB2-style readers."
+    )
+    try:
+        legacy_cb.setChecked(bool(self.legacy_structure_var))
+    except Exception:
+        pass
+
+    def _on_legacy_structure_toggle(checked):
+        try:
+            self.legacy_structure_var = bool(checked)
+            self.config['legacy_structure'] = self.legacy_structure_var
+            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    legacy_cb.toggled.connect(_on_legacy_structure_toggle)
+    section_v.addWidget(legacy_cb)
+
+    # CSS Attachment toggle
     css_cb = self._create_styled_checkbox("Attach CSS to Chapters (May fix or cause styling issues)")
     try:
         css_cb.setChecked(bool(self.attach_css_to_chapters_var))
