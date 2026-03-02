@@ -1519,9 +1519,12 @@ class BatchHeaderTranslator:
         # Use configured batch size if not explicitly provided
         if batch_size is None:
             batch_size = int(os.getenv('HEADERS_PER_BATCH', str(self.default_batch_size)))
-            if batch_size <= 0:
-                batch_size = self._auto_batch_size()
             print(f"[DEBUG] Using headers_per_batch from GUI/env: {batch_size}")
+        
+        # Auto-calculate if batch_size is <= 0 (whether from caller or env)
+        if batch_size is not None and batch_size <= 0:
+            batch_size = self._auto_batch_size()
+            print(f"[DEBUG] Auto-calculated batch size: {batch_size}")
         
         # Translate headers
         translated_headers = self.translate_headers_batch(
@@ -1607,6 +1610,12 @@ class BatchHeaderTranslator:
         # The headers_dict is already in the correct order from the caller
         sorted_headers = list(headers_dict.items())
         all_translations = {}
+        
+        # Safety guard: if batch_size is still <= 0, auto-calculate it
+        if batch_size is None or batch_size <= 0:
+            batch_size = self._auto_batch_size()
+            print(f"[DEBUG] Auto-calculated batch size in translate_headers_batch: {batch_size}")
+        
         total_batches = (len(sorted_headers) + batch_size - 1) // batch_size
         
         # Get temperature and max_tokens from environment (passed by GUI) or config as fallback
@@ -1622,9 +1631,10 @@ class BatchHeaderTranslator:
         # Determine max workers from config or environment variable
         # Use extraction_workers setting, with fallback to default of 3
         configured_workers = int(os.getenv('EXTRACTION_WORKERS', self.config.get('extraction_workers', 3)))
-        # Don't create more workers than batches, and cap at configured limit
-        max_workers = min(configured_workers, total_batches)
+        # Don't create more workers than batches, cap at configured limit, and ensure at least 1
+        max_workers = max(1, min(configured_workers, total_batches))
         print(f"[DEBUG] Using ThreadPoolExecutor with {max_workers} workers for {total_batches} batches (configured: {configured_workers})")
+
         
         # Thread-safe lock for updating all_translations
         translations_lock = threading.Lock()
