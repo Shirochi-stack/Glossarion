@@ -455,7 +455,7 @@ def print_env_var_status():
         'UPDATE_HTML_HEADERS': 'Update HTML headers',
         'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
         'IGNORE_HEADER': 'Ignore header',
-        'IGNORE_TITLE': 'Ignore title',
+        'USE_TITLE': 'Use title',
     }
     print(f"\n🏷️ METADATA/HEADERS VARIABLES:")
     print("-" * 40)

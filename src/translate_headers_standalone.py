@@ -172,20 +172,13 @@ def extract_source_chapters_with_opf_mapping(
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
                     title = None
-                    for tag_name in ['h1', 'h2', 'h3', 'title']:
+                    for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                         tag = soup.find(tag_name)
                         if tag:
                             text = tag.get_text().strip()
                             if text:
                                 title = text
                                 break
-                    
-                    if not title:
-                        p = soup.find('p')
-                        if p:
-                            text = p.get_text().strip()
-                            if text and len(text) < 100:
-                                title = text
                     
                     if title:
                         # Store by basename without extension
@@ -296,7 +289,7 @@ def match_output_to_source_chapters(
                 
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                for tag_name in ['h1', 'h2', 'h3', 'title']:
+                for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     tag = soup.find(tag_name)
                     if tag:
                         text = tag.get_text().strip()

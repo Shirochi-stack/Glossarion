@@ -1324,7 +1324,7 @@ Text to analyze:
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
-        self.ignore_title_var = self.config.get('ignore_title', False)
+        self.use_title_var = self.config.get('use_title', False)
         self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
@@ -7035,7 +7035,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set essential environment variables from current config before translation
                 os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
-                os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
+                os.environ['USE_TITLE'] = '1' if self.config.get('use_title', False) else '0'
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
                 os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
                 # Update temperature and max output tokens from GUI's current values
@@ -13363,7 +13363,7 @@ Important rules:
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('ignore_header', ['ignore_header_var'], False, bool),
-                ('ignore_title', ['ignore_title_var'], False, bool),
+                ('use_title', ['use_title_var'], False, bool),
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
                 ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], False, bool),
                 ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
@@ -13949,7 +13949,7 @@ Important rules:
             'UPDATE_HTML_HEADERS': 'Update HTML headers',
             'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
             'IGNORE_HEADER': 'Ignore header metadata',
-            'IGNORE_TITLE': 'Ignore title metadata',
+            'USE_TITLE': 'Use title metadata',
             
             # Extraction
             'TEXT_EXTRACTION_METHOD': 'Text extraction method',
@@ -14432,7 +14432,7 @@ Important rules:
                 ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),
-                ('IGNORE_TITLE', '1' if getattr(self, 'ignore_title_var', False) else '0'),
+                ('USE_TITLE', '1' if getattr(self, 'use_title_var', False) else '0'),
 
                 # Extraction mode
                 ('TEXT_EXTRACTION_METHOD', getattr(self, 'text_extraction_method_var', 'standard') if hasattr(self, 'text_extraction_method_var') else 'standard'),

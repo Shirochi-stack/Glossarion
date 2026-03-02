@@ -536,11 +536,11 @@ class EnhancedTextExtractor:
             # Respect GUI toggles to exclude headers/titles BEFORE conversion
             try:
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
                 
-                if ignore_title_tag and soup.title:
+                if not use_title_tag and soup.title:
                     # Remove <title> so it isn't included when using full extraction
                     soup.title.decompose()
                 

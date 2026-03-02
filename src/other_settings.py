@@ -352,7 +352,7 @@ class HeaderTranslationHelpDialog(QDialog):
                 "title": "🚫 Ignore Options",
                 "content": [
                     "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)",
-                    "• Ignore title: Skip <title> tag (prevents re-translation of document titles)"
+                    "• Use title: Include <title> tag in translation (translates document titles)"
                 ]
             },
             {
@@ -5277,22 +5277,22 @@ def _create_prompt_management_section(self, parent):
     
     ignore_h.addSpacing(15)
     
-    ignore_title_cb = self._create_styled_checkbox("Ignore title")
+    use_title_cb = self._create_styled_checkbox("Use title")
     try:
-        ignore_title_cb.setChecked(bool(self.ignore_title_var))
+        use_title_cb.setChecked(bool(self.use_title_var))
     except Exception:
         pass
-    def _on_ignore_title_toggle(checked):
+    def _on_use_title_toggle(checked):
         try:
-            self.ignore_title_var = bool(checked)
+            self.use_title_var = bool(checked)
         except Exception:
             pass
-    ignore_title_cb.toggled.connect(_on_ignore_title_toggle)
-    ignore_title_cb.setToolTip(
-        "Skip translating the title tag in the HTML head.\n"
-        "Keeps original document titles."
+    use_title_cb.toggled.connect(_on_use_title_toggle)
+    use_title_cb.setToolTip(
+        "Include the title tag in translation.\n"
+        "Translates document titles in the HTML head."
     )
-    ignore_h.addWidget(ignore_title_cb)
+    ignore_h.addWidget(use_title_cb)
     
     ignore_h.addStretch()
     section_v.addWidget(ignore_row)
@@ -5549,7 +5549,7 @@ def _create_prompt_management_section(self, parent):
         update_cb.setEnabled(checked)
         save_cb.setEnabled(checked)
         ignore_header_cb.setEnabled(checked)
-        ignore_title_cb.setEnabled(checked)
+        use_title_cb.setEnabled(checked)
         use_fallback_cb.setEnabled(checked)
         translate_now_btn.setEnabled(checked)
     

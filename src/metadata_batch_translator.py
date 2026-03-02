@@ -2898,7 +2898,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 soup = BeautifulSoup(content, parser)
                 
                 current_title = None
-                for tag_name in ['h1', 'h2', 'h3', 'title']:
+                for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     tag = soup.find(tag_name)
                     if tag:
                         text = tag.get_text().strip()
@@ -2931,7 +2931,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 soup = BeautifulSoup(content, 'html.parser')
                 
                 current_title = None
-                for tag_name in ['h1', 'h2', 'h3', 'title']:
+                for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     tag = soup.find(tag_name)
                     if tag:
                         text = tag.get_text().strip()
@@ -3064,20 +3064,13 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
                     title = None
-                    for tag_name in ['h1', 'h2', 'h3', 'title']:
+                    for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                         tag = soup.find(tag_name)
                         if tag:
                             text = tag.get_text().strip()
                             if text:
                                 title = text
                                 break
-                    
-                    if not title:
-                        p = soup.find('p')
-                        if p:
-                            text = p.get_text().strip()
-                            if text and len(text) < 100:
-                                title = text
                     
                     if title:
                         source_titles_by_index[idx] = title

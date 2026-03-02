@@ -5673,7 +5673,7 @@ class BatchTranslationProcessor:
         
         # Check ignore settings for filtering
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+        use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
         
@@ -5684,12 +5684,12 @@ class BatchTranslationProcessor:
             # Get chapter body and apply ignore filters if needed
             chapter_body = chapter["body"]
             
-            if (ignore_title_tag or ignore_header_tags or remove_duplicate_h1_p) and chapter_body:
+            if (not use_title_tag or ignore_header_tags or remove_duplicate_h1_p) and chapter_body:
                 from bs4 import BeautifulSoup
                 body_soup = BeautifulSoup(chapter_body, 'html.parser')
                 
                 # Remove title tags if ignored (including those in <head>)
-                if ignore_title_tag:
+                if not use_title_tag:
                     for title_tag in body_soup.find_all('title'):
                         title_tag.decompose()
                 
@@ -10317,16 +10317,16 @@ def main(log_callback=None, stop_callback=None):
             # -------------------------------------------------------------------------
             if needs_translation and c.get("body"):
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 
-                if (ignore_title_tag or ignore_header_tags):
+                if (not use_title_tag or ignore_header_tags):
                     try:
                         from bs4 import BeautifulSoup
                         content_soup = BeautifulSoup(c["body"], 'html.parser')
                         modified = False
                         
-                        if ignore_title_tag:
+                        if not use_title_tag:
                             for title_tag in content_soup.find_all('title'):
                                 title_tag.decompose()
                                 modified = True
@@ -11551,19 +11551,19 @@ def main(log_callback=None, stop_callback=None):
                 # IMPORTANT: Skip header removal if request merging is active, because
                 # synthetic merge headers are critical for split-the-merge functionality
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 
                 # Don't remove headers if this is a merged request
                 if merge_info is not None:
                     ignore_header_tags = False
                 
-                if (ignore_title_tag or ignore_header_tags) and c["body"]:
+                if (not use_title_tag or ignore_header_tags) and c["body"]:
                     from bs4 import BeautifulSoup
                     content_soup = BeautifulSoup(c["body"], 'html.parser')
                     
                     # Remove title tags if ignored
-                    if ignore_title_tag:
+                    if not use_title_tag:
                         for title_tag in content_soup.find_all('title'):
                             title_tag.decompose()
                     

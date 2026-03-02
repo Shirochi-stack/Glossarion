@@ -1370,14 +1370,14 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
     if not chapter_num:
         # Check ignore settings for batch translation
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+        use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         
         # Prepare all text sources to check in parallel
         text_sources = []
         
-        # Add title tag if not ignored
-        if not ignore_title_tag and soup.title and soup.title.string:
+        # Add title tag if using titles
+        if use_title_tag and soup.title and soup.title.string:
             title_text = soup.title.string.strip()
             text_sources.append(("title", title_text, True))  # True means this can be chapter_title
         
@@ -1475,13 +1475,13 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
     
     # Extract title if not already found (with ignore settings support)
     if not chapter_title:
-        # Check ignore settings for batch translation
+        # Check settings for batch translation
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+        use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         
-        # Try title tag if not ignored
-        if not ignore_title_tag and soup.title and soup.title.string:
+        # Try title tag if using titles
+        if use_title_tag and soup.title and soup.title.string:
             chapter_title = soup.title.string.strip()
         
         # Try header tags if not ignored and no title found
@@ -2265,13 +2265,13 @@ def _process_single_html_file(
             # Extract title (with ignore settings support)
             chapter_title = None
             
-            # Check ignore settings for batch translation
+            # Check settings for batch translation
             batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-            ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+            use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
             ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
             
-            # Extract from title tag if not ignored
-            if not ignore_title_tag and soup.title and soup.title.string:
+            # Extract from title tag if using titles
+            if use_title_tag and soup.title and soup.title.string:
                 chapter_title = soup.title.string.strip()
             
             # Extract from header tags if not ignored and no title found
@@ -2346,18 +2346,18 @@ def _process_single_html_file(
                     detection_method = f"{extraction_mode}_sequential_fallback" if extraction_mode == "enhanced" else "sequential_fallback"
                     print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
         
-        # Filter content_html for ignore settings (before processing)
+        # Filter content_html for title/header settings (before processing)
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+        use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
         
-        if (ignore_title_tag or ignore_header_tags or remove_duplicate_h1_p) and content_html and not enhanced_extraction_used:
-            # Parse the content HTML to remove ignored tags
+        if (not use_title_tag or ignore_header_tags or remove_duplicate_h1_p) and content_html and not enhanced_extraction_used:
+            # Parse the content HTML to remove unused tags
             content_soup = BeautifulSoup(content_html, parser)
             
-            # Remove title tags if ignored
-            if ignore_title_tag:
+            # Remove title tags if not using titles
+            if not use_title_tag:
                 for title_tag in content_soup.find_all('title'):
                     title_tag.decompose()
             
