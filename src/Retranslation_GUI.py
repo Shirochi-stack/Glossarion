@@ -2403,10 +2403,26 @@ class RetranslationMixin:
                 _line_num = 1
                 if qa_issues:
                     # Extract a meaningful search term from the QA issue strings
+                    # Try all common delimiter styles in order
+                    _QUOTE_PATTERNS = [
+                        r"'([^']+)'",                    # single quotes: 'text'
+                        r'"([^"]+)"',                   # double quotes: "text"
+                        r"\u201c([^\u201d]+)\u201d",    # curly double quotes: “text”
+                        r"\u2018([^\u2019]+)\u2019",    # curly single quotes: ‘text’
+                        r"\u300c([^\u300d]+)\u300d",    # Japanese corner brackets: 「text」
+                        r"\u300e([^\u300f]+)\u300f",    # Japanese white corner brackets: 『text』
+                        r"\uff62([^\uff63]+)\uff63",    # Halfwidth corner brackets
+                        r"\[([^\]]+)\]",              # square brackets: [text]
+                        r"\(([^)]+)\)",               # parentheses: (text)
+                    ]
                     for _issue in qa_issues:
-                        _m = re.search(r"'([^']+)'", str(_issue))
-                        if _m and _m.group(1).strip():
-                            search_term = _m.group(1)
+                        _s = str(_issue)
+                        for _pat in _QUOTE_PATTERNS:
+                            _m = re.search(_pat, _s)
+                            if _m and _m.group(1).strip():
+                                search_term = _m.group(1)
+                                break
+                        if search_term:
                             break
                     # Fallback: scan file for any non-ASCII sequence
                     if not search_term:
