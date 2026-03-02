@@ -4977,19 +4977,7 @@ class UnifiedClient:
                     # Add messages for chapter/chunk logging
                     extraction_kwargs['messages'] = messages
                     
-                    # Prefer explicit chapter/chunk context and label from thread-local state
-                    try:
-                        tls = self._get_thread_local_client()
-                        ctx = getattr(tls, "chapter_context", None)
-                        if ctx:
-                            extraction_kwargs['chapter_context'] = ctx
-                        label = getattr(tls, "current_request_label", None)
-                        if label:
-                            extraction_kwargs['log_label'] = label
-                    except Exception:
-                        pass
-                    
-                    # Try universal extraction with provider-specific parameters
+# Try universal extraction with provider-specific parameters
                     extracted_content, finish_reason = self._extract_response_text(
                         response, 
                         provider=getattr(self, 'client_type', 'unknown'),
@@ -5828,26 +5816,6 @@ class UnifiedClient:
                     try:
                         tls_fb = temp_client._get_thread_local_client()
                         tls_fb.max_retries_override = 1
-                    except Exception:
-                        pass
-                    
-                    # Propagate chapter/chunk context for correct logging in fallback client
-                    try:
-                        src_tls = self._get_thread_local_client()
-                        ctx = getattr(src_tls, "chapter_context", None)
-                        if ctx and hasattr(temp_client, 'set_chapter_context'):
-                            temp_client.set_chapter_context(
-                                chapter=ctx.get("chapter"),
-                                chunk=ctx.get("chunk"),
-                                total_chunks=ctx.get("total_chunks"),
-                                merged_chapters=ctx.get("merged_chapters"),
-                            )
-                        elif ctx:
-                            try:
-                                fb_tls = temp_client._get_thread_local_client()
-                                fb_tls.chapter_context = ctx
-                            except Exception:
-                                pass
                     except Exception:
                         pass
                     
@@ -6717,94 +6685,8 @@ class UnifiedClient:
                 # Always return the content from UnifiedResponse
                 if len(response.content) > 0:
                     # Extract chapter info for better logging
-                    # Prefer thread-local label/context, then kwargs, then message parsing
-                    log_label = None
-                    try:
-                        tls = self._get_thread_local_client()
-                        log_label = getattr(tls, 'current_request_label', None)
-                        if not log_label:
-                            ctx = getattr(tls, 'chapter_context', None)
-                            if isinstance(ctx, dict):
-                                chap = ctx.get("chapter")
-                                chunk = ctx.get("chunk")
-                                total = ctx.get("total_chunks")
-                                merged = ctx.get("merged_chapters")
-                                if merged and len(merged) > 0:
-                                    merged_nums = sorted([int(c) for c in merged if c is not None])
-                                    if merged_nums:
-                                        if len(merged_nums) == 1:
-                                            base_label = f"Merged {merged_nums[0]}"
-                                        else:
-                                            base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
-                                        if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                            log_label = f"{base_label} (chunk {chunk}/{total})"
-                                        else:
-                                            log_label = base_label
-                                if not log_label and chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                    log_label = f"Chapter {chap} (chunk {chunk}/{total})"
-                                if not log_label and chap is not None:
-                                    log_label = f"Chapter {chap}"
-                    except Exception:
-                        log_label = None
-                    
-                    # Fallback to client instance state if thread-local label is missing
-                    if not log_label:
-                        try:
-                            log_label = getattr(self, "_last_request_label", None)
-                            if not log_label:
-                                ctx = getattr(self, "_last_chapter_context", None)
-                                if isinstance(ctx, dict):
-                                    chap = ctx.get("chapter")
-                                    chunk = ctx.get("chunk")
-                                    total = ctx.get("total_chunks")
-                                    merged = ctx.get("merged_chapters")
-                                    if merged and len(merged) > 0:
-                                        merged_nums = sorted([int(c) for c in merged if c is not None])
-                                        if merged_nums:
-                                            if len(merged_nums) == 1:
-                                                base_label = f"Merged {merged_nums[0]}"
-                                            else:
-                                                base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
-                                            if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                                log_label = f"{base_label} (chunk {chunk}/{total})"
-                                            else:
-                                                log_label = base_label
-                                    if not log_label and chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                        log_label = f"Chapter {chap} (chunk {chunk}/{total})"
-                                    if not log_label and chap is not None:
-                                        log_label = f"Chapter {chap}"
-                        except Exception:
-                            log_label = None
-
-                    if not log_label:
-                        # Prefer explicit log label or chapter_context passed in kwargs
-                        log_label = kwargs.get('log_label', None)
-                    if not log_label:
-                        ctx = kwargs.get('chapter_context', None)
-                        if isinstance(ctx, dict):
-                            try:
-                                chap = ctx.get("chapter")
-                                chunk = ctx.get("chunk")
-                                total = ctx.get("total_chunks")
-                                merged = ctx.get("merged_chapters")
-                                if merged and len(merged) > 0:
-                                    merged_nums = sorted([int(c) for c in merged if c is not None])
-                                    if merged_nums:
-                                        if len(merged_nums) == 1:
-                                            base_label = f"Merged {merged_nums[0]}"
-                                        else:
-                                            base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
-                                        if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                            log_label = f"{base_label} (chunk {chunk}/{total})"
-                                        else:
-                                            log_label = base_label
-                                if not log_label and chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                    log_label = f"Chapter {chap} (chunk {chunk}/{total})"
-                                if not log_label and chap is not None:
-                                    log_label = f"Chapter {chap}"
-                            except Exception:
-                                log_label = None
-                    # Do NOT parse messages for chapter labels (can be wrong); only use explicit context
+                    chapter_info = kwargs.get('messages', None)
+                    log_label = self._extract_chapter_label(chapter_info) if chapter_info else None
                     
                     if log_label and log_label != "request":
                         print(f"   ✅ Received {log_label} response ({len(response.content):,} chars)")
@@ -10413,10 +10295,7 @@ class UnifiedClient:
         """Stash label and context for stagger logger. Actual log is emitted by _apply_api_call_stagger."""
         try:
             tls = self._get_thread_local_client()
-            # Prefer explicit thread-local chapter context/label if available
-            label = self._get_request_label_for_logs(messages)
-            if not label:
-                label = self._extract_chapter_label(messages)
+            label = self._extract_chapter_label(messages)
             tls.current_request_label = label
             tls.current_request_context = context or 'translation'
         except Exception:

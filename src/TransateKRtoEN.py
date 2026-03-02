@@ -5473,24 +5473,9 @@ class BatchTranslationProcessor:
                 print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created (reason: {failure_reason})")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                    # Route prohibited/blocked saves to the separate toggle
-                    is_prohibited = False
-                    try:
-                        fr_lower = str(failure_reason or "").lower()
-                        if "content filter" in fr_lower or "blocked" in fr_lower or "prohibited" in fr_lower:
-                            is_prohibited = True
-                    except Exception:
-                        pass
-                    if not is_prohibited:
-                        try:
-                            cl = str(cleaned).lower()
-                            if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl:
-                                is_prohibited = True
-                        except Exception:
-                            pass
                     save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
                     save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
-                    should_save = save_prohibited_results if is_prohibited else save_partial_results
+                    should_save = (save_prohibited_results if is_prohibited_failure(cleaned, failure_reason) else save_partial_results)
                     if should_save:
                         try:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -6168,25 +6153,10 @@ class BatchTranslationProcessor:
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    # Route prohibited/blocked saves to the separate toggle
                     failure_reason = get_failure_reason(cleaned)
-                    is_prohibited = False
-                    try:
-                        fr_lower = str(failure_reason or "").lower()
-                        if "content filter" in fr_lower or "blocked" in fr_lower or "prohibited" in fr_lower:
-                            is_prohibited = True
-                    except Exception:
-                        pass
-                    if not is_prohibited:
-                        try:
-                            cl = str(cleaned).lower()
-                            if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl:
-                                is_prohibited = True
-                        except Exception:
-                            pass
                     save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
                     save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
-                    should_save = save_prohibited_results if is_prohibited else save_partial_results
+                    should_save = (save_prohibited_results if is_prohibited_failure(cleaned, failure_reason) else save_partial_results)
                     if should_save:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
@@ -7376,37 +7346,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         total_chunks=chapter_context.get('total_chunks'),
                         merged_chapters=chapter_context.get('merged_chapters'),
                     )
-                    # Also set a friendly label in the API thread for logging
-                    try:
-                        tls = client._get_thread_local_client()
-                        chap = chapter_context.get('chapter')
-                        chunk = chapter_context.get('chunk')
-                        total = chapter_context.get('total_chunks')
-                        merged = chapter_context.get('merged_chapters')
-                        if merged and len(merged) > 0:
-                            merged_nums = sorted([int(c) for c in merged if c is not None])
-                            if merged_nums:
-                                if len(merged_nums) == 1:
-                                    base_label = f"Merged {merged_nums[0]}"
-                                else:
-                                    base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
-                                if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                    tls.current_request_label = f"{base_label} (chunk {chunk}/{total})"
-                                else:
-                                    tls.current_request_label = base_label
-                        elif chap is not None:
-                            if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                                tls.current_request_label = f"Chapter {chap} (chunk {chunk}/{total})"
-                            else:
-                                tls.current_request_label = f"Chapter {chap}"
-                        # Also store on client instance for fallback logging
-                        try:
-                            client._last_request_label = getattr(tls, "current_request_label", None)
-                            client._last_chapter_context = dict(chapter_context) if isinstance(chapter_context, dict) else chapter_context
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
                 except Exception:
                     # Context is best-effort and should never break the call
                     pass
@@ -8154,6 +8093,23 @@ def get_failure_reason(content):
         return f"Short response with error indicators: {content_str[:30]}..."
     
     return "Unknown failure pattern"
+
+
+def is_prohibited_failure(content, failure_reason=None):
+    """Best-effort detection of prohibited/blocked failures for save routing."""
+    try:
+        fr = str(failure_reason or "").lower()
+        if "content filter" in fr or "blocked" in fr or "prohibited" in fr:
+            return True
+    except Exception:
+        pass
+    try:
+        cl = str(content or "").lower()
+        if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl:
+            return True
+    except Exception:
+        pass
+    return False
     
 def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     """Convert markdown/plain text back to HTML after translation (for enhanced mode)
@@ -12610,7 +12566,11 @@ def main(log_callback=None, stop_callback=None):
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    if not is_only_error_marker:
+                    failure_reason = get_failure_reason(cleaned)
+                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
+                    should_save = (save_prohibited_results if is_prohibited_failure(cleaned, failure_reason) else save_partial_results)
+                    if should_save and not is_only_error_marker:
                         # Save for debugging - contains actual translation attempt that failed QA
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
