@@ -1396,51 +1396,7 @@ def _create_output_settings_section(self, parent):
     alignment_h.addStretch()
     section_v.addWidget(alignment_row)
     pdf_controls.append(alignment_row)
-
-    # Start Page row
-    if not hasattr(self, 'pdf_start_page_var'):
-        self.pdf_start_page_var = self.config.get('pdf_start_page', 1)
-
-    start_page_row = QWidget()
-    start_page_h = QHBoxLayout(start_page_row)
-    start_page_h.setContentsMargins(40, 2, 0, 0)
-
-    start_page_label = QLabel("Start Page:")
-    start_page_h.addWidget(start_page_label)
-    page_num_sub_controls.append(start_page_label)
-
-    start_page_spin = QSpinBox()
-    start_page_spin.setMinimum(1)
-    start_page_spin.setMaximum(999)
-    start_page_spin.setValue(int(self.pdf_start_page_var) if self.pdf_start_page_var else 1)
-    start_page_spin.setFixedWidth(70)
-    start_page_spin.setToolTip(
-        "Page number assigned to the first content page of the PDF.\n"
-        "1 = default (first page is page 1).\n"
-        "2 = first page is labelled page 2 (e.g. when a cover\n"
-        "    counts as page 1 but shows no number)."
-    )
-    def _on_start_page_changed(value):
-        try:
-            self.pdf_start_page_var = value
-            self.config['pdf_start_page'] = value
-            os.environ['PDF_START_PAGE'] = str(value)
-        except Exception:
-            pass
-    start_page_spin.valueChanged.connect(_on_start_page_changed)
-    self._disable_spinbox_mousewheel(start_page_spin)
-    start_page_h.addWidget(start_page_spin)
-    page_num_sub_controls.append(start_page_spin)
-
-    start_page_hint = QLabel("(1 = default, 2 = shift +1)")
-    start_page_hint.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 9pt;")
-    start_page_h.addWidget(start_page_hint)
-    page_num_sub_controls.append(start_page_hint)
-
-    start_page_h.addStretch()
-    section_v.addWidget(start_page_row)
-    pdf_controls.append(start_page_row)
-
+    
     page_num_desc = QLabel("Page numbers appear as semi-transparent footer text")
     page_num_desc.setStyleSheet("color: gray; font-size: 10pt;")
     page_num_desc.setContentsMargins(20, 0, 0, 5)

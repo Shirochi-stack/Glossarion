@@ -5329,6 +5329,9 @@ img {
                     except Exception:
                         pass
         
+        # Override any @page rules from EPUB CSS that may set margin: 0 (which clips page number footers)
+        styles += " @page { margin: 15mm; } "
+
         # Add image styles for PDF rendering
         styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
         # Suppress all heading-generated sidebar bookmarks; only .pdf-bm elements create them
@@ -5338,11 +5341,8 @@ img {
         # Page number CSS
         alignment = settings['page_number_alignment']
         page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
-        start_page = int(os.environ.get('PDF_START_PAGE', '1') or '1')
         if settings['page_numbers']:
             styles += f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
-        if start_page > 1:
-            styles += f" body {{ counter-reset: page {start_page - 1}; }} "
         
         # Process chapters
         documents = []

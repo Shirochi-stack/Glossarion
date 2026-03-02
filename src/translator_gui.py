@@ -10303,7 +10303,6 @@ Important rules:
             os.environ['PDF_TOC_PAGE_NUMBERS'] = '1' if self.config.get('pdf_toc_page_numbers', True) else '0'
             os.environ['PDF_PAGE_NUMBERS'] = '1' if self.config.get('pdf_page_numbers', True) else '0'
             os.environ['PDF_PAGE_NUMBER_ALIGNMENT'] = self.config.get('pdf_page_number_alignment', 'center')
-            os.environ['PDF_START_PAGE'] = str(self.config.get('pdf_start_page', 1))
             os.environ['PDF_IMAGE_FORMAT'] = self.config.get('pdf_image_format', 'jpeg')
             os.environ['PDF_PNG_OPTIMIZE'] = '1' if self.config.get('pdf_png_optimize', True) else '0'
             os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(self.config.get('pdf_png_compress_level', 6))
@@ -14395,7 +14394,6 @@ Important rules:
                 ('PDF_TOC_PAGE_NUMBERS', '1' if self.config.get('pdf_toc_page_numbers', True) else '0'),
                 ('PDF_PAGE_NUMBERS', '1' if self.config.get('pdf_page_numbers', True) else '0'),
                 ('PDF_PAGE_NUMBER_ALIGNMENT', self.config.get('pdf_page_number_alignment', 'center')),
-                ('PDF_START_PAGE', str(self.config.get('pdf_start_page', 1))),
                 # Image compression quality sub-settings
                 ('IMAGE_COMPRESSION_QUALITY', str(self.config.get('image_compression_quality', 80))),
                 ('EXCLUDE_COVER_COMPRESSION', '1' if self.config.get('exclude_cover_compression', True) else '0'),
