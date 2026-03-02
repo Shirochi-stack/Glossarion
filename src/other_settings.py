@@ -4849,7 +4849,7 @@ def _create_prompt_management_section(self, parent):
     
     title_desc = QLabel("When enabled: Book titles and selected metadata will be translated")
     title_desc.setStyleSheet("color: gray; font-size: 9pt;")
-    title_desc.setContentsMargins(20, 0, 0, 10)
+    title_desc.setContentsMargins(20, 0, 0, 0)
     section_v.addWidget(title_desc)
     
     def _on_glossary_title_toggle(checked):
