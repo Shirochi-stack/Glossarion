@@ -5100,7 +5100,6 @@ def _create_prompt_management_section(self, parent):
     # Batch Header Translation Section
     header_title = QLabel("Chapter Header Translation:")
     header_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
-    header_title.setContentsMargins(0, 5, 0, 5)
     section_v.addWidget(header_title)
     
     header_row1 = QWidget()
