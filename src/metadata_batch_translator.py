@@ -1528,7 +1528,7 @@ class BatchHeaderTranslator:
         
         # Translate headers
         translated_headers = self.translate_headers_batch(
-            headers_dict, batch_size
+            headers_dict, batch_size, translation_type='header'
         )
         
         if not translated_headers:
@@ -1552,8 +1552,12 @@ class BatchHeaderTranslator:
         
         return translated_headers
         
-    def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None) -> Dict[int, str]:
-        """Translate headers in batches using configured prompts with parallel execution"""
+    def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
+        """Translate headers/TOC entries in batches using configured prompts with parallel execution
+        
+        Args:
+            translation_type: 'header' or 'toc' - controls log messages and API context
+        """
         if not headers_dict:
             return {}
         
@@ -1653,7 +1657,8 @@ class BatchHeaderTranslator:
                 total_input_tokens = system_tokens + user_tokens
                 
                 # Debug output showing input tokens
-                print(f"\n📚 Translating header batch {batch_num + 1}/{total_batches}")
+                type_label = 'TOC' if translation_type == 'toc' else 'header'
+                print(f"\n📚 Translating {type_label} batch {batch_num + 1}/{total_batches}")
                 print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
                 print(f"  - User prompt: {user_tokens} tokens")
                 print(f"  - Total input: {total_input_tokens} tokens (including system prompt)")
@@ -1685,7 +1690,7 @@ class BatchHeaderTranslator:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    context='batch_header_translation'
+                    context='batch_toc_translation' if translation_type == 'toc' else 'batch_header_translation'
                 )
                 
                 # Extract content from response - handle both object and tuple formats
@@ -1738,7 +1743,8 @@ class BatchHeaderTranslator:
             batch_tasks.append((batch_num, batch_headers))
         
         # Execute batches in parallel using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HeaderBatch") as executor:
+        thread_prefix = 'TOCBatch' if translation_type == 'toc' else 'HeaderBatch'
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_prefix) as executor:
             # Submit all tasks
             future_to_batch = {executor.submit(translate_batch, batch_num, headers): batch_num 
                              for batch_num, headers in batch_tasks}

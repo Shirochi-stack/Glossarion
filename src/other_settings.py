@@ -5105,8 +5105,8 @@ def _create_prompt_management_section(self, parent):
     _toc_col_right_v.addWidget(p_fallback_cb)
     _toc_col_right_v.addStretch()
 
-    # Delete TOC.txt button
-    delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
+    # Delete TOC files button
+    delete_toc_btn = QPushButton("🗑️Delete TOC Files")
     delete_toc_btn.setFixedWidth(210)
     delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
     delete_toc_btn.setStyleSheet(
@@ -5119,7 +5119,7 @@ def _create_prompt_management_section(self, parent):
         from PySide6.QtGui import QIcon as _QIcon
         delete_toc_btn.setIcon(_QIcon(_toc_icon_path))
 
-    # Delete TOC.txt button + TOC batch limit (Horizontal layout)
+    # Delete TOC files button + TOC batch limit (Horizontal layout)
     _toc_btn_row = QWidget()
     _toc_btn_h = QHBoxLayout(_toc_btn_row)
     _toc_btn_h.setContentsMargins(0, 0, 0, 0)
@@ -5551,7 +5551,6 @@ def _create_prompt_management_section(self, parent):
         ignore_header_cb.setEnabled(checked)
         ignore_title_cb.setEnabled(checked)
         use_fallback_cb.setEnabled(checked)
-        delete_btn.setEnabled(checked)
         translate_now_btn.setEnabled(checked)
     
     batch_toggle_cb.toggled.connect(_toggle_header_controls)

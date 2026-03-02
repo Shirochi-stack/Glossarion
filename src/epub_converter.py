@@ -4589,7 +4589,7 @@ img {
                                 first_idx_by_label[key] = idx
                                 unique_original[idx] = label
                             self.log(f"🔁 Skip duplicate translation enabled: {len(unique_original)}/{len(original)} unique labels")
-                            unique_translations = tr.translate_headers_batch(unique_original, batch_size=toc_ncx_per_batch) or {}
+                            unique_translations = tr.translate_headers_batch(unique_original, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
                             translations = {}
                             for idx, label in original.items():
                                 key = (label or '').strip()
@@ -4597,7 +4597,7 @@ img {
                                 if first_idx in unique_translations:
                                     translations[idx] = unique_translations[first_idx]
                         else:
-                            translations = tr.translate_headers_batch(original, batch_size=toc_ncx_per_batch) or {}
+                            translations = tr.translate_headers_batch(original, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
                         if translations:
                             # Pre-compute actual output paths so "Output File" shows
                             # the path in the built EPUB, not the raw NCX src.
