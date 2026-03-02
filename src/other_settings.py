@@ -3827,7 +3827,7 @@ def _create_response_handling_section(self, parent):
 
     # Save prohibited content responses (separate toggle)
     if not hasattr(self, 'save_prohibited_results_var'):
-        self.save_prohibited_results_var = self.config.get('save_prohibited_results', True)
+        self.save_prohibited_results_var = self.config.get('save_prohibited_results', False)
 
     self.save_prohibited_results_checkbox = self._create_styled_checkbox("Save blocked/prohibited responses")
     self.save_prohibited_results_checkbox.setContentsMargins(20, 0, 0, 0)

@@ -13440,7 +13440,7 @@ Important rules:
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
                 ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
                 ('save_partial_results', ['save_partial_results_checkbox', 'save_partial_results_var'], True, bool),
-                ('save_prohibited_results', ['save_prohibited_results_checkbox', 'save_prohibited_results_var'], True, bool),
+                ('save_prohibited_results', ['save_prohibited_results_checkbox', 'save_prohibited_results_var'], False, bool),
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 1800, lambda v: safe_int(v, 1800)),
@@ -13655,7 +13655,7 @@ Important rules:
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
             self.config.setdefault('save_partial_results', True)
-            self.config.setdefault('save_prohibited_results', True)
+            self.config.setdefault('save_prohibited_results', False)
             # Image compression defaults
             compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
             for key, val in compression_defaults.items():
