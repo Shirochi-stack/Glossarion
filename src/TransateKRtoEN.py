@@ -5197,15 +5197,37 @@ class BatchTranslationProcessor:
                             save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
                             if save_partial_results:
                                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                                with self.progress_lock:
-                                    self.update_progress_fn(
-                                        idx, actual_num, content_hash, fname,
-                                        status="qa_failed",
-                                        qa_issues_found=["PARTIAL"],
-                                        chapter_obj=chapter
-                                    )
-                                    self.save_progress_fn()
-                                print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
+                                partial_content = None
+                                try:
+                                    tls = self.client._get_thread_local_client()
+                                    partial_content = getattr(tls, '_last_truncated_content', None)
+                                except Exception:
+                                    partial_content = getattr(self.client, '_last_truncated_content', None)
+                                if isinstance(partial_content, str) and partial_content:
+                                    try:
+                                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                            f.write(partial_content)
+                                    except Exception:
+                                        pass
+                                    with self.progress_lock:
+                                        self.update_progress_fn(
+                                            idx, actual_num, content_hash, fname,
+                                            status="qa_failed",
+                                            qa_issues_found=["TRUNCATED"],
+                                            chapter_obj=chapter
+                                        )
+                                        self.save_progress_fn()
+                                    print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved truncated output")
+                                else:
+                                    with self.progress_lock:
+                                        self.update_progress_fn(
+                                            idx, actual_num, content_hash, fname,
+                                            status="qa_failed",
+                                            qa_issues_found=["PARTIAL"],
+                                            chapter_obj=chapter
+                                        )
+                                        self.save_progress_fn()
+                                    print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                             chunk_abort_event.set()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             # Let the outer handler mark the chapter as pending/skipped
@@ -5451,6 +5473,13 @@ class BatchTranslationProcessor:
                 print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created (reason: {failure_reason})")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
+                    if save_partial_results:
+                        try:
+                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned if isinstance(cleaned, str) else "")
+                        except Exception:
+                            pass
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
                     self.save_progress_fn()
                 return False, actual_num, None, None, None
@@ -6122,7 +6151,23 @@ class BatchTranslationProcessor:
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    if not is_only_error_marker and cleaned_stripped:
+                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
+                    if save_partial_results:
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                        try:
+                            cleaned_to_save = cleaned
+                            if split_the_merge:
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id=\"split-\\d+\"[^>]*>.*?</h1>\\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
+                            with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned_to_save if isinstance(cleaned_to_save, str) else "")
+                        except Exception:
+                            pass
+                    elif not is_only_error_marker and cleaned_stripped:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = cleaned
@@ -11931,14 +11976,36 @@ def main(log_callback=None, stop_callback=None):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
                     if save_partial_results:
-                        progress_manager.update(
-                            idx, actual_num, content_hash, fname,
-                            status="qa_failed",
-                            qa_issues_found=["PARTIAL"],
-                            chapter_obj=c
-                        )
-                        progress_manager.save()
-                        print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
+                        # If we have a truncated partial response, save it and mark TRUNCATED
+                        partial_content = None
+                        try:
+                            tls = translation_processor.client._get_thread_local_client()
+                            partial_content = getattr(tls, '_last_truncated_content', None)
+                        except Exception:
+                            partial_content = getattr(translation_processor.client, '_last_truncated_content', None)
+                        if isinstance(partial_content, str) and partial_content:
+                            try:
+                                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                    f.write(partial_content)
+                            except Exception:
+                                pass
+                            progress_manager.update(
+                                idx, actual_num, content_hash, fname,
+                                status="qa_failed",
+                                qa_issues_found=["TRUNCATED"],
+                                chapter_obj=c
+                            )
+                            progress_manager.save()
+                            print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved truncated output")
+                        else:
+                            progress_manager.update(
+                                idx, actual_num, content_hash, fname,
+                                status="qa_failed",
+                                qa_issues_found=["PARTIAL"],
+                                chapter_obj=c
+                            )
+                            progress_manager.save()
+                            print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                     else:
                         progress_manager.update(idx, actual_num, content_hash, fname, status="pending")
                         progress_manager.save()

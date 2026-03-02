@@ -5114,6 +5114,13 @@ class UnifiedClient:
                 if finish_reason in ['length', 'max_tokens']:
                     print(f"Response was truncated: {finish_reason}")
                     print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
+                    # Record last truncated content for callers that need to save partial output
+                    try:
+                        tls = self._get_thread_local_client()
+                        tls._last_truncated_content = extracted_content
+                        tls._last_truncated_finish_reason = finish_reason
+                    except Exception:
+                        pass
                     # If the user has already pressed Stop, abort before scheduling any retries
                     if self._is_stop_requested():
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -5185,6 +5192,11 @@ class UnifiedClient:
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active or self._is_stop_requested():
                                 print("  ⏹️ Truncation retry skipped (graceful stop/stop requested)")
+                                try:
+                                    tls = self._get_thread_local_client()
+                                    tls._truncation_retries_exhausted = True
+                                except Exception:
+                                    pass
                                 return extracted_content, finish_reason
                             trunc_success_logged = False
                             for attempt_idx in range(allowed_attempts):
