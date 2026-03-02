@@ -5317,7 +5317,36 @@ img {
             if body_match:
                 return body_match.group(1)
             return html_content
-        
+
+        def _rewrite_epub_hrefs(content, epub_file_map):
+            """Convert EPUB relative file hrefs to PDF internal anchors.
+            Uses #chapter-N (always exists) when the file is in the map.
+            Falls back to the raw #fragment only when the file is unknown.
+            """
+            def _replace(m):
+                val = m.group(1)
+                # Leave absolute URLs, data URIs, and already-internal anchors unchanged
+                low = val.lower()
+                if low.startswith(('#', 'data:', 'http://', 'https://', 'mailto:', 'tel:')):
+                    return m.group(0)
+                # Must look like a relative file reference
+                if not any(c in val for c in ('/', '.xhtml', '.html', '.htm')):
+                    return m.group(0)
+                # Extract file basename (strip fragment and query string)
+                file_part = val.split('#')[0].split('?')[0]
+                basename = os.path.basename(file_part)
+                # Prefer the guaranteed #chapter-N anchor from the map
+                anchor = epub_file_map.get(basename)
+                if anchor:
+                    return f'href="{anchor}"'
+                # File not in map — fall back to raw fragment if present
+                if '#' in val:
+                    frag = val.split('#', 1)[1]
+                    if frag:
+                        return f'href="#{frag}"'
+                return m.group(0)
+            return re.sub(r'href="([^"]*)"', _replace, content, flags=re.IGNORECASE)
+
         # Collect CSS
         styles = ""
         if os.path.isdir(self.css_dir):
@@ -5410,7 +5439,37 @@ img {
         for chap_num, (title, conf, source) in chapter_titles_info.items():
             if source:
                 source_to_chapter[source] = chap_num
-        
+
+        # Build EPUB filename -> PDF chapter anchor map from the source EPUB OPF spine
+        epub_file_map = {}
+        _epub_path = os.environ.get('EPUB_PATH', '')
+        if _epub_path and os.path.exists(_epub_path):
+            try:
+                import zipfile as _zf_mod
+                with _zf_mod.ZipFile(_epub_path) as _zf:
+                    _container = _zf.read('META-INF/container.xml').decode('utf-8', errors='replace')
+                    _opf_m = re.search(r'full-path="([^"]+)"', _container)
+                    if _opf_m:
+                        _opf_txt = _zf.read(_opf_m.group(1)).decode('utf-8', errors='replace')
+                        _manifest = {m.group(1): m.group(2)
+                                     for m in re.finditer(r'<item\b[^>]*\bid="([^"]+)"[^>]*\bhref="([^"]+)"', _opf_txt)}
+                        _spine_hrefs = []
+                        for _iid in re.findall(r'<itemref\b[^>]*\bidref="([^"]+)"', _opf_txt):
+                            _href = _manifest.get(_iid, '')
+                            if not _href.lower().endswith(('.xhtml', '.html', '.htm')):
+                                continue
+                            _pm = re.search(rf'<item\b[^>]*\bid="{re.escape(_iid)}"[^>]*\bproperties="([^"]*)"', _opf_txt)
+                            if _pm and 'nav' in _pm.group(1):
+                                continue
+                            _spine_hrefs.append(_href)
+                        for _si, _sh in enumerate(_spine_hrefs):
+                            if _si < len(html_files):
+                                _hf = html_files[_si]
+                                _cn = source_to_chapter.get(_hf, _si)
+                                epub_file_map[os.path.basename(_sh)] = f'#chapter-{_cn}'
+            except Exception as _em:
+                self.log(f"  ⚠️ Could not build EPUB href map: {_em}")
+
         # Build all chapters as a single HTML document for continuous page numbering
         self.log(f"  Building combined chapter document ({len(html_files)} chapters)...")
         all_chapters_html = ""
@@ -5436,7 +5495,10 @@ img {
                 
                 # Extract just the body content to avoid nested <html><body> structures
                 body_content = _extract_body_content(content)
-                
+
+                # Convert EPUB-style relative hrefs to PDF internal anchors
+                body_content = _rewrite_epub_hrefs(body_content, epub_file_map)
+
                 # Add anchor ID for TOC linking and page break before each chapter (except first)
                 _bm_title = chapter_titles_info.get(chap_num, ('', 0, ''))[0]
                 _bm_h1 = (f'<h1 class="pdf-bm">{html_module.escape(str(_bm_title))}</h1>'
