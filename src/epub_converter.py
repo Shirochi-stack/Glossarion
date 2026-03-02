@@ -4561,7 +4561,8 @@ img {
                     self.log("⚠️ TRANSLATE_TOC_NCX enabled but API client is not initialized; using original toc.ncx labels")
                     translations = {}
                 else:
-                    self.log(f"🌐 Translating {len(original)} toc.ncx entries in ONE API call...")
+                    toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '400'))
+                    self.log(f"🌐 Translating {len(original)} toc.ncx entries in chunks of {toc_ncx_per_batch}...")
                     try:
                         from metadata_batch_translator import BatchHeaderTranslator
                         tr = BatchHeaderTranslator(self.api_client, {})
@@ -4576,7 +4577,7 @@ img {
                                 first_idx_by_label[key] = idx
                                 unique_original[idx] = label
                             self.log(f"🔁 Skip duplicate translation enabled: {len(unique_original)}/{len(original)} unique labels")
-                            unique_translations = tr.translate_headers_batch(unique_original, batch_size=len(unique_original)) or {}
+                            unique_translations = tr.translate_headers_batch(unique_original, batch_size=toc_ncx_per_batch) or {}
                             translations = {}
                             for idx, label in original.items():
                                 key = (label or '').strip()
@@ -4584,7 +4585,7 @@ img {
                                 if first_idx in unique_translations:
                                     translations[idx] = unique_translations[first_idx]
                         else:
-                            translations = tr.translate_headers_batch(original, batch_size=len(original)) or {}
+                            translations = tr.translate_headers_batch(original, batch_size=toc_ncx_per_batch) or {}
                         if translations:
                             # Pre-compute actual output paths so "Output File" shows
                             # the path in the built EPUB, not the raw NCX src.

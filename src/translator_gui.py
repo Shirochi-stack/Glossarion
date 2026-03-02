@@ -1320,6 +1320,7 @@ Text to analyze:
             print("Metadata translation UI not available")
         self.batch_translate_headers_var = self.config.get('batch_translate_headers', False)
         self.headers_per_batch_var = self.config.get('headers_per_batch', '400')
+        self.toc_ncx_per_batch_var = self.config.get('toc_ncx_per_batch', '400')
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
@@ -10247,6 +10248,7 @@ Important rules:
             # Set batch translation settings
             os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var else "0"
             os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var)
+            os.environ['TOC_NCX_PER_BATCH'] = str(self.toc_ncx_per_batch_var)
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
             # Set Chapter Headers prompts from config - replace {target_lang} with output language
@@ -13401,7 +13403,8 @@ Important rules:
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
-                ('headers_per_batch', ['headers_per_batch_var'], 10, int),
+                ('headers_per_batch', ['headers_per_batch_var'], 400, lambda v: safe_int(v, 400)),
+                ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], 400, lambda v: safe_int(v, 400)),
 
                 # Gemini/GPT/DeepSeek Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),

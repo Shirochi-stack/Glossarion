@@ -5054,6 +5054,7 @@ def _create_prompt_management_section(self, parent):
     dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
     _toc_col_right_v.addWidget(dedup_toc_translated_cb)
 
+
     def _sync_dedup_child(master_checked):
         dedup_toc_translated_cb.setEnabled(bool(master_checked))
     dedup_toc_cb.toggled.connect(_sync_dedup_child)
@@ -5083,7 +5084,7 @@ def _create_prompt_management_section(self, parent):
     _toc_col_right_v.addWidget(p_fallback_cb)
     _toc_col_right_v.addStretch()
 
-    # Delete TOC.txt button (full width)
+    # Delete TOC.txt button
     delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
     delete_toc_btn.setFixedWidth(210)
     delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
@@ -5096,7 +5097,39 @@ def _create_prompt_management_section(self, parent):
     if os.path.exists(_toc_icon_path):
         from PySide6.QtGui import QIcon as _QIcon
         delete_toc_btn.setIcon(_QIcon(_toc_icon_path))
-    section_v.addWidget(delete_toc_btn)
+
+    # Delete TOC.txt button + TOC batch limit (Horizontal layout)
+    _toc_btn_row = QWidget()
+    _toc_btn_h = QHBoxLayout(_toc_btn_row)
+    _toc_btn_h.setContentsMargins(0, 0, 0, 0)
+    
+    _toc_btn_h.addWidget(delete_toc_btn)
+    
+    _toc_btn_h.addSpacing(20)
+    toc_batch_label = QLabel("TOC entries per batch:")
+    toc_batch_label.setStyleSheet("font-size: 13px; color: #ced4da;")
+    _toc_btn_h.addWidget(toc_batch_label)
+    
+    toc_batch_entry = QLineEdit()
+    toc_batch_entry.setFixedWidth(60)
+    toc_batch_entry.setText(str(getattr(self, 'toc_ncx_per_batch_var', '400')))
+    toc_batch_entry.setStyleSheet("""
+        QLineEdit {
+            background-color: #2b2b2b;
+            color: #e0e0e0;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 2px 5px;
+        }
+    """)
+    def _on_toc_batch_changed(text):
+        if text.isdigit():
+            self.toc_ncx_per_batch_var = text
+    toc_batch_entry.textChanged.connect(_on_toc_batch_changed)
+    _toc_btn_h.addWidget(toc_batch_entry)
+    _toc_btn_h.addStretch()
+    
+    section_v.addWidget(_toc_btn_row)
 
     # Separator
     sep_toc_struct = QFrame()
@@ -5486,6 +5519,7 @@ def _create_prompt_management_section(self, parent):
     if os.path.exists(icon_path):
         delete_btn.setIcon(QIcon(icon_path))
     buttons_h.addWidget(delete_btn)
+
 
     buttons_h.addStretch()
     
