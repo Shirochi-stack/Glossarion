@@ -4957,12 +4957,34 @@ def _create_prompt_management_section(self, parent):
     translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)
     skip_dup_toc_cb.toggled.connect(_on_skip_dup_toc_toggle)
 
-    section_v.addWidget(use_toc_cb)
-    section_v.addWidget(translate_toc_cb)
-    skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(skip_dup_toc_cb)
+    # ── 2-column layout ──────────────────────────────────────────
+    _toc_cols_w = QWidget()
+    _toc_cols_h = QHBoxLayout(_toc_cols_w)
+    _toc_cols_h.setContentsMargins(0, 0, 0, 0)
+    _toc_cols_h.setSpacing(8)
 
-    # Deduplicate TOC entries (exact match)
+    _toc_col_left = QWidget()
+    _toc_col_left_v = QVBoxLayout(_toc_col_left)
+    _toc_col_left_v.setContentsMargins(0, 0, 0, 0)
+    _toc_col_left_v.setSpacing(4)
+
+    _toc_col_right = QWidget()
+    _toc_col_right_v = QVBoxLayout(_toc_col_right)
+    _toc_col_right_v.setContentsMargins(0, 0, 0, 0)
+    _toc_col_right_v.setSpacing(4)
+
+    _toc_cols_h.addWidget(_toc_col_left)
+    _toc_cols_h.addWidget(_toc_col_right)
+    section_v.addWidget(_toc_cols_w)
+
+    # Left column: NCX toggles
+    _toc_col_left_v.addWidget(use_toc_cb)
+    _toc_col_left_v.addWidget(translate_toc_cb)
+    skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
+    _toc_col_left_v.addWidget(skip_dup_toc_cb)
+    _toc_col_left_v.addStretch()
+
+    # Right column: Dedup + fallback
     if not hasattr(self, 'deduplicate_toc_var'):
         self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
 
@@ -4985,10 +5007,8 @@ def _create_prompt_management_section(self, parent):
             pass
 
     dedup_toc_cb.toggled.connect(_on_dedup_toc_toggle)
-    dedup_toc_cb.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(dedup_toc_cb)
+    _toc_col_right_v.addWidget(dedup_toc_cb)
 
-    # Deduplicate TOC based on translated titles (only if Deduplicate TOC enabled)
     if not hasattr(self, 'deduplicate_toc_use_translated_var'):
         self.deduplicate_toc_use_translated_var = self.config.get('deduplicate_toc_use_translated', False)
 
@@ -5011,15 +5031,14 @@ def _create_prompt_management_section(self, parent):
             pass
 
     dedup_toc_translated_cb.toggled.connect(_on_dedup_toc_translated_toggle)
-    dedup_toc_translated_cb.setContentsMargins(40, 0, 0, 0)
+    dedup_toc_translated_cb.setContentsMargins(20, 0, 0, 0)
     dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
-    section_v.addWidget(dedup_toc_translated_cb)
+    _toc_col_right_v.addWidget(dedup_toc_translated_cb)
 
     def _sync_dedup_child(master_checked):
         dedup_toc_translated_cb.setEnabled(bool(master_checked))
     dedup_toc_cb.toggled.connect(_sync_dedup_child)
 
-    # Use <p> tag as TOC fallback
     if not hasattr(self, 'use_p_tag_toc_fallback_var'):
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
 
@@ -5042,10 +5061,10 @@ def _create_prompt_management_section(self, parent):
             pass
 
     p_fallback_cb.toggled.connect(_on_p_tag_toc_fallback_toggle)
-    p_fallback_cb.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(p_fallback_cb)
+    _toc_col_right_v.addWidget(p_fallback_cb)
+    _toc_col_right_v.addStretch()
 
-    # Delete TOC.txt button
+    # Delete TOC.txt button (full width)
     delete_toc_btn = QPushButton("🗑️Delete TOC.txt")
     delete_toc_btn.setFixedWidth(210)
     delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
@@ -5058,7 +5077,6 @@ def _create_prompt_management_section(self, parent):
     if os.path.exists(_toc_icon_path):
         from PySide6.QtGui import QIcon as _QIcon
         delete_toc_btn.setIcon(_QIcon(_toc_icon_path))
-    delete_toc_btn.setContentsMargins(20, 0, 0, 0)
     section_v.addWidget(delete_toc_btn)
 
     # Separator
