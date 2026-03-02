@@ -5526,15 +5526,25 @@ img {
                 chapters_doc = WeasyHTML(string=combined_html, base_url=self.output_dir).render()
                 documents.append(chapters_doc)
                 
-                # Calculate page numbers for TOC (offset by cover + TOC pages)
-                # Page numbers in TOC should start from 1, not counting cover and TOC itself
-                chapter_toc_page = 1  # TOC page numbers start from 1
-                
-                for idx, (html_file, chap_num) in enumerate(chapters_order):
-                    chapter_page_map[html_file] = chapter_toc_page
-                    chapter_page_map[chap_num] = chapter_toc_page
-                    # Increment page for next chapter (each chapter starts on new page)
-                    chapter_toc_page += 1
+                # Resolve accurate page numbers using WeasyPrint's Page.anchors.
+                # Each chapter div has id="chapter-{chap_num}"; iterate rendered
+                # pages and find which page each anchor lands on (1-indexed).
+                _anchor_to_page = {}
+                for _pidx, _pg in enumerate(chapters_doc.pages):
+                    for _aid in _pg.anchors:
+                        if _aid not in _anchor_to_page:
+                            _anchor_to_page[_aid] = _pidx + 1
+                _fallback_page = 1
+                for _html_file, _chap_num in chapters_order:
+                    _pg_num = _anchor_to_page.get(f'chapter-{_chap_num}')
+                    if _pg_num is not None:
+                        chapter_page_map[_html_file] = _pg_num
+                        chapter_page_map[_chap_num] = _pg_num
+                        _fallback_page = _pg_num + 1
+                    else:
+                        chapter_page_map[_html_file] = _fallback_page
+                        chapter_page_map[_chap_num] = _fallback_page
+                        _fallback_page += 1
                 
                 current_page += len(chapters_doc.pages)
                 self.log(f"  Combined document: {len(chapters_doc.pages)} pages")
