@@ -1792,6 +1792,7 @@ class EPUBCompiler:
                     _, _toc_trans, _toc_files = self._load_toc_translations_file(toc_txt_path)
                     if _toc_trans:
                         # Build output-filename -> translated title lookup
+                        # TOC.txt stores extensionless names, so strip extensions when matching
                         _file_to_title = {}
                         for _idx, _ttitle in _toc_trans.items():
                             _out = _toc_files.get(_idx, '')
@@ -1801,8 +1802,20 @@ class EPUBCompiler:
                         _pdf_titles = {}
                         for _cn, (_ot, _cf, _fn) in chapter_titles_info.items():
                             _base = os.path.basename(_fn) if _fn else ''
+                            # Try exact match first, then extensionless match
                             if _base in _file_to_title:
                                 _pdf_titles[_cn] = (_file_to_title[_base], 1.0, _fn)
+                            else:
+                                # Strip extensions for matching (TOC.txt stores extensionless names)
+                                _base_no_ext = _base
+                                while True:
+                                    _name, _ext = os.path.splitext(_base_no_ext)
+                                    if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                        _base_no_ext = _name
+                                    else:
+                                        break
+                                if _base_no_ext in _file_to_title:
+                                    _pdf_titles[_cn] = (_file_to_title[_base_no_ext], 1.0, _fn)
                         if _pdf_titles:
                             chapter_titles_info = _pdf_titles
                             self.log(f"📝 PDF TOC will use {len(_pdf_titles)} entries from TOC.txt")
@@ -4601,20 +4614,35 @@ img {
                         if translations:
                             # Pre-compute actual output paths so "Output File" shows
                             # the path in the built EPUB, not the raw NCX src.
+                            # Strip file extensions to prevent double-extension issues.
                             output_refs: Dict[int, str] = {}
                             for _idx, _ent in enumerate(entries, 1):
                                 _src = (_ent.get('src') or '').strip()
                                 if not _src:
-                                    output_refs[_idx] = refs.get(_idx, '')
+                                    _fallback = refs.get(_idx, '')
+                                    # Strip extensions from fallback too
+                                    _fb_base = os.path.basename(_fallback) if _fallback else ''
+                                    while _fb_base:
+                                        _name, _ext = os.path.splitext(_fb_base)
+                                        if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                            _fb_base = _name
+                                        else:
+                                            break
+                                    output_refs[_idx] = _fb_base
                                     continue
                                 _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
                                 _core = self._normalize_core_name(_src_base)
                                 _target = spine_href_by_core.get(_core)
-                                if _target:
-                                    output_refs[_idx] = _target  # file path only, no fragment
-                                else:
-                                    # fallback: strip fragment from source path
-                                    output_refs[_idx] = _src_base
+                                _resolved = _target if _target else _src_base
+                                # Strip extensions to prevent double-extension issues
+                                _clean = os.path.basename(_resolved)
+                                while True:
+                                    _name, _ext = os.path.splitext(_clean)
+                                    if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                        _clean = _name
+                                    else:
+                                        break
+                                output_refs[_idx] = _clean
                             self._save_toc_translations_file(toc_txt_path, original, translations, output_refs)
                             self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
                         else:
