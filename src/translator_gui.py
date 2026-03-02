@@ -2407,6 +2407,7 @@ Recent translations to summarize:
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             ('save_partial_results_var', 'save_partial_results', False),
+            ('save_prohibited_results_var', 'save_prohibited_results', False),
             ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', False),
             ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
             ('disable_refusal_checks_var', 'disable_refusal_checks', False),
@@ -13344,6 +13345,8 @@ Important rules:
                 ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
                 ('disable_refusal_checks', ['disable_refusal_checks_var'], False, bool),
                 ('refusal_pattern_length_limit', ['refusal_pattern_length_limit_var'], 1000, lambda v: safe_int(v, 1000)),
+                ('save_partial_results', ['save_partial_results_var'], False, bool),
+                ('save_prohibited_results', ['save_prohibited_results_var'], False, bool),
 
                 # Prompts and text fields
                 ('summary_role', ['summary_role_var'], '', str),
