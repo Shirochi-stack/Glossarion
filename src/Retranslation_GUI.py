@@ -1437,6 +1437,7 @@ class RetranslationMixin:
         lbl_in_progress = QLabel(f"🔄 In Progress: {in_progress} | ")
         lbl_in_progress.setFont(stats_font)
         lbl_in_progress.setStyleSheet("color: orange;")
+        lbl_in_progress.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_in_progress)
         if in_progress == 0:
             lbl_in_progress.setVisible(False)
@@ -1508,10 +1509,11 @@ class RetranslationMixin:
                 lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
             return _handler
 
-        lbl_completed.mousePressEvent = _make_cycle_handler(('completed',))
-        lbl_pending.mousePressEvent   = _make_cycle_handler(('pending',))
-        lbl_missing.mousePressEvent   = _make_cycle_handler(('not_translated',))
-        lbl_failed.mousePressEvent    = _make_cycle_handler(('failed', 'qa_failed'))
+        lbl_completed.mousePressEvent   = _make_cycle_handler(('completed',))
+        lbl_in_progress.mousePressEvent = _make_cycle_handler(('in_progress',))
+        lbl_pending.mousePressEvent     = _make_cycle_handler(('pending',))
+        lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated',))
+        lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed'))
         
         # Populate listbox with dynamic column widths
         status_icons = {
