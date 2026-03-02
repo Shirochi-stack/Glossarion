@@ -5876,7 +5876,20 @@ class UnifiedClient:
                     temp_client.current_session_context = self.current_session_context
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
-                    
+
+                    # Copy chapter context so the temp client logs the correct chapter label
+                    try:
+                        src_ctx = getattr(self._get_thread_local_client(), 'chapter_context', None)
+                        if src_ctx:
+                            temp_client.set_chapter_context(
+                                chapter=src_ctx.get('chapter'),
+                                chunk=src_ctx.get('chunk'),
+                                total_chunks=src_ctx.get('total_chunks'),
+                                merged_chapters=src_ctx.get('merged_chapters'),
+                            )
+                    except Exception:
+                        pass
+
                     print(f"{log_prefix} Created temp client with model: {temp_client.model}")
                     print(f"{log_prefix} Multi-key mode: {temp_client._multi_key_mode}")
                     
@@ -6135,7 +6148,20 @@ class UnifiedClient:
                     temp_client.current_session_context = self.current_session_context
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
-                    
+
+                    # Copy chapter context so the temp client logs the correct chapter label
+                    try:
+                        src_ctx = getattr(self._get_thread_local_client(), 'chapter_context', None)
+                        if src_ctx:
+                            temp_client.set_chapter_context(
+                                chapter=src_ctx.get('chapter'),
+                                chunk=src_ctx.get('chunk'),
+                                total_chunks=src_ctx.get('total_chunks'),
+                                merged_chapters=src_ctx.get('merged_chapters'),
+                            )
+                    except Exception:
+                        pass
+
                     print(f"[FALLBACK DIRECT {idx+1}] Sending request...")
                     
                     # Use internal method to avoid nested retry loops
