@@ -2472,8 +2472,8 @@ class RetranslationMixin:
                             _STRIP_QUOTES = '\'"「」『』“”‘’｢｣《》〈〉（）'
                             _bare = search_term.strip(_STRIP_QUOTES)
                             _base = _bare if _bare else search_term
-                            # Build candidates: full bare term, then shrinking prefixes (min 2 chars)
-                            _candidates = [_base[:_l] for _l in range(len(_base), 1, -1)]
+                            # Build candidates: full bare term, then shrinking prefixes (min 1 char)
+                            _candidates = [_base[:_l] for _l in range(len(_base), 0, -1)]
                             for _cand in _candidates:
                                 for _i, _ln in enumerate(_lines, 1):
                                     if _cand in _ln:
