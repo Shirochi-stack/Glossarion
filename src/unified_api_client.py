@@ -10355,7 +10355,10 @@ class UnifiedClient:
         """Stash label and context for stagger logger. Actual log is emitted by _apply_api_call_stagger."""
         try:
             tls = self._get_thread_local_client()
-            label = self._extract_chapter_label(messages)
+            # Prefer explicit thread-local chapter context/label if available
+            label = self._get_request_label_for_logs(messages)
+            if not label:
+                label = self._extract_chapter_label(messages)
             tls.current_request_label = label
             tls.current_request_context = context or 'translation'
         except Exception:
