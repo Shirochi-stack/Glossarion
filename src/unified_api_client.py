@@ -11461,7 +11461,7 @@ class UnifiedClient:
             print(f"🔒 Gemini Safety Status: {safety_status}{endpoint_info}")
             
             thinking_status = ""
-            if supports_thinking:
+            if supports_thinking or use_openai_endpoint:
                 if is_gemini_3:
                     thinking_status = f" (thinking level: {thinking_level})"
                 elif thinking_budget == 0:
