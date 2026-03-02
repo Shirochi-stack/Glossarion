@@ -4763,7 +4763,7 @@ def _create_prompt_management_section(self, parent):
     # Title frame with checkbox and buttons
     title_w = QWidget()
     title_h = QHBoxLayout(title_w)
-    title_h.setContentsMargins(0, 10, 0, 10)
+    title_h.setContentsMargins(0, 0, 0, 0)
     
     translate_title_cb = self._create_styled_checkbox("Translate Book Title")
     try:
@@ -4849,7 +4849,7 @@ def _create_prompt_management_section(self, parent):
     
     title_desc = QLabel("When enabled: Book titles and selected metadata will be translated")
     title_desc.setStyleSheet("color: gray; font-size: 9pt;")
-    title_desc.setContentsMargins(20, 0, 0, 0)
+    title_desc.setContentsMargins(20, 0, 0, 8)
     section_v.addWidget(title_desc)
     
     def _on_glossary_title_toggle(checked):
@@ -5102,6 +5102,7 @@ def _create_prompt_management_section(self, parent):
     sep_toc_struct = QFrame()
     sep_toc_struct.setFrameShape(QFrame.HLine)
     sep_toc_struct.setFrameShadow(QFrame.Sunken)
+    sep_toc_struct.setContentsMargins(0, 0, 0, 15)
     section_v.addWidget(sep_toc_struct)
 
     # Batch Header Translation Section
