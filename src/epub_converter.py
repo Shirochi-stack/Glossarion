@@ -5338,8 +5338,11 @@ img {
         # Page number CSS
         alignment = settings['page_number_alignment']
         page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
+        start_page = int(os.environ.get('PDF_START_PAGE', '1') or '1')
         if settings['page_numbers']:
             styles += f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
+        if start_page > 1:
+            styles += f" body {{ counter-reset: page {start_page - 1}; }} "
         
         # Process chapters
         documents = []
