@@ -1422,6 +1422,7 @@ class RetranslationMixin:
         lbl_completed = QLabel(f"✅ Completed: {completed} | ")
         lbl_completed.setFont(stats_font)
         lbl_completed.setStyleSheet("color: green;")
+        lbl_completed.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_completed)
         
         # Merged: chapters combined into parent request (always create, hide if 0)
@@ -1444,6 +1445,7 @@ class RetranslationMixin:
         lbl_pending = QLabel(f"❓ Pending: {pending} | ")
         lbl_pending.setFont(stats_font)
         lbl_pending.setStyleSheet("color: white;")
+        lbl_pending.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_pending)
         if pending == 0:
             lbl_pending.setVisible(False)
@@ -1452,12 +1454,14 @@ class RetranslationMixin:
         lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
         lbl_missing.setFont(stats_font)
         lbl_missing.setStyleSheet("color: #2b6cb0;")
+        lbl_missing.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_missing)
         
-        # Match list status: failed/qa_failed use ❌ and red
+        # Match list status: failed/qa_failed use ❌ and red (clickable — jumps to next failure)
         lbl_failed = QLabel(f"❌ Failed: {failed} | ")
         lbl_failed.setFont(stats_font)
         lbl_failed.setStyleSheet("color: red;")
+        lbl_failed.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_failed)
         
         
@@ -1484,6 +1488,30 @@ class RetranslationMixin:
         
         # Store listbox reference for toggle handler
         listbox_ref[0] = listbox
+        
+        # Helper: cycle to next item matching given statuses
+        def _make_cycle_handler(statuses):
+            def _handler(_event=None):
+                lb = listbox_ref[0]
+                if not lb:
+                    return
+                indices = [
+                    i for i in range(lb.count())
+                    if not lb.item(i).isHidden()
+                    and (lb.item(i).data(Qt.UserRole) or {}).get('info', {}).get('status') in statuses
+                ]
+                if not indices:
+                    return
+                current = lb.currentRow()
+                nxt = next((i for i in indices if i > current), indices[0])
+                lb.setCurrentRow(nxt)
+                lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
+            return _handler
+
+        lbl_completed.mousePressEvent = _make_cycle_handler(('completed',))
+        lbl_pending.mousePressEvent   = _make_cycle_handler(('pending',))
+        lbl_missing.mousePressEvent   = _make_cycle_handler(('not_translated',))
+        lbl_failed.mousePressEvent    = _make_cycle_handler(('failed', 'qa_failed'))
         
         # Populate listbox with dynamic column widths
         status_icons = {
@@ -2435,13 +2463,24 @@ class RetranslationMixin:
                         except Exception:
                             pass
                     # Find line number of search term in file
+                    # Try progressively shorter prefixes in case the QA term is truncated
                     if search_term and os.path.exists(qa_file_path):
                         try:
                             with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
-                                for _i, _ln in enumerate(_f, 1):
-                                    if search_term in _ln:
+                                _lines = _f.readlines()
+                            # Strip surrounding quote/bracket chars so we search raw content
+                            _STRIP_QUOTES = '\'"「」『』“”‘’｢｣《》〈〉（）'
+                            _bare = search_term.strip(_STRIP_QUOTES)
+                            _base = _bare if _bare else search_term
+                            # Build candidates: full bare term, then shrinking prefixes (min 2 chars)
+                            _candidates = [_base[:_l] for _l in range(len(_base), 1, -1)]
+                            for _cand in _candidates:
+                                for _i, _ln in enumerate(_lines, 1):
+                                    if _cand in _ln:
                                         _line_num = _i
                                         break
+                                if _line_num > 1:
+                                    break
                         except Exception:
                             pass
                     # Copy search term to clipboard
