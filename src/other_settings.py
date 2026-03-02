@@ -5534,7 +5534,7 @@ def _create_prompt_management_section(self, parent):
     # EPUB Utilities
     epub_title = QLabel("EPUB Utilities:")
     epub_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
-    epub_title.setContentsMargins(0, 5, 0, 5)
+    epub_title.setContentsMargins(0, 0, 0, 5)
     section_v.addWidget(epub_title)
     
     btn_validate = QPushButton("🔍 Validate EPUB Structure")
