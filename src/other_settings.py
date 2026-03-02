@@ -2009,6 +2009,18 @@ def _create_context_management_section(self, parent):
     
     section_v.addWidget(output_dir_row)
 
+    # Halgakos icon at bottom (128x128 HiDPI)
+    _icon_label = QLabel()
+    _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(_icon_path):
+        from PySide6.QtGui import QPixmap
+        _pixmap = QPixmap(_icon_path)
+        if not _pixmap.isNull():
+            _scaled = _pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _icon_label.setPixmap(_scaled)
+            _icon_label.setAlignment(Qt.AlignCenter)
+            section_v.addWidget(_icon_label)
+
     # Place the section at row 0, column 1 to match the original grid
     try:
         grid.addWidget(section_box, 0, 1)
