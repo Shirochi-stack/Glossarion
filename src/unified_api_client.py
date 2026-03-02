@@ -6746,6 +6746,35 @@ class UnifiedClient:
                                     log_label = f"Chapter {chap}"
                     except Exception:
                         log_label = None
+                    
+                    # Fallback to client instance state if thread-local label is missing
+                    if not log_label:
+                        try:
+                            log_label = getattr(self, "_last_request_label", None)
+                            if not log_label:
+                                ctx = getattr(self, "_last_chapter_context", None)
+                                if isinstance(ctx, dict):
+                                    chap = ctx.get("chapter")
+                                    chunk = ctx.get("chunk")
+                                    total = ctx.get("total_chunks")
+                                    merged = ctx.get("merged_chapters")
+                                    if merged and len(merged) > 0:
+                                        merged_nums = sorted([int(c) for c in merged if c is not None])
+                                        if merged_nums:
+                                            if len(merged_nums) == 1:
+                                                base_label = f"Merged {merged_nums[0]}"
+                                            else:
+                                                base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+                                            if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
+                                                log_label = f"{base_label} (chunk {chunk}/{total})"
+                                            else:
+                                                log_label = base_label
+                                    if not log_label and chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
+                                        log_label = f"Chapter {chap} (chunk {chunk}/{total})"
+                                    if not log_label and chap is not None:
+                                        log_label = f"Chapter {chap}"
+                        except Exception:
+                            log_label = None
 
                     if not log_label:
                         # Prefer explicit log label or chapter_context passed in kwargs
@@ -6775,9 +6804,7 @@ class UnifiedClient:
                                     log_label = f"Chapter {chap}"
                             except Exception:
                                 log_label = None
-                    if not log_label:
-                        chapter_info = kwargs.get('messages', None)
-                        log_label = self._extract_chapter_label(chapter_info) if chapter_info else None
+                    # Do NOT parse messages for chapter labels (can be wrong); only use explicit context
                     
                     if log_label and log_label != "request":
                         print(f"   ✅ Received {log_label} response ({len(response.content):,} chars)")

@@ -7376,6 +7376,37 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         total_chunks=chapter_context.get('total_chunks'),
                         merged_chapters=chapter_context.get('merged_chapters'),
                     )
+                    # Also set a friendly label in the API thread for logging
+                    try:
+                        tls = client._get_thread_local_client()
+                        chap = chapter_context.get('chapter')
+                        chunk = chapter_context.get('chunk')
+                        total = chapter_context.get('total_chunks')
+                        merged = chapter_context.get('merged_chapters')
+                        if merged and len(merged) > 0:
+                            merged_nums = sorted([int(c) for c in merged if c is not None])
+                            if merged_nums:
+                                if len(merged_nums) == 1:
+                                    base_label = f"Merged {merged_nums[0]}"
+                                else:
+                                    base_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
+                                if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
+                                    tls.current_request_label = f"{base_label} (chunk {chunk}/{total})"
+                                else:
+                                    tls.current_request_label = base_label
+                        elif chap is not None:
+                            if chunk and total and not (str(chunk) == '1' and str(total) == '1'):
+                                tls.current_request_label = f"Chapter {chap} (chunk {chunk}/{total})"
+                            else:
+                                tls.current_request_label = f"Chapter {chap}"
+                        # Also store on client instance for fallback logging
+                        try:
+                            client._last_request_label = getattr(tls, "current_request_label", None)
+                            client._last_chapter_context = dict(chapter_context) if isinstance(chapter_context, dict) else chapter_context
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                 except Exception:
                     # Context is best-effort and should never break the call
                     pass
