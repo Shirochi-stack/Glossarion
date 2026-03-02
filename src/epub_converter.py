@@ -3914,8 +3914,14 @@ img {
                         break
                 
                 if not cover_file:
-                    cover_file = next(iter(processed_images.values()))
-                    self.log(f"📔 Using first image as cover: {cover_file}")
+                    # Sort numerically so e.g. "2.jpg" comes before "10.jpg"
+                    import re as _re
+                    def _numeric_key(name):
+                        parts = _re.split(r'(\d+)', name.lower())
+                        return [int(p) if p.isdigit() else p for p in parts]
+                    first_original = sorted(processed_images.keys(), key=_numeric_key)[0]
+                    cover_file = processed_images[first_original]
+                    self.log(f"📔 Using first image (numerically sorted) as cover: {cover_file}")
             
             self.log(f"✅ Processed {len(processed_images)} images successfully")
             
