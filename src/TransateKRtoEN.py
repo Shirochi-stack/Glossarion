@@ -5247,8 +5247,8 @@ class BatchTranslationProcessor:
                             # Signal other chunk workers to abort quickly (chapter-local only)
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                            save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
-                            if save_partial_results:
+                            save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
+                            if save_prohibited_results:
                                 # Do NOT preserve original; save AI output if any, otherwise empty
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -5473,8 +5473,25 @@ class BatchTranslationProcessor:
                 print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created (reason: {failure_reason})")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    # Route prohibited/blocked saves to the separate toggle
+                    is_prohibited = False
+                    try:
+                        fr_lower = str(failure_reason or "").lower()
+                        if "content filter" in fr_lower or "blocked" in fr_lower or "prohibited" in fr_lower:
+                            is_prohibited = True
+                    except Exception:
+                        pass
+                    if not is_prohibited:
+                        try:
+                            cl = str(cleaned).lower()
+                            if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl:
+                                is_prohibited = True
+                        except Exception:
+                            pass
                     save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
-                    if save_partial_results:
+                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
+                    should_save = save_prohibited_results if is_prohibited else save_partial_results
+                    if should_save:
                         try:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned if isinstance(cleaned, str) else "")
@@ -6151,8 +6168,26 @@ class BatchTranslationProcessor:
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
+                    # Route prohibited/blocked saves to the separate toggle
+                    failure_reason = get_failure_reason(cleaned)
+                    is_prohibited = False
+                    try:
+                        fr_lower = str(failure_reason or "").lower()
+                        if "content filter" in fr_lower or "blocked" in fr_lower or "prohibited" in fr_lower:
+                            is_prohibited = True
+                    except Exception:
+                        pass
+                    if not is_prohibited:
+                        try:
+                            cl = str(cleaned).lower()
+                            if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl:
+                                is_prohibited = True
+                        except Exception:
+                            pass
                     save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
-                    if save_partial_results:
+                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
+                    should_save = save_prohibited_results if is_prohibited else save_partial_results
+                    if should_save:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = cleaned
@@ -11952,8 +11987,8 @@ def main(log_callback=None, stop_callback=None):
                 # If this chunk was blocked/prohibited, stop remaining chunks and mark QA fail
                 if finish_reason in ("content_filter", "prohibited_content", "error"):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
-                    if save_partial_results:
+                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
+                    if save_prohibited_results:
                         # Do NOT preserve original; save AI output if any, otherwise empty
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:

@@ -3796,15 +3796,15 @@ def _create_response_handling_section(self, parent):
     sep_preserve.setFrameShape(QFrame.HLine)
     sep_preserve.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(sep_preserve)
-    # Save interrupted/blocked chapters
+    # Save interrupted chapters
     if not hasattr(self, 'save_partial_results_var'):
-        self.save_partial_results_var = self.config.get('save_partial_results', False)
+        self.save_partial_results_var = self.config.get('save_partial_results', True)
     
-    self.save_partial_results_checkbox = self._create_styled_checkbox("Save interrupted/blocked chapters")
+    self.save_partial_results_checkbox = self._create_styled_checkbox("Save interrupted chapters")
     self.save_partial_results_checkbox.setContentsMargins(20, 5, 0, 0)
     self.save_partial_results_checkbox.setToolTip(
-        "When enabled, chapters interrupted by graceful stop or blocked for prohibited content\n"
-        "are saved and marked as QA failed (PARTIAL/PROHIBITED) instead of staying pending."
+        "When enabled, chapters interrupted by graceful stop are saved\n"
+        "and marked as QA failed (PARTIAL/TRUNCATED) instead of staying pending."
     )
     try:
         self.save_partial_results_checkbox.setChecked(bool(self.save_partial_results_var))
@@ -3819,11 +3819,40 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.save_partial_results_checkbox)
     
     save_partial_desc = QLabel(
-        "Saves the original content when a chapter is interrupted or blocked, and marks it QA failed."
+        "Saves partial output when a chapter is interrupted by graceful stop, and marks it QA failed."
     )
     save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
     save_partial_desc.setContentsMargins(20, 2, 0, 10)
     section_v.addWidget(save_partial_desc)
+
+    # Save prohibited content responses (separate toggle)
+    if not hasattr(self, 'save_prohibited_results_var'):
+        self.save_prohibited_results_var = self.config.get('save_prohibited_results', True)
+
+    self.save_prohibited_results_checkbox = self._create_styled_checkbox("Save blocked/prohibited responses")
+    self.save_prohibited_results_checkbox.setContentsMargins(20, 0, 0, 0)
+    self.save_prohibited_results_checkbox.setToolTip(
+        "When enabled, blocked/prohibited responses are saved (AI output or empty)\n"
+        "and marked as QA failed (PROHIBITED_CONTENT)."
+    )
+    try:
+        self.save_prohibited_results_checkbox.setChecked(bool(self.save_prohibited_results_var))
+    except Exception:
+        pass
+    def _on_save_prohibited_results_toggle(checked):
+        try:
+            self.save_prohibited_results_var = bool(checked)
+        except Exception:
+            pass
+    self.save_prohibited_results_checkbox.toggled.connect(_on_save_prohibited_results_toggle)
+    section_v.addWidget(self.save_prohibited_results_checkbox)
+
+    save_prohibited_desc = QLabel(
+        "Saves blocked/prohibited responses and marks the chapter QA failed."
+    )
+    save_prohibited_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    save_prohibited_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(save_prohibited_desc)
 
     # Preserve Original Text on Failure
     preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
