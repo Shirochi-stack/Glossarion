@@ -4949,8 +4949,14 @@ def _create_prompt_management_section(self, parent):
             translate_toc_cb.setEnabled(bool(checked))
             if checked:
                 skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
-            if not checked:
+            else:
                 skip_dup_toc_cb.setEnabled(False)
+            # Deduplicate TOC and its child also depend on use_toc_ncx
+            dedup_toc_cb.setEnabled(bool(checked))
+            if checked:
+                dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
+            else:
+                dedup_toc_translated_cb.setEnabled(False)
         except Exception:
             pass
 
@@ -5019,6 +5025,7 @@ def _create_prompt_management_section(self, parent):
             pass
 
     dedup_toc_cb.toggled.connect(_on_dedup_toc_toggle)
+    dedup_toc_cb.setEnabled(use_toc_cb.isChecked())
     _toc_col_right_v.addWidget(dedup_toc_cb)
 
     if not hasattr(self, 'deduplicate_toc_use_translated_var'):
