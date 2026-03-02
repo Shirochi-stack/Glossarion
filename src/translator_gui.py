@@ -1319,8 +1319,8 @@ Text to analyze:
         except ImportError:
             print("Metadata translation UI not available")
         self.batch_translate_headers_var = self.config.get('batch_translate_headers', False)
-        self.headers_per_batch_var = self.config.get('headers_per_batch', '400')
-        self.toc_ncx_per_batch_var = self.config.get('toc_ncx_per_batch', '400')
+        self.headers_per_batch_var = self.config.get('headers_per_batch', '-1')
+        self.toc_ncx_per_batch_var = self.config.get('toc_ncx_per_batch', '-1')
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
@@ -13403,8 +13403,8 @@ Important rules:
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
-                ('headers_per_batch', ['headers_per_batch_var'], 400, lambda v: safe_int(v, 400)),
-                ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], 400, lambda v: safe_int(v, 400)),
+                ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
+                ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
 
                 # Gemini/GPT/DeepSeek Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
@@ -14428,7 +14428,7 @@ Important rules:
                 ('TRANSLATE_METADATA_FIELDS', _json.dumps(getattr(self, 'translate_metadata_fields', {}))),
                 ('METADATA_TRANSLATION_MODE', self.config.get('metadata_translation_mode', 'together')),
                 ('BATCH_TRANSLATE_HEADERS', '1' if getattr(self, 'batch_translate_headers_var', False) else '0'),
-                ('HEADERS_PER_BATCH', str(getattr(self, 'headers_per_batch_var', '400'))),
+                ('HEADERS_PER_BATCH', str(getattr(self, 'headers_per_batch_var', '-1'))),
                 ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),

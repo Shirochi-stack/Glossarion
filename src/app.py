@@ -471,7 +471,7 @@ class GlossarionWeb:
         
         # Chapter Processing Options
         os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if config('batch_translate_headers', False) else '0'
-        os.environ['HEADERS_PER_BATCH'] = str(config('headers_per_batch', 400))
+        os.environ['HEADERS_PER_BATCH'] = str(config('headers_per_batch', -1))
         os.environ['USE_NCX_NAVIGATION'] = '1' if config('use_ncx_navigation', False) else '0'
         os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if config('attach_css_to_chapters', False) else '0'
         os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if config('retain_source_extension', True) else '0'

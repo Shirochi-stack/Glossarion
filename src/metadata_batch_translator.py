@@ -1472,10 +1472,30 @@ class BatchHeaderTranslator:
         
         # Get default batch size from config or environment
         self.default_batch_size = int(os.getenv('HEADERS_PER_BATCH', 
-                                      self.config.get('headers_per_batch', '350')))
+                                      self.config.get('headers_per_batch', '-1')))
+        if self.default_batch_size <= 0:
+            self.default_batch_size = self._auto_batch_size()
         
     def set_stop_flag(self, flag: bool):
         self.stop_flag = flag
+    
+    @staticmethod
+    def _auto_batch_size() -> int:
+        """Calculate batch size from output token limit / compression factor.
+        
+        Each header entry is estimated at ~50 tokens (title text + JSON key/formatting).
+        So available_tokens / 50 gives the number of entries that fit in one API call.
+        """
+        max_output_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
+        compression_factor = float(os.getenv('COMPRESSION_FACTOR', '3.0'))
+        if compression_factor <= 0:
+            compression_factor = 3.0
+        available_tokens = int(max_output_tokens / compression_factor)
+        batch_size = max(10, available_tokens // 50)
+        print(f"📐 Auto batch size: {batch_size} entries "
+              f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
+              f"{available_tokens:,} available tokens, ~50 tok/entry)")
+        return batch_size
         
     def translate_and_save_headers(self,
                                   html_dir: str,
@@ -1499,6 +1519,8 @@ class BatchHeaderTranslator:
         # Use configured batch size if not explicitly provided
         if batch_size is None:
             batch_size = int(os.getenv('HEADERS_PER_BATCH', str(self.default_batch_size)))
+            if batch_size <= 0:
+                batch_size = self._auto_batch_size()
             print(f"[DEBUG] Using headers_per_batch from GUI/env: {batch_size}")
         
         # Translate headers
@@ -2632,7 +2654,7 @@ def enhance_epub_compiler(compiler_instance):
         translate_metadata_fields = {}
     
     batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', 350))
+    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', -1))
     update_html = os.getenv('UPDATE_HTML_HEADERS', '1') == '1'
     save_translations = os.getenv('SAVE_HEADER_TRANSLATIONS', '1') == '1'
     

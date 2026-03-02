@@ -1575,11 +1575,11 @@ class EPUBCompiler:
                             for num in list(source_headers.keys())[:3]:
                                 self.log(f"  Example - Chapter {num}: {source_headers[num]}")
                             
-                            # Translate headers with current titles info
+                            _hpb = getattr(self, 'headers_per_batch', -1)
                             translated_headers = self.header_translator.translate_and_save_headers(
                                 html_dir=self.html_dir,
                                 headers_dict=source_headers,
-                                batch_size=getattr(self, 'headers_per_batch', 400),
+                                batch_size=_hpb if _hpb > 0 else None,
                                 output_dir=self.output_dir,
                                 update_html=getattr(self, 'update_html_headers', True),
                                 save_to_file=getattr(self, 'save_header_translations', True),
@@ -4561,7 +4561,19 @@ img {
                     self.log("⚠️ TRANSLATE_TOC_NCX enabled but API client is not initialized; using original toc.ncx labels")
                     translations = {}
                 else:
-                    toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '400'))
+                    toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
+                    if toc_ncx_per_batch <= 0:
+                        # Auto-calculate based on output token limit / compression factor
+                        max_output_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
+                        compression_factor = float(os.environ.get('COMPRESSION_FACTOR', '3.0'))
+                        if compression_factor <= 0:
+                            compression_factor = 3.0
+                        available_tokens = int(max_output_tokens / compression_factor)
+                        # ~50 tokens per TOC entry (title text + JSON key/formatting overhead)
+                        toc_ncx_per_batch = max(10, available_tokens // 50)
+                        self.log(f"📐 Auto batch size: {toc_ncx_per_batch} entries "
+                                 f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
+                                 f"{available_tokens:,} available tokens, ~50 tok/entry)")
                     self.log(f"🌐 Translating {len(original)} toc.ncx entries in chunks of {toc_ncx_per_batch}...")
                     try:
                         from metadata_batch_translator import BatchHeaderTranslator

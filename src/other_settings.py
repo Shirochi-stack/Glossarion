@@ -4918,10 +4918,11 @@ def _create_prompt_management_section(self, parent):
     
     toc_batch_entry = QLineEdit()
     toc_batch_entry.setFixedWidth(60)
-    toc_batch_entry.setText(str(getattr(self, 'toc_ncx_per_batch_var', '400')))
+    toc_batch_entry.setText(str(getattr(self, 'toc_ncx_per_batch_var', '-1')))
     def _on_toc_batch_changed(text):
-        if text.isdigit():
-            self.toc_ncx_per_batch_var = text
+        stripped = text.strip().lstrip('-')
+        if stripped.isdigit() or text.strip() in ('-', '-1', '0'):
+            self.toc_ncx_per_batch_var = text.strip()
     toc_batch_entry.textChanged.connect(_on_toc_batch_changed)
 
     translate_toc_cb = self._create_styled_checkbox("Translate toc.ncx")
@@ -5172,7 +5173,9 @@ def _create_prompt_management_section(self, parent):
         pass
     def _on_headers_per_batch_changed(text):
         try:
-            self.headers_per_batch_var = text
+            stripped = text.strip().lstrip('-')
+            if stripped.isdigit() or text.strip() in ('-', '-1', '0'):
+                self.headers_per_batch_var = text.strip()
         except Exception:
             pass
     batch_entry.textChanged.connect(_on_headers_per_batch_changed)

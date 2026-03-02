@@ -694,7 +694,7 @@ def translate_headers_standalone(
         translated_headers = translator.translate_and_save_headers(
             html_dir=output_dir,
             headers_dict=headers_to_translate,
-            batch_size=config.get('headers_per_batch', 350) if config else 350,
+            batch_size=config.get('headers_per_batch', -1) if config else None,
             output_dir=output_dir,
             update_html=update_html,  # Uses _update_html_headers_exact - same as pipeline
             save_to_file=save_to_file,  # Saves to translated_headers.txt - same as pipeline
@@ -771,7 +771,7 @@ def run_translation(
         
         # Get configuration from environment variables
         config = {
-            'headers_per_batch': int(os.getenv('HEADERS_PER_BATCH', '350')),
+            'headers_per_batch': int(os.getenv('HEADERS_PER_BATCH', '-1')),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
             # Add Chapter Headers prompts from environment variables - use None if not set so fallback works
@@ -934,7 +934,7 @@ def run_translate_headers_gui(gui_instance):
         
         # Get config from GUI once
         config = {
-            'headers_per_batch': int(getattr(gui_instance, 'headers_per_batch_var', 350)),
+            'headers_per_batch': int(getattr(gui_instance, 'headers_per_batch_var', -1)),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
             # Add Chapter Headers prompts from active profile/config
