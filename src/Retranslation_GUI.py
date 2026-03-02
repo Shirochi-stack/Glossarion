@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import shutil
 import traceback
+import subprocess
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -2202,6 +2203,14 @@ class RetranslationMixin:
                 has_missing_images = True
                 print("DEBUG: Detected missing_images via list item text")
             
+            # Determine file path for Notepad QA action
+            _output_file = display_info.get('output_file')
+            qa_file_path = None
+            if qa_issues and _output_file:
+                _candidate = os.path.join(data['output_dir'], _output_file)
+                if os.path.exists(_candidate):
+                    qa_file_path = _candidate
+            
             menu = QMenu(listbox)
             # Remove extra left gutter reserved for icons to avoid empty space
             menu.setStyleSheet(
@@ -2232,6 +2241,9 @@ class RetranslationMixin:
                 act_insert_img = menu.addAction("🖼️ Insert Missing Image")
                 
             act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
+            act_notepad_qa = None
+            if qa_file_path:
+                act_notepad_qa = menu.addAction("📝 Open in Notepad (find QA issue)")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
                 _open_file_for_item(item)
@@ -2391,6 +2403,56 @@ class RetranslationMixin:
                     traceback.print_exc()
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
+            elif act_notepad_qa and chosen == act_notepad_qa:
+                # Extract a meaningful search term from the QA issue strings
+                search_term = None
+                for _issue in qa_issues:
+                    _m = re.search(r"'([^']+)'", str(_issue))
+                    if _m and _m.group(1).strip():
+                        search_term = _m.group(1)
+                        break
+                # Fallback: scan file for any non-ASCII sequence
+                if not search_term:
+                    try:
+                        with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
+                            _content = _f.read()
+                        _m = re.search(r'[^\x00-\x7f]{1,30}', _content)
+                        if _m:
+                            search_term = _m.group(0)
+                    except Exception:
+                        pass
+                # Copy search term to clipboard and open file in Notepad
+                try:
+                    if search_term:
+                        from PySide6.QtWidgets import QApplication
+                        QApplication.clipboard().setText(search_term)
+                    # Pick best available editor
+                    if sys.platform == 'win32':
+                        _npp_paths = [
+                            r'C:\Program Files\Notepad++\notepad++.exe',
+                            r'C:\Program Files (x86)\Notepad++\notepad++.exe',
+                        ]
+                        _editor = next((p for p in _npp_paths if os.path.exists(p)), 'notepad.exe')
+                        subprocess.Popen([_editor, qa_file_path])
+                    elif sys.platform == 'darwin':
+                        subprocess.Popen(['open', '-t', qa_file_path])
+                    else:
+                        # Linux: try common editors, fall back to xdg-open
+                        _linux_editors = ['gedit', 'kate', 'mousepad', 'xed', 'pluma', 'nano', 'xdg-open']
+                        _editor = next(
+                            (e for e in _linux_editors if shutil.which(e)),
+                            'xdg-open'
+                        )
+                        subprocess.Popen([_editor, qa_file_path])
+                    if search_term:
+                        self._show_message(
+                            'info', "Notepad Opened",
+                            f"Search term copied to clipboard:\n\n{search_term}\n\nPress Ctrl+F in Notepad to find it.",
+                            parent=data.get('dialog', self)
+                        )
+                except Exception as _e:
+                    self._show_message('error', "Open Failed", f"Could not open Notepad:\n{_e}",
+                                       parent=data.get('dialog', self))
 
         listbox.customContextMenuRequested.connect(show_context_menu)
         
