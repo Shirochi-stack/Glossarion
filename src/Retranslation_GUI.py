@@ -2189,10 +2189,8 @@ class RetranslationMixin:
             # The actual progress entry is nested inside 'info' key of display_info
             progress_entry = display_info.get('info', {})
             
-            # Check both possible keys for issues
-            qa_issues = progress_entry.get('qa_issues', []) or progress_entry.get('qa_issues_found', [])
-            
-            # Ensure it's a list (handle legacy bool values or None)
+            # qa_issues is a boolean flag; the actual list is qa_issues_found
+            qa_issues = progress_entry.get('qa_issues_found', [])
             if not isinstance(qa_issues, list):
                 qa_issues = []
                 
@@ -2203,13 +2201,9 @@ class RetranslationMixin:
                 has_missing_images = True
                 print("DEBUG: Detected missing_images via list item text")
             
-            # Determine file path for Notepad QA action
+            # Determine file path for Notepad action
             _output_file = display_info.get('output_file')
-            qa_file_path = None
-            if qa_issues and _output_file:
-                _candidate = os.path.join(data['output_dir'], _output_file)
-                if os.path.exists(_candidate):
-                    qa_file_path = _candidate
+            qa_file_path = os.path.join(data['output_dir'], _output_file) if _output_file else None
             
             menu = QMenu(listbox)
             # Remove extra left gutter reserved for icons to avoid empty space
@@ -2234,6 +2228,10 @@ class RetranslationMixin:
                 "}"
             )
             act_open = menu.addAction("📂 Open File")
+            act_notepad_qa = None
+            if qa_file_path:
+                _label = "✏️ Edit File (find QA issue)" if qa_issues else "✏️ Edit File"
+                act_notepad_qa = menu.addAction(_label)
             act_retranslate = menu.addAction("🔁 Retranslate Selected")
             
             act_insert_img = None
@@ -2241,9 +2239,6 @@ class RetranslationMixin:
                 act_insert_img = menu.addAction("🖼️ Insert Missing Image")
                 
             act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
-            act_notepad_qa = None
-            if qa_file_path:
-                act_notepad_qa = menu.addAction("📝 Open in Notepad (find QA issue)")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
                 _open_file_for_item(item)
@@ -2404,54 +2399,71 @@ class RetranslationMixin:
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
             elif act_notepad_qa and chosen == act_notepad_qa:
-                # Extract a meaningful search term from the QA issue strings
                 search_term = None
-                for _issue in qa_issues:
-                    _m = re.search(r"'([^']+)'", str(_issue))
-                    if _m and _m.group(1).strip():
-                        search_term = _m.group(1)
-                        break
-                # Fallback: scan file for any non-ASCII sequence
-                if not search_term:
-                    try:
-                        with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
-                            _content = _f.read()
-                        _m = re.search(r'[^\x00-\x7f]{1,30}', _content)
-                        if _m:
-                            search_term = _m.group(0)
-                    except Exception:
-                        pass
-                # Copy search term to clipboard and open file in Notepad
-                try:
+                _line_num = 1
+                if qa_issues:
+                    # Extract a meaningful search term from the QA issue strings
+                    for _issue in qa_issues:
+                        _m = re.search(r"'([^']+)'", str(_issue))
+                        if _m and _m.group(1).strip():
+                            search_term = _m.group(1)
+                            break
+                    # Fallback: scan file for any non-ASCII sequence
+                    if not search_term:
+                        try:
+                            with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
+                                _content = _f.read()
+                            _m = re.search(r'[^\x00-\x7f]{1,30}', _content)
+                            if _m:
+                                search_term = _m.group(0)
+                        except Exception:
+                            pass
+                    # Find line number of search term in file
+                    if search_term and os.path.exists(qa_file_path):
+                        try:
+                            with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
+                                for _i, _ln in enumerate(_f, 1):
+                                    if search_term in _ln:
+                                        _line_num = _i
+                                        break
+                        except Exception:
+                            pass
+                    # Copy search term to clipboard
                     if search_term:
                         from PySide6.QtWidgets import QApplication
                         QApplication.clipboard().setText(search_term)
-                    # Pick best available editor
+                # Open file in best available editor, jumping to line if supported
+                try:
                     if sys.platform == 'win32':
                         _npp_paths = [
                             r'C:\Program Files\Notepad++\notepad++.exe',
                             r'C:\Program Files (x86)\Notepad++\notepad++.exe',
                         ]
-                        _editor = next((p for p in _npp_paths if os.path.exists(p)), 'notepad.exe')
-                        subprocess.Popen([_editor, qa_file_path])
+                        _npp = next((p for p in _npp_paths if os.path.exists(p)), None)
+                        if _npp:
+                            subprocess.Popen([_npp, f'-n{_line_num}', qa_file_path])
+                        else:
+                            subprocess.Popen(['notepad.exe', qa_file_path])
                     elif sys.platform == 'darwin':
-                        subprocess.Popen(['open', '-t', qa_file_path])
+                        # Try TextEdit alternatives that support line jumping
+                        if shutil.which('code'):
+                            subprocess.Popen(['code', '--goto', f'{qa_file_path}:{_line_num}'])
+                        else:
+                            subprocess.Popen(['open', '-t', qa_file_path])
                     else:
-                        # Linux: try common editors, fall back to xdg-open
-                        _linux_editors = ['gedit', 'kate', 'mousepad', 'xed', 'pluma', 'nano', 'xdg-open']
-                        _editor = next(
-                            (e for e in _linux_editors if shutil.which(e)),
-                            'xdg-open'
-                        )
-                        subprocess.Popen([_editor, qa_file_path])
-                    if search_term:
-                        self._show_message(
-                            'info', "Notepad Opened",
-                            f"Search term copied to clipboard:\n\n{search_term}\n\nPress Ctrl+F in Notepad to find it.",
-                            parent=data.get('dialog', self)
-                        )
+                        # Linux: try editors with line-jump support first
+                        if shutil.which('gedit'):
+                            subprocess.Popen(['gedit', f'+{_line_num}', qa_file_path])
+                        elif shutil.which('kate'):
+                            subprocess.Popen(['kate', '-l', str(_line_num), qa_file_path])
+                        elif shutil.which('code'):
+                            subprocess.Popen(['code', '--goto', f'{qa_file_path}:{_line_num}'])
+                        else:
+                            _linux_editors = ['mousepad', 'xed', 'pluma', 'nano', 'xdg-open']
+                            _editor = next((e for e in _linux_editors if shutil.which(e)), 'xdg-open')
+                            subprocess.Popen([_editor, qa_file_path])
                 except Exception as _e:
-                    self._show_message('error', "Open Failed", f"Could not open Notepad:\n{_e}",
+                    self._show_message('error', "Open Failed", f"Could not open editor:\n{_e}",
                                        parent=data.get('dialog', self))
 
         listbox.customContextMenuRequested.connect(show_context_menu)
