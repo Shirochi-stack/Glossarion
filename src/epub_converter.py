@@ -4559,7 +4559,7 @@ img {
                                 first_idx = first_idx_by_label.get(key, idx)
                                 if first_idx in unique_translations:
                                     translations[idx] = unique_translations[first_idx]
-                    else:
+                        else:
                             translations = tr.translate_headers_batch(original, batch_size=len(original)) or {}
                         if translations:
                             # Pre-compute actual output paths so "Output File" shows
