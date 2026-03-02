@@ -5042,7 +5042,7 @@ def _create_prompt_management_section(self, parent):
     if not hasattr(self, 'use_p_tag_toc_fallback_var'):
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
 
-    p_fallback_cb = self._create_styled_checkbox("Allow TOC fallback titles when headers are missing")
+    p_fallback_cb = self._create_styled_checkbox("Use TOC fallback titles")
     p_fallback_cb.setToolTip(
         "When enabled, the TOC may fall back to the first <p> tag and generic Chapter N titles\n"
         "if no header tags are present. Disable to avoid any fallback titles."
