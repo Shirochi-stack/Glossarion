@@ -5913,6 +5913,8 @@ def _create_processing_options_section(self, parent):
     empty_attr_extract_desc.setTextFormat(Qt.RichText)
     # left_v.addWidget(empty_attr_extract_desc)
     
+    
+
     left_v.addStretch()
     columns_h.addWidget(left_column)
     
@@ -6041,6 +6043,38 @@ def _create_processing_options_section(self, parent):
     standard_desc.setStyleSheet("color: gray; font-size: 9pt;")
     standard_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(standard_desc)
+    
+    # Fix Empty Attribute Tags (BeautifulSoup) - standard mode LLM token fix
+    empty_attr_bs_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (BeautifulSoup) - LLM Token Fix")
+    try:
+        if not hasattr(self, 'fix_empty_attr_tags_bs_var'):
+            self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
+        empty_attr_bs_cb.setChecked(bool(self.fix_empty_attr_tags_bs_var))
+    except Exception:
+        pass
+    def _on_empty_attr_bs_toggle(checked):
+        try:
+            self.fix_empty_attr_tags_bs_var = bool(checked)
+            self.config['fix_empty_attr_tags_bs'] = self.fix_empty_attr_tags_bs_var
+            os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_attr_bs_cb.toggled.connect(_on_empty_attr_bs_toggle)
+    empty_attr_bs_cb.setContentsMargins(20, 2, 0, 0)
+    extraction_v.addWidget(empty_attr_bs_cb)
+    self._bs_empty_attr_cb = empty_attr_bs_cb
+    
+    empty_attr_bs_desc = QLabel("Escapes hallucinated tags like &lt;tag attr=\"\"&gt; to visible text (Standard mode)")
+    empty_attr_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    empty_attr_bs_desc.setContentsMargins(30, 0, 0, 5)
+    empty_attr_bs_desc.setTextFormat(Qt.RichText)
+    extraction_v.addWidget(empty_attr_bs_desc)
+    self._bs_empty_attr_desc = empty_attr_bs_desc
+    
+    # Set initial visibility based on current extraction method
+    _bs_visible = getattr(self, 'text_extraction_method_var', 'standard') == 'standard'
+    self._bs_empty_attr_cb.setVisible(_bs_visible)
+    self._bs_empty_attr_desc.setVisible(_bs_visible)
     
     # Enhanced extraction
     enhanced_rb = QRadioButton("🚀 Enhanced (html2text)")
@@ -7228,6 +7262,13 @@ def on_extraction_method_change(self):
                 self.enhanced_options_frame.setVisible(True)
             else:
                 self.enhanced_options_frame.setVisible(False)
+            
+            # Show/hide BS empty attr tags toggle (opposite of enhanced)
+            if hasattr(self, '_bs_empty_attr_cb'):
+                _bs_vis = self.text_extraction_method_var == 'standard'
+                self._bs_empty_attr_cb.setVisible(_bs_vis)
+            if hasattr(self, '_bs_empty_attr_desc'):
+                self._bs_empty_attr_desc.setVisible(_bs_vis)
         except Exception:
             # Fallback for any errors during transition
             pass
@@ -7627,6 +7668,12 @@ def on_extraction_mode_change(self):
                 self.enhanced_options_separator.setVisible(False)
             if hasattr(self, 'enhanced_options_frame'):
                 self.enhanced_options_frame.setVisible(False)
+            # Show BS toggle when not enhanced
+            if hasattr(self, '_bs_empty_attr_cb'):
+                _bs_vis = self.extraction_mode_var != 'enhanced'
+                self._bs_empty_attr_cb.setVisible(_bs_vis)
+            if hasattr(self, '_bs_empty_attr_desc'):
+                self._bs_empty_attr_desc.setVisible(_bs_vis)
     except Exception:
         # Fallback for any errors during transition
         pass

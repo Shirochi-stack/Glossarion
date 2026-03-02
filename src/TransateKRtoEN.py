@@ -5492,6 +5492,10 @@ class BatchTranslationProcessor:
             
             # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
             # Pattern matches: &lt;img ... /&gt; where the tag ends with /
+            # Post-process: Fix empty attribute tags for BeautifulSoup mode
+            if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
+                cleaned = _fix_empty_attr_tags_bs(cleaned)
+            
             img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
             if img_count > 0:
                 print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (post-processing)")
@@ -6105,6 +6109,15 @@ class BatchTranslationProcessor:
                 cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
                 cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
                 
+                # Post-process: Fix empty attribute tags for BeautifulSoup mode
+                if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1':
+                    try:
+                        enhanced_group_check = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
+                    except Exception:
+                        enhanced_group_check = False
+                    if not enhanced_group_check:
+                        cleaned = _fix_empty_attr_tags_bs(cleaned)
+                
                 # Get parent chapter info
                 parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
                 merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
@@ -6525,6 +6538,40 @@ def clean_memory_artifacts(text):
 def emergency_restore_paragraphs(text, original_html=None, verbose=True):
     """Emergency restoration when AI returns wall of text"""
     return ContentProcessor.emergency_restore_paragraphs(text, original_html, verbose)
+
+
+def _fix_empty_attr_tags_bs(text: str) -> str:
+    """Post-process: escape hallucinated empty-attribute tags in BeautifulSoup output.
+    
+    Transforms patterns like <Tag Attr="">Content</Tag> into &lt;Tag Attr&gt;Content
+    for non-standard HTML tags, preserving real HTML tags untouched.
+    """
+    known_tags = {
+        'html','head','body','title','meta','link','style','script','noscript',
+        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
+        'ul','ol','li','dl','dt','dd',
+        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
+        'table','thead','tbody','tr','td','th','caption','col','colgroup',
+        'blockquote','q','cite',
+        'section','article','header','footer','nav','main','aside','details','summary',
+        'figure','figcaption',
+        'form','input','button','select','option','textarea','label','fieldset','legend',
+        'iframe','canvas','svg','math',
+        'video','audio','source','track','embed','object','param',
+        'map','area',
+        'center', 'font', 'base'
+    }
+    
+    def _repl_pair(m):
+        tagname = m.group(1)
+        if tagname.lower() in known_tags:
+            return m.group(0)
+        attrname = m.group(2)
+        content = m.group(3)
+        return f"&lt;{tagname} {attrname}&gt;{content}"
+    
+    text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>(.*?)</\1>', _repl_pair, text, flags=re.DOTALL)
+    return text
 
 def is_meaningful_text_content(html_content):
     """Check if chapter has meaningful text beyond just structure"""
