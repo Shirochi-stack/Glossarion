@@ -1784,6 +1784,31 @@ class EPUBCompiler:
             # Write EPUB
             self._write_epub(book, metadata)
             
+            # Build PDF TOC exclusively from TOC.txt if it exists;
+            # entries not in TOC.txt are excluded entirely.
+            toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
+            if os.path.exists(toc_txt_path):
+                try:
+                    _, _toc_trans, _toc_files = self._load_toc_translations_file(toc_txt_path)
+                    if _toc_trans:
+                        # Build output-filename -> translated title lookup
+                        _file_to_title = {}
+                        for _idx, _ttitle in _toc_trans.items():
+                            _out = _toc_files.get(_idx, '')
+                            if _out:
+                                _file_to_title[os.path.basename(_out)] = _ttitle
+                        # Rebuild chapter_titles_info keeping only TOC.txt entries
+                        _pdf_titles = {}
+                        for _cn, (_ot, _cf, _fn) in chapter_titles_info.items():
+                            _base = os.path.basename(_fn) if _fn else ''
+                            if _base in _file_to_title:
+                                _pdf_titles[_cn] = (_file_to_title[_base], 1.0, _fn)
+                        if _pdf_titles:
+                            chapter_titles_info = _pdf_titles
+                            self.log(f"📝 PDF TOC will use {len(_pdf_titles)} entries from TOC.txt")
+                except Exception as _e:
+                    self.log(f"⚠️ Could not load TOC.txt for PDF: {_e}")
+
             # Generate PDF if enabled
             if os.environ.get('ENABLE_PDF_OUTPUT', '0') == '1':
                 if self.is_stopped():
