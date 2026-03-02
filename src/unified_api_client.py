@@ -5819,6 +5819,26 @@ class UnifiedClient:
                     except Exception:
                         pass
                     
+                    # Propagate chapter/chunk context for correct logging in fallback client
+                    try:
+                        src_tls = self._get_thread_local_client()
+                        ctx = getattr(src_tls, "chapter_context", None)
+                        if ctx and hasattr(temp_client, 'set_chapter_context'):
+                            temp_client.set_chapter_context(
+                                chapter=ctx.get("chapter"),
+                                chunk=ctx.get("chunk"),
+                                total_chunks=ctx.get("total_chunks"),
+                                merged_chapters=ctx.get("merged_chapters"),
+                            )
+                        elif ctx:
+                            try:
+                                fb_tls = temp_client._get_thread_local_client()
+                                fb_tls.chapter_context = ctx
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    
                     # Set key-specific credentials for the temp client
                     if fallback_google_creds:
                         temp_client.current_key_google_creds = fallback_google_creds
