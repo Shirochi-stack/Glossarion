@@ -1844,7 +1844,6 @@ class EPUBCompiler:
             '‘': "'",   # Left single quotation mark
             '“': '"',   # Left double quotation mark
             '”': '"',   # Right double quotation mark
-            '—': '-',   # Em dash to hyphen
             '–': '-',   # En dash to hyphen
             '…': '...', # Ellipsis to three dots
         }
