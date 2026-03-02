@@ -2718,6 +2718,10 @@ class RetranslationMixin:
                 if _auto_discover_from_output_dir(data['output_dir'], prog):
                     print("💾 Recreated progress file via auto-discovery (refresh)")
                 try:
+                    # Ensure the output directory exists (it may have been deleted)
+                    progress_dir = os.path.dirname(data['progress_file'])
+                    if progress_dir:
+                        os.makedirs(progress_dir, exist_ok=True)
                     with open(data['progress_file'], 'w', encoding='utf-8') as f:
                         json.dump(prog, f, ensure_ascii=False, indent=2)
                 except Exception as e:
