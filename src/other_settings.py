@@ -6044,6 +6044,11 @@ def _create_processing_options_section(self, parent):
     standard_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(standard_desc)
     
+    # BeautifulSoup options (shown when standard is selected)
+    self.bs_options_frame = QWidget()
+    bs_opts_v = QVBoxLayout(self.bs_options_frame)
+    bs_opts_v.setContentsMargins(20, 5, 0, 0)
+    
     # Fix Empty Attribute Tags (BeautifulSoup) - standard mode LLM token fix
     empty_attr_bs_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (BeautifulSoup) - LLM Token Fix")
     try:
@@ -6060,21 +6065,20 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     empty_attr_bs_cb.toggled.connect(_on_empty_attr_bs_toggle)
-    empty_attr_bs_cb.setContentsMargins(20, 2, 0, 0)
-    extraction_v.addWidget(empty_attr_bs_cb)
-    self._bs_empty_attr_cb = empty_attr_bs_cb
+    empty_attr_bs_cb.setContentsMargins(0, 2, 0, 0)
+    bs_opts_v.addWidget(empty_attr_bs_cb)
     
     empty_attr_bs_desc = QLabel("Escapes hallucinated tags like &lt;tag attr=\"\"&gt; to visible text (Standard mode)")
     empty_attr_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    empty_attr_bs_desc.setContentsMargins(30, 0, 0, 5)
+    empty_attr_bs_desc.setContentsMargins(20, 0, 0, 3)
     empty_attr_bs_desc.setTextFormat(Qt.RichText)
-    extraction_v.addWidget(empty_attr_bs_desc)
-    self._bs_empty_attr_desc = empty_attr_bs_desc
+    bs_opts_v.addWidget(empty_attr_bs_desc)
+    
+    extraction_v.addWidget(self.bs_options_frame)
     
     # Set initial visibility based on current extraction method
     _bs_visible = getattr(self, 'text_extraction_method_var', 'standard') == 'standard'
-    self._bs_empty_attr_cb.setVisible(_bs_visible)
-    self._bs_empty_attr_desc.setVisible(_bs_visible)
+    self.bs_options_frame.setVisible(_bs_visible)
     
     # Enhanced extraction
     enhanced_rb = QRadioButton("🚀 Enhanced (html2text)")
@@ -7263,12 +7267,9 @@ def on_extraction_method_change(self):
             else:
                 self.enhanced_options_frame.setVisible(False)
             
-            # Show/hide BS empty attr tags toggle (opposite of enhanced)
-            if hasattr(self, '_bs_empty_attr_cb'):
-                _bs_vis = self.text_extraction_method_var == 'standard'
-                self._bs_empty_attr_cb.setVisible(_bs_vis)
-            if hasattr(self, '_bs_empty_attr_desc'):
-                self._bs_empty_attr_desc.setVisible(_bs_vis)
+            # Show/hide BS options frame (opposite of enhanced)
+            if hasattr(self, 'bs_options_frame'):
+                self.bs_options_frame.setVisible(self.text_extraction_method_var == 'standard')
         except Exception:
             # Fallback for any errors during transition
             pass
