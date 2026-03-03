@@ -425,7 +425,7 @@ class GlossarionWeb:
             'indefinitely_retry_rate_limit': False,  # CRITICAL: Default to False for rate limit retry
             'thread_submission_delay': 0.1,  # CRITICAL: Default threading delay
             'prompt_profiles': {},  # Will be populated from default_prompts in __init__
-            'active_profile': 'Korean_BeautifulSoup',  # Default active profile
+            'active_profile': 'Universal',  # Default active profile
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
