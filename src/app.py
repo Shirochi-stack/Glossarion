@@ -3231,7 +3231,7 @@ class GlossarionWeb:
                                 )
                                 
                                 # Automatic glossary extraction settings (only show when enabled)
-                                with gr.Group(visible=self.get_config_value('enable_auto_glossary', True)) as auto_glossary_settings:
+                                with gr.Column(visible=self.get_config_value('enable_auto_glossary', True)) as auto_glossary_settings:
                                     gr.Markdown("#### Automatic Glossary Extraction Settings")
                                     
                                     with gr.Row():
