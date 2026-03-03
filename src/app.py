@@ -226,7 +226,17 @@ class GlossarionWeb:
         
         # Default prompts from the GUI (same as translator_gui.py)
         self.default_prompts = {
-            "korean": (
+            "Universal": (
+                "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
+                "- You MUST output ONLY in {target_lang}. No other languages are permitted.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <img>, etc.\n"
+                "{split_marker_instruction}\n"
+                "- Preserve any Markdown formatting (headers, bold, italic, lists, etc.) if present.\n"
+                "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
+                "- Maintain the original meaning, tone, and style.\n"
+                "- Output ONLY the translated text in {target_lang}. Do not add any explanations, notes, or conversational filler.\n"
+            ),
+            "Korean_BeautifulSoup": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -236,11 +246,12 @@ class GlossarionWeb:
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "{split_marker_instruction}\n"
             ),
-            "japanese": (
+            "Japanese_BeautifulSoup": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -250,35 +261,87 @@ class GlossarionWeb:
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Japanese quotation marks (「」, 『』) as-is without converting to English quotes.\n"
+                "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "{split_marker_instruction}\n"
             ),
-            "chinese": (
+            "Chinese_BeautifulSoup": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
-                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔法 = magic).\n"
-                "- When translating Chinese's pronoun-dropping style, insert pronouns in English only where needed for clarity while maintaining natural English flow.\n"
+                "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
-                "- Retain onomatopoeia in Pinyin.\n"
-                "- Keep original Chinese quotation marks (「」, 『』) as-is without converting to English quotes.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "{split_marker_instruction}\n"
+            ),
+            "Korean_html2text": (
+                "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
+                "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- All Korean profanity must be translated to English profanity.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Use line breaks for proper formatting as expected of a novel.\n"
+                "- Preserve all Markdown present.\n"
+                "- Preserve any image tags exactly as they appear.\n"
+                "{split_marker_instruction}\n"
+            ),
+            "Japanese_html2text": (
+                "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
+                "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
+                "- All Japanese profanity must be translated to English profanity.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
+                "- Use line breaks for proper formatting as expected of a novel.\n"
+                "- Preserve all Markdown present.\n"
+                "- Preserve any image tags exactly as they appear.\n"
+                "{split_marker_instruction}\n"
+            ),
+            "Chinese_html2text": (
+                "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
+                "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
+                "- All Chinese profanity must be translated to English profanity.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
+                "- Use line breaks for proper formatting as expected of a novel.\n"
+                "- Preserve all Markdown present.\n"
+                "- Preserve any image tags exactly as they appear.\n"
+                "{split_marker_instruction}\n"
             ),
             "Manga_JP": (
                 "You are a professional Japanese to English Manga translator.\n"
                 "You have both the image of the Manga panel and the extracted text to work with.\n"
                 "Output only English text while following these rules: \n\n"
-
                 "VISUAL CONTEXT:\n"
                 "- Analyze the character's facial expressions and body language in the image.\n"
                 "- Consider the scene's mood and atmosphere.\n"
                 "- Note any action or movement depicted.\n"
                 "- Use visual cues to determine the appropriate tone and emotion.\n"
                 "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
-
                 "DIALOGUE REQUIREMENTS:\n"
                 "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
@@ -286,43 +349,37 @@ class GlossarionWeb:
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
                 "- Retain honorifics and onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
-
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),
             "Manga_KR": (
                 "You are a professional Korean to English Manhwa translator.\n"
                 "You have both the image of the Manhwa panel and the extracted text to work with.\n"
                 "Output only English text while following these rules: \n\n"
-
                 "VISUAL CONTEXT:\n"
                 "- Analyze the character's facial expressions and body language in the image.\n"
                 "- Consider the scene's mood and atmosphere.\n"
                 "- Note any action or movement depicted.\n"
                 "- Use visual cues to determine the appropriate tone and emotion.\n"
                 "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
-
                 "DIALOGUE REQUIREMENTS:\n"
                 "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
                 "- Retain honorifics and onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (“ ”, ‘ ‘, 「」, 『』) as-is without converting to English quotes.\n\n"
-
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\n\n"
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),
             "Manga_CN": (
                 "You are a professional Chinese to English Manga translator.\n"
                 "You have both the image of the Manga panel and the extracted text to work with.\n"
                 "Output only English text while following these rules: \n\n"
-
                 "VISUAL CONTEXT:\n"
                 "- Analyze the character's facial expressions and body language in the image.\n"
                 "- Consider the scene's mood and atmosphere.\n"
                 "- Note any action or movement depicted.\n"
                 "- Use visual cues to determine the appropriate tone and emotion.\n"
                 "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
-
                 "DIALOGUE REQUIREMENTS:\n"
                 "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
@@ -330,7 +387,6 @@ class GlossarionWeb:
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
                 "- Retain honorifics and onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
-
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),
             "Original": "Return everything exactly as seen on the source."
@@ -369,7 +425,7 @@ class GlossarionWeb:
             'indefinitely_retry_rate_limit': False,  # CRITICAL: Default to False for rate limit retry
             'thread_submission_delay': 0.1,  # CRITICAL: Default threading delay
             'prompt_profiles': {},  # Will be populated from default_prompts in __init__
-            'active_profile': 'korean',  # Default active profile
+            'active_profile': 'Korean_BeautifulSoup',  # Default active profile
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
@@ -738,7 +794,8 @@ class GlossarionWeb:
         temperature,
         max_tokens,
         enable_image_trans=False,
-        glossary_file=None
+        glossary_file=None,
+        target_language='English'
     ):
         """Translate EPUB file - yields progress updates"""
         
@@ -798,6 +855,27 @@ class GlossarionWeb:
             # Set all additional environment variables from config
             self.set_all_environment_variables()
             
+            # AUTO-SWITCH EXTRACTION MODE BASED ON PROFILE NAME (matches translator_gui.py)
+            if profile_name:
+                profile_lower = profile_name.lower()
+                if 'beautifulsoup' in profile_lower:
+                    os.environ['TEXT_EXTRACTION_METHOD'] = 'standard'
+                    os.environ['EXTRACTION_MODE'] = self.get_config_value('file_filtering_level', 'smart')
+                    translation_logs.append(f"🔄 Auto-switched to BeautifulSoup extraction (profile: {profile_name})")
+                elif 'html2text' in profile_lower:
+                    os.environ['TEXT_EXTRACTION_METHOD'] = 'enhanced'
+                    os.environ['EXTRACTION_MODE'] = 'enhanced'
+                    translation_logs.append(f"🔄 Auto-switched to html2text extraction (profile: {profile_name})")
+                # Auto-toggle image translation for OCR profiles
+                if '_ocr' in profile_lower:
+                    os.environ['ENABLE_IMAGE_TRANSLATION'] = '1'
+                    translation_logs.append(f"📷 Auto-enabled image translation for OCR profile: {profile_name}")
+                elif 'beautifulsoup' in profile_lower or 'html2text' in profile_lower:
+                    # BeautifulSoup/html2text profiles don't need image translation
+                    if enable_image_trans:
+                        os.environ['ENABLE_IMAGE_TRANSLATION'] = '0'
+                        translation_logs.append(f"📷 Auto-disabled image translation for {profile_name}")
+            
             # OVERRIDE critical safety features AFTER config load
             # CORRECT variable name is EMERGENCY_PARAGRAPH_RESTORE (no ATION)
             os.environ['EMERGENCY_PARAGRAPH_RESTORE'] = '0'  # DISABLED
@@ -828,6 +906,20 @@ class GlossarionWeb:
             
             # Set the system prompt - CRITICAL: Must set environment variable for TransateKRtoEN.main()
             if translation_prompt:
+                # Replace {target_lang} placeholder with the selected target language
+                target_lang = target_language if target_language else 'English'
+                translation_prompt = translation_prompt.replace('{target_lang}', target_lang)
+                
+                # Replace {split_marker_instruction} placeholder
+                import re
+                split_instr = ""
+                if self.get_config_value('request_merging_enabled', False):
+                    split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
+                translation_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', lambda m: '\n' + split_instr if split_instr else '', translation_prompt)
+                
+                # Set OUTPUT_LANGUAGE env var for downstream use
+                os.environ['OUTPUT_LANGUAGE'] = target_lang
+                
                 # Set environment variable that TransateKRtoEN reads
                 # Use large_env to bypass Windows 32,767-char env var limit
                 try:
@@ -3080,6 +3172,14 @@ class GlossarionWeb:
                                 label="📝 Translation Profile"
                             )
                             
+                            epub_target_language = gr.Dropdown(
+                                choices=["English", "Korean", "Japanese", "Chinese", "Spanish", "French", "German", "Portuguese", "Russian", "Arabic", "Thai", "Vietnamese", "Indonesian", "Malay", "Filipino", "Hindi", "Turkish", "Italian", "Polish", "Dutch", "Swedish", "Czech", "Romanian", "Hungarian", "Greek", "Hebrew", "Danish", "Finnish", "Norwegian"],
+                                value=self.get_config_value('output_language', 'English'),
+                                label="🌐 Target Language",
+                                allow_custom_value=True,
+                                info="Replaces {target_lang} in prompts (used by Universal profile)"
+                            )
+                            
                             epub_system_prompt = gr.Textbox(
                                 label="System Prompt (Translation Instructions)",
                                 lines=8,
@@ -3281,7 +3381,8 @@ class GlossarionWeb:
                             epub_temperature,
                             epub_max_tokens,
                             enable_image_translation,
-                            glossary_file
+                            glossary_file,
+                            epub_target_language
                         ],
                         outputs=[
                             epub_output,          # Download file
