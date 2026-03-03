@@ -5428,6 +5428,11 @@ img {
         if settings['page_numbers']:
             styles += f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
         
+        # Deduplication settings (match EPUB TOC behaviour)
+        _dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        _dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        _seen_bm_titles = set()
+
         # Process chapters
         documents = []
         chapter_page_map = {}
@@ -5559,6 +5564,13 @@ img {
                 # Skip untitled placeholders (matches EPUB TOC filtering)
                 if _bm_title and _bm_title.strip().lower() in ('untitled chapter', 'untitled'):
                     _bm_title = ''
+                # Deduplicate bookmark titles when enabled
+                if _bm_title and _dedup_enabled:
+                    _bm_key = _bm_title if _dedup_use_translated else chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+                    if _bm_key in _seen_bm_titles:
+                        _bm_title = ''
+                    else:
+                        _seen_bm_titles.add(_bm_key)
                 _bm_h1 = (f'<h1 class="pdf-bm">{html_module.escape(str(_bm_title))}</h1>'
                           if _bm_title else '')
                 if i > 0:
@@ -5668,11 +5680,20 @@ img {
             '<h1>Table of Contents</h1><ul>'
         )
         
+        _dedup_on = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        _dedup_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        _seen_titles = set()
+
         for chap_num in sorted(chapter_titles_info.keys()):
             title, confidence, source = chapter_titles_info[chap_num]
             # Skip untitled placeholders (matches EPUB TOC filtering)
             if title.strip().lower() in ('untitled chapter', 'untitled'):
                 continue
+            # Deduplicate when enabled
+            if _dedup_on:
+                if title in _seen_titles:
+                    continue
+                _seen_titles.add(title)
             safe_title = _html.escape(title)
             
             # Get page number - try chapter number key directly first
