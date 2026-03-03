@@ -5556,6 +5556,9 @@ img {
 
                 # Add anchor ID for TOC linking and page break before each chapter (except first)
                 _bm_title = chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+                # Skip untitled placeholders (matches EPUB TOC filtering)
+                if _bm_title and _bm_title.strip().lower() in ('untitled chapter', 'untitled'):
+                    _bm_title = ''
                 _bm_h1 = (f'<h1 class="pdf-bm">{html_module.escape(str(_bm_title))}</h1>'
                           if _bm_title else '')
                 if i > 0:
@@ -5667,6 +5670,9 @@ img {
         
         for chap_num in sorted(chapter_titles_info.keys()):
             title, confidence, source = chapter_titles_info[chap_num]
+            # Skip untitled placeholders (matches EPUB TOC filtering)
+            if title.strip().lower() in ('untitled chapter', 'untitled'):
+                continue
             safe_title = _html.escape(title)
             
             # Get page number - try chapter number key directly first
