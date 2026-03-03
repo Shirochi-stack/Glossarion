@@ -10322,7 +10322,12 @@ Important rules:
             os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(self.config.get('pdf_png_compress_level', 6))
 
             # EPUB structure settings
-            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if getattr(self, 'legacy_structure_var', self.config.get('legacy_structure', False)) else '0'
+            _epub_layout = getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto'))
+            # Migrate old bool config if needed
+            if _epub_layout is None or _epub_layout not in ('auto', 'epub2', 'epub3'):
+                _epub_layout = 'epub2' if self.config.get('legacy_structure', False) else 'auto'
+            os.environ['EPUB_LAYOUT_MODE'] = _epub_layout
+            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if _epub_layout == 'epub2' else '0'
             os.environ['USE_TOC_NCX'] = '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'
             os.environ['TRANSLATE_TOC_NCX'] = '1' if (getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) and getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False))) else '0'
             os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'
@@ -13464,6 +13469,9 @@ Important rules:
                 ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
                 ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
 
+                # EPUB layout mode
+                ('epub_layout_mode', ['epub_layout_mode_var'], 'auto', str),
+
                 # Extraction settings - NOTE: these are only created in Other Settings dialog
                 ('enable_parallel_extraction', ['enable_parallel_extraction_var'], False, bool),
                 ('extraction_workers', ['extraction_workers_var'], 1, int),
@@ -14348,8 +14356,9 @@ Important rules:
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
                 ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', False) else '0'),
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
-                # New: Legacy EPUB2-style internal folder structure (OEBPS/Text)
-                ('LEGACY_EPUB_STRUCTURE', '1' if getattr(self, 'legacy_structure_var', self.config.get('legacy_structure', False)) else '0'),
+                # EPUB layout mode (auto / epub2 / epub3)
+                ('EPUB_LAYOUT_MODE', getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) or 'auto'),
+                ('LEGACY_EPUB_STRUCTURE', '1' if getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) == 'epub2' else '0'),
                 # New: Use/translate source toc.ncx
                 ('USE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),
                 ('TRANSLATE_TOC_NCX', '1' if (getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) and getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False))) else '0'),

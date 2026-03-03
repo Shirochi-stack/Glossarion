@@ -1254,8 +1254,18 @@ class EPUBCompiler:
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
         self.metadata_path = os.path.join(self.output_dir, "metadata.json")
         self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
-        # Legacy EPUB2-style internal structure toggle (OEBPS/Text)
-        self.legacy_epub_structure = os.getenv('LEGACY_EPUB_STRUCTURE', '0') == '1'
+        # EPUB layout mode: 'auto' (detect from source), 'epub2' (force OEBPS/Text), 'epub3' (flat OEBPS)
+        _layout_mode = os.getenv('EPUB_LAYOUT_MODE', '').lower().strip()
+        if _layout_mode == 'epub2':
+            self.legacy_epub_structure = True
+        elif _layout_mode == 'epub3':
+            self.legacy_epub_structure = False
+        elif _layout_mode == 'auto':
+            # Auto-detect from source EPUB's content.opf manifest
+            self.legacy_epub_structure = self._detect_epub2_layout()
+        else:
+            # Fallback to old boolean env var for backward compatibility
+            self.legacy_epub_structure = os.getenv('LEGACY_EPUB_STRUCTURE', '0') == '1'
 
         # Source toc.ncx options
         self.use_toc_ncx = os.getenv('USE_TOC_NCX', '0') == '1'
@@ -1266,8 +1276,8 @@ class EPUBCompiler:
 
         self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
         self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
-        if self.legacy_epub_structure:
-            self.log("[INFO] Legacy structure enabled: EPUB2 layout (OEBPS/Text)")
+        _layout_label = _layout_mode if _layout_mode else ('legacy' if self.legacy_epub_structure else 'epub3')
+        self.log(f"[INFO] EPUB layout mode: {_layout_label} → {'EPUB2 (OEBPS/Text)' if self.legacy_epub_structure else 'EPUB3 (flat OEBPS)'}")
         if self.use_toc_ncx:
             self.log("[INFO] Use toc.ncx enabled: TOC will be built from the source EPUB's toc.ncx")
         if self.translate_toc_ncx:
@@ -1304,6 +1314,35 @@ class EPUBCompiler:
         # Enhance with translation features
         enhance_epub_compiler(self)
     
+    def _detect_epub2_layout(self) -> bool:
+        """Auto-detect whether the source EPUB used an EPUB2-style folder layout.
+
+        Checks the content.opf manifest for item hrefs that reference a ``Text/``
+        subdirectory, which is the hallmark of the classic ``OEBPS/Text/`` layout.
+
+        Returns ``True`` if an EPUB2 layout is detected, ``False`` otherwise
+        (including when content.opf doesn't exist – defaults to modern EPUB3).
+        """
+        import xml.etree.ElementTree as _ET
+
+        opf_path = os.path.join(self.output_dir, 'content.opf')
+        if not os.path.exists(opf_path):
+            return False  # no content.opf → default to EPUB3
+
+        try:
+            tree = _ET.parse(opf_path)
+            root = tree.getroot()
+            ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            for item in root.findall('.//opf:manifest/opf:item', ns):
+                href = item.get('href', '')
+                if href.startswith('Text/') or href.startswith('text/'):
+                    self.log("[INFO] Auto-detected EPUB2 layout (Text/ references in content.opf)")
+                    return True
+        except Exception:
+            pass
+
+        return False
+
     def log(self, message: str):
         """Log a message"""
         if self.log_callback:

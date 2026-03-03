@@ -5833,31 +5833,64 @@ def _create_prompt_management_section(self, parent):
     )
     section_v.addWidget(ncx_cb)
 
-    if not hasattr(self, 'legacy_structure_var'):
-        self.legacy_structure_var = self.config.get('legacy_structure', False)
+    # EPUB Layout Mode dropdown (Auto / EPUB2 / EPUB3)
+    if not hasattr(self, 'epub_layout_mode_var'):
+        # Backward compat: migrate old bool 'legacy_structure' → string mode
+        old_legacy = self.config.get('legacy_structure', None)
+        if old_legacy is True:
+            self.epub_layout_mode_var = 'epub2'
+        else:
+            self.epub_layout_mode_var = self.config.get('epub_layout_mode', 'auto')
 
-    legacy_cb = self._create_styled_checkbox("EPUB2 Folder Layout (OEBPS/Text)")
-    legacy_cb.setToolTip(
-        "Use a legacy EPUB2-style folder structure inside the .epub:\n"
-        "• OEBPS/Text/ (XHTML/HTML chapter files)\n\n"
-        "Note: Resource folders (css/images/fonts) keep their existing names; only chapter HTML/XHTML\n"
-        "files are moved under OEBPS/Text/ for compatibility with EPUB2-style readers."
+    layout_row = QWidget()
+    layout_h = QHBoxLayout(layout_row)
+    layout_h.setContentsMargins(0, 5, 0, 5)
+    layout_h.setSpacing(8)
+
+    layout_label = QLabel("EPUB Layout:")
+    layout_label.setStyleSheet("font-weight: bold;")
+    layout_h.addWidget(layout_label)
+
+    layout_combo = QComboBox()
+    layout_combo.addItems(["Auto", "EPUB2", "EPUB3"])
+    layout_combo.setFixedWidth(120)
+    layout_combo.setToolTip(
+        "Controls the internal folder structure of the compiled EPUB:\n\n"
+        "• Auto — Detect the layout from the source EPUB and preserve it.\n"
+        "  If the source uses OEBPS/Text/, the output will too.\n\n"
+        "• EPUB2 — Force a legacy EPUB2-style structure (OEBPS/Text/).\n"
+        "  Chapter files are placed under OEBPS/Text/ for compatibility\n"
+        "  with older e-readers.\n\n"
+        "• EPUB3 — Force a modern flat OEBPS/ structure.\n"
+        "  Chapter files sit directly inside OEBPS/.\n\n"
+        "Default: Auto (falls back to EPUB3 if detection fails)."
     )
-    try:
-        legacy_cb.setChecked(bool(self.legacy_structure_var))
-    except Exception:
-        pass
 
-    def _on_legacy_structure_toggle(checked):
+    # Set current selection from saved config
+    _mode_map = {'auto': 0, 'epub2': 1, 'epub3': 2}
+    try:
+        layout_combo.setCurrentIndex(_mode_map.get(self.epub_layout_mode_var, 0))
+    except Exception:
+        layout_combo.setCurrentIndex(0)  # Default to Auto
+
+    def _on_layout_mode_changed(index):
         try:
-            self.legacy_structure_var = bool(checked)
-            self.config['legacy_structure'] = self.legacy_structure_var
-            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if checked else '0'
+            modes = ['auto', 'epub2', 'epub3']
+            mode = modes[index]
+            self.epub_layout_mode_var = mode
+            self.config['epub_layout_mode'] = mode
+            # Set env var for epub_converter.py
+            # 'auto' → let the compiler detect, 'epub2' → force legacy, 'epub3' → force modern
+            os.environ['EPUB_LAYOUT_MODE'] = mode
+            # Backward compat: also set the old env var
+            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if mode == 'epub2' else '0'
         except Exception:
             pass
 
-    legacy_cb.toggled.connect(_on_legacy_structure_toggle)
-    section_v.addWidget(legacy_cb)
+    layout_combo.currentIndexChanged.connect(_on_layout_mode_changed)
+    layout_h.addWidget(layout_combo)
+    layout_h.addStretch()
+    section_v.addWidget(layout_row)
 
     # CSS Attachment toggle
     css_cb = self._create_styled_checkbox("Attach CSS to Chapters (May fix or cause styling issues)")
