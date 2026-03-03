@@ -138,11 +138,11 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
                 break
 
     if not output_dir or not os.path.isdir(output_dir):
-        return
+        return ('no_opf',)
 
     opf_path = os.path.join(output_dir, 'content.opf')
     if not os.path.exists(opf_path):
-        return  # no content.opf → do nothing
+        return ('no_opf',)
 
     # Parse content.opf to build a set of original basenames + extensions
     try:
@@ -169,10 +169,10 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
             if ext:
                 opf_names[name] = ext  # e.g. 'chapter001' → '.xhtml'
     except Exception:
-        return  # unparseable → do nothing
+        return ('no_opf',)
 
     if not opf_names:
-        return
+        return ('no_opf',)
 
     # Known HTML-like extensions to strip when peeling stacked extensions
     _HTML_EXTS = {'.html', '.xhtml', '.htm', '.xml'}
@@ -300,6 +300,10 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
         if errors:
             for err in errors[:5]:
                 gui.append_log(f'⚠️ Rename error: {err}')
+
+    if renamed:
+        return ('renamed', renamed)
+    return ('no_files',)
 
 
 def initialize_extraction_variables(gui_instance):
@@ -6034,16 +6038,72 @@ def _create_prompt_management_section(self, parent):
             os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if checked else '0'
         except Exception:
             pass
-        # Actively rename files in the output directory based on content.opf
-        # _rename_output_files_for_retain(self, bool(checked))
     retain_cb.toggled.connect(_on_retain_toggle)
-    retain_cb.setContentsMargins(0, 5, 0, 5)
     retain_cb.setToolTip(
         "Keep the original chapter filename/extension instead of adding 'response_' and replacing the extension with '.html'.\n"
-        "Toggling this will rename existing output files to match the new naming convention.\n"
         "Requires content.opf in the output folder; does nothing otherwise."
     )
-    section_v.addWidget(retain_cb)
+
+    rename_btn = QPushButton("Rename Files")
+    rename_btn.setToolTip("Rename existing output files to match the current naming convention.\nOnly available when no translation is running.")
+    rename_btn.setMinimumWidth(100)
+    rename_btn.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 4px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; } "
+        "QPushButton:disabled { background-color: #555; color: #999; }"
+    )
+
+    # Check if translation is running and disable accordingly
+    def _update_rename_btn_state():
+        try:
+            btn_text = self.run_button_text.text() if hasattr(self, 'run_button_text') else 'Run Translation'
+            rename_btn.setEnabled(btn_text == 'Run Translation')
+        except Exception:
+            rename_btn.setEnabled(True)
+
+    _update_rename_btn_state()
+
+    # Poll the run button state periodically
+    from PySide6.QtCore import QTimer
+    rename_timer = QTimer()
+    rename_timer.timeout.connect(_update_rename_btn_state)
+    rename_timer.start(1000)
+    rename_btn._keep_timer = rename_timer  # prevent GC
+
+    def _on_rename_clicked():
+        import winsound
+        try:
+            result = _rename_output_files_for_retain(self, bool(retain_cb.isChecked()))
+            if result and result[0] == 'renamed':
+                rename_btn.setText(f"✅ {result[1]} files renamed")
+                winsound.MessageBeep(winsound.MB_OK)
+            elif result and result[0] == 'no_opf':
+                rename_btn.setText("📁 No content.opf found")
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            else:
+                rename_btn.setText("📄 No files to rename")
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            rename_btn.setText("⚠️ Rename failed")
+            try:
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+            except Exception:
+                pass
+        # Revert button text after 3 seconds
+        QTimer.singleShot(3000, lambda: rename_btn.setText("Rename Files"))
+
+    rename_btn.clicked.connect(_on_rename_clicked)
+
+    from PySide6.QtWidgets import QHBoxLayout as _RetainHBox
+    retain_row = QWidget()
+    retain_row_h = _RetainHBox(retain_row)
+    retain_row_h.setContentsMargins(0, 5, 0, 5)
+    retain_row_h.setSpacing(8)
+    retain_row_h.addWidget(retain_cb)
+    retain_row_h.addWidget(rename_btn)
+    retain_row_h.addStretch()
+    section_v.addWidget(retain_row)
     
     # Place the section at row 0, column 0 to match the original grid
     try:
