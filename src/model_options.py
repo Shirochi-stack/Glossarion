@@ -153,6 +153,15 @@ def get_model_options() -> List[str]:
         "authgpt/gpt-5.1-codex", "authgpt/gpt-5.1-codex-max",
         "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex",
 
+        # Antigravity Cloud Code proxy (localhost:8080, no API key needed)
+        # Claude models via Cloud Code
+        "antigravity/claude-sonnet-4-5", "antigravity/claude-sonnet-4-5-thinking",
+        "antigravity/claude-opus-4-6-thinking", "antigravity/claude-sonnet-4-6-thinking",
+
+        # Gemini models via Cloud Code
+        "antigravity/gemini-3-flash", "antigravity/gemini-3.1-flash",
+        "antigravity/gemini-3.1-pro-high", "antigravity/gemini-3.1-pro-low",
+
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
         "nd/deepseek-ai/deepseek-v3.2",
         "nd/deepseek-ai/deepseek-r1",

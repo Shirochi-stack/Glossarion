@@ -136,6 +136,9 @@ app_files = [
 
 	# AuthGPT - ChatGPT subscription OAuth
 	('authgpt_auth.py', '.'),
+
+	# Antigravity Cloud Code proxy
+	('antigravity_proxy.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -195,6 +198,7 @@ app_modules = [
 	'advanced_duplicate_detection',
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
+	'antigravity_proxy',  # Antigravity Cloud Code proxy
 ]
 # GUI Framework
 gui_modules = [

@@ -927,6 +927,22 @@ except ImportError:
     _authgpt_cancel_stream = None
     _authgpt_reset_cancel = None
     AUTHGPT_AVAILABLE = False
+
+# Antigravity Cloud Code proxy (optional)
+try:
+    from antigravity_proxy import send_message as _antigravity_send
+    from antigravity_proxy import send_message_stream as _antigravity_send_stream
+    from antigravity_proxy import cancel_stream as _antigravity_cancel_stream
+    from antigravity_proxy import reset_cancel as _antigravity_reset_cancel
+    from antigravity_proxy import check_proxy_health as _antigravity_health_check
+    ANTIGRAVITY_AVAILABLE = True
+except ImportError:
+    _antigravity_send = None
+    _antigravity_send_stream = None
+    _antigravity_cancel_stream = None
+    _antigravity_reset_cancel = None
+    _antigravity_health_check = None
+    ANTIGRAVITY_AVAILABLE = False
     
 from functools import lru_cache
 from datetime import datetime, timedelta
@@ -1601,6 +1617,8 @@ class UnifiedClient:
         'google-translate': 'google_translate',
         'authgpt/': 'authgpt',
         'authgpt': 'authgpt',
+        'antigravity/': 'antigravity',
+        'antigravity': 'antigravity',
     }
     
     # Model-specific constraints
@@ -1625,7 +1643,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/', 'antigravity/', 'antigravity')
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
     @classmethod
@@ -4530,6 +4548,14 @@ class UnifiedClient:
                     "exists under src/ with __init__.py, oauth.py, token_store.py, chatgpt_api.py."
                 )
             # logger.info("AuthGPT will use ChatGPT backend API with OAuth tokens")
+
+        elif self.client_type == 'antigravity':
+            # Antigravity uses local proxy (antigravity-claude-proxy) – no SDK client needed
+            if not ANTIGRAVITY_AVAILABLE:
+                raise ImportError(
+                    "Antigravity proxy module not found. Make sure 'antigravity_proxy.py' exists in src/."
+                )
+            logger.info("Antigravity will use local proxy (antigravity-claude-proxy)")
 
         elif self.client_type in ['yi', 'qwen', 'baichuan', 'zhipu', 'moonshot', 'baidu', 
                                   'tencent', 'iflytek', 'bytedance', 'minimax', 
@@ -10176,6 +10202,7 @@ class UnifiedClient:
             'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
             'authgpt': self._send_authgpt,  # ChatGPT subscription via OAuth
+            'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
         }
         
         # IMPORTANT: Use actual_provider for routing, not client_type
@@ -14760,6 +14787,126 @@ class UnifiedClient:
 
         raise UnifiedClientError(
             f"AuthGPT request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
+        )
+
+    def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via the Antigravity Cloud Code proxy.
+
+        Uses the antigravity-claude-proxy (localhost:8080) which proxies to
+        Google Cloud Code. Models are prefixed with 'antigravity/' (e.g.
+        antigravity/claude-sonnet-4-5, antigravity/gemini-3-flash).
+        """
+        if not ANTIGRAVITY_AVAILABLE or _antigravity_send is None:
+            raise UnifiedClientError(
+                "Antigravity proxy module is not available. Ensure antigravity_proxy.py exists in src/.\n"
+                "Also make sure the proxy is running: npx antigravity-claude-proxy@latest start",
+                error_type="config_error"
+            )
+
+        # Strip the antigravity/ prefix to get the actual model name
+        actual_model = self.model
+        for prefix in ('antigravity/', 'antigravity'):
+            if actual_model.startswith(prefix):
+                actual_model = actual_model[len(prefix):].lstrip('/')
+                break
+        if not actual_model:
+            actual_model = 'claude-sonnet-4-5'  # sensible default
+
+        max_retries = self._get_max_retries()
+        last_error = None
+        print(f"🌀 Antigravity: Sending request via proxy (model={actual_model})")
+
+        for attempt in range(max_retries):
+            # Check stop flag
+            if self._is_stop_requested():
+                raise UnifiedClientError(
+                    "Antigravity: Translation stopped by user",
+                    error_type="cancelled"
+                )
+
+            try:
+                # Reset cancel flag before each attempt
+                if _antigravity_reset_cancel is not None:
+                    _antigravity_reset_cancel()
+
+                result = _antigravity_send(
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=self.request_timeout,
+                    log_fn=print,
+                )
+
+                content = result.get("content", "")
+                finish_reason = result.get("finish_reason", "stop")
+                usage = result.get("usage")
+
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+
+                # Stream cancelled
+                if "cancelled" in error_str.lower():
+                    self._log_once("⏹️ Antigravity: Stream cancelled by user")
+                    raise UnifiedClientError(
+                        "Antigravity: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                # Connection refused – proxy not running
+                if "connection refused" in error_str.lower():
+                    raise UnifiedClientError(
+                        f"Antigravity proxy is not running. Start it with:\n"
+                        f"  npx antigravity-claude-proxy@latest start\n"
+                        f"Then open http://localhost:8080 to add your Google account.",
+                        error_type="config_error"
+                    )
+
+                # Rate limit / quota exhausted
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA_EXHAUSTED" in error_str:
+                    if attempt < max_retries - 1:
+                        delay = self._get_send_interval() * (attempt + 1)
+                        print(f"⏳ Antigravity: Rate limited – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
+                        if not self._sleep_with_cancel(delay, 0.5):
+                            raise UnifiedClientError("Antigravity: Translation stopped by user", error_type="cancelled")
+                        continue
+
+                # Bail on stop request
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Antigravity: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"⚠️ Antigravity error (attempt {attempt+1}/{max_retries}): {error_str}")
+                    time.sleep(self._get_send_interval())
+                    continue
+
+            except Exception as exc:
+                error_str = str(exc)
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Antigravity: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"⚠️ Antigravity error (attempt {attempt+1}/{max_retries}): {error_str}")
+                    time.sleep(self._get_send_interval())
+                    continue
+
+        raise UnifiedClientError(
+            f"Antigravity request failed after {max_retries} attempts: {last_error}",
             error_type="api_error"
         )
 

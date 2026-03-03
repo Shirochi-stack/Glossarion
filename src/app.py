@@ -10,6 +10,8 @@ import sys
 import json
 import tempfile
 import base64
+import threading
+import uuid
 from pathlib import Path
 
 # CRITICAL: Set API delay IMMEDIATELY at module level before any other imports
@@ -82,7 +84,7 @@ except ImportError as e:
 
 
 # Models that do not require an API key
-_NO_API_KEY_PREFIXES = ('vertex/', 'authgpt/', 'google-translate', 'deepl')
+_NO_API_KEY_PREFIXES = ('vertex/', 'authgpt/', 'antigravity/', 'google-translate', 'deepl')
 
 def _model_needs_no_api_key(model: str) -> bool:
     """Return True if the given model name does not require a user-supplied API key."""
@@ -90,6 +92,72 @@ def _model_needs_no_api_key(model: str) -> bool:
         return False
     m = model.lower().strip()
     return any(m.startswith(p) for p in _NO_API_KEY_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# Thread-local stdout writer — isolates log output per translation thread
+# so User A's logs never leak into User B's log_callback.
+# ---------------------------------------------------------------------------
+_thread_local = threading.local()
+
+class _ThreadLocalStdoutWriter:
+    """sys.stdout replacement that routes write() to a per-thread callback.
+
+    If the current thread has a callback registered in _thread_local.log_cb,
+    output goes there.  Otherwise it falls through to the original stdout so
+    server-side console logs still work.
+    """
+    def __init__(self, original_stdout):
+        self._original = original_stdout
+
+    # --- required file-like API ---
+    def write(self, text):
+        cb = getattr(_thread_local, 'log_cb', None)
+        if cb is not None:
+            # Only forward non-empty, non-whitespace-only text
+            stripped = text.strip()
+            if stripped:
+                try:
+                    cb(stripped)
+                except Exception:
+                    pass
+            return
+        # No per-thread callback → use original stdout
+        if self._original is not None:
+            try:
+                self._original.write(text)
+            except Exception:
+                pass
+
+    def flush(self):
+        if self._original is not None:
+            try:
+                self._original.flush()
+            except Exception:
+                pass
+
+    def fileno(self):
+        if self._original is not None:
+            return self._original.fileno()
+        raise OSError("no underlying fileno")
+
+    @property
+    def encoding(self):
+        return getattr(self._original, 'encoding', 'utf-8')
+
+    def isatty(self):
+        return False
+
+    def readable(self):
+        return False
+
+    def writable(self):
+        return True
+
+# Install the thread-local writer ONCE at module load so *all* print()
+# calls are routed through it.  The original stdout is preserved inside.
+if not isinstance(sys.stdout, _ThreadLocalStdoutWriter):
+    sys.stdout = _ThreadLocalStdoutWriter(sys.stdout)
 
 
 class GlossarionWeb:
@@ -211,14 +279,20 @@ class GlossarionWeb:
         print(f"🤖 Loaded {len(self.models)} models: {self.models[:5]}{'...' if len(self.models) > 5 else ''}")
         
         # Translation state management
-        import threading
+        # NOTE: These are per-instance defaults.  For a public web app each
+        # concurrent request needs its own stop flag — we use a dict keyed by
+        # a unique request_id so one user's stop doesn't affect another.
         self.is_translating = False
         self.stop_flag = threading.Event()
         self.translation_thread = None
         self.current_unified_client = None  # Track active client to allow cancellation
         self.current_translator = None     # Track active translator to allow shutdown
         
-        # Add stop flags for different translation types
+        # Per-request stop flags (keyed by request_id uuid)
+        self._stop_flags: dict[str, bool] = {}   # request_id -> True means "stop"
+        self._stop_lock = threading.Lock()
+        
+        # Legacy flags (kept for manga which still uses the old pattern)
         self.epub_translation_stop = False
         self.epub_translation_thread = None
         self.glossary_extraction_stop = False
@@ -830,8 +904,13 @@ class GlossarionWeb:
             yield None, None, None, "❌ Please select a translation profile", None, "Error", 0
             return
         
-        # Initialize logs list
+        # Initialize logs list (per-request, NOT shared)
         translation_logs = []
+        
+        # Create a unique request id for per-session stop tracking
+        request_id = self._new_request_id()
+        # Also reset legacy flag
+        self.epub_translation_stop = False
         
         try:
             # Initial status
@@ -967,28 +1046,46 @@ class GlossarionWeb:
             
             # Create a thread-safe queue for capturing logs
             import queue
-            import threading
             import time
             log_queue = queue.Queue()
             translation_complete = threading.Event()
             translation_error = [None]
             
+            # CRITICAL: Reset stop env vars so stale flags don't interfere
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['TRANSLATION_CANCELLED'] = '0'
+            try:
+                from TransateKRtoEN import set_stop_flag as _set_stop
+                _set_stop(False)
+            except ImportError:
+                pass
+            
             def log_callback(msg):
-                """Capture log messages"""
+                """Capture log messages — per-request, thread-safe"""
                 if msg and msg.strip():
                     log_queue.put(msg.strip())
             
+            # Stop callback that TransateKRtoEN.main() will poll
+            _rid = request_id  # capture in closure
+            def stop_callback():
+                return self._is_request_stopped(_rid) or self.epub_translation_stop
+            
             # Run translation in a separate thread
             def run_translation():
+                # Install per-thread log routing so print() inside
+                # TransateKRtoEN goes to THIS request's queue only.
+                _thread_local.log_cb = log_callback
                 try:
                     result = TransateKRtoEN.main(
                         log_callback=log_callback,
-                        stop_callback=None
+                        stop_callback=stop_callback
                     )
                     translation_error[0] = None
                 except Exception as e:
                     translation_error[0] = e
                 finally:
+                    # Remove per-thread redirect
+                    _thread_local.log_cb = None
                     translation_complete.set()
             
             translation_thread = threading.Thread(target=run_translation, daemon=True)
@@ -999,10 +1096,16 @@ class GlossarionWeb:
             progress_percent = 10
             
             while not translation_complete.is_set() or not log_queue.empty():
-                # Check if stop was requested
-                if self.epub_translation_stop:
+                # Check if stop was requested (per-request OR legacy flag)
+                if self._is_request_stopped(request_id) or self.epub_translation_stop:
                     translation_logs.append("⚠️ Stopping translation...")
-                    # Try to stop the translation thread
+                    # Signal the translation engine to stop as well
+                    try:
+                        from TransateKRtoEN import set_stop_flag as _set_stop
+                        _set_stop(True)
+                    except ImportError:
+                        pass
+                    os.environ['TRANSLATION_CANCELLED'] = '1'
                     translation_complete.set()
                     break
                     
@@ -1367,6 +1470,9 @@ class GlossarionWeb:
             error_msg = f"❌ Error during translation:\n{str(e)}\n\n{traceback.format_exc()}"
             translation_logs.append(error_msg)
             yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Error occurred", 0
+        finally:
+            # Always clean up the per-request stop flag
+            self._cleanup_request(request_id)
     
     def translate_epub_with_stop(self, *args):
         """Wrapper for translate_epub that includes button visibility control"""
@@ -1387,6 +1493,17 @@ class GlossarionWeb:
     def stop_epub_translation(self):
         """Stop the ongoing EPUB translation"""
         self.epub_translation_stop = True
+        # Also signal the translation engine's global stop flag
+        try:
+            from TransateKRtoEN import set_stop_flag as _set_stop
+            _set_stop(True)
+        except ImportError:
+            pass
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        # Signal all active per-request stop flags for epub
+        with self._stop_lock:
+            for rid in self._stop_flags:
+                self._stop_flags[rid] = True
         if self.epub_translation_thread and self.epub_translation_thread.is_alive():
             # The thread will check the stop flag
             pass
@@ -1485,31 +1602,46 @@ class GlossarionWeb:
             
             # Create a thread-safe queue for capturing logs
             import queue
-            import threading
             import time
             log_queue = queue.Queue()
             extraction_complete = threading.Event()
             extraction_error = [None]
             extraction_result = [None]
             
+            # Per-request stop tracking for glossary extraction
+            gloss_request_id = self._new_request_id()
+            self.glossary_extraction_stop = False
+            
+            # CRITICAL: Reset stop env vars
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['TRANSLATION_CANCELLED'] = '0'
+            
             def log_callback(msg):
-                """Capture log messages"""
+                """Capture log messages — per-request, thread-safe"""
                 if msg and msg.strip():
                     log_queue.put(msg.strip())
             
+            _grid = gloss_request_id  # capture in closure
+            def stop_callback():
+                return self._is_request_stopped(_grid) or self.glossary_extraction_stop
+            
             # Run extraction in a separate thread
             def run_extraction():
+                # Install per-thread log routing
+                _thread_local.log_cb = log_callback
                 try:
                     result = extract_glossary_from_epub.main(
                         log_callback=log_callback,
-                        stop_callback=None
+                        stop_callback=stop_callback
                     )
                     extraction_result[0] = result
                     extraction_error[0] = None
                 except Exception as e:
                     extraction_error[0] = e
                 finally:
+                    _thread_local.log_cb = None
                     extraction_complete.set()
+                    self._cleanup_request(_grid)
             
             extraction_thread = threading.Thread(target=run_extraction, daemon=True)
             extraction_thread.start()
@@ -1519,10 +1651,10 @@ class GlossarionWeb:
             progress_percent = 40
             
             while not extraction_complete.is_set() or not log_queue.empty():
-                # Check if stop was requested
-                if self.glossary_extraction_stop:
+                # Check if stop was requested (per-request OR legacy flag)
+                if self._is_request_stopped(gloss_request_id) or self.glossary_extraction_stop:
                     extraction_logs.append("⚠️ Stopping extraction...")
-                    # Try to stop the extraction thread
+                    os.environ['TRANSLATION_CANCELLED'] = '1'
                     extraction_complete.set()
                     break
                     
@@ -1615,6 +1747,11 @@ class GlossarionWeb:
     def stop_glossary_extraction(self):
         """Stop the ongoing glossary extraction"""
         self.glossary_extraction_stop = True
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        # Signal all active per-request stop flags
+        with self._stop_lock:
+            for rid in self._stop_flags:
+                self._stop_flags[rid] = True
         if self.glossary_extraction_thread and self.glossary_extraction_thread.is_alive():
             # The thread will check the stop flag
             pass
@@ -1973,10 +2110,43 @@ class GlossarionWeb:
         else:
             print("DEBUG: stop_translation called but not translating")
     
+    # -- per-request stop helpers --------------------------------------------------
+    def _new_request_id(self) -> str:
+        """Create a fresh request ID and register its stop flag."""
+        rid = str(uuid.uuid4())
+        with self._stop_lock:
+            self._stop_flags[rid] = False
+        return rid
+
+    def _request_stop(self, rid: str):
+        """Signal stop for a given request."""
+        with self._stop_lock:
+            self._stop_flags[rid] = True
+
+    def _is_request_stopped(self, rid: str) -> bool:
+        with self._stop_lock:
+            return self._stop_flags.get(rid, False)
+
+    def _cleanup_request(self, rid: str):
+        with self._stop_lock:
+            self._stop_flags.pop(rid, None)
+
     def _reset_translation_flags(self):
         """Reset all translation flags for new translation"""
         self.is_translating = False
         self.stop_flag.clear()
+        
+        # CRITICAL: Reset stop / graceful-stop env vars so stale state
+        # from a previous run does not bleed into the next one.
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['TRANSLATION_CANCELLED'] = '0'
+        
+        # Reset global stop flags in the translation engine
+        try:
+            from TransateKRtoEN import set_stop_flag as _set_stop
+            _set_stop(False)
+        except ImportError:
+            pass
         
         # Reset global cancellation flags
         try:
