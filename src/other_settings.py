@@ -5298,7 +5298,7 @@ def _create_prompt_management_section(self, parent):
 
     dedup_toc_translated_cb.toggled.connect(_on_dedup_toc_translated_toggle)
     dedup_toc_translated_cb.setContentsMargins(20, 0, 0, 0)
-    dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
+    dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked() and use_toc_cb.isChecked())
     _toc_col_right_v.addWidget(dedup_toc_translated_cb)
 
 
