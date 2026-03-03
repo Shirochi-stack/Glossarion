@@ -2,6 +2,7 @@
 # Routes requests through the antigravity-claude-proxy (github.com/badrisnarayanan/antigravity-claude-proxy)
 # which exposes an Anthropic Messages API backed by Google Cloud Code.
 #
+import webbrowser
 # Usage: prefix models with 'antigravity/' (e.g., antigravity/claude-sonnet-4-5, antigravity/gemini-3-flash)
 """
 Antigravity Proxy adapter for Glossarion.
@@ -50,6 +51,64 @@ _cancel_event = threading.Event()
 # Module-level proxy subprocess tracking
 _proxy_process: Optional[subprocess.Popen] = None
 _proxy_launch_lock = threading.Lock()
+
+# Auth browser tracking — only open the browser once per session
+_auth_browser_opened = False
+_auth_browser_lock = threading.Lock()
+
+
+def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
+    """Open the proxy auth URL in the browser, but only once per session.
+
+    Returns True if the browser was opened (first call), False if already opened.
+    """
+    global _auth_browser_opened
+    with _auth_browser_lock:
+        if _auth_browser_opened:
+            return False
+        _auth_browser_opened = True
+    _log = log_fn or (lambda msg: None)
+    _log(f"🔐 Antigravity: Authentication required – opening {proxy_url} in your browser...")
+    _log(f"   Please link your Google account. Glossarion will continue automatically once done.")
+    try:
+        webbrowser.open(proxy_url)
+    except Exception:
+        pass
+    return True
+
+
+def _wait_for_auth(
+    url: str,
+    payload: dict,
+    headers: dict,
+    proxy_url: str,
+    log_fn=None,
+    max_wait: int = 120,
+    poll_interval: int = 5,
+    stream: bool = False,
+):
+    """Open browser once and poll until authentication succeeds or timeout.
+
+    Returns the successful requests.Response, or None if timed out.
+    """
+    _open_auth_browser_once(proxy_url, log_fn)
+    _log = log_fn or (lambda msg: None)
+    elapsed = 0
+    while elapsed < max_wait:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        if _cancel_event.is_set():
+            return None
+        _log(f"⏳ Waiting for authentication... ({elapsed}s / {max_wait}s)")
+        try:
+            retry_resp = requests.post(
+                url, json=payload, headers=headers, timeout=30, stream=stream
+            )
+            if retry_resp.status_code not in (401, 403):
+                return retry_resp
+        except Exception:
+            continue
+    return None
 
 
 def cancel_stream():
@@ -137,6 +196,38 @@ def _find_npx() -> Optional[str]:
     return None
 
 
+def _ensure_proxy_config():
+    """Ensure the proxy config disables API key auth.
+
+    The antigravity-claude-proxy validates an ``apiKey`` on every ``/v1/*``
+    request.  Glossarion talks to the proxy on localhost, so there is no
+    need for this gate.  We write ``{"apiKey": ""}`` (skip validation) into
+    the proxy's config file so that any dummy token we send is accepted.
+    Existing settings in the file are preserved; only ``apiKey`` is touched.
+    """
+    try:
+        config_dir = os.path.join(os.path.expanduser("~"), ".config", "antigravity-proxy")
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, "config.json")
+
+        # Read existing config if present, otherwise start fresh
+        existing: Dict[str, Any] = {}
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    existing = json.loads(f.read())
+            except Exception:
+                existing = {}
+
+        # Only write if apiKey is not already empty
+        if existing.get("apiKey", None) != "":
+            existing["apiKey"] = ""
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(existing, indent=2))
+    except Exception:
+        pass  # Non-critical – proxy may still work without this
+
+
 def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
     """Ensure the Antigravity proxy is running, auto-launching if needed.
 
@@ -150,6 +241,9 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
     global _proxy_process
 
     _log = log_fn or (lambda msg: None)
+
+    # Ensure proxy config disables API key auth (localhost doesn't need it)
+    _ensure_proxy_config()
 
     # Already running?
     health = check_proxy_health()
@@ -203,6 +297,15 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                 "stderr": subprocess.DEVNULL,
                 "stdin": subprocess.DEVNULL,
             }
+
+            # Ensure node.exe's directory is on PATH for the subprocess
+            # (npx.cmd invokes "node" and needs it resolvable)
+            npx_dir = os.path.dirname(npx_path)
+            env = os.environ.copy()
+            if npx_dir not in env.get("PATH", ""):
+                env["PATH"] = npx_dir + os.pathsep + env.get("PATH", "")
+            kwargs["env"] = env
+
             if sys.platform == "win32":
                 # CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS so it survives app close
                 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -358,6 +461,20 @@ def send_message(
             "The model may need more time for long translations."
         )
 
+    # Handle auth failure: open browser once and wait for user to authenticate
+    if resp.status_code in (401, 403):
+        auth_resp = _wait_for_auth(
+            url, payload, headers, proxy_url, log_fn, stream=False
+        )
+        if auth_resp is not None and auth_resp.status_code == 200:
+            resp = auth_resp  # auth succeeded, continue with this response
+        else:
+            raise RuntimeError(
+                f"Antigravity: Authentication timed out.\n"
+                f"Open {proxy_url} in your browser and link your Google account,\n"
+                f"then try again."
+            )
+
     if resp.status_code != 200:
         error_body = resp.text
         try:
@@ -464,6 +581,20 @@ def send_message_stream(
         raise RuntimeError(
             f"Antigravity proxy streaming request timed out after {timeout}s."
         )
+
+    # Handle auth failure: open browser once and wait for user to authenticate
+    if resp.status_code in (401, 403):
+        auth_resp = _wait_for_auth(
+            url, payload, headers, proxy_url, log_fn, stream=True
+        )
+        if auth_resp is not None and auth_resp.status_code == 200:
+            resp = auth_resp  # auth succeeded, continue with this streaming response
+        else:
+            raise RuntimeError(
+                f"Antigravity: Authentication timed out.\n"
+                f"Open {proxy_url} in your browser and link your Google account,\n"
+                f"then try again."
+            )
 
     if resp.status_code != 200:
         raise RuntimeError(f"Antigravity: {resp.status_code} - {resp.text[:500]}")

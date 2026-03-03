@@ -14882,12 +14882,10 @@ class UnifiedClient:
                         error_type="config_error"
                     )
 
-                # Authentication error – user needs to link Google account (don't retry)
-                if "401" in error_str or "403" in error_str or "api key" in error_str.lower():
+                # Authentication timed out – proxy handled the browser+polling already
+                if "authentication timed out" in error_str.lower():
                     raise UnifiedClientError(
-                        f"Antigravity proxy authentication failed.\n"
-                        f"Open http://localhost:8080 in your browser and link your Google account,\n"
-                        f"then try again.",
+                        str(exc),
                         error_type="config_error"
                     )
 
