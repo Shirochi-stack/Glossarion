@@ -1404,7 +1404,7 @@ class EPUBCompiler:
                                         epub_path=source_epub_path,
                                         output_dir=self.html_dir,
                                         translations_file=translations_file,
-                                        update_html=True,  # Make sure to update the HTML files
+                                        update_html=getattr(self, 'update_html_headers', True),
                                         log_callback=self.log
                                     )
                                     
