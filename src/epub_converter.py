@@ -5288,14 +5288,23 @@ img {
         
         def _read_image_as_pdf_compatible(fpath, ctype):
             """Read image bytes, converting webp to JPEG/PNG since WeasyPrint does not support webp.
-            Respects PDF_IMAGE_FORMAT, IMAGE_COMPRESSION_QUALITY, and PDF_PNG_OPTIMIZE settings."""
+            When ENABLE_IMAGE_COMPRESSION is off, converts to lossless PNG to avoid quality loss.
+            When enabled, respects PDF_IMAGE_FORMAT, IMAGE_COMPRESSION_QUALITY, and PDF_PNG_OPTIMIZE settings."""
             if ctype == 'image/webp':
                 try:
                     from PIL import Image
                     from io import BytesIO
-                    pdf_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').lower()
+                    _compression_on = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
                     with Image.open(fpath) as img:
                         buf = BytesIO()
+                        if not _compression_on:
+                            # Compression disabled: convert to lossless PNG
+                            if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                img = img.convert('RGBA')
+                            img.save(buf, format='PNG')
+                            return buf.getvalue(), 'image/png'
+                        # Compression enabled: respect user format/quality settings
+                        pdf_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').lower()
                         if pdf_fmt == 'png':
                             # PNG: preserves transparency
                             optimize = os.environ.get('PDF_PNG_OPTIMIZE', '1') == '1'
