@@ -1222,7 +1222,7 @@ class MangaTranslationTab(QObject):
             if not has_api_key:
                 _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
                 _ml = (_model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                if _ml.startswith('authgpt/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
                     has_api_key = True
             
             if not has_api_key:

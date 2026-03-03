@@ -51,7 +51,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 # Models/prefixes that don't require an API key
-_NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/')
+_NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/', 'antigravity/', 'antigravity')
 _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
 def _model_needs_api_key(model: str) -> bool:
