@@ -5836,9 +5836,16 @@ def _create_prompt_management_section(self, parent):
     # EPUB Layout Mode dropdown (Auto / EPUB2 / EPUB3)
     if not hasattr(self, 'epub_layout_mode_var'):
         # Backward compat: migrate old bool 'legacy_structure' → string mode
-        old_legacy = self.config.get('legacy_structure', None)
-        if old_legacy is True:
-            self.epub_layout_mode_var = 'epub2'
+        # Only migrate if the NEW key doesn't exist yet in config
+        if 'epub_layout_mode' not in self.config:
+            old_legacy = self.config.get('legacy_structure', None)
+            if old_legacy is True:
+                self.epub_layout_mode_var = 'epub2'
+            else:
+                self.epub_layout_mode_var = 'auto'
+            self.config['epub_layout_mode'] = self.epub_layout_mode_var
+            # Remove old key so it never overrides again
+            self.config.pop('legacy_structure', None)
         else:
             self.epub_layout_mode_var = self.config.get('epub_layout_mode', 'auto')
 

@@ -10323,9 +10323,9 @@ Important rules:
 
             # EPUB structure settings
             _epub_layout = getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto'))
-            # Migrate old bool config if needed
+            # Fallback if value is invalid
             if _epub_layout is None or _epub_layout not in ('auto', 'epub2', 'epub3'):
-                _epub_layout = 'epub2' if self.config.get('legacy_structure', False) else 'auto'
+                _epub_layout = 'auto'
             os.environ['EPUB_LAYOUT_MODE'] = _epub_layout
             os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if _epub_layout == 'epub2' else '0'
             os.environ['USE_TOC_NCX'] = '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'
@@ -13470,7 +13470,7 @@ Important rules:
                 ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
 
                 # EPUB layout mode
-                ('epub_layout_mode', ['epub_layout_mode_var'], 'auto', str),
+                ('epub_layout_mode', ['epub_layout_mode_var', ('config', 'epub_layout_mode')], 'auto', str),
 
                 # Extraction settings - NOTE: these are only created in Other Settings dialog
                 ('enable_parallel_extraction', ['enable_parallel_extraction_var'], False, bool),
