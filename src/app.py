@@ -3230,8 +3230,7 @@ class GlossarionWeb:
                                     info="Applies to ALL glossaries - manual and automatic"
                                 )
                                 
-                                # Automatic glossary extraction settings (only show when enabled)
-                                with gr.Column(visible=self.get_config_value('enable_auto_glossary', True)) as auto_glossary_settings:
+                                with gr.Column(visible=self.get_config_value('enable_auto_glossary', True), elem_id="auto-glossary-settings") as auto_glossary_settings:
                                     gr.Markdown("#### Automatic Glossary Extraction Settings")
                                     
                                     with gr.Row():
@@ -3292,11 +3291,12 @@ class GlossarionWeb:
                                         info="How similar names must be to match (0.9 = 90% match)"
                                     )
                                 
-                                # Toggle visibility of auto glossary settings
+                                # Toggle visibility of auto glossary settings (JS-only, no server round-trip)
                                 enable_auto_glossary.change(
-                                    fn=lambda x: gr.update(visible=x),
+                                    fn=None,
                                     inputs=[enable_auto_glossary],
-                                    outputs=[auto_glossary_settings]
+                                    outputs=[],
+                                    js="(checked) => { const el = document.querySelector('#auto-glossary-settings'); if (el) el.style.display = checked ? '' : 'none'; }"
                                 )
                                 
                                 gr.Markdown("### Quality Assurance")
@@ -3330,9 +3330,8 @@ class GlossarionWeb:
                                     visible=True
                                 )
                             
-                            # Progress section (similar to manga tab)
-                            with gr.Group(visible=False) as epub_progress_group:
-                                gr.Markdown("### Progress")
+                            epub_progress_proxy = gr.HTML(value="", visible=False)
+                            with gr.Column(visible=False, elem_id="epub-progress-group") as epub_progress_group:
                                 epub_progress_text = gr.Textbox(
                                     label="📨 Current Status",
                                     value="Ready to start",
@@ -3391,7 +3390,7 @@ class GlossarionWeb:
                         outputs=[
                             epub_output,          # Download file
                             epub_status_message,  # Top status message
-                            epub_progress_group,  # Progress group visibility
+                            epub_progress_proxy,  # Progress group visibility (proxy)
                             epub_logs,            # Translation logs
                             epub_status,          # Final status
                             epub_progress_text,   # Progress text
@@ -3682,9 +3681,8 @@ class GlossarionWeb:
                                     visible=True
                             )
                             
-                            # Progress section for manga translation (similar to manga integration script)
-                            with gr.Group(visible=False) as manga_progress_group:
-                                gr.Markdown("### Progress")
+                            manga_progress_proxy = gr.HTML(value="", visible=False)
+                            with gr.Column(visible=False, elem_id="manga-progress-group") as manga_progress_group:
                                 manga_progress_text = gr.Textbox(
                                     label="📈 Current Status",
                                     value="Ready to start",
@@ -4040,7 +4038,7 @@ class GlossarionWeb:
                             parallel_panel_translation,
                             panel_max_workers
                         ],
-                        outputs=[manga_logs, manga_output_gallery, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar, translate_manga_btn, stop_manga_btn]
+                        outputs=[manga_logs, manga_output_gallery, manga_cbz_output, manga_status, manga_progress_proxy, manga_progress_text, manga_progress_bar, translate_manga_btn, stop_manga_btn]
                     )
                     
                     # Stop button click handler
@@ -5041,9 +5039,8 @@ CRITICAL EXTRACTION RULES:
                                     visible=True
                                 )
                             
-                            # Progress section (similar to translation tabs)
-                            with gr.Group(visible=False) as glossary_progress_group:
-                                gr.Markdown("### Progress")
+                            glossary_progress_proxy = gr.HTML(value="", visible=False)
+                            with gr.Column(visible=False, elem_id="glossary-progress-group") as glossary_progress_group:
                                 glossary_progress_text = gr.Textbox(
                                     label="📨 Current Status",
                                     value="Ready to start",
@@ -5106,7 +5103,7 @@ CRITICAL EXTRACTION RULES:
                         outputs=[
                             glossary_output,
                             glossary_status_message,
-                            glossary_progress_group,
+                            glossary_progress_proxy,
                             glossary_logs,
                             glossary_status,
                             glossary_progress_text,
@@ -5299,9 +5296,8 @@ CRITICAL EXTRACTION RULES:
                                     visible=True
                                 )
                             
-                            # Progress section
-                            with gr.Group(visible=False) as qa_progress_group:
-                                gr.Markdown("### Progress")
+                            qa_progress_proxy = gr.HTML(value="", visible=False)
+                            with gr.Column(visible=False, elem_id="qa-progress-group") as qa_progress_group:
                                 qa_progress_text = gr.Textbox(
                                     label="📨 Current Status",
                                     value="Ready to start",
@@ -5359,7 +5355,7 @@ CRITICAL EXTRACTION RULES:
                         outputs=[
                             qa_report,
                             qa_status_message,
-                            qa_progress_group,
+                            qa_progress_proxy,
                             qa_logs,
                             qa_status,
                             qa_progress_text,
