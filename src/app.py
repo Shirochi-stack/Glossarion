@@ -2292,7 +2292,7 @@ class GlossarionWeb:
             
             simple_config = SimpleConfig(merged_config)
             # Get max_output_tokens from config or use from web app config
-            web_max_tokens = merged_config.get('max_output_tokens', 16000)
+            web_max_tokens = merged_config.get('max_output_tokens', 65536)
             mock_gui = MockGUI(simple_config.config, profile_name, system_prompt, web_max_tokens, api_key, model)
             
             # CRITICAL: Set SYSTEM_PROMPT environment variable for manga translation
@@ -3200,7 +3200,7 @@ class GlossarionWeb:
                                 
                                 epub_max_tokens = gr.Number(
                                     label="Max Output Tokens",
-                                    value=self.get_config_value('max_output_tokens', 16000),
+                                    value=self.get_config_value('max_output_tokens', 65536),
                                     minimum=0
                                 )
                                 
@@ -3216,7 +3216,7 @@ class GlossarionWeb:
                                 
                                 enable_auto_glossary = gr.Checkbox(
                                     label="Enable Automatic Glossary Generation",
-                                    value=self.get_config_value('enable_auto_glossary', False),
+                                    value=self.get_config_value('enable_auto_glossary', True),
                                     info="Automatic extraction and translation of character names/terms"
                                 )
                                 
@@ -3227,7 +3227,7 @@ class GlossarionWeb:
                                 )
                                 
                                 # Automatic glossary extraction settings (only show when enabled)
-                                with gr.Group(visible=self.get_config_value('enable_auto_glossary', False)) as auto_glossary_settings:
+                                with gr.Group(visible=self.get_config_value('enable_auto_glossary', True)) as auto_glossary_settings:
                                     gr.Markdown("#### Automatic Glossary Extraction Settings")
                                     
                                     with gr.Row():
@@ -5429,7 +5429,7 @@ CRITICAL EXTRACTION RULES:
                             
                             output_token_limit = gr.Number(
                                 label="Output Token limit",
-                                value=self.get_config_value('max_output_tokens', 16000),
+                                value=self.get_config_value('max_output_tokens', 65536),
                                 minimum=0
                             )
                         
@@ -5750,9 +5750,9 @@ CRITICAL EXTRACTION RULES:
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # epub_profile
                     self.profiles.get(self.get_config_value('active_profile', ''), ''),  # epub_system_prompt
                     self.get_config_value('temperature', 0.3),  # epub_temperature
-                    self.get_config_value('max_output_tokens', 16000),  # epub_max_tokens
+                    self.get_config_value('max_output_tokens', 65536),  # epub_max_tokens
                     self.get_config_value('enable_image_translation', False),  # enable_image_translation
-                    self.get_config_value('enable_auto_glossary', False),  # enable_auto_glossary  
+                    self.get_config_value('enable_auto_glossary', True),  # enable_auto_glossary  
                     self.get_config_value('append_glossary_to_prompt', True),  # append_glossary
                     # Auto glossary settings
                     self.get_config_value('glossary_min_frequency', 2),  # auto_glossary_min_freq
