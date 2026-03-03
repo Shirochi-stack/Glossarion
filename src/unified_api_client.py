@@ -5482,7 +5482,7 @@ class UnifiedClient:
                 else:
                     # For other errors, try again with a short delay
                     delay = self._compute_backoff(attempt, base_delay/4, 15)  # Short delay for other errors
-                    print(f"🔄 API error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries}): {str(e)[:100]}")
+                    print(f"🔄 API error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries}): {e}")
                     
                     wait_start = time.time()
                     while time.time() - wait_start < delay:
