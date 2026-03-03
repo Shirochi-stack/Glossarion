@@ -3680,11 +3680,6 @@ class GlossarionWeb:
                         inputs=[manga_model],
                         outputs=[manga_api_key]
                     )
-                    glossary_model.change(
-                        fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
-                        inputs=[glossary_model],
-                        outputs=[glossary_api_key]
-                    )
                     
                     # --- AuthGPT Login handler ---
                     def _authgpt_login():
@@ -3962,7 +3957,7 @@ class GlossarionWeb:
                             if API_KEY_ENCRYPTION_AVAILABLE:
                                 config = decrypt_config(config)
                             return [
-                                config.get('model', 'gpt-4-turbo'),
+                                config.get('model', 'authgpt/gpt-5.2'),
                                 config.get('api_key', ''),
                                 config.get('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # profile
                                 self.profiles.get(config.get('active_profile', list(self.profiles.keys())[0] if self.profiles else ''), ''),  # prompt
@@ -3991,7 +3986,7 @@ class GlossarionWeb:
                         else:
                             # For HF Spaces, return defaults (will be overridden by JS)
                             return [
-                                'gpt-4-turbo',  # model
+                                'authgpt/gpt-5.2',  # model
                                 '',  # api_key
                                 list(self.profiles.keys())[0] if self.profiles else '',  # profile
                                 self.profiles.get(list(self.profiles.keys())[0] if self.profiles else '', ''),  # prompt
@@ -5035,6 +5030,13 @@ CRITICAL EXTRACTION RULES:
                         inputs=[target_language_prompt],
                         outputs=[target_language]
                     )
+                    
+                    # Glossary model change: toggle API key visibility
+                    glossary_model.change(
+                        fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
+                        inputs=[glossary_model],
+                        outputs=[glossary_api_key]
+                    )
                 
                 # QA Scanner Tab
                 with gr.Tab("🔍 QA Scanner"):
@@ -5642,7 +5644,7 @@ CRITICAL EXTRACTION RULES:
                 
                 # Return values for all tracked components
                 return [
-                    self.get_config_value('model', 'gpt-4-turbo'),  # epub_model
+                    self.get_config_value('model', 'authgpt/gpt-5.2'),  # epub_model
                     self.get_config_value('api_key', ''),  # epub_api_key
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # epub_profile
                     self.profiles.get(self.get_config_value('active_profile', ''), ''),  # epub_system_prompt
@@ -5690,7 +5692,7 @@ CRITICAL EXTRACTION RULES:
                     self.get_config_value('enable_gemini_thinking', False),  # enable_gemini_thinking - disabled by default
                     self.get_config_value('gemini_thinking_budget', 0),  # gemini_thinking_budget - 0 = disabled
                     # Manga settings
-                    self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
+                    self.get_config_value('model', 'authgpt/gpt-5.2'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # manga_profile
                     self.profiles.get(self.get_config_value('active_profile', ''), ''),  # manga_system_prompt
