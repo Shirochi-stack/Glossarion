@@ -4849,6 +4849,32 @@ img {
                         candidate = os.path.normpath(os.path.join(root_dir, cand))
                         if os.path.exists(candidate):
                             return True
+
+                # Final fallback: scan output dir for any HTML file matching core name
+                # This catches double extensions like .htm.xhtml, .html.html, etc.
+                _html_exts_set = {'.html', '.xhtml', '.htm', '.xml'}
+                def _core_of(fn):
+                    n = fn
+                    if n.startswith('response_'):
+                        n = n[9:]
+                    while True:
+                        b, e = os.path.splitext(n)
+                        if e and e.lower() in _html_exts_set:
+                            n = b
+                        else:
+                            break
+                    return n.lower().strip()
+
+                target_core = _core_of(os.path.basename(rel_path))
+                if target_core:
+                    try:
+                        for f in os.listdir(self.output_dir):
+                            if f.lower().endswith(('.html', '.htm', '.xhtml')) and os.path.isfile(os.path.join(self.output_dir, f)):
+                                if _core_of(f) == target_core:
+                                    return True
+                    except Exception:
+                        pass
+
                 return False
 
             if not _path_exists_with_fallback(target_base):
