@@ -14827,7 +14827,7 @@ class UnifiedClient:
 
         max_retries = self._get_max_retries()
         last_error = None
-        print(f"🌀 Antigravity: Sending request via proxy (model={actual_model})")
+
 
         for attempt in range(max_retries):
             # Check stop flag
