@@ -6035,7 +6035,7 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
         # Actively rename files in the output directory based on content.opf
-        _rename_output_files_for_retain(self, bool(checked))
+        # _rename_output_files_for_retain(self, bool(checked))
     retain_cb.toggled.connect(_on_retain_toggle)
     retain_cb.setContentsMargins(0, 5, 0, 5)
     retain_cb.setToolTip(

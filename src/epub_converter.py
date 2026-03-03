@@ -5004,6 +5004,26 @@ img {
         # Add any unsorted items at the end (like gallery)
         final_toc.extend(unsorted_items)
 
+        # Deduplicate TOC entries if enabled
+        dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        if dedup_enabled:
+            seen_titles = set()
+            deduped_toc = []
+            removed = 0
+            for item in final_toc:
+                title = getattr(item, 'title', '') if hasattr(item, 'title') else ''
+                key = (title or '').strip()
+                if key and key in seen_titles:
+                    removed += 1
+                    continue
+                if key:
+                    seen_titles.add(key)
+                deduped_toc.append(item)
+            if removed:
+                self.log(f"🔁 Deduplicated EPUB TOC: removed {removed} duplicate entries ({len(deduped_toc)} remaining)")
+            final_toc = deduped_toc
+
         # DEBUG: Log after sorting (only if debug mode is enabled)
         if debug_mode_enabled:
             self.log("\nTOC order (after sorting to match spine):")
