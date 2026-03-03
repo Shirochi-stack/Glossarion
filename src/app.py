@@ -138,8 +138,8 @@ class GlossarionWeb:
         
         # Set batch translation settings
         if 'batch_translation' not in self.config:
-            self.config['batch_translation'] = True
-            self.decrypted_config['batch_translation'] = True
+            self.config['batch_translation'] = False
+            self.decrypted_config['batch_translation'] = False
         if 'batch_size' not in self.config:
             self.config['batch_size'] = 10
             self.decrypted_config['batch_size'] = 10
@@ -414,7 +414,7 @@ class GlossarionWeb:
             'model': 'authgpt/gpt-5.2',
             'api_key': '',
             'api_call_delay': 0.5,  # Default 0.5 seconds between API calls
-            'batch_translation': True,  # Enable batch translation by default
+            'batch_translation': False,  # Disable batch translation by default (no batching)
             'batch_size': 10,  # Default batch size
             'batching_mode': 'direct',  # Default batching mode (aggressive/direct/conservative)
             'batch_group_size': 3,  # Group size for conservative mode
@@ -593,9 +593,13 @@ class GlossarionWeb:
         os.environ['CONTEXTUAL'] = '1' if config('contextual', False) else '0'
         os.environ['TRANSLATION_HISTORY_LIMIT'] = str(config('translation_history_limit', 2))
         os.environ['TRANSLATION_HISTORY_ROLLING'] = '1' if config('translation_history_rolling', False) else '0'
-        os.environ['BATCH_TRANSLATION'] = '1' if config('batch_translation', True) else '0'
+        os.environ['BATCH_TRANSLATION'] = '1' if config('batch_translation', False) else '0'
         os.environ['BATCH_SIZE'] = str(config('batch_size', 10))
         os.environ['THREAD_SUBMISSION_DELAY'] = str(config('thread_submission_delay', 0.1))
+        # AuthGPT streaming logs — always show streamed text deltas in the UI
+        os.environ['LOG_STREAM_CHUNKS'] = '1'
+        os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1'
+        os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1'
         # DELAY is kept for backwards compatibility, but reads from api_call_delay
         os.environ['DELAY'] = str(config('api_call_delay', 0.5))
         os.environ['CHAPTER_RANGE'] = config('chapter_range', '')
@@ -604,7 +608,7 @@ class GlossarionWeb:
         os.environ['DISABLE_INPUT_TOKEN_LIMIT'] = '1' if config('token_limit_disabled', False) else '0'
         
         # Glossary Settings
-        os.environ['ENABLE_AUTO_GLOSSARY'] = '1' if config('enable_auto_glossary', False) else '0'
+        os.environ['ENABLE_AUTO_GLOSSARY'] = '1' if config('enable_auto_glossary', True) else '0'
         os.environ['APPEND_GLOSSARY_TO_PROMPT'] = '1' if config('append_glossary_to_prompt', True) else '0'
         os.environ['GLOSSARY_MIN_FREQUENCY'] = str(config('glossary_min_frequency', 2))
         os.environ['GLOSSARY_MAX_NAMES'] = str(config('glossary_max_names', 50))
@@ -2284,7 +2288,7 @@ class GlossarionWeb:
                     # IMPORTANT: token_limit_entry must return STRING because manga_translator calls .strip() on it
                     self.token_limit_entry = MockVar(str(config.get('token_limit', 200000)))
                     # Batch translation settings
-                    self.batch_translation_var = MockVar(bool(config.get('batch_translation', True)))
+                    self.batch_translation_var = MockVar(bool(config.get('batch_translation', False)))
                     self.batch_size_var = MockVar(str(config.get('batch_size', '10')))
                     # Add API key and model for custom-api OCR provider - ensure strings
                     self.api_key_entry = MockVar(str(api_key) if api_key else '')
@@ -5452,7 +5456,7 @@ CRITICAL EXTRACTION RULES:
                             
                             batch_translation = gr.Checkbox(
                                 label="Batch Translation",
-                                value=self.get_config_value('batch_translation', True)
+                                value=self.get_config_value('batch_translation', False)
                             )
                             
                             batch_size = gr.Number(
