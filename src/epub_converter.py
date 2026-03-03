@@ -4790,15 +4790,47 @@ img {
             def _path_exists_with_fallback(rel_path: str) -> bool:
                 if not rel_path:
                     return False
-                # Try with/without a leading Text/ folder
-                candidates = [rel_path]
+                # Build all candidate relative paths:
+                # - original, with/without Text/ prefix
+                # - with response_ prefix and alternate extensions
+                base_candidates = [rel_path]
                 norm_rel = rel_path.replace('\\', '/')
                 if norm_rel.lower().startswith('text/'):
-                    candidates.append(norm_rel[5:])
+                    base_candidates.append(norm_rel[5:])
                 else:
-                    candidates.append(f"Text/{norm_rel}")
-                # Direct path
-                for cand in candidates:
+                    base_candidates.append(f"Text/{norm_rel}")
+
+                # Also try response_ prefix + alternate extensions
+                _alt_exts = ['.html', '.xhtml', '.htm']
+                expanded = []
+                for cand in base_candidates:
+                    expanded.append(cand)
+                    cand_dir = os.path.dirname(cand)
+                    cand_base = os.path.basename(cand)
+                    cand_core, cand_ext = os.path.splitext(cand_base)
+                    # Strip stacked extensions
+                    while cand_ext and cand_ext.lower() in ('.html', '.xhtml', '.htm', '.xml'):
+                        cand_core_next, cand_ext_next = os.path.splitext(cand_core)
+                        if cand_ext_next and cand_ext_next.lower() in ('.html', '.xhtml', '.htm', '.xml'):
+                            cand_core = cand_core_next
+                            cand_ext = cand_ext_next
+                        else:
+                            break
+                    # Try with response_ prefix
+                    if not cand_base.startswith('response_'):
+                        for ext in _alt_exts:
+                            resp_name = f"response_{cand_core}{ext}"
+                            expanded.append(os.path.join(cand_dir, resp_name) if cand_dir else resp_name)
+                    # Try without response_ prefix + alternate extensions
+                    bare_core = cand_core
+                    if bare_core.startswith('response_'):
+                        bare_core = bare_core[9:]
+                    for ext in _alt_exts:
+                        if ext != cand_ext:
+                            expanded.append(os.path.join(cand_dir, f"{bare_core}{ext}") if cand_dir else f"{bare_core}{ext}")
+
+                # Direct path check
+                for cand in expanded:
                     direct = os.path.normpath(os.path.join(self.output_dir, cand))
                     if os.path.exists(direct):
                         return True
@@ -4813,7 +4845,7 @@ img {
                 except Exception:
                     candidate_roots = []
                 for root_dir in candidate_roots:
-                    for cand in candidates:
+                    for cand in expanded:
                         candidate = os.path.normpath(os.path.join(root_dir, cand))
                         if os.path.exists(candidate):
                             return True
