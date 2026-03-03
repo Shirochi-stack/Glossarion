@@ -5861,6 +5861,7 @@ def _create_prompt_management_section(self, parent):
     layout_combo = QComboBox()
     layout_combo.addItems(["Auto", "EPUB2", "EPUB3"])
     layout_combo.setFixedWidth(120)
+    layout_combo.wheelEvent = lambda event: None
     layout_combo.setToolTip(
         "Controls the internal folder structure of the compiled EPUB:\n\n"
         "• Auto — Detect the layout from the source EPUB and preserve it.\n"
