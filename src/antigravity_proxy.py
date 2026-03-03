@@ -20,9 +20,12 @@ Prerequisites:
 """
 
 import os
+import sys
 import json
 import time
 import logging
+import shutil
+import subprocess
 import threading
 from typing import Optional, Dict, Any, List
 
@@ -43,6 +46,10 @@ DUMMY_AUTH_TOKEN = "antigravity-proxy"
 
 # Module-level cancellation flag
 _cancel_event = threading.Event()
+
+# Module-level proxy subprocess tracking
+_proxy_process: Optional[subprocess.Popen] = None
+_proxy_launch_lock = threading.Lock()
 
 
 def cancel_stream():
@@ -88,6 +95,157 @@ def check_proxy_health() -> Dict[str, Any]:
         return {"healthy": False, "error": "Connection refused – is the antigravity-claude-proxy running?"}
     except Exception as exc:
         return {"healthy": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Auto-launch proxy
+# ---------------------------------------------------------------------------
+
+def _find_npx() -> Optional[str]:
+    """Locate the npx executable on PATH or common install locations."""
+    # Try PATH first
+    npx = shutil.which("npx")
+    if npx:
+        return npx
+
+    # On Windows, check common Node.js install locations
+    if sys.platform == "win32":
+        candidates = []
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA", "APPDATA"):
+            base = os.environ.get(env_var, "")
+            if base:
+                candidates.append(os.path.join(base, "nodejs", "npx.cmd"))
+                candidates.append(os.path.join(base, "fnm", "node-versions"))  # fnm
+        # nvm-windows
+        nvm_home = os.environ.get("NVM_HOME", "")
+        if nvm_home:
+            nvm_symlink = os.environ.get("NVM_SYMLINK", os.path.join(nvm_home, "..","nodejs"))
+            candidates.append(os.path.join(nvm_symlink, "npx.cmd"))
+        # Volta
+        volta_home = os.environ.get("VOLTA_HOME", "")
+        if volta_home:
+            candidates.append(os.path.join(volta_home, "bin", "npx.cmd"))
+        # Common default paths
+        candidates.extend([
+            os.path.expandvars(r"%PROGRAMFILES%\nodejs\npx.cmd"),
+            os.path.expandvars(r"%APPDATA%\npm\npx.cmd"),
+        ])
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+
+    return None
+
+
+def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
+    """Ensure the Antigravity proxy is running, auto-launching if needed.
+
+    1. Checks health – if already running, returns immediately.
+    2. Finds npx on PATH (or common Node.js install locations).
+    3. Launches `npx -y antigravity-claude-proxy@latest start` in background.
+    4. Waits up to 20s for the proxy to become healthy.
+
+    Returns dict with 'running' (bool), 'auto_launched' (bool), and optional 'error'.
+    """
+    global _proxy_process
+
+    _log = log_fn or (lambda msg: None)
+
+    # Already running?
+    health = check_proxy_health()
+    if health.get("healthy"):
+        return {"running": True, "auto_launched": False}
+
+    with _proxy_launch_lock:
+        # Double-check after acquiring lock (another thread may have launched it)
+        health = check_proxy_health()
+        if health.get("healthy"):
+            return {"running": True, "auto_launched": False}
+
+        # If we already launched a process, check if it's still alive
+        if _proxy_process is not None:
+            if _proxy_process.poll() is None:
+                # Process is still alive but not healthy yet – wait a bit
+                _log("🌀 Antigravity proxy process is running, waiting for it to become healthy...")
+                for _ in range(10):
+                    time.sleep(2)
+                    health = check_proxy_health()
+                    if health.get("healthy"):
+                        return {"running": True, "auto_launched": True}
+                return {
+                    "running": False,
+                    "auto_launched": True,
+                    "error": "Proxy was launched but did not become healthy within 20s."
+                }
+            else:
+                # Process exited – clear it so we can try again
+                _proxy_process = None
+
+        # Find npx
+        npx_path = _find_npx()
+        if not npx_path:
+            return {
+                "running": False,
+                "auto_launched": False,
+                "error": (
+                    "Node.js (npx) is not installed or not on PATH.\n"
+                    "Install Node.js from https://nodejs.org/ then restart Glossarion,\n"
+                    "or manually run: npx -y antigravity-claude-proxy@latest start"
+                )
+            }
+
+        # Launch the proxy as a detached background process
+        _log("🚀 Auto-launching Antigravity proxy...")
+        try:
+            # Build platform-appropriate launch args
+            kwargs: Dict[str, Any] = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "stdin": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                # CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS so it survives app close
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                DETACHED_PROCESS = 0x00000008
+                kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+            else:
+                kwargs["start_new_session"] = True
+
+            cmd = [npx_path, "-y", "antigravity-claude-proxy@latest", "start"]
+            _proxy_process = subprocess.Popen(cmd, **kwargs)
+            _log(f"🌀 Proxy process started (PID {_proxy_process.pid}), waiting for it to become healthy...")
+
+        except Exception as exc:
+            return {
+                "running": False,
+                "auto_launched": False,
+                "error": f"Failed to launch proxy: {exc}"
+            }
+
+        # Wait for it to become healthy (up to 20s)
+        for attempt in range(20):
+            time.sleep(1)
+            # Check the process hasn't crashed
+            if _proxy_process.poll() is not None:
+                _proxy_process = None
+                return {
+                    "running": False,
+                    "auto_launched": True,
+                    "error": (
+                        "Proxy process exited immediately. "
+                        "Try running manually: npx -y antigravity-claude-proxy@latest start"
+                    )
+                }
+            health = check_proxy_health()
+            if health.get("healthy"):
+                _log("✅ Antigravity proxy is now running!")
+                return {"running": True, "auto_launched": True}
+
+        return {
+            "running": False,
+            "auto_launched": True,
+            "error": "Proxy launched but did not become healthy within 20s. Check the proxy logs."
+        }
 
 
 # ---------------------------------------------------------------------------

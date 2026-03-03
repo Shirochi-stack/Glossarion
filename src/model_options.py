@@ -18,7 +18,8 @@ def get_model_options() -> List[str]:
         # Google Gemini Models
         "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
         "gemini-2.0-flash","gemini-2.0-flash-lite", "gemini-pro", "gemini-pro-vision",
-        "gemini-3-pro-preview","gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-3-pro-image-preview",
+        "gemini-3-pro-preview","gemini-3-flash-preview", "gemini-3.1-pro-preview","gemini-3.1-flash-lite-preview", "gemini-3-pro-image-preview",
+        "gemini-3.1-flash-image-preview",
         
         # Anthropic Claude Models
         "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
@@ -159,7 +160,7 @@ def get_model_options() -> List[str]:
         "antigravity/claude-opus-4-6-thinking", "antigravity/claude-sonnet-4-6-thinking",
 
         # Gemini models via Cloud Code
-        "antigravity/gemini-3-flash", "antigravity/gemini-3.1-flash",
+        "antigravity/gemini-3-flash",
         "antigravity/gemini-3.1-pro-high", "antigravity/gemini-3.1-pro-low",
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown

@@ -935,6 +935,7 @@ try:
     from antigravity_proxy import cancel_stream as _antigravity_cancel_stream
     from antigravity_proxy import reset_cancel as _antigravity_reset_cancel
     from antigravity_proxy import check_proxy_health as _antigravity_health_check
+    from antigravity_proxy import ensure_proxy_running as _antigravity_ensure_running
     ANTIGRAVITY_AVAILABLE = True
 except ImportError:
     _antigravity_send = None
@@ -942,6 +943,7 @@ except ImportError:
     _antigravity_cancel_stream = None
     _antigravity_reset_cancel = None
     _antigravity_health_check = None
+    _antigravity_ensure_running = None
     ANTIGRAVITY_AVAILABLE = False
     
 from functools import lru_cache
@@ -14803,6 +14805,16 @@ class UnifiedClient:
                 "Also make sure the proxy is running: npx antigravity-claude-proxy@latest start",
                 error_type="config_error"
             )
+
+        # Auto-launch the proxy if it's not running
+        if _antigravity_ensure_running is not None:
+            proxy_status = _antigravity_ensure_running(log_fn=print)
+            if not proxy_status.get("running"):
+                error_msg = proxy_status.get("error", "Proxy is not running.")
+                raise UnifiedClientError(
+                    f"Antigravity proxy could not be started: {error_msg}",
+                    error_type="config_error"
+                )
 
         # Strip the antigravity/ prefix to get the actual model name
         actual_model = self.model
