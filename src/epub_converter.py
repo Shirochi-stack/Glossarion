@@ -1729,6 +1729,11 @@ class EPUBCompiler:
                 self.log("🛑 EPUB converter stopped by user")
                 return
             
+            # Build OPF filename map for restoring original names inside the EPUB
+            self._opf_filename_map = self._build_opf_filename_map()
+            if self._opf_filename_map:
+                self.log(f"✅ Loaded {len(self._opf_filename_map)} original filenames from content.opf")
+
             # Process chapters with updated titles
             chapters_added = self._process_chapters(
                 book, html_files, chapter_titles_info, 
@@ -2406,7 +2411,9 @@ class EPUBCompiler:
                     # Create EPUB chapter
                     import html
                     text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
-                    chapter_file_name = os.path.basename(chapter_data['filename'])
+                    # Restore original OPF filename (strips response_ prefix, restores source extension)
+                    opf_map = getattr(self, '_opf_filename_map', {})
+                    chapter_file_name = self._restore_opf_filename(chapter_data['filename'], opf_map)
                     if text_dirname:
                         chapter_file_name = f"{text_dirname}/{chapter_file_name}"
                     chapter = epub.EpubHtml(
@@ -3017,7 +3024,9 @@ class EPUBCompiler:
             # Create chapter object
             import html
             text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
-            chapter_file_name = os.path.basename(filename)
+            # Restore original OPF filename (strips response_ prefix, restores source extension)
+            opf_map = getattr(self, '_opf_filename_map', {})
+            chapter_file_name = self._restore_opf_filename(filename, opf_map)
             if text_dirname:
                 chapter_file_name = f"{text_dirname}/{chapter_file_name}"
             chapter = epub.EpubHtml(
@@ -4365,6 +4374,55 @@ img {
             else:
                 break
         return core
+
+    def _build_opf_filename_map(self) -> dict:
+        """Build a mapping from core_name → original OPF basename from content.opf.
+
+        Returns an empty dict if content.opf does not exist or is unparseable.
+        The keys are lower-cased core names (extensions and 'response_' stripped).
+        The values are the original basenames exactly as they appear in the OPF manifest.
+        """
+        opf_path = os.path.join(self.output_dir, 'content.opf')
+        if not os.path.exists(opf_path):
+            return {}
+        try:
+            tree = ET.parse(opf_path)
+            root = tree.getroot()
+            ns_uri = ''
+            if root.tag.startswith('{'):
+                ns_uri = root.tag[1:root.tag.index('}')]
+            ns = {'opf': ns_uri} if ns_uri else {}
+            mapping = {}
+            xpath = './/opf:manifest/opf:item' if ns else \
+                    './/{http://www.idpf.org/2007/opf}manifest/{http://www.idpf.org/2007/opf}item'
+            for item in root.findall(xpath, ns if ns else None):
+                href = item.get('href', '')
+                media = item.get('media-type', '')
+                if not href:
+                    continue
+                if 'html' not in media.lower() and \
+                   not href.lower().endswith(('.html', '.xhtml', '.htm')):
+                    continue
+                basename = os.path.basename(href)
+                core = self._strip_all_ext(basename).lower().strip()
+                if core:
+                    mapping[core] = basename
+            return mapping
+        except Exception:
+            return {}
+
+    def _restore_opf_filename(self, disk_filename: str, opf_map: dict) -> str:
+        """Return the original OPF basename for *disk_filename*, or the
+        basename unchanged if it cannot be resolved.
+
+        Handles ``response_`` prefix and stacked extensions automatically.
+        """
+        base = os.path.basename(disk_filename)
+        core = base
+        if core.startswith('response_'):
+            core = core[9:]
+        core = self._strip_all_ext(core).lower().strip()
+        return opf_map.get(core, base)
 
     def _normalize_core_name(self, filename_or_href: str) -> str:
         """Normalize a filename/href for matching (strip fragment, response_ prefix, and all extensions)."""

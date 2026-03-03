@@ -2286,7 +2286,36 @@ class ProgressManager:
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
-                    
+                    # Before deleting, check if the file was renamed (response_/extension toggle)
+                    _html_exts = {'.html', '.xhtml', '.htm', '.xml'}
+                    def _norm_cleanup(fn):
+                        b = os.path.basename(fn)
+                        if b.startswith('response_'):
+                            b = b[len('response_'):]
+                        while True:
+                            b2, e2 = os.path.splitext(b)
+                            if e2.lower() in _html_exts:
+                                b = b2
+                            else:
+                                break
+                        return b.lower()
+
+                    expected_norm = _norm_cleanup(output_file)
+                    renamed_match = None
+                    try:
+                        for f in os.listdir(output_dir):
+                            if f.lower().endswith(('.html', '.xhtml', '.htm')):
+                                if _norm_cleanup(f) == expected_norm:
+                                    renamed_match = f
+                                    break
+                    except Exception:
+                        pass
+
+                    if renamed_match:
+                        # File was renamed (retain toggle) – update the stored filename
+                        chapter_info['output_file'] = renamed_match
+                        continue
+
                     actual_num = chapter_info.get("actual_num")
                     if actual_num is not None:
                         # Track if this was a parent of merged chapters

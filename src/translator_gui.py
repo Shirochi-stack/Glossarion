@@ -8345,6 +8345,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set EPUB_PATH in environment for immediate use
                 os.environ['EPUB_PATH'] = file_path
                 
+                # Rename existing output files to match current retain-source-extension toggle
+                # This must run before translation starts so the progress tracker sees correct filenames
+                try:
+                    from other_settings import _rename_output_files_for_retain
+                    retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                    _rename_output_files_for_retain(self, retain, output_dir=output_dir)
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not sync output filenames: {e}")
+
+                
             old_argv = sys.argv
             old_env = dict(os.environ)
             
