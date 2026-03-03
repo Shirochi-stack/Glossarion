@@ -5823,6 +5823,8 @@ def _create_prompt_management_section(self, parent):
     def _on_ncx_toggle(checked):
         try:
             self.force_ncx_only_var = bool(checked)
+            self.config['force_ncx_only'] = bool(checked)
+            os.environ['FORCE_NCX_ONLY'] = '1' if checked else '0'
         except Exception:
             pass
     ncx_cb.toggled.connect(_on_ncx_toggle)
@@ -5918,6 +5920,8 @@ def _create_prompt_management_section(self, parent):
     def _on_css_toggle(checked):
         try:
             self.attach_css_to_chapters_var = bool(checked)
+            self.config['attach_css_to_chapters'] = bool(checked)
+            os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if checked else '0'
         except Exception:
             pass
 
@@ -6005,6 +6009,8 @@ def _create_prompt_management_section(self, parent):
     def _on_html_method_toggle(checked):
         try:
             self.epub_use_html_method_var = bool(checked)
+            self.config['epub_use_html_method'] = bool(checked)
+            os.environ['EPUB_USE_HTML_METHOD'] = '1' if checked else '0'
         except Exception:
             pass
     html_method_cb.toggled.connect(_on_html_method_toggle)
@@ -6024,6 +6030,8 @@ def _create_prompt_management_section(self, parent):
     def _on_retain_toggle(checked):
         try:
             self.retain_source_extension_var = bool(checked)
+            self.config['retain_source_extension'] = bool(checked)
+            os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if checked else '0'
         except Exception:
             pass
         # Actively rename files in the output directory based on content.opf
@@ -6962,6 +6970,8 @@ def _create_processing_options_section(self, parent):
     def _on_gallery_toggle(checked):
         try:
             self.disable_epub_gallery_var = bool(checked)
+            self.config['disable_epub_gallery'] = bool(checked)
+            os.environ['DISABLE_EPUB_GALLERY'] = '1' if checked else '0'
         except Exception:
             pass
     gallery_cb.toggled.connect(_on_gallery_toggle)
@@ -6982,6 +6992,8 @@ def _create_processing_options_section(self, parent):
     def _on_cover_toggle(checked):
         try:
             self.disable_automatic_cover_creation_var = bool(checked)
+            self.config['disable_automatic_cover_creation'] = bool(checked)
+            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = '1' if checked else '0'
         except Exception:
             pass
     cover_cb.toggled.connect(_on_cover_toggle)
@@ -7003,6 +7015,8 @@ def _create_processing_options_section(self, parent):
         try:
             old_value = self.translate_special_files_var
             self.translate_special_files_var = bool(checked)
+            self.config['translate_special_files'] = bool(checked)
+            os.environ['TRANSLATE_SPECIAL_FILES'] = '1' if checked else '0'
             # Show helpful message if value changed
             if old_value != bool(checked):
                 if checked:
