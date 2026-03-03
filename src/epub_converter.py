@@ -5820,7 +5820,18 @@ img {
         self.log(f"  Total pages: {len(all_pages)}")
         self.log("  Writing PDF to disk...")
         try:
-            documents[0].copy(all_pages).write_pdf(pdf_path)
+            # When image compression is disabled, tell WeasyPrint to write
+            # an uncompressed PDF so it does not re-encode images to lossy
+            # JPEG internally (which would shrink a 10 MB cover to ~2 MB).
+            _pdf_write_kwargs = {}
+            if compression_enabled:
+                _pdf_quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                _pdf_write_kwargs['image_quality'] = _pdf_quality
+                self.log(f"  PDF image quality: {_pdf_quality}%")
+            else:
+                _pdf_write_kwargs['uncompressed_pdf'] = True
+                self.log("  PDF images: uncompressed (preserving original quality)")
+            documents[0].copy(all_pages).write_pdf(pdf_path, **_pdf_write_kwargs)
         except BaseException as e:
             import traceback
             self.log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")

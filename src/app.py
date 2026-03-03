@@ -81,6 +81,17 @@ except ImportError as e:
             print(f"❌ Missing: {file}")
 
 
+# Models that do not require an API key
+_NO_API_KEY_PREFIXES = ('vertex/', 'authgpt/', 'google-translate', 'deepl')
+
+def _model_needs_no_api_key(model: str) -> bool:
+    """Return True if the given model name does not require a user-supplied API key."""
+    if not model:
+        return False
+    m = model.lower().strip()
+    return any(m.startswith(p) for p in _NO_API_KEY_PREFIXES)
+
+
 class GlossarionWeb:
     """Web interface for Glossarion translator"""
     
@@ -344,7 +355,7 @@ class GlossarionWeb:
     def get_default_config(self):
         """Get default configuration for Hugging Face Spaces"""
         return {
-            'model': 'gpt-4-turbo',
+            'model': 'authgpt/gpt-5.2',
             'api_key': '',
             'api_call_delay': 0.5,  # Default 0.5 seconds between API calls
             'batch_translation': True,  # Enable batch translation by default
@@ -631,6 +642,24 @@ class GlossarionWeb:
         # Concise Pipeline Logs
         os.environ['CONCISE_PIPELINE_LOGS'] = '1' if config('concise_pipeline_logs', False) else '0'
         
+        # Glossary Append Prompt (CRITICAL: Must be set or build_system_prompt raises ValueError)
+        append_gloss_prompt = config('append_glossary_prompt', '')
+        if not append_gloss_prompt:
+            append_gloss_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'
+        os.environ['APPEND_GLOSSARY_PROMPT'] = append_gloss_prompt
+        
+        # Output language
+        os.environ['OUTPUT_LANGUAGE'] = config('output_language', 'English')
+        
+        # Glossary compression
+        os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config('compress_glossary_prompt', False) else '0'
+        
+        # Additional glossary
+        os.environ['ADD_ADDITIONAL_GLOSSARY'] = '1' if config('add_additional_glossary', False) else '0'
+        
+        # Book title translation
+        os.environ['TRANSLATE_BOOK_TITLE'] = '1' if config('translate_book_title', True) else '0'
+        
         print("✅ All environment variables set from configuration")
     
     def save_config(self, config):
@@ -721,7 +750,7 @@ class GlossarionWeb:
             yield None, None, None, "❌ Please upload an EPUB or TXT file", None, "Error", 0
             return
         
-        if not api_key:
+        if not api_key and not _model_needs_no_api_key(model):
             yield None, None, None, "❌ Please provide an API key", None, "Error", 0
             return
         
@@ -784,6 +813,7 @@ class GlossarionWeb:
             yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Configuration set...", 10
             
             # Set API key environment variable
+            api_key = api_key or ''
             if 'gpt' in model.lower() or 'openai' in model.lower():
                 os.environ['OPENAI_API_KEY'] = api_key
                 os.environ['API_KEY'] = api_key
@@ -1879,11 +1909,11 @@ class GlossarionWeb:
             self.is_translating = False
             yield "❌ Please upload at least one image", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
-        
-        if not api_key:
+        if not api_key and not _model_needs_no_api_key(model):
             self.is_translating = False
             yield "❌ Please provide an API key", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
+        api_key = api_key or ''
         
         # Check for stop request
         if self.stop_flag.is_set():
@@ -3012,7 +3042,7 @@ class GlossarionWeb:
                             
                             epub_model = gr.Dropdown(
                                 choices=self.models,
-                                value=self.get_config_value('model', 'gpt-4-turbo'),
+                                value=self.get_config_value('model', 'authgpt/gpt-5.2'),
                                 label="🤖 AI Model",
                                 interactive=True,
                                 allow_custom_value=True,
@@ -3023,7 +3053,20 @@ class GlossarionWeb:
                                 label="🔑 API Key",
                                 type="password",
                                 placeholder="Enter your API key",
-                                value=self.get_config_value('api_key', '')
+                                value=self.get_config_value('api_key', ''),
+                                visible=not _model_needs_no_api_key(self.get_config_value('model', 'authgpt/gpt-5.2'))
+                            )
+                            
+                            # AuthGPT login button (visible for authgpt/* models)
+                            _initial_model = self.get_config_value('model', 'authgpt/gpt-5.2').lower()
+                            authgpt_login_btn = gr.Button(
+                                "🔐 ChatGPT Login",
+                                variant="secondary",
+                                visible=_initial_model.startswith('authgpt/')
+                            )
+                            authgpt_login_status = gr.Textbox(
+                                label="", interactive=False, visible=False,
+                                max_lines=1
                             )
                             
                             # Use all profiles without filtering
@@ -3288,7 +3331,7 @@ class GlossarionWeb:
                             
                             manga_model = gr.Dropdown(
                                 choices=self.models,
-                                value=self.get_config_value('model', 'gpt-4-turbo'),
+                                value=self.get_config_value('model', 'authgpt/gpt-5.2'),
                                 label="🤖 AI Model",
                                 interactive=True,
                                 allow_custom_value=True,
@@ -3299,7 +3342,8 @@ class GlossarionWeb:
                                 label="🔑 API Key",
                                 type="password",
                                 placeholder="Enter your API key",
-                                value=self.get_config_value('api_key', '')  # Pre-fill from config
+                                value=self.get_config_value('api_key', ''),
+                                visible=not _model_needs_no_api_key(self.get_config_value('model', 'authgpt/gpt-5.2'))
                             )
                             
                             # Use all profiles without filtering
@@ -3614,6 +3658,62 @@ class GlossarionWeb:
                         fn=lambda p: self.profiles.get(p, ''),
                         inputs=[manga_profile],
                         outputs=[manga_system_prompt]
+                    )
+                    
+                    # --- Model change handlers: toggle API key & AuthGPT login ---
+                    def _on_model_change(model):
+                        """Return visibility updates for API key and AuthGPT login button."""
+                        hide_key = _model_needs_no_api_key(model or '')
+                        is_authgpt = (model or '').lower().startswith('authgpt/')
+                        return (
+                            gr.update(visible=not hide_key),   # api_key
+                            gr.update(visible=is_authgpt),     # authgpt_login_btn
+                        )
+                    
+                    epub_model.change(
+                        fn=_on_model_change,
+                        inputs=[epub_model],
+                        outputs=[epub_api_key, authgpt_login_btn]
+                    )
+                    manga_model.change(
+                        fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
+                        inputs=[manga_model],
+                        outputs=[manga_api_key]
+                    )
+                    glossary_model.change(
+                        fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
+                        inputs=[glossary_model],
+                        outputs=[glossary_api_key]
+                    )
+                    
+                    # --- AuthGPT Login handler ---
+                    def _authgpt_login():
+                        """Run OAuth flow for ChatGPT subscription login."""
+                        try:
+                            from authgpt_auth import get_default_store, run_oauth_flow
+                            store = get_default_store()
+                            
+                            # If already logged in, show status
+                            if store.has_tokens:
+                                info = store.account_info
+                                email = info.get('email', '')
+                                plan = info.get('plan_type', '')
+                                return gr.update(value=f"✅ Already logged in ({email or plan or 'active'})", visible=True)
+                            
+                            # Run OAuth flow (opens browser)
+                            tokens = run_oauth_flow()
+                            store.save_tokens(tokens)
+                            info = store.account_info
+                            email = info.get('email', '')
+                            plan = info.get('plan_type', '')
+                            return gr.update(value=f"✅ Logged in ({email or plan or 'success'})", visible=True)
+                        except Exception as e:
+                            return gr.update(value=f"❌ Login failed: {e}", visible=True)
+                    
+                    authgpt_login_btn.click(
+                        fn=_authgpt_login,
+                        inputs=[],
+                        outputs=[authgpt_login_status]
                     )
                     
                     # Manual save function for all configuration
@@ -4621,7 +4721,7 @@ class GlossarionWeb:
                             
                             glossary_model = gr.Dropdown(
                                 choices=self.models,
-                                value=self.get_config_value('model', 'gpt-4-turbo'),
+                                value=self.get_config_value('model', 'authgpt/gpt-5.2'),
                                 label="🤖 AI Model",
                                 interactive=True,
                                 allow_custom_value=True,
@@ -4632,7 +4732,8 @@ class GlossarionWeb:
                                 label="🔑 API Key",
                                 type="password",
                                 placeholder="Enter your API key",
-                                value=self.get_config_value('api_key', '')
+                                value=self.get_config_value('api_key', ''),
+                                visible=not _model_needs_no_api_key(self.get_config_value('model', 'authgpt/gpt-5.2'))
                             )
                             
                             # Tabs for different settings sections
