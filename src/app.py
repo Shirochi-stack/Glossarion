@@ -623,7 +623,7 @@ class GlossarionWeb:
         os.environ['MANUAL_GLOSSARY_MAX_TITLES'] = str(config('manual_glossary_max_titles', 30))
         os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(config('glossary_max_text_size', 0))
         os.environ['GLOSSARY_MAX_SENTENCES'] = str(config('glossary_max_sentences', 200))
-        os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(config('glossary_chapter_split_threshold', 8192))
+        os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(config('glossary_chapter_split_threshold', 0))
         os.environ['MANUAL_GLOSSARY_FILTER_MODE'] = config('manual_glossary_filter_mode', 'all')
         os.environ['STRIP_HONORIFICS'] = '1' if config('strip_honorifics', True) else '0'
         os.environ['MANUAL_GLOSSARY_FUZZY_THRESHOLD'] = str(config('manual_glossary_fuzzy_threshold', 0.90))
@@ -711,8 +711,19 @@ class GlossarionWeb:
         # Output language
         os.environ['OUTPUT_LANGUAGE'] = config('output_language', 'English')
         
-        # Glossary compression
-        os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config('compress_glossary_prompt', False) else '0'
+        # Glossary compression (enabled by default)
+        os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config('compress_glossary_prompt', True) else '0'
+        
+        # Dynamic limit expansion (enabled by default)
+        os.environ['GLOSSARY_INCLUDE_ALL_CHARACTERS'] = '1' if config('glossary_include_all_characters', True) else '0'
+        
+        # Auto glossary prompt from config (prevents fallback to hard-coded default)
+        auto_gloss_prompt = config('unified_auto_glosary_prompt3', '')
+        if auto_gloss_prompt:
+            os.environ['AUTO_GLOSSARY_PROMPT'] = auto_gloss_prompt
+        
+        # Output token limit
+        os.environ['MAX_OUTPUT_TOKENS'] = str(config('max_output_tokens', 128000))
         
         # Additional glossary
         os.environ['ADD_ADDITIONAL_GLOSSARY'] = '1' if config('add_additional_glossary', False) else '0'
@@ -1416,6 +1427,7 @@ class GlossarionWeb:
             yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Starting...", 0
             
             input_path = epub_file.name if hasattr(epub_file, 'name') else epub_file
+            output_json_path = input_path.replace('.epub', '_glossary.json')
             output_path = input_path.replace('.epub', '_glossary.csv')
             
             extraction_logs.append(f"📖 Input: {os.path.basename(input_path)}")
@@ -1425,19 +1437,28 @@ class GlossarionWeb:
             # Set all environment variables from config
             self.set_all_environment_variables()
             
-            # Set API key
-            if 'gpt' in model.lower():
-                os.environ['OPENAI_API_KEY'] = api_key
-            elif 'claude' in model.lower():
-                os.environ['ANTHROPIC_API_KEY'] = api_key
-            else:
-                os.environ['API_KEY'] = api_key
+            # Set API key (set all common env vars for unified_api_client compatibility)
+            os.environ['API_KEY'] = api_key
+            os.environ['OPENAI_API_KEY'] = api_key
+            os.environ['OPENAI_OR_Gemini_API_KEY'] = api_key
+            os.environ['GEMINI_API_KEY'] = api_key
+            
+            # Enable streaming logs so extraction shows real-time API output
+            os.environ['ENABLE_STREAMING'] = '1'
+            os.environ['LOG_STREAM_CHUNKS'] = '1'
+            os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1'
+            os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1'
             
             extraction_logs.append("📋 Extracting text from EPUB...")
             yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Extracting text...", 20
             
             # Set environment variables for glossary extraction
             os.environ['MODEL'] = model
+            
+            # CRITICAL: Set EPUB_PATH and OUTPUT_PATH for extract_glossary_from_epub.main() GUI mode
+            os.environ['EPUB_PATH'] = input_path
+            os.environ['OUTPUT_PATH'] = output_json_path
+            
             os.environ['GLOSSARY_MIN_FREQUENCY'] = str(min_frequency)
             os.environ['GLOSSARY_MAX_NAMES'] = str(max_names)
             os.environ['GLOSSARY_MAX_TITLES'] = str(max_titles)
@@ -1550,10 +1571,21 @@ class GlossarionWeb:
             extraction_logs.append("🖍️ Writing glossary to CSV...")
             yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Writing CSV...", 95
             
-            if os.path.exists(output_path):
+            # The extract_glossary_from_epub module saves CSV inside a Glossary/ subfolder
+            glossary_dir = os.path.join(os.path.dirname(output_json_path), "Glossary")
+            glossary_csv_in_subdir = os.path.join(glossary_dir, os.path.basename(output_path))
+            
+            # Check multiple possible output locations
+            found_output = None
+            for candidate in [glossary_csv_in_subdir, output_path, output_json_path]:
+                if os.path.exists(candidate):
+                    found_output = candidate
+                    break
+            
+            if found_output:
                 extraction_logs.append(f"✅ Glossary extracted successfully!")
-                extraction_logs.append(f"💾 Saved to: {os.path.basename(output_path)}")
-                yield output_path, gr.update(visible=True), gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), "Extraction complete!", 100
+                extraction_logs.append(f"💾 Saved to: {os.path.basename(found_output)}")
+                yield found_output, gr.update(visible=True), gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), "Extraction complete!", 100
             else:
                 extraction_logs.append("❌ Glossary extraction failed - output file not created")
                 yield None, None, gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), "Extraction failed", 0

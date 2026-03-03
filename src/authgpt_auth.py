@@ -459,6 +459,50 @@ class AuthGPTTokenStore:
                     "Run the OAuth login flow first."
                 )
 
+            # Detect headless environments (HF Spaces, Docker, etc.) where browser login is impossible
+            is_headless = (
+                os.environ.get("SPACE_ID") is not None
+                or os.environ.get("HF_SPACES") == "true"
+                or os.environ.get("DOCKER_CONTAINER") == "true"
+                or os.environ.get("KUBERNETES_SERVICE_HOST") is not None
+            )
+            if is_headless:
+                # Check for manually-provided tokens via environment variables
+                env_access = os.environ.get("AUTHGPT_ACCESS_TOKEN", "").strip()
+                env_refresh = os.environ.get("AUTHGPT_REFRESH_TOKEN", "").strip()
+                if env_access:
+                    # User provided an access token directly — save and use it
+                    manual_tokens = {
+                        "access_token": env_access,
+                        "expires_at": time.time() + 3600,  # assume 1h validity
+                    }
+                    if env_refresh:
+                        manual_tokens["refresh_token"] = env_refresh
+                    self.save_tokens(manual_tokens)
+                    logger.info("AuthGPT: Using access token from AUTHGPT_ACCESS_TOKEN env var")
+                    return env_access
+                if env_refresh:
+                    # Try refreshing with the provided refresh token
+                    try:
+                        refreshed = refresh_access_token(env_refresh)
+                        self.save_tokens(refreshed)
+                        logger.info("AuthGPT: Obtained access token via AUTHGPT_REFRESH_TOKEN env var")
+                        return refreshed["access_token"]
+                    except Exception as ref_exc:
+                        raise RuntimeError(
+                            f"AuthGPT: AUTHGPT_REFRESH_TOKEN was set but refresh failed: {ref_exc}\n"
+                            "The refresh token may be expired. Please obtain a new one."
+                        )
+                raise RuntimeError(
+                    "AuthGPT: Browser-based OAuth login is not available in headless environments "
+                    "(e.g. Hugging Face Spaces, Docker containers).\n"
+                    "To use AuthGPT models, set one of these as environment secrets:\n"
+                    "  • AUTHGPT_ACCESS_TOKEN — a valid ChatGPT OAuth access token\n"
+                    "  • AUTHGPT_REFRESH_TOKEN — a ChatGPT OAuth refresh token (will auto-refresh)\n"
+                    "You can obtain these by running the OAuth flow locally first, then copying\n"
+                    "the tokens from ~/.glossarion/authgpt_tokens.json"
+                )
+
             print("🔄 AuthGPT: No valid token found – starting browser login…")
             new_tokens = run_oauth_flow()
             self.save_tokens(new_tokens)

@@ -841,8 +841,20 @@ def set_output_redirect(log_callback=None):
         sys.stdout = CallbackWriter(log_callback)
 
 def load_config(path: str) -> Dict:
-    with open(path, 'r', encoding='utf-8') as f:
-        cfg = json.load(f)
+    # Gracefully handle missing config file (e.g. when running from Gradio web UI)
+    # Instead of crashing, create a sensible default config from environment variables
+    if not path or not os.path.exists(path):
+        print(f"[Info] Config file not found at '{path}', using environment variables and defaults")
+        cfg = {
+            'api_key': os.getenv('API_KEY') or os.getenv('OPENAI_API_KEY') or os.getenv('GEMINI_API_KEY', ''),
+            'model': os.getenv('MODEL', 'gemini-2.0-flash'),
+            'temperature': 0.1,
+            'max_tokens': 65536,
+            'context_limit_chapters': 3,
+        }
+    else:
+        with open(path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
 
     # override context_limit_chapters if GUI passed GLOSSARY_CONTEXT_LIMIT
     env_limit = os.getenv("GLOSSARY_CONTEXT_LIMIT")
