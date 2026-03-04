@@ -884,7 +884,9 @@ class GlossarionWeb:
         max_tokens,
         enable_image_trans=False,
         glossary_file=None,
-        target_language='English'
+        target_language='English',
+        enable_auto_gloss=None,
+        append_gloss_to_prompt=None
     ):
         """Translate EPUB file - yields progress updates"""
         
@@ -948,6 +950,14 @@ class GlossarionWeb:
             
             # Set all additional environment variables from config
             self.set_all_environment_variables()
+            
+            # CRITICAL: Override glossary settings from UI toggle values
+            # (set_all_environment_variables reads from saved config, not the live UI)
+            if enable_auto_gloss is not None:
+                os.environ['ENABLE_AUTO_GLOSSARY'] = '1' if enable_auto_gloss else '0'
+                translation_logs.append(f"📋 Auto Glossary: {'enabled' if enable_auto_gloss else 'disabled'}")
+            if append_gloss_to_prompt is not None:
+                os.environ['APPEND_GLOSSARY_TO_PROMPT'] = '1' if append_gloss_to_prompt else '0'
             
             # AUTO-SWITCH EXTRACTION MODE BASED ON PROFILE NAME (matches translator_gui.py)
             if profile_name:
@@ -3429,7 +3439,8 @@ class GlossarionWeb:
                                 append_glossary = gr.Checkbox(
                                     label="Append Glossary to System Prompt",
                                     value=self.get_config_value('append_glossary_to_prompt', True),
-                                    info="Applies to ALL glossaries - manual and automatic"
+                                    info="Applies to ALL glossaries - manual and automatic",
+                                    interactive=True
                                 )
                                 
                                 with gr.Column(visible=self.get_config_value('enable_auto_glossary', True), elem_id="auto-glossary-settings") as auto_glossary_settings:
@@ -3587,7 +3598,9 @@ class GlossarionWeb:
                             epub_max_tokens,
                             enable_image_translation,
                             glossary_file,
-                            epub_target_language
+                            epub_target_language,
+                            enable_auto_glossary,
+                            append_glossary
                         ],
                         outputs=[
                             epub_output,          # Download file
@@ -4013,7 +4026,8 @@ class GlossarionWeb:
                     authgpt_login_btn.click(
                         fn=_authgpt_login,
                         inputs=[],
-                        outputs=[authgpt_login_status]
+                        outputs=[authgpt_login_status],
+                        concurrency_limit=None  # OAuth flow blocks for up to 300s waiting for browser callback
                     )
                     
                     # Manual save function for all configuration
