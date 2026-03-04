@@ -4286,23 +4286,29 @@ class UnifiedClient:
             gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
             
             if use_gemini_endpoint and gemini_endpoint:
-                # Use OpenAI client for Gemini with custom endpoint
-                #print(f"[DEBUG] Preparing Gemini with OpenAI-compatible endpoint")
-                pass
-                if openai is None:
-                    raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                # Auto-detect: bare hostname = gRPC, http URL = OpenAI REST
+                _ep_check = gemini_endpoint.strip().lower()
+                _is_grpc_early = not _ep_check.startswith("http") and "/openai" not in _ep_check
                 
-                # Ensure endpoint has proper format
-                if not gemini_endpoint.endswith('/openai/'):
-                    if gemini_endpoint.endswith('/'):
-                        gemini_endpoint = gemini_endpoint + 'openai/'
-                    else:
-                        gemini_endpoint = gemini_endpoint + '/openai/'
+                if _is_grpc_early:
+                    # Bare hostname → gRPC transport, don't modify or require OpenAI lib
+                    pass
+                else:
+                    # OpenAI-compatible REST endpoint
+                    if openai is None:
+                        raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                    
+                    # Ensure endpoint has proper format for OpenAI REST
+                    if not gemini_endpoint.endswith('/openai/'):
+                        if gemini_endpoint.endswith('/'):
+                            gemini_endpoint = gemini_endpoint + 'openai/'
+                        else:
+                            gemini_endpoint = gemini_endpoint + '/openai/'
+                    
+                    # Set base_url for Gemini OpenAI endpoint
+                    base_url = gemini_endpoint
                 
-                # Set base_url for Gemini OpenAI endpoint
-                base_url = gemini_endpoint
-                
-                #print(f"[DEBUG] Gemini will use OpenAI-compatible endpoint: {gemini_endpoint}")
+                #print(f"[DEBUG] Gemini will use endpoint: {gemini_endpoint}")
                 
                 # Safety config will be saved when actual API call is made
                 # No need to save during client setup
