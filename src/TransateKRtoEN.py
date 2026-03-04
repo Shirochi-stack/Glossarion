@@ -5607,17 +5607,13 @@ class BatchTranslationProcessor:
                     f.write(cleaned)
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
-                elif is_partial_result:
-                    chapter_status = "qa_failed"
-                    print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Partial translation (graceful stop)")
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features, qa_issues_found=["PARTIAL"])
-                    self.save_progress_fn()
-                    return False, actual_num, None, None, None
-                else:
-                    chapter_status = "completed"
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
-                    self.save_progress_fn()
-                    self.chapters_completed += 1
+
+            # If we reached here, the chapter completed successfully (truncated/partial
+            # cases already returned above in the early gate).
+            with self.progress_lock:
+                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
+                self.save_progress_fn()
+                self.chapters_completed += 1
             
             # Log removed - executor loop will log "Chapter X done"
             # print(f"✅ Chapter {actual_num} completed successfully")
