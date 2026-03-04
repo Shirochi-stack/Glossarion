@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.8.1"
+        __version__ = "7.8.2"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.1')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.2')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2681,7 +2681,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.8.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.8.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -3434,8 +3434,11 @@ Recent translations to summarize:
         # Get default model and model list
         default_model = self.config.get('model', 'authgpt/gpt-5.2')
         self.model_var = default_model
-        models = get_model_options()
-        self._model_all_values = models
+        # Use custom model list from config if saved, otherwise default catalog
+        models = self.config.get('custom_model_list', None)
+        if models is None:
+            models = get_model_options()
+        self._model_all_values = list(models)
         
         # Create editable combobox
         self.model_combo = QComboBox()
@@ -3443,8 +3446,11 @@ Recent translations to summarize:
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
         self.model_combo.setMaximumWidth(450)
-        # Add custom styling with unicode arrow
+        # Add custom styling with unicode arrow and left padding for cog overlay
         self.model_combo.setStyleSheet("""
+            QComboBox {
+                padding-left: 34px;
+            }
             QComboBox::down-arrow {
                 image: none;
                 width: 12px;
@@ -3455,6 +3461,65 @@ Recent translations to summarize:
         # Add unicode arrow using a label overlay
         self._add_combobox_arrow(self.model_combo)
         self.frame.addWidget(self.model_combo, 1, 1, 1, 1)  # row, col, rowspan, colspan
+        
+        # Manage Models (cog) button overlaid on the left inside the combo
+        self.model_manage_btn = QToolButton(self.model_combo)
+        self.model_manage_btn.setText("⚙")
+        self.model_manage_btn.setToolTip("Manage Models")
+        self.model_manage_btn.setFixedSize(20, 20)
+        self.model_manage_btn.setStyleSheet(
+            "QToolButton { "
+            "background-color: transparent; "
+            "border: none; "
+            "color: white; "
+            "}"
+            "QToolButton:hover { "
+            "background-color: transparent; "
+            "color: #5a9fd4; "
+            "}"
+            "QToolButton:pressed { "
+            "background-color: transparent; "
+            "color: #3a8ad6; "
+            "}"
+        )
+        self.model_manage_btn.clicked.connect(self._open_model_manager)
+        # Thin separator line between cog and text
+        from PySide6.QtWidgets import QFrame
+        self.model_cog_separator = QFrame(self.model_combo)
+        self.model_cog_separator.setFrameShape(QFrame.VLine)
+        self.model_cog_separator.setFrameShadow(QFrame.Plain)
+        self.model_cog_separator.setLineWidth(1)
+        self.model_cog_separator.setStyleSheet("color: #4a5568; background-color: #4a5568;")
+        self.model_cog_separator.setFixedWidth(1)
+
+        # Position cog and separator inside combo without shifting layout
+        def _position_model_cog():
+            try:
+                h = self.model_combo.height()
+                btn_h = self.model_manage_btn.height()
+                y = max(0, (h - btn_h) // 2)
+                self.model_manage_btn.move(6, y)
+
+                sep_h = h - 8
+                sep_y = max(0, (h - sep_h) // 2)
+                self.model_cog_separator.setFixedHeight(max(12, sep_h))
+                self.model_cog_separator.move(30, sep_y)
+                self.model_cog_separator.raise_()
+                self.model_manage_btn.raise_()
+            except Exception:
+                pass
+
+        original_model_resize = self.model_combo.resizeEvent
+        def _model_resize_with_cog(event):
+            original_model_resize(event)
+            _position_model_cog()
+        self.model_combo.resizeEvent = _model_resize_with_cog
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _position_model_cog)
+        # Add context menu for model management (right-click)
+        self.model_combo.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.model_combo.customContextMenuRequested.connect(self._show_model_context_menu)
         
         # Container for info button + AuthGPT login (keeps them adjacent)
         model_btn_container = QWidget()
@@ -3919,6 +3984,287 @@ Recent translations to summarize:
         self.append_log("✓ Profile order updated")
         dialog.accept()
     
+    def _show_model_context_menu(self, position):
+        """Show context menu for model management."""
+        from PySide6.QtWidgets import QMenu
+        
+        menu = QMenu(self.model_combo)
+        manage_action = menu.addAction("⚙️ Manage Models...")
+        
+        action = menu.exec(self.model_combo.mapToGlobal(position))
+        
+        if action == manage_action:
+            self._open_model_manager()
+
+    def _open_model_manager(self):
+        """Open a dialog for managing the model dropdown list."""
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                        QListWidget, QPushButton, QLabel,
+                                        QApplication, QLineEdit, QMessageBox)
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QIcon
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Models")
+
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog_width = int(screen.width() * 0.28)
+        dialog_height = int(screen.height() * 0.50)
+        dialog.setMinimumWidth(dialog_width)
+        dialog.setMinimumHeight(dialog_height)
+        dialog.resize(dialog_width, dialog_height)
+
+        # Set icon
+        try:
+            icon_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(dialog)
+
+        # Instructions
+        instructions = QLabel(
+            "Drag and drop models to reorder. Add custom entries or remove unused ones (Ctrl+Click for multiple):"
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(instructions)
+
+        # --- Add-model row ---
+        add_row = QHBoxLayout()
+        add_entry = QLineEdit()
+        add_entry.setPlaceholderText("Type a model ID to add…")
+        add_row.addWidget(add_entry)
+        add_btn = QPushButton("➕ Add")
+        add_btn.setToolTip("Add the entered model to the list")
+        add_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
+
+        def _add_model():
+            text = add_entry.text().strip()
+            if not text:
+                return
+            # Check for duplicates
+            for i in range(list_widget.count()):
+                if list_widget.item(i).text() == text:
+                    QMessageBox.information(dialog, "Duplicate",
+                                            f"'{text}' is already in the list.")
+                    return
+            list_widget.addItem(text)
+            add_entry.clear()
+            save_state()
+
+        add_btn.clicked.connect(_add_model)
+        add_entry.returnPressed.connect(_add_model)
+        add_row.addWidget(add_btn)
+        layout.addLayout(add_row)
+
+        # Horizontal layout for list and buttons
+        content_layout = QHBoxLayout()
+
+        # List widget with drag-and-drop and multi-selection
+        list_widget = QListWidget()
+        list_widget.setDragDropMode(QListWidget.InternalMove)
+        list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+
+        # Populate from current combo
+        current_models = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
+        list_widget.addItems(current_models)
+
+        # Select current model
+        current_model = self.model_combo.currentText()
+        for i in range(list_widget.count()):
+            if list_widget.item(i).text() == current_model:
+                list_widget.setCurrentRow(i)
+                break
+
+        # History for undo/redo
+        history_stack = [self._get_list_order(list_widget)]
+        history_index = [0]
+
+        def save_state():
+            history_stack[history_index[0] + 1:] = []
+            current_order = self._get_list_order(list_widget)
+            if history_stack[history_index[0]] != current_order:
+                history_stack.append(current_order)
+                history_index[0] = len(history_stack) - 1
+                update_undo_redo_buttons()
+
+        def update_undo_redo_buttons():
+            undo_btn.setEnabled(history_index[0] > 0)
+            redo_btn.setEnabled(history_index[0] < len(history_stack) - 1)
+
+        list_widget.model().rowsMoved.connect(lambda: save_state())
+        content_layout.addWidget(list_widget)
+
+        # Vertical layout for reorder buttons
+        button_column = QVBoxLayout()
+
+        # Undo
+        undo_btn = QPushButton("↶ Undo")
+        undo_btn.setToolTip("Undo last change")
+        undo_btn.setEnabled(False)
+        def do_undo():
+            if history_index[0] > 0:
+                history_index[0] -= 1
+                self._restore_list_order(list_widget, history_stack[history_index[0]])
+                update_undo_redo_buttons()
+        undo_btn.clicked.connect(do_undo)
+        button_column.addWidget(undo_btn)
+
+        # Redo
+        redo_btn = QPushButton("↷ Redo")
+        redo_btn.setToolTip("Redo last undone change")
+        redo_btn.setEnabled(False)
+        def do_redo():
+            if history_index[0] < len(history_stack) - 1:
+                history_index[0] += 1
+                self._restore_list_order(list_widget, history_stack[history_index[0]])
+                update_undo_redo_buttons()
+        redo_btn.clicked.connect(do_redo)
+        button_column.addWidget(redo_btn)
+
+        button_column.addSpacing(10)
+
+        # Move to Top
+        move_top_btn = QPushButton("⇈ Top")
+        move_top_btn.setToolTip("Move selected model(s) to top")
+        def move_top():
+            self._move_profile_in_list(list_widget, 'top')
+            save_state()
+        move_top_btn.clicked.connect(move_top)
+        button_column.addWidget(move_top_btn)
+
+        # Move Up
+        move_up_btn = QPushButton("↑ Up")
+        move_up_btn.setToolTip("Move selected model(s) up")
+        def move_up():
+            self._move_profile_in_list(list_widget, 'up')
+            save_state()
+        move_up_btn.clicked.connect(move_up)
+        button_column.addWidget(move_up_btn)
+
+        # Move Down
+        move_down_btn = QPushButton("↓ Down")
+        move_down_btn.setToolTip("Move selected model(s) down")
+        def move_down():
+            self._move_profile_in_list(list_widget, 'down')
+            save_state()
+        move_down_btn.clicked.connect(move_down)
+        button_column.addWidget(move_down_btn)
+
+        # Move to Bottom
+        move_bottom_btn = QPushButton("⇊ Bottom")
+        move_bottom_btn.setToolTip("Move selected model(s) to bottom")
+        def move_bottom():
+            self._move_profile_in_list(list_widget, 'bottom')
+            save_state()
+        move_bottom_btn.clicked.connect(move_bottom)
+        button_column.addWidget(move_bottom_btn)
+
+        button_column.addSpacing(10)
+
+        # Delete
+        delete_btn = QPushButton("❌ Delete")
+        delete_btn.setToolTip("Remove selected model(s) from the dropdown")
+        delete_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+        def delete_models():
+            selected_items = list_widget.selectedItems()
+            if not selected_items:
+                return
+            names = [item.text() for item in selected_items]
+            msg = f"Remove {len(names)} model(s) from the dropdown?\n\n" + "\n".join(names)
+            reply = QMessageBox.question(dialog, "Confirm Remove", msg,
+                                          QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                for item in selected_items:
+                    list_widget.takeItem(list_widget.row(item))
+                save_state()
+        delete_btn.clicked.connect(delete_models)
+        button_column.addWidget(delete_btn)
+
+        button_column.addSpacing(10)
+
+        # Reset to Defaults
+        reset_btn = QPushButton("🔄 Reset")
+        reset_btn.setToolTip("Reset model list to built-in defaults")
+        reset_btn.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
+        def reset_defaults():
+            reply = QMessageBox.question(
+                dialog, "Reset Model List",
+                "Replace the current list with the built-in default model catalog?\n\n"
+                "Any custom models you added will be lost.",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                list_widget.clear()
+                list_widget.addItems(get_model_options())
+                save_state()
+        reset_btn.clicked.connect(reset_defaults)
+        button_column.addWidget(reset_btn)
+
+        button_column.addStretch()
+
+        content_layout.addLayout(button_column)
+        layout.addLayout(content_layout)
+
+        # Bottom button row
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        save_btn.clicked.connect(lambda: self._save_model_order(list_widget, dialog))
+        button_layout.addWidget(save_btn)
+
+        layout.addLayout(button_layout)
+
+        dialog.exec()
+
+    def _save_model_order(self, list_widget, dialog):
+        """Save the new model order from the list widget."""
+        new_order = [list_widget.item(i).text() for i in range(list_widget.count())]
+
+        if not new_order:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(dialog, "Empty List",
+                                "The model list cannot be empty. Add at least one model.")
+            return
+
+        # Persist to config
+        self.config['custom_model_list'] = new_order
+        self._model_all_values = list(new_order)
+
+        # Remember current selection
+        current_model = self.model_combo.currentText()
+
+        # Refresh combobox
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(new_order)
+        self.model_combo.setCurrentText(current_model)
+        self.model_combo.blockSignals(False)
+
+        # Rebuild autocomplete completer
+        from PySide6.QtWidgets import QCompleter
+        from PySide6.QtCore import Qt as QtConst
+        completer = QCompleter(new_order)
+        completer.setCaseSensitivity(QtConst.CaseInsensitive)
+        completer.setFilterMode(QtConst.MatchContains)
+        self.model_combo.setCompleter(completer)
+
+        # Save config
+        self.save_config(show_message=False)
+
+        self.append_log("✓ Model list updated")
+        dialog.accept()
+
     def _create_settings_section(self):
         """Create all settings controls"""
         # Threading delay (with extra spacing at top)
@@ -14710,7 +15056,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.8.1...")
+    print("🚀 Starting Glossarion v7.8.2...")
     
     # Initialize splash screen
     splash_manager = None
