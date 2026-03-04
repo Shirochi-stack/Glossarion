@@ -12877,6 +12877,46 @@ def main(log_callback=None, stop_callback=None):
                 flags=re.IGNORECASE
             )
             
+            # ------------------------------------------------------------------
+            # Truncation / partial-result gate — check BEFORE writing to disk.
+            # When "Save interrupted chapters" is OFF we must NOT create a file.
+            # ------------------------------------------------------------------
+            is_truncated_result = finish_reason in ["length", "max_tokens"]
+            if is_truncated_result or is_partial_result:
+                save_partial_results = (
+                    os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
+                    or bool(getattr(config, 'save_partial_results', False))
+                )
+                qa_issue = ["TRUNCATED"] if is_truncated_result else ["PARTIAL"]
+                qa_label = "truncated" if is_truncated_result else "partial (graceful stop)"
+
+                if save_partial_results:
+                    # User opted-in: write the truncated/partial output to disk
+                    if is_text_file and not is_pdf_file:
+                        fname_out = fname.replace('.html', '.txt')
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(cleaned, 'html.parser')
+                        text_content = soup.get_text(strip=True)
+                        with open(os.path.join(out, fname_out), 'w', encoding='utf-8') as f:
+                            f.write(text_content)
+                    else:
+                        fname_out = fname
+                        with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname_out} ({len(cleaned)} chars)")
+                else:
+                    fname_out = fname if not (is_text_file and not is_pdf_file) else fname.replace('.html', '.txt')
+                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — 'Save interrupted chapters' is OFF")
+
+                progress_manager.update(
+                    idx, actual_num, content_hash,
+                    fname_out if (is_text_file and not is_pdf_file) else fname,
+                    status="qa_failed", chapter_obj=c, qa_issues_found=qa_issue
+                )
+                progress_manager.save()
+                print(f"⚠️ Chapter {actual_num} marked as qa_failed: {qa_label}")
+                continue
+
             if is_text_file and not is_pdf_file:
                 # For text files (but NOT PDFs), save as plain text instead of HTML
                 fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
