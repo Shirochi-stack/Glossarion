@@ -3319,9 +3319,11 @@ Recent translations to summarize:
             <li><b>antigravity/gemini-3-flash</b> - Gemini 3 Flash (fastest)</li>
             <li><b>antigravity/gemini-3.1-pro-low</b> - Gemini 3.1 Pro (low quota)</li>
             <li><b>antigravity/gemini-3.1-pro-high</b> - Gemini 3.1 Pro (high quota)</li>
-            <li><b>antigravity/claude-sonnet-4-5</b> - Claude Sonnet 4.5</li>
-            <li><b>antigravity/claude-sonnet-4-5-thinking</b> - Claude Sonnet 4.5 (thinking)</li>
         </ul>
+        <p style="color: #d9534f; padding: 4px; font-size: 11px;">
+            <b>⚠️ Warning:</b> This feature uses a proxy to access Google Cloud Code.
+            Using it may violate Google's Terms of Service. Use at your own risk.
+        </p>
         <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
             <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:8080.
             Glossarion will auto-launch it if Node.js is installed.
