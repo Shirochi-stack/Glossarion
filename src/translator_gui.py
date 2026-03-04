@@ -4052,7 +4052,8 @@ Recent translations to summarize:
                     QMessageBox.information(dialog, "Duplicate",
                                             f"'{text}' is already in the list.")
                     return
-            list_widget.addItem(text)
+            list_widget.insertItem(0, text)
+            list_widget.setCurrentRow(0)
             add_entry.clear()
             save_state()
 
