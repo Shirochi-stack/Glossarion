@@ -5535,6 +5535,40 @@ class BatchTranslationProcessor:
                 flags=re.IGNORECASE
             )
             
+            # ------------------------------------------------------------------
+            # Truncation / partial-result gate — check BEFORE writing to disk.
+            # When "Save interrupted chapters" is OFF we must NOT create a file.
+            # ------------------------------------------------------------------
+            if chapter_truncated or is_partial_result:
+                save_partial_results = (
+                    os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
+                    or bool(getattr(self.config, 'save_partial_results', False))
+                )
+                qa_issue = ["TRUNCATED"] if chapter_truncated else ["PARTIAL"]
+                qa_label = "truncated" if chapter_truncated else "partial (graceful stop)"
+
+                if save_partial_results:
+                    # User opted-in: write the truncated/partial output to disk
+                    if self.is_text_file:
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    else:
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname} ({len(cleaned)} chars)")
+                else:
+                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — 'Save interrupted chapters' is OFF")
+
+                with self.progress_lock:
+                    self.update_progress_fn(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed", ai_features=ai_features,
+                        qa_issues_found=qa_issue
+                    )
+                    self.save_progress_fn()
+                print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {qa_label}")
+                return False, actual_num, None, None, None
+
             if self.is_text_file:
                 # For text files, save as plain text
                 fname_txt = fname.replace('.html', '.txt') if fname.endswith('.html') else fname
@@ -5573,32 +5607,6 @@ class BatchTranslationProcessor:
                     f.write(cleaned)
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
-            
-            # Initialize ai_features at the beginning to ensure it's always defined
-            if ai_features is None:
-                ai_features = None
-            
-            # Extract and save AI features for future duplicate detection
-            if (self.config.RETRY_DUPLICATE_BODIES and 
-                hasattr(self.config, 'DUPLICATE_DETECTION_MODE') and 
-                self.config.DUPLICATE_DETECTION_MODE in ['ai-hunter', 'cascading']):
-                try:
-                    # Extract features from the translated content
-                    cleaned_text = re.sub(r'<[^>]+>', '', cleaned).strip()
-                    # Note: self.translator doesn't exist, so we can't extract features here
-                    # The features will need to be extracted during regular processing
-                    print(f"    ⚠️ AI features extraction not available in batch mode")
-                except Exception as e:
-                    print(f"    ⚠️ Failed to extract AI features: {e}")
-            
-            with self.progress_lock:
-                # Check for truncation or partial result first
-                if chapter_truncated:
-                    chapter_status = "qa_failed"
-                    print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Response was truncated")
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features, qa_issues_found=["TRUNCATED"])
-                    self.save_progress_fn()
-                    return False, actual_num, None, None, None
                 elif is_partial_result:
                     chapter_status = "qa_failed"
                     print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Partial translation (graceful stop)")
