@@ -480,7 +480,7 @@ def _convert_messages_to_anthropic(messages: List[Dict]) -> tuple:
 
 def send_message(
     messages: List[Dict],
-    model: str = "claude-sonnet-4-5",
+    model: str = "claude-sonnet-4-6",
     temperature: float = 0.7,
     max_tokens: int = 8192,
     timeout: float = 300,
@@ -623,7 +623,7 @@ def send_message(
 
 def send_message_stream(
     messages: List[Dict],
-    model: str = "claude-sonnet-4-5",
+    model: str = "claude-sonnet-4-6",
     temperature: float = 0.7,
     max_tokens: int = 8192,
     timeout: float = 300,

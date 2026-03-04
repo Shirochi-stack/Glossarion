@@ -14823,7 +14823,7 @@ class UnifiedClient:
                 actual_model = actual_model[len(prefix):].lstrip('/')
                 break
         if not actual_model:
-            actual_model = 'claude-sonnet-4-5'  # sensible default
+            actual_model = 'claude-sonnet-4-6'  # sensible default
 
         max_retries = self._get_max_retries()
         last_error = None

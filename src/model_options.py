@@ -155,12 +155,15 @@ def get_model_options() -> List[str]:
         "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex",
 
         # Antigravity Cloud Code proxy (localhost:8080, no API key needed)
-        # Claude models via Cloud Code
-        "antigravity/claude-sonnet-4-5", "antigravity/claude-sonnet-4-5-thinking",
-        "antigravity/claude-opus-4-6-thinking", "antigravity/claude-sonnet-4-6-thinking",
+        # Claude models via Cloud Code (must match Cloud Code's available model IDs exactly)
+        "antigravity/claude-opus-4-6-thinking", "antigravity/claude-sonnet-4-6",
 
         # Gemini models via Cloud Code
+        "antigravity/gemini-2.5-flash", "antigravity/gemini-2.5-flash-lite",
+        "antigravity/gemini-2.5-flash-thinking", "antigravity/gemini-2.5-pro",
         "antigravity/gemini-3-flash",
+        "antigravity/gemini-3-pro-high", "antigravity/gemini-3-pro-low",
+        "antigravity/gemini-3.1-flash-image",
         "antigravity/gemini-3.1-pro-high", "antigravity/gemini-3.1-pro-low",
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
