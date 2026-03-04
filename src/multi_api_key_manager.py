@@ -4549,11 +4549,9 @@ class MultiAPIKeyDialog(QDialog):
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
         
-        # Get Gemini endpoint settings
+        # Get Gemini endpoint settings (auto-detects gRPC vs OpenAI from URL)
         use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
-        use_gemini_grpc = os.getenv("USE_GEMINI_GRPC_ENDPOINT", "0") == "1"
-        gemini_grpc_endpoint = os.getenv("GEMINI_GRPC_ENDPOINT", "")
         
         # Create thread pool for parallel testing
         max_workers = min(10, len(indices))  # Limit to 10 concurrent tests
@@ -4582,8 +4580,11 @@ class MultiAPIKeyDialog(QDialog):
                 
                 # Check if this is a Gemini model with custom endpoint
                 is_gemini_model = key.model.lower().startswith('gemini')
+                # Auto-detect: bare hostname = gRPC (skip OpenAI test), URL with http/openai = REST
+                _ep_lower = gemini_endpoint.strip().lower() if gemini_endpoint else ""
+                _is_openai_rest = _ep_lower.startswith("http") or "/openai" in _ep_lower
                 
-                if is_gemini_model and use_gemini_endpoint and gemini_endpoint:
+                if is_gemini_model and use_gemini_endpoint and gemini_endpoint and _is_openai_rest:
                     # Test Gemini with OpenAI-compatible endpoint
                     import openai
                     

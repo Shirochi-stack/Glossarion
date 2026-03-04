@@ -386,10 +386,8 @@ def print_env_var_status():
         'GROQ_API_URL': 'Groq API base URL',
         'FIREWORKS_API_URL': 'Fireworks API base URL',
         'USE_CUSTOM_OPENAI_ENDPOINT': 'Use custom OpenAI-compatible endpoint',
-        'USE_GEMINI_OPENAI_ENDPOINT': 'Use Gemini-compatible OpenAI endpoint',
-        'GEMINI_OPENAI_ENDPOINT': 'Gemini OpenAI endpoint URL',
-        'USE_GEMINI_GRPC_ENDPOINT': 'Use Gemini raw gRPC transport',
-        'GEMINI_GRPC_ENDPOINT': 'Gemini gRPC endpoint host',
+        'USE_GEMINI_OPENAI_ENDPOINT': 'Use Gemini custom endpoint',
+        'GEMINI_OPENAI_ENDPOINT': 'Gemini custom endpoint URL (auto-detects gRPC vs OpenAI)',
     }
     print(f"\n🔌 API ENDPOINT VARIABLES:")
     print("-" * 40)

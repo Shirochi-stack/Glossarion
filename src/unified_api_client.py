@@ -4414,8 +4414,15 @@ class UnifiedClient:
                 )
         
         elif self.client_type == 'gemini':
+            # Auto-detect gRPC vs OpenAI from endpoint URL format
+            _is_grpc_endpoint = False
             if use_gemini_endpoint and gemini_endpoint:
-                # Use OpenAI client for Gemini endpoint
+                _ep_lower = gemini_endpoint.strip().lower()
+                if not _ep_lower.startswith("http") and "/openai" not in _ep_lower:
+                    _is_grpc_endpoint = True
+            
+            if use_gemini_endpoint and gemini_endpoint and not _is_grpc_endpoint:
+                # Use OpenAI client for Gemini endpoint (REST)
                 if base_url is None:
                     base_url = gemini_endpoint
                 
@@ -4428,52 +4435,47 @@ class UnifiedClient:
                     self._original_client_type = 'gemini'
                     self.client_type = 'openai'
                 print(f"[DEBUG] Gemini using OpenAI-compatible endpoint: {base_url}")
-            else:
-                # Check if we should use raw gRPC transport
-                use_grpc = os.getenv("USE_GEMINI_GRPC_ENDPOINT", "0") == "1"
-                grpc_endpoint = os.getenv("GEMINI_GRPC_ENDPOINT", "")
-                
-                if use_grpc and GEMINI_GRPC_AVAILABLE and grpc_endpoint:
-                    # MICROSECOND LOCK for gRPC Gemini client
-                    try:
-                        with self._model_lock:
-                            self.grpc_gemini_client = GrpcGeminiClient(
-                                api_key=self.api_key,
-                                endpoint=grpc_endpoint
-                            )
-                            self.gemini_client = None  # Don't create SDK client when using gRPC
-                        if hasattr(tls, 'model'):
-                            tls.gemini_configured = True
-                            tls.gemini_api_key = self.api_key
-                            tls.grpc_gemini_client = self.grpc_gemini_client
-                        print(f"⚡ Created raw gRPC Gemini client (endpoint: {grpc_endpoint})")
-                    except Exception as grpc_err:
-                        print(f"⚠️ gRPC Gemini client failed: {grpc_err} — falling back to native SDK")
-                        self.grpc_gemini_client = None
-                        # Fall through to native SDK below
-                        use_grpc = False
-                
-                if not (use_grpc and self.grpc_gemini_client):
-                    # MICROSECOND LOCK for native Gemini client
-                    # Check if this key has Google credentials (multi-key mode)
-                    google_creds = None
-                    if hasattr(self, 'current_key_google_creds') and self.current_key_google_creds:
-                        google_creds = self.current_key_google_creds
-                        print(f"[DEBUG] Using key-specific Google credentials: {os.path.basename(google_creds)}")
-                        # Set environment variable for this request
-                        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
-                    elif hasattr(self, 'google_creds_path') and self.google_creds_path:
-                        google_creds = self.google_creds_path
-                        print(f"[DEBUG] Using default Google credentials: {os.path.basename(google_creds)}")
-                    
+            elif _is_grpc_endpoint and GEMINI_GRPC_AVAILABLE:
+                # Raw gRPC transport — auto-detected from bare hostname
+                grpc_endpoint = gemini_endpoint.strip()
+                try:
                     with self._model_lock:
-                        self.gemini_client = genai.Client(api_key=self.api_key)
+                        self.grpc_gemini_client = GrpcGeminiClient(
+                            api_key=self.api_key,
+                            endpoint=grpc_endpoint
+                        )
+                        self.gemini_client = None  # Don't create SDK client when using gRPC
                     if hasattr(tls, 'model'):
                         tls.gemini_configured = True
                         tls.gemini_api_key = self.api_key
-                        tls.gemini_client = self.gemini_client
-                    
-                    #print(f"[DEBUG] Created native Gemini client for model: {self.model}")
+                        tls.grpc_gemini_client = self.grpc_gemini_client
+                    print(f"⚡ Created raw gRPC Gemini client (endpoint: {grpc_endpoint})")
+                except Exception as grpc_err:
+                    print(f"⚠️ gRPC Gemini client failed: {grpc_err} — falling back to native SDK")
+                    self.grpc_gemini_client = None
+                    _is_grpc_endpoint = False
+                
+            if not (use_gemini_endpoint and gemini_endpoint and not _is_grpc_endpoint) and not (_is_grpc_endpoint and getattr(self, 'grpc_gemini_client', None)):
+                # MICROSECOND LOCK for native Gemini client
+                # Check if this key has Google credentials (multi-key mode)
+                google_creds = None
+                if hasattr(self, 'current_key_google_creds') and self.current_key_google_creds:
+                    google_creds = self.current_key_google_creds
+                    print(f"[DEBUG] Using key-specific Google credentials: {os.path.basename(google_creds)}")
+                    # Set environment variable for this request
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                elif hasattr(self, 'google_creds_path') and self.google_creds_path:
+                    google_creds = self.google_creds_path
+                    print(f"[DEBUG] Using default Google credentials: {os.path.basename(google_creds)}")
+                
+                with self._model_lock:
+                    self.gemini_client = genai.Client(api_key=self.api_key)
+                if hasattr(tls, 'model'):
+                    tls.gemini_configured = True
+                    tls.gemini_api_key = self.api_key
+                    tls.gemini_client = self.gemini_client
+                
+                #print(f"[DEBUG] Created native Gemini client for model: {self.model}")
         
         elif self.client_type == 'mistral':
             if MistralClient is not None:
@@ -11359,13 +11361,24 @@ class UnifiedClient:
         """
         response = None
         
-        # Check if we should use OpenAI-compatible endpoint
+        # Check if we should use a custom Gemini endpoint (OpenAI-compatible or gRPC)
         use_openai_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+        
+        # Auto-detect gRPC vs OpenAI from URL format:
+        #   - Bare hostname (no http, no /openai path) → gRPC
+        #   - URL with http(s):// or /openai → OpenAI-compatible REST
+        use_grpc_transport = False
+        if use_openai_endpoint and gemini_endpoint:
+            ep_lower = gemini_endpoint.strip().lower()
+            if not ep_lower.startswith("http") and "/openai" not in ep_lower:
+                # Looks like a bare gRPC hostname (e.g. "generativelanguage.googleapis.com")
+                use_grpc_transport = True
+                use_openai_endpoint = False  # Don't route through OpenAI-compatible path
 
         # Fallback: if key doesn't look like a Google API key and a custom OpenAI
         # endpoint is configured, route Gemini through the custom endpoint.
-        if (not use_openai_endpoint or not gemini_endpoint):
+        if (not use_openai_endpoint or not gemini_endpoint) and not use_grpc_transport:
             custom_enabled = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
             custom_base_url = os.getenv("OPENAI_CUSTOM_BASE_URL", os.getenv("OPENAI_API_BASE", ""))
             if custom_enabled and custom_base_url and not self._looks_like_google_api_key(self.api_key):
@@ -11520,15 +11533,12 @@ class UnifiedClient:
             }
         
         # Log to console with thinking status - only if not stopping
-        # Determine gRPC mode for logging
-        use_grpc = hasattr(self, 'grpc_gemini_client') and self.grpc_gemini_client is not None
         
         if not self._is_stop_requested():
             if use_openai_endpoint:
                 endpoint_info = f" (via OpenAI endpoint: {gemini_endpoint})"
-            elif use_grpc:
-                grpc_ep = os.getenv("GEMINI_GRPC_ENDPOINT", "generativelanguage.googleapis.com")
-                endpoint_info = f" (via raw gRPC: {grpc_ep})"
+            elif use_grpc_transport:
+                endpoint_info = f" (via raw gRPC: {gemini_endpoint})"
             else:
                 endpoint_info = " (native API)"
             print(f"🔒 Gemini Safety Status: {safety_status}{endpoint_info}")
@@ -11555,8 +11565,8 @@ class UnifiedClient:
         config_data = {
             "type": request_type,
             "model": self.model,
-            "endpoint": gemini_endpoint if use_openai_endpoint else (os.getenv("GEMINI_GRPC_ENDPOINT", "grpc") if use_grpc else "native"),
-            "transport": "grpc" if use_grpc else ("openai" if use_openai_endpoint else "native-sdk"),
+            "endpoint": gemini_endpoint if use_openai_endpoint else (gemini_endpoint if use_grpc_transport else "native"),
+            "transport": "grpc" if use_grpc_transport else ("openai" if use_openai_endpoint else "native-sdk"),
             "safety_enabled": not disable_safety,
             "safety_settings": readable_safety,
             "temperature": temperature,
@@ -11688,11 +11698,23 @@ class UnifiedClient:
                     
                     return response
                     
-                elif hasattr(self, 'grpc_gemini_client') and self.grpc_gemini_client is not None:
+                elif use_grpc_transport and GEMINI_GRPC_AVAILABLE:
                     # ========== RAW gRPC TRANSPORT ==========
                     # Maximum performance: binary protobuf over HTTP/2
-                    if not self._is_stop_requested():
-                        grpc_ep = os.getenv("GEMINI_GRPC_ENDPOINT", "generativelanguage.googleapis.com")
+                    grpc_ep = gemini_endpoint.strip() if gemini_endpoint else "generativelanguage.googleapis.com"
+                    
+                    # Initialize gRPC client on-the-fly if not already created or endpoint changed
+                    if not hasattr(self, 'grpc_gemini_client') or self.grpc_gemini_client is None:
+                        try:
+                            self.grpc_gemini_client = GrpcGeminiClient(
+                                api_key=self.api_key,
+                                endpoint=grpc_ep
+                            )
+                        except Exception as grpc_init_err:
+                            print(f"⚠️ gRPC init failed: {grpc_init_err} — falling back to native SDK")
+                            use_grpc_transport = False
+                    
+                    if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
                     
                     try:

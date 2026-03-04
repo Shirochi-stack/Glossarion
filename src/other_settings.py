@@ -345,7 +345,7 @@ def setup_other_settings_methods(gui_instance):
         'show_header_help_dialog',
         'on_extraction_method_change', 'on_extraction_mode_change',
         # Toggle methods
-        'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_gemini_grpc_endpoint', 'toggle_ai_hunter',
+        'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
         'toggle_custom_endpoint_ui', 'toggle_more_endpoints',
         '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
         '_toggle_anti_duplicate_controls', 'toggle_image_translation_section',
@@ -8583,27 +8583,29 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     help_lbl.setTextFormat(Qt.RichText)
     help_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
     help_lbl.setOpenExternalLinks(False)
-    help_lbl.setToolTip("Double-click the URL to copy it")
+    help_lbl.setToolTip("Double-click the URL to paste it into the endpoint field")
     try:
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtCore import QTimer, QEvent
+        _ollama_url = "http://localhost:11434/v1"
         orig_style = help_lbl.styleSheet()
         orig_text = help_lbl.text()
-        def _copy_ollama_url(_link=None):
+        def _dbl_click(event):
+            # Paste into field
+            self.openai_base_url_entry.setText(_ollama_url)
+            self.openai_base_url_var = _ollama_url
+            # Copy to clipboard
             try:
-                QGuiApplication.clipboard().setText("http://localhost:11434/v1")
+                QGuiApplication.clipboard().setText(_ollama_url)
             except Exception:
                 pass
-        def _flash_feedback():
+            # Flash green feedback
             try:
                 help_lbl.setStyleSheet(orig_style + " color: #00d084;")
-                help_lbl.setText("Copied: http://localhost:11434/v1")
+                help_lbl.setText(f"✓ Pasted: {_ollama_url}")
                 QTimer.singleShot(900, lambda: (help_lbl.setStyleSheet(orig_style), help_lbl.setText(orig_text)))
             except Exception:
                 pass
-        def _dbl_click(event):
-            _copy_ollama_url()
-            _flash_feedback()
         help_lbl.mouseDoubleClickEvent = _dbl_click
     except Exception:
         pass
@@ -8744,8 +8746,8 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     info_lbl.setContentsMargins(0, 10, 0, 10)
     additional_v.addWidget(info_lbl)
     
-    # Gemini OpenAI-Compatible Endpoint
-    gemini_cb = self._create_styled_checkbox("Enable Gemini OpenAI-Compatible Endpoint")
+    # Gemini Custom Endpoint (auto-detects OpenAI-compatible vs gRPC from URL)
+    gemini_cb = self._create_styled_checkbox("Enable Gemini Custom Endpoint")
     try:
         gemini_cb.setChecked(bool(self.use_gemini_openai_endpoint_var))
     except Exception:
@@ -8764,9 +8766,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     gemini_row = QWidget()
     gemini_h = QHBoxLayout(gemini_row)
     gemini_h.setContentsMargins(0, 5, 0, 5)
-    gemini_h.addWidget(QLabel("Gemini OpenAI Endpoint:"))
+    gemini_h.addWidget(QLabel("Gemini Custom Endpoint:"))
     
     self.gemini_endpoint_entry = QLineEdit()
+    self.gemini_endpoint_entry.setPlaceholderText("Paste OpenAI-compatible URL or gRPC hostname...")
     try:
         self.gemini_endpoint_entry.setText(str(self.gemini_openai_endpoint_var))
     except Exception:
@@ -8788,74 +8791,98 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     gemini_h.addWidget(self.gemini_clear_button)
     additional_v.addWidget(gemini_row)
     
-    gemini_help = QLabel("For Gemini rate limit optimization with proxy services (e.g., OpenRouter, LiteLLM)")
+    gemini_help = QLabel(
+        "Auto-detects mode from URL:\n"
+        "  • URLs with /openai or http(s):// → OpenAI-compatible REST endpoint\n"
+        "  • Bare hostname (no /openai) → ⚡ Raw gRPC (binary protobuf, HTTP/2)"
+    )
     gemini_help.setStyleSheet("color: gray; font-size: 8pt;")
-    gemini_help.setContentsMargins(0, 0, 0, 5)
+    gemini_help.setWordWrap(True)
+    gemini_help.setContentsMargins(0, 0, 0, 3)
     additional_v.addWidget(gemini_help)
     
-    # ─── Gemini gRPC Endpoint (raw binary transport for max performance) ───
-    grpc_cb = self._create_styled_checkbox("Enable Gemini gRPC Endpoint (⚡ Raw Binary Transport)")
+    # Shortcut URLs — double-click to copy into the endpoint field
+    shortcuts_widget = QWidget()
+    shortcuts_h = QHBoxLayout(shortcuts_widget)
+    shortcuts_h.setContentsMargins(0, 0, 0, 5)
+    shortcuts_h.addWidget(QLabel("Quick paste (double-click):"))
+    
+    openai_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    grpc_host = "generativelanguage.googleapis.com"
+    
     try:
-        if not hasattr(self, 'use_gemini_grpc_endpoint_var'):
-            self.use_gemini_grpc_endpoint_var = self.config.get('use_gemini_grpc_endpoint', False)
-        grpc_cb.setChecked(bool(self.use_gemini_grpc_endpoint_var))
-    except Exception:
-        pass
-    def _on_grpc_endpoint_toggle(checked):
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QTimer
+    except ImportError:
+        QGuiApplication = None
+        QTimer = None
+    
+    openai_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline; cursor:pointer;">{openai_url}</span>')
+    openai_shortcut.setStyleSheet("font-size: 8pt;")
+    openai_shortcut.setTextFormat(Qt.RichText)
+    openai_shortcut.setToolTip("Double-click to paste OpenAI-compatible endpoint")
+    _openai_orig_style = openai_shortcut.styleSheet()
+    _openai_orig_text = openai_shortcut.text()
+    def _paste_openai_url(event):
+        self.gemini_endpoint_entry.setText(openai_url)
+        self.gemini_openai_endpoint_var = openai_url
         try:
-            self.use_gemini_grpc_endpoint_var = bool(checked)
-            self.toggle_gemini_grpc_endpoint()
-            # If gRPC is enabled, disable OpenAI endpoint to avoid conflict
-            if checked and hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
-                self.use_gemini_openai_endpoint_var = False
-                gemini_cb.setChecked(False)
-                print("⚠️ Disabled Gemini OpenAI endpoint (conflicts with gRPC mode)")
+            if QGuiApplication:
+                QGuiApplication.clipboard().setText(openai_url)
         except Exception:
             pass
-    grpc_cb.toggled.connect(_on_grpc_endpoint_toggle)
-    grpc_cb.setContentsMargins(0, 10, 0, 5)
-    additional_v.addWidget(grpc_cb)
-    
-    # gRPC endpoint URL input
-    grpc_row = QWidget()
-    grpc_h = QHBoxLayout(grpc_row)
-    grpc_h.setContentsMargins(0, 5, 0, 5)
-    grpc_h.addWidget(QLabel("Gemini gRPC Endpoint:"))
-    
-    if not hasattr(self, 'gemini_grpc_endpoint_var'):
-        self.gemini_grpc_endpoint_var = self.config.get('gemini_grpc_endpoint', 'generativelanguage.googleapis.com')
-    self.gemini_grpc_endpoint_entry = QLineEdit()
-    self.gemini_grpc_endpoint_entry.setPlaceholderText("generativelanguage.googleapis.com")
-    try:
-        self.gemini_grpc_endpoint_entry.setText(str(self.gemini_grpc_endpoint_var))
-    except Exception:
-        pass
-    def _on_grpc_url_changed(text):
+        # Flash green feedback
         try:
-            self.gemini_grpc_endpoint_var = text
+            openai_shortcut.setStyleSheet(_openai_orig_style + " color: #00d084;")
+            openai_shortcut.setTextFormat(Qt.PlainText)
+            openai_shortcut.setText(f"✓ Pasted: {openai_url}")
+            if QTimer:
+                QTimer.singleShot(900, lambda: (
+                    openai_shortcut.setStyleSheet(_openai_orig_style),
+                    openai_shortcut.setTextFormat(Qt.RichText),
+                    openai_shortcut.setText(_openai_orig_text),
+                ))
         except Exception:
             pass
-    self.gemini_grpc_endpoint_entry.textChanged.connect(_on_grpc_url_changed)
-    grpc_h.addWidget(self.gemini_grpc_endpoint_entry)
+    openai_shortcut.mouseDoubleClickEvent = _paste_openai_url
+    shortcuts_h.addWidget(openai_shortcut)
     
-    self.gemini_grpc_clear_button = QPushButton("Clear")
-    self.gemini_grpc_clear_button.setFixedWidth(80)
-    def _clear_grpc_url():
-        self.gemini_grpc_endpoint_var = "generativelanguage.googleapis.com"
-        self.gemini_grpc_endpoint_entry.setText("generativelanguage.googleapis.com")
-    self.gemini_grpc_clear_button.clicked.connect(_clear_grpc_url)
-    grpc_h.addWidget(self.gemini_grpc_clear_button)
-    additional_v.addWidget(grpc_row)
+    separator = QLabel(" | ")
+    separator.setStyleSheet("color: gray; font-size: 8pt;")
+    shortcuts_h.addWidget(separator)
     
-    grpc_help = QLabel("⚡ Raw gRPC: Binary protobuf over HTTP/2 for ~30-40% smaller payloads.\n"
-                        "Default: generativelanguage.googleapis.com | Requires: pip install grpcio google-ai-generativelanguage")
-    grpc_help.setStyleSheet("color: #ffc107; font-size: 8pt;")
-    grpc_help.setWordWrap(True)
-    grpc_help.setContentsMargins(0, 0, 0, 5)
-    additional_v.addWidget(grpc_help)
+    grpc_shortcut = QLabel(f'<span style="color:#ffc107; text-decoration:underline; cursor:pointer;">{grpc_host}</span>')
+    grpc_shortcut.setStyleSheet("font-size: 8pt;")
+    grpc_shortcut.setTextFormat(Qt.RichText)
+    grpc_shortcut.setToolTip("Double-click to paste raw gRPC endpoint")
+    _grpc_orig_style = grpc_shortcut.styleSheet()
+    _grpc_orig_text = grpc_shortcut.text()
+    def _paste_grpc_host(event):
+        self.gemini_endpoint_entry.setText(grpc_host)
+        self.gemini_openai_endpoint_var = grpc_host
+        try:
+            if QGuiApplication:
+                QGuiApplication.clipboard().setText(grpc_host)
+        except Exception:
+            pass
+        # Flash green feedback
+        try:
+            grpc_shortcut.setStyleSheet(_grpc_orig_style + " color: #00d084;")
+            grpc_shortcut.setTextFormat(Qt.PlainText)
+            grpc_shortcut.setText(f"✓ Pasted: {grpc_host}")
+            if QTimer:
+                QTimer.singleShot(900, lambda: (
+                    grpc_shortcut.setStyleSheet(_grpc_orig_style),
+                    grpc_shortcut.setTextFormat(Qt.RichText),
+                    grpc_shortcut.setText(_grpc_orig_text),
+                ))
+        except Exception:
+            pass
+    grpc_shortcut.mouseDoubleClickEvent = _paste_grpc_host
+    shortcuts_h.addWidget(grpc_shortcut)
     
-    # Initialize gRPC endpoint UI state
-    self.toggle_gemini_grpc_endpoint()
+    shortcuts_h.addStretch()
+    additional_v.addWidget(shortcuts_widget)
     
     # Add the additional endpoints frame to the main section
     section_v.addWidget(self.additional_endpoints_frame)
@@ -8931,17 +8958,7 @@ def toggle_gemini_endpoint(self):
     except Exception:
         pass
 
-def toggle_gemini_grpc_endpoint(self):
-    """Enable/disable Gemini gRPC endpoint entry based on toggle (Qt version)"""
-    try:
-        enabled = bool(getattr(self, 'use_gemini_grpc_endpoint_var', False))
-        if hasattr(self, 'gemini_grpc_endpoint_entry'):
-            self.gemini_grpc_endpoint_entry.setEnabled(enabled)
-        if hasattr(self, 'gemini_grpc_clear_button'):
-            self.gemini_grpc_clear_button.setEnabled(enabled)
-    except Exception:
-        pass
-    
+
 def toggle_custom_endpoint_ui(self, user_interaction=False):
     """Enable/disable the OpenAI base URL entry and detect Azure (Qt version)"""
     try:
