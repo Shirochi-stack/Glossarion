@@ -3313,6 +3313,20 @@ Recent translations to summarize:
             <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
         </p>
 
+        <h4>Antigravity Proxy (antigravity/)</h4>
+        <p>Free access to Claude &amp; Gemini via Google Cloud Code — no API key needed</p>
+        <ul>
+            <li><b>antigravity/gemini-3-flash</b> - Gemini 3 Flash (fastest)</li>
+            <li><b>antigravity/gemini-3.1-pro-low</b> - Gemini 3.1 Pro (low quota)</li>
+            <li><b>antigravity/gemini-3.1-pro-high</b> - Gemini 3.1 Pro (high quota)</li>
+            <li><b>antigravity/claude-sonnet-4-5</b> - Claude Sonnet 4.5</li>
+            <li><b>antigravity/claude-sonnet-4-5-thinking</b> - Claude Sonnet 4.5 (thinking)</li>
+        </ul>
+        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:8080.
+            Glossarion will auto-launch it if Node.js is installed.
+        </p>
+
         <h4>POE (poe/)</h4>
         <p>Access models through Poe platform <span style="color: #d9534f;">(likely not functional)</span></p>
         <ul>
@@ -3334,14 +3348,50 @@ Recent translations to summarize:
         <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
         """
         
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Model Provider Information")
-        msg_box.setTextFormat(Qt.RichText)
-        msg_box.setText(info_text)
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.setModal(False)
-        msg_box.show()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Model Provider Information")
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        # Size: moderate width, shorter height
+        from PySide6.QtWidgets import QApplication, QScrollArea
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog_width = int(screen.width() * 0.28)
+        dialog_height = int(screen.height() * 0.5)
+        dialog.resize(dialog_width, dialog_height)
+        dialog.setMinimumSize(int(screen.width() * 0.18), int(screen.height() * 0.20))
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 8)
+
+        # Scrollable content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        from PySide6.QtWidgets import QFrame
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QLabel(info_text)
+        content.setTextFormat(Qt.RichText)
+        content.setWordWrap(True)
+        content.setContentsMargins(16, 8, 16, 8)
+        scroll.setWidget(content)
+
+        layout.addWidget(scroll)
+
+        # OK button
+        ok_btn = QPushButton("OK")
+        ok_btn.setFixedWidth(80)
+        ok_btn.clicked.connect(dialog.accept)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        # Keep reference so it isn't garbage-collected
+        self._model_info_dialog = dialog
+        dialog.finished.connect(lambda: setattr(self, '_model_info_dialog', None))
+        dialog.show()
     
     # PySide6 helper method for model text changes
     def _on_model_text_changed(self, text):
