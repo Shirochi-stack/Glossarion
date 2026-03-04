@@ -648,6 +648,8 @@ def send_message_stream(
     system_prompt, anthropic_messages = _convert_messages_to_anthropic(messages)
 
     if model == "claude-opus-4-6-thinking" and max_tokens > 64000:
+        if log_fn:
+            log_fn(f"⚠️ Antigravity: Capping max_tokens from {max_tokens} to 64000 (Cloud Code limit for {model})")
         max_tokens = 64000
 
     payload = {
