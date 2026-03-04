@@ -634,6 +634,7 @@ def send_message_stream(
     max_tokens: int = 8192,
     timeout: float = 300,
     log_fn=None,
+    log_stream: bool = True,
 ) -> Dict[str, Any]:
     """Send a streaming message to the Antigravity proxy.
     
@@ -664,8 +665,8 @@ def send_message_stream(
 
     headers = _build_headers()
 
-    if log_fn:
-        log_fn(f"🌀 Antigravity: Streaming from proxy at {proxy_url} (model={model})")
+    _log = log_fn or (lambda msg: None)
+    _log(f"🌀 Antigravity: Streaming from proxy at {proxy_url} (model={model})")
 
     try:
         resp = requests.post(
@@ -717,6 +718,9 @@ def send_message_stream(
     collected_content = []
     finish_reason = "stop"
     usage = None
+    t_start = time.time()
+    got_first_data = False
+    log_buf: list = []
 
     for line in resp.iter_lines(decode_unicode=True):
         if _cancel_event.is_set():
@@ -725,6 +729,11 @@ def send_message_stream(
 
         if not line or not line.startswith("data: "):
             continue
+
+        if not got_first_data:
+            got_first_data = True
+            ttft = time.time() - t_start
+            _log(f"📡 Antigravity: First token in {ttft:.1f}s, streaming…")
 
         data_str = line[6:]  # Strip "data: " prefix
         if data_str.strip() == "[DONE]":
@@ -740,7 +749,23 @@ def send_message_stream(
         if event_type == "content_block_delta":
             delta = event.get("delta", {})
             if delta.get("type") == "text_delta":
-                collected_content.append(delta.get("text", ""))
+                text = delta.get("text", "")
+                collected_content.append(text)
+                # Real-time stream logging (HTML-tag-aware line buffering)
+                if log_stream and text:
+                    combined = "".join(log_buf) + text
+                    for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
+                        combined = combined.replace(tag, tag + '\n')
+                    if "\n" in combined:
+                        parts = combined.split("\n")
+                        for part in parts[:-1]:
+                            _log(part)
+                        log_buf = [parts[-1]]
+                    else:
+                        log_buf.append(text)
+                        if len("".join(log_buf)) > 150:
+                            _log("".join(log_buf))
+                            log_buf = []
 
         elif event_type == "message_delta":
             delta = event.get("delta", {})
@@ -767,7 +792,15 @@ def send_message_stream(
                     "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
                 }
 
+    # Flush remaining log buffer
+    if log_stream and log_buf:
+        remainder = "".join(log_buf).strip()
+        if remainder:
+            _log(remainder)
+
     content = "".join(collected_content)
+    t_total = time.time() - t_start
+    _log(f"📡 Antigravity: Stream finished in {t_total:.1f}s")
     return {
         "content": content,
         "finish_reason": finish_reason,

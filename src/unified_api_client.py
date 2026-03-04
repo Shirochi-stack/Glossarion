@@ -14842,13 +14842,20 @@ class UnifiedClient:
                 if _antigravity_reset_cancel is not None:
                     _antigravity_reset_cancel()
 
-                result = _antigravity_send(
+                # Determine stream log visibility: always log by default,
+                # but suppress during batch mode unless the user toggled it on.
+                log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+                if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                    log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+
+                result = _antigravity_send_stream(
                     messages=messages,
                     model=actual_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=self.request_timeout,
                     log_fn=print,
+                    log_stream=log_stream,
                 )
 
                 content = result.get("content", "")
