@@ -3367,14 +3367,25 @@ class GlossarionWeb:
                             
                             # AuthGPT login button (visible for authgpt/* models)
                             _initial_model = self.get_config_value('model', 'authgpt/gpt-5.2').lower()
+                            _is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+                            _show_authgpt = _initial_model.startswith('authgpt/')
                             authgpt_login_btn = gr.Button(
-                                "🔐 ChatGPT Login",
+                                "🔐 ChatGPT Login" if not _is_hf_spaces else "🔐 Save Token",
                                 variant="secondary",
-                                visible=_initial_model.startswith('authgpt/')
+                                visible=_show_authgpt
+                            )
+                            # On HF Spaces, show a textbox for users to paste their refresh token
+                            authgpt_token_input = gr.Textbox(
+                                label="🔑 AuthGPT Refresh Token",
+                                type="password",
+                                placeholder="Paste refresh_token from ~/.glossarion/authgpt_tokens.json",
+                                visible=_is_hf_spaces and _show_authgpt,
+                                info="Browser login unavailable on HF Spaces. Paste your refresh token here.",
+                                interactive=True
                             )
                             authgpt_login_status = gr.Textbox(
                                 label="", interactive=False, visible=False,
-                                max_lines=1
+                                max_lines=2
                             )
                             
                             # Use all profiles without filtering
@@ -3980,18 +3991,20 @@ class GlossarionWeb:
                     
                     # --- Model change handlers: toggle API key & AuthGPT login ---
                     def _on_model_change(model):
-                        """Return visibility updates for API key and AuthGPT login button."""
+                        """Return visibility updates for API key, AuthGPT login button, and token input."""
                         hide_key = _model_needs_no_api_key(model or '')
                         is_authgpt = (model or '').lower().startswith('authgpt/')
+                        _hf = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
                         return (
-                            gr.update(visible=not hide_key),   # api_key
-                            gr.update(visible=is_authgpt),     # authgpt_login_btn
+                            gr.update(visible=not hide_key),       # api_key
+                            gr.update(visible=is_authgpt),         # authgpt_login_btn
+                            gr.update(visible=is_authgpt and _hf), # authgpt_token_input
                         )
                     
                     epub_model.change(
                         fn=_on_model_change,
                         inputs=[epub_model],
-                        outputs=[epub_api_key, authgpt_login_btn]
+                        outputs=[epub_api_key, authgpt_login_btn, authgpt_token_input]
                     )
                     manga_model.change(
                         fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
@@ -4000,32 +4013,68 @@ class GlossarionWeb:
                     )
                     
                     # --- AuthGPT Login handler ---
-                    def _authgpt_login():
-                        """Run OAuth flow for ChatGPT subscription login."""
+                    def _authgpt_login(pasted_token):
+                        """Run OAuth flow for ChatGPT subscription login.
+                        
+                        On Hugging Face Spaces (headless), accepts a pasted refresh token
+                        instead of opening a browser for the OAuth flow.
+                        """
                         try:
-                            from authgpt_auth import get_default_store, run_oauth_flow
+                            import time
+                            from authgpt_auth import get_default_store, run_oauth_flow, refresh_access_token
                             store = get_default_store()
                             
+                            _hf = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+                            
                             # If already logged in, show status
-                            if store.has_tokens:
+                            if store.has_tokens and not pasted_token:
                                 info = store.account_info
                                 email = info.get('email', '')
                                 plan = info.get('plan_type', '')
                                 return gr.update(value=f"✅ Already logged in ({email or plan or 'active'})", visible=True)
                             
-                            # Run OAuth flow (opens browser)
-                            tokens = run_oauth_flow()
-                            store.save_tokens(tokens)
-                            info = store.account_info
-                            email = info.get('email', '')
-                            plan = info.get('plan_type', '')
-                            return gr.update(value=f"✅ Logged in ({email or plan or 'success'})", visible=True)
+                            if _hf:
+                                # --- HF Spaces: use pasted token ---
+                                token_str = (pasted_token or '').strip()
+                                if not token_str:
+                                    return gr.update(
+                                        value="❌ Paste your refresh_token from ~/.glossarion/authgpt_tokens.json above, then click Save Token.",
+                                        visible=True
+                                    )
+                                
+                                # Try to use the pasted value as a refresh token
+                                try:
+                                    refreshed = refresh_access_token(token_str)
+                                    store.save_tokens(refreshed)
+                                    info = store.account_info
+                                    email = info.get('email', '')
+                                    plan = info.get('plan_type', '')
+                                    return gr.update(value=f"✅ Logged in via token ({email or plan or 'success'})", visible=True)
+                                except Exception as ref_exc:
+                                    # Maybe it's a raw access token instead?
+                                    manual_tokens = {
+                                        "access_token": token_str,
+                                        "expires_at": time.time() + 3600,
+                                    }
+                                    store.save_tokens(manual_tokens)
+                                    return gr.update(
+                                        value=f"⚠️ Saved as access token (refresh failed: {ref_exc}). May expire in ~1h.",
+                                        visible=True
+                                    )
+                            else:
+                                # --- Local/desktop: run browser OAuth flow ---
+                                tokens = run_oauth_flow()
+                                store.save_tokens(tokens)
+                                info = store.account_info
+                                email = info.get('email', '')
+                                plan = info.get('plan_type', '')
+                                return gr.update(value=f"✅ Logged in ({email or plan or 'success'})", visible=True)
                         except Exception as e:
                             return gr.update(value=f"❌ Login failed: {e}", visible=True)
                     
                     authgpt_login_btn.click(
                         fn=_authgpt_login,
-                        inputs=[],
+                        inputs=[authgpt_token_input],
                         outputs=[authgpt_login_status],
                         concurrency_limit=None  # OAuth flow blocks for up to 300s waiting for browser callback
                     )
