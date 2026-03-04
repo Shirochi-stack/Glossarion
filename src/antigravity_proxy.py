@@ -119,6 +119,14 @@ def cancel_stream():
 def reset_cancel():
     """Clear the cancellation flag before a new request."""
     _cancel_event.clear()
+    reset_auth_browser()
+
+
+def reset_auth_browser():
+    """Reset the auth browser flag so the browser can be re-opened."""
+    global _auth_browser_opened
+    with _auth_browser_lock:
+        _auth_browser_opened = False
 
 
 def is_cancelled() -> bool:

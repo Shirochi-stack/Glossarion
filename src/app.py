@@ -3387,6 +3387,25 @@ class GlossarionWeb:
                                 label="", interactive=False, visible=False,
                                 max_lines=2
                             )
+                            # AuthGPT logout button
+                            authgpt_logout_btn = gr.Button(
+                                "🔓 Logout",
+                                variant="secondary",
+                                visible=_show_authgpt,
+                                size="sm"
+                            )
+                            
+                            # Antigravity proxy login button (for antigravity/* models)
+                            _show_antigravity = _initial_model.startswith('antigravity/')
+                            antigravity_login_btn = gr.Button(
+                                "🌀 Open Proxy Login",
+                                variant="secondary",
+                                visible=_show_antigravity
+                            )
+                            antigravity_login_status = gr.Textbox(
+                                label="", interactive=False, visible=False,
+                                max_lines=2
+                            )
                             
                             # Use all profiles without filtering
                             profile_choices = list(self.profiles.keys())
@@ -3991,20 +4010,23 @@ class GlossarionWeb:
                     
                     # --- Model change handlers: toggle API key & AuthGPT login ---
                     def _on_model_change(model):
-                        """Return visibility updates for API key, AuthGPT login button, and token input."""
+                        """Return visibility updates for API key, AuthGPT login/logout, token input, and Antigravity login."""
                         hide_key = _model_needs_no_api_key(model or '')
                         is_authgpt = (model or '').lower().startswith('authgpt/')
+                        is_antigravity = (model or '').lower().startswith('antigravity/')
                         _hf = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
                         return (
-                            gr.update(visible=not hide_key),       # api_key
-                            gr.update(visible=is_authgpt),         # authgpt_login_btn
-                            gr.update(visible=is_authgpt and _hf), # authgpt_token_input
+                            gr.update(visible=not hide_key),           # api_key
+                            gr.update(visible=is_authgpt),             # authgpt_login_btn
+                            gr.update(visible=is_authgpt and _hf),     # authgpt_token_input
+                            gr.update(visible=is_authgpt),             # authgpt_logout_btn
+                            gr.update(visible=is_antigravity),         # antigravity_login_btn
                         )
                     
                     epub_model.change(
                         fn=_on_model_change,
                         inputs=[epub_model],
-                        outputs=[epub_api_key, authgpt_login_btn, authgpt_token_input]
+                        outputs=[epub_api_key, authgpt_login_btn, authgpt_token_input, authgpt_logout_btn, antigravity_login_btn]
                     )
                     manga_model.change(
                         fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
@@ -4077,6 +4099,57 @@ class GlossarionWeb:
                         inputs=[authgpt_token_input],
                         outputs=[authgpt_login_status],
                         concurrency_limit=None  # OAuth flow blocks for up to 300s waiting for browser callback
+                    )
+                    
+                    # --- AuthGPT Logout handler ---
+                    def _authgpt_logout():
+                        """Clear stored AuthGPT tokens."""
+                        try:
+                            from authgpt_auth import get_default_store
+                            store = get_default_store()
+                            store.clear_tokens()
+                            return gr.update(value="🔓 Logged out. Tokens cleared.", visible=True)
+                        except Exception as e:
+                            return gr.update(value=f"❌ Logout failed: {e}", visible=True)
+                    
+                    authgpt_logout_btn.click(
+                        fn=_authgpt_logout,
+                        inputs=[],
+                        outputs=[authgpt_login_status]
+                    )
+                    
+                    # --- Antigravity Proxy Login handler ---
+                    def _antigravity_login():
+                        """Open the Antigravity proxy auth page in the browser and check status."""
+                        import webbrowser
+                        try:
+                            from antigravity_proxy import get_proxy_url, check_proxy_health, ensure_proxy_running
+                            
+                            # Make sure the proxy is running first
+                            proxy_status = ensure_proxy_running(log_fn=print)
+                            if not proxy_status.get('running'):
+                                error = proxy_status.get('error', 'Unknown error')
+                                return gr.update(value=f"❌ Proxy not running: {error}", visible=True)
+                            
+                            proxy_url = get_proxy_url()
+                            webbrowser.open(proxy_url)
+                            
+                            # Reset the browser-opened flag so auth polling works fresh
+                            import antigravity_proxy
+                            with antigravity_proxy._auth_browser_lock:
+                                antigravity_proxy._auth_browser_opened = True  # We just opened it
+                            
+                            return gr.update(
+                                value=f"🌀 Opened {proxy_url} — link your Google account, then start translating.",
+                                visible=True
+                            )
+                        except Exception as e:
+                            return gr.update(value=f"❌ Failed: {e}", visible=True)
+                    
+                    antigravity_login_btn.click(
+                        fn=_antigravity_login,
+                        inputs=[],
+                        outputs=[antigravity_login_status]
                     )
                     
                     # Manual save function for all configuration
