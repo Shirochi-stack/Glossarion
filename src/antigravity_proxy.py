@@ -667,30 +667,83 @@ def send_message_stream(
 
     _log = log_fn or (lambda msg: None)
     _log(f"🌀 Antigravity: Streaming from proxy at {proxy_url} (model={model})")
+    t_start = time.time()
 
+    # Try httpx first (same as authgpt — streams SSE without buffering),
+    # fall back to requests if httpx is not available.
+    _httpx = None
     try:
-        resp = requests.post(
-            url, json=payload, headers=headers, timeout=timeout, stream=True
-        )
-    except requests.ConnectionError:
-        raise RuntimeError(
-            "Antigravity proxy connection refused. "
-            "Make sure the proxy is running:\n"
-            "  npx antigravity-claude-proxy@latest start"
-        )
-    except requests.Timeout:
-        raise RuntimeError(
-            f"Antigravity proxy streaming request timed out after {timeout}s."
-        )
+        import httpx as _httpx
+    except ImportError:
+        pass
+
+    use_httpx = _httpx is not None
+    resp = None
+    _httpx_ctx = None
+
+    if use_httpx:
+        try:
+            _timeout = _httpx.Timeout(timeout, connect=30.0)
+            _httpx_ctx = _httpx.stream(
+                "POST", url, json=payload, headers=headers, timeout=_timeout
+            )
+            resp = _httpx_ctx.__enter__()
+        except Exception as exc:
+            if _httpx_ctx is not None:
+                try:
+                    _httpx_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+            exc_str = str(exc).lower()
+            if "connect" in exc_str or "refused" in exc_str:
+                raise RuntimeError(
+                    "Antigravity proxy connection refused. "
+                    "Make sure the proxy is running:\n"
+                    "  npx antigravity-claude-proxy@latest start"
+                )
+            raise RuntimeError(
+                f"Antigravity proxy streaming error: {exc}"
+            )
+    else:
+        try:
+            resp = requests.post(
+                url, json=payload, headers=headers, timeout=timeout, stream=True
+            )
+        except requests.ConnectionError:
+            raise RuntimeError(
+                "Antigravity proxy connection refused. "
+                "Make sure the proxy is running:\n"
+                "  npx antigravity-claude-proxy@latest start"
+            )
+        except requests.Timeout:
+            raise RuntimeError(
+                f"Antigravity proxy streaming request timed out after {timeout}s."
+            )
 
     # Handle auth failure
     if resp.status_code in (401, 403):
+        if use_httpx and _httpx_ctx:
+            try:
+                _httpx_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+
         error_detail = ""
         try:
-            err_json = resp.json()
-            error_detail = err_json.get("error", {}).get("message", "")
+            if use_httpx:
+                error_detail = resp.read().decode("utf-8", errors="replace")
+                try:
+                    error_detail = json.loads(error_detail).get("error", {}).get("message", error_detail)
+                except Exception:
+                    pass
+            else:
+                err_json = resp.json()
+                error_detail = err_json.get("error", {}).get("message", "")
         except Exception:
-            error_detail = resp.text[:200]
+            try:
+                error_detail = resp.text[:200] if not use_httpx else str(resp.read()[:200])
+            except Exception:
+                error_detail = ""
 
         if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
             invalidate_api_key_cache()
@@ -704,6 +757,7 @@ def send_message_stream(
         )
         if auth_resp is not None and auth_resp.status_code == 200:
             resp = auth_resp
+            use_httpx = False  # auth fallback always returns requests response
         else:
             raise RuntimeError(
                 f"Antigravity: Authentication timed out.\n"
@@ -712,17 +766,29 @@ def send_message_stream(
             )
 
     if resp.status_code != 200:
-        raise RuntimeError(f"Antigravity: {resp.status_code} - {resp.text[:500]}")
+        error_text = ""
+        try:
+            error_text = resp.text[:500] if not use_httpx else resp.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        if use_httpx and _httpx_ctx:
+            try:
+                _httpx_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+        raise RuntimeError(f"Antigravity: {resp.status_code} - {error_text}")
 
     # Collect SSE events
     collected_content = []
     finish_reason = "stop"
     usage = None
-    t_start = time.time()
     got_first_data = False
     log_buf: list = []
 
-    for line in resp.iter_lines(decode_unicode=True):
+    # httpx iter_lines() yields str directly; requests iter_lines needs chunk_size=1
+    line_iter = resp.iter_lines() if use_httpx else resp.iter_lines(decode_unicode=True, chunk_size=1)
+
+    for line in line_iter:
         if _cancel_event.is_set():
             resp.close()
             raise RuntimeError("Antigravity: stream cancelled by user")
@@ -797,6 +863,13 @@ def send_message_stream(
         remainder = "".join(log_buf).strip()
         if remainder:
             _log(remainder)
+
+    # Clean up httpx context manager
+    if use_httpx and _httpx_ctx:
+        try:
+            _httpx_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
 
     content = "".join(collected_content)
     t_total = time.time() - t_start
