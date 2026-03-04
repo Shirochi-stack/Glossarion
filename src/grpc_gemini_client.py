@@ -164,10 +164,25 @@ class GrpcGeminiClient:
                     api_endpoint=self.endpoint
                 )
                 
-                self._client = GenerativeServiceClient(
-                    client_options=opts,
-                    client_info=None,  # Skip default client info
-                )
+                # CRITICAL: Use AnonymousCredentials to prevent the client from
+                # picking up GOOGLE_APPLICATION_CREDENTIALS (ADC) from the environment.
+                # In multi-key mode, the ADC may belong to a different project than
+                # the current API key, causing "CONSUMER_INVALID" errors.
+                # Auth is handled entirely via the x-goog-api-key metadata header.
+                try:
+                    from google.auth.credentials import AnonymousCredentials
+                    anon_creds = AnonymousCredentials()
+                except ImportError:
+                    anon_creds = None
+                
+                client_kwargs = {
+                    "client_options": opts,
+                    "client_info": None,  # Skip default client info
+                }
+                if anon_creds is not None:
+                    client_kwargs["credentials"] = anon_creds
+                
+                self._client = GenerativeServiceClient(**client_kwargs)
                 
                 # Override the API key in transport metadata
                 # The client uses x-goog-api-key header for API key auth
