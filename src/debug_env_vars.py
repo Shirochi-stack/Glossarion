@@ -388,6 +388,8 @@ def print_env_var_status():
         'USE_CUSTOM_OPENAI_ENDPOINT': 'Use custom OpenAI-compatible endpoint',
         'USE_GEMINI_OPENAI_ENDPOINT': 'Use Gemini-compatible OpenAI endpoint',
         'GEMINI_OPENAI_ENDPOINT': 'Gemini OpenAI endpoint URL',
+        'USE_GEMINI_GRPC_ENDPOINT': 'Use Gemini raw gRPC transport',
+        'GEMINI_GRPC_ENDPOINT': 'Gemini gRPC endpoint host',
     }
     print(f"\n🔌 API ENDPOINT VARIABLES:")
     print("-" * 40)

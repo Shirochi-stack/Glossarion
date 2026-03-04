@@ -4552,6 +4552,8 @@ class MultiAPIKeyDialog(QDialog):
         # Get Gemini endpoint settings
         use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+        use_gemini_grpc = os.getenv("USE_GEMINI_GRPC_ENDPOINT", "0") == "1"
+        gemini_grpc_endpoint = os.getenv("GEMINI_GRPC_ENDPOINT", "")
         
         # Create thread pool for parallel testing
         max_workers = min(10, len(indices))  # Limit to 10 concurrent tests

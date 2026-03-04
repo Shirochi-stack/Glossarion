@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.8.2"
+        __version__ = "7.8.3"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.2')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.3')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1100,6 +1100,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
         self.gemini_openai_endpoint_var = self.config.get('gemini_openai_endpoint', '')
+        self.use_gemini_grpc_endpoint_var = self.config.get('use_gemini_grpc_endpoint', False)
+        self.gemini_grpc_endpoint_var = self.config.get('gemini_grpc_endpoint', 'generativelanguage.googleapis.com')
         self.azure_api_version_var = self.config.get('azure_api_version', '2025-01-01-preview')
         # Set initial Azure API version environment variable
         azure_version = self.config.get('azure_api_version', '2025-01-01-preview')
@@ -2681,7 +2683,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.8.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.8.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -9094,6 +9096,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else '',
+            'USE_GEMINI_GRPC_ENDPOINT': '1' if getattr(self, 'use_gemini_grpc_endpoint_var', False) else '0',
+            'GEMINI_GRPC_ENDPOINT': getattr(self, 'gemini_grpc_endpoint_var', '') or 'generativelanguage.googleapis.com',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
@@ -13776,6 +13780,7 @@ Important rules:
                 ('disable_merge_fallback', ['disable_merge_fallback_var'], True, bool),
                 ('synthetic_merge_headers', ['synthetic_merge_headers_var'], True, bool),
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
+                ('use_gemini_grpc_endpoint', ['use_gemini_grpc_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('ignore_header', ['ignore_header_var'], False, bool),
@@ -13799,6 +13804,7 @@ Important rules:
                 ('groq_base_url', ['groq_base_url_var'], '', str),
                 ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
                 ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], '', str),
+                ('gemini_grpc_endpoint', ['gemini_grpc_endpoint_var'], 'generativelanguage.googleapis.com', str),
 
                 # Image settings
                 ('enable_image_translation', ['enable_image_translation_var'], False, bool),
@@ -14810,6 +14816,8 @@ Important rules:
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
                 ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'),
                 ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', '')),
+                ('USE_GEMINI_GRPC_ENDPOINT', '1' if getattr(self, 'use_gemini_grpc_endpoint_var', False) else '0'),
+                ('GEMINI_GRPC_ENDPOINT', getattr(self, 'gemini_grpc_endpoint_var', 'generativelanguage.googleapis.com')),
 
                 # PDF output
                 ('ENABLE_PDF_OUTPUT', '1' if getattr(self, 'enable_pdf_output_var', False) else '0'),
@@ -15059,7 +15067,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.8.2...")
+    print("🚀 Starting Glossarion v7.8.3...")
     
     # Initialize splash screen
     splash_manager = None

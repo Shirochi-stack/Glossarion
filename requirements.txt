@@ -79,6 +79,7 @@ google-auth
 google-auth-httplib2
 google-api-core
 googleapis-common-protos
+google-ai-generativelanguage
 grpcio
 grpcio-status
 proto-plus

@@ -345,7 +345,7 @@ def setup_other_settings_methods(gui_instance):
         'show_header_help_dialog',
         'on_extraction_method_change', 'on_extraction_mode_change',
         # Toggle methods
-        'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
+        'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_gemini_grpc_endpoint', 'toggle_ai_hunter',
         'toggle_custom_endpoint_ui', 'toggle_more_endpoints',
         '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
         '_toggle_anti_duplicate_controls', 'toggle_image_translation_section',
@@ -8793,6 +8793,70 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     gemini_help.setContentsMargins(0, 0, 0, 5)
     additional_v.addWidget(gemini_help)
     
+    # ─── Gemini gRPC Endpoint (raw binary transport for max performance) ───
+    grpc_cb = self._create_styled_checkbox("Enable Gemini gRPC Endpoint (⚡ Raw Binary Transport)")
+    try:
+        if not hasattr(self, 'use_gemini_grpc_endpoint_var'):
+            self.use_gemini_grpc_endpoint_var = self.config.get('use_gemini_grpc_endpoint', False)
+        grpc_cb.setChecked(bool(self.use_gemini_grpc_endpoint_var))
+    except Exception:
+        pass
+    def _on_grpc_endpoint_toggle(checked):
+        try:
+            self.use_gemini_grpc_endpoint_var = bool(checked)
+            self.toggle_gemini_grpc_endpoint()
+            # If gRPC is enabled, disable OpenAI endpoint to avoid conflict
+            if checked and hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
+                self.use_gemini_openai_endpoint_var = False
+                gemini_cb.setChecked(False)
+                print("⚠️ Disabled Gemini OpenAI endpoint (conflicts with gRPC mode)")
+        except Exception:
+            pass
+    grpc_cb.toggled.connect(_on_grpc_endpoint_toggle)
+    grpc_cb.setContentsMargins(0, 10, 0, 5)
+    additional_v.addWidget(grpc_cb)
+    
+    # gRPC endpoint URL input
+    grpc_row = QWidget()
+    grpc_h = QHBoxLayout(grpc_row)
+    grpc_h.setContentsMargins(0, 5, 0, 5)
+    grpc_h.addWidget(QLabel("Gemini gRPC Endpoint:"))
+    
+    if not hasattr(self, 'gemini_grpc_endpoint_var'):
+        self.gemini_grpc_endpoint_var = self.config.get('gemini_grpc_endpoint', 'generativelanguage.googleapis.com')
+    self.gemini_grpc_endpoint_entry = QLineEdit()
+    self.gemini_grpc_endpoint_entry.setPlaceholderText("generativelanguage.googleapis.com")
+    try:
+        self.gemini_grpc_endpoint_entry.setText(str(self.gemini_grpc_endpoint_var))
+    except Exception:
+        pass
+    def _on_grpc_url_changed(text):
+        try:
+            self.gemini_grpc_endpoint_var = text
+        except Exception:
+            pass
+    self.gemini_grpc_endpoint_entry.textChanged.connect(_on_grpc_url_changed)
+    grpc_h.addWidget(self.gemini_grpc_endpoint_entry)
+    
+    self.gemini_grpc_clear_button = QPushButton("Clear")
+    self.gemini_grpc_clear_button.setFixedWidth(80)
+    def _clear_grpc_url():
+        self.gemini_grpc_endpoint_var = "generativelanguage.googleapis.com"
+        self.gemini_grpc_endpoint_entry.setText("generativelanguage.googleapis.com")
+    self.gemini_grpc_clear_button.clicked.connect(_clear_grpc_url)
+    grpc_h.addWidget(self.gemini_grpc_clear_button)
+    additional_v.addWidget(grpc_row)
+    
+    grpc_help = QLabel("⚡ Raw gRPC: Binary protobuf over HTTP/2 for ~30-40% smaller payloads.\n"
+                        "Default: generativelanguage.googleapis.com | Requires: pip install grpcio google-ai-generativelanguage")
+    grpc_help.setStyleSheet("color: #ffc107; font-size: 8pt;")
+    grpc_help.setWordWrap(True)
+    grpc_help.setContentsMargins(0, 0, 0, 5)
+    additional_v.addWidget(grpc_help)
+    
+    # Initialize gRPC endpoint UI state
+    self.toggle_gemini_grpc_endpoint()
+    
     # Add the additional endpoints frame to the main section
     section_v.addWidget(self.additional_endpoints_frame)
     
@@ -8864,6 +8928,17 @@ def toggle_gemini_endpoint(self):
             self.gemini_endpoint_entry.setEnabled(enabled)
         if hasattr(self, 'gemini_clear_button'):
             self.gemini_clear_button.setEnabled(enabled)
+    except Exception:
+        pass
+
+def toggle_gemini_grpc_endpoint(self):
+    """Enable/disable Gemini gRPC endpoint entry based on toggle (Qt version)"""
+    try:
+        enabled = bool(getattr(self, 'use_gemini_grpc_endpoint_var', False))
+        if hasattr(self, 'gemini_grpc_endpoint_entry'):
+            self.gemini_grpc_endpoint_entry.setEnabled(enabled)
+        if hasattr(self, 'gemini_grpc_clear_button'):
+            self.gemini_grpc_clear_button.setEnabled(enabled)
     except Exception:
         pass
     
