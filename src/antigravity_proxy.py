@@ -41,9 +41,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROXY_URL = "http://localhost:8080"
 MESSAGES_ENDPOINT = "/v1/messages"
 HEALTH_ENDPOINT = "/health"
+CONFIG_ENDPOINT = "/api/config"
 
-# The proxy accepts any value as auth token (it uses its own Google OAuth)
-DUMMY_AUTH_TOKEN = "antigravity-proxy"
+# Cached API key (read from proxy config file)
+_cached_api_key: Optional[str] = None
+_api_key_lock = threading.Lock()
 
 # Module-level cancellation flag
 _cancel_event = threading.Event()
@@ -68,13 +70,100 @@ def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
             return False
         _auth_browser_opened = True
     _log = log_fn or (lambda msg: None)
-    _log(f"🔐 Antigravity: Authentication required – opening {proxy_url} in your browser...")
-    _log(f"   Please link your Google account. Glossarion will continue automatically once done.")
+    _log(f"🔐 Antigravity: Opening {proxy_url} in your browser for Google account linking...")
     try:
         webbrowser.open(proxy_url)
     except Exception:
         pass
     return True
+
+
+def _get_proxy_api_key() -> str:
+    """Read the proxy's API key from its config file.
+
+    The antigravity-claude-proxy stores its config (including apiKey) in
+    ~/.config/antigravity-proxy/config.json.  We read it and cache it so
+    every request sends the matching key.
+
+    Returns the key string, or empty string if no key is configured.
+    """
+    global _cached_api_key
+    with _api_key_lock:
+        if _cached_api_key is not None:
+            return _cached_api_key
+
+        config_path = os.path.join(
+            os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+        )
+        key = ""
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.loads(f.read())
+                key = data.get("apiKey", "") or ""
+            except Exception:
+                pass
+
+        # If config file has no key, the proxy may still have one in memory.
+        # Try to recover it by forcing a config save (the proxy writes the
+        # full in-memory config, including apiKey, to disk on any valid save).
+        if not key:
+            try:
+                proxy_url = get_proxy_url()
+                resp = requests.get(
+                    f"{proxy_url}{CONFIG_ENDPOINT}", timeout=3
+                )
+                if resp.status_code == 200:
+                    cfg = resp.json().get("config", {})
+                    live_key = cfg.get("apiKey", "")
+                    if live_key and live_key != "":
+                        # Proxy has a key in memory — force a config dump
+                        # by toggling a harmless setting (debug).
+                        debug_val = cfg.get("debug", False)
+                        requests.post(
+                            f"{proxy_url}{CONFIG_ENDPOINT}",
+                            json={"debug": not debug_val},
+                            timeout=3,
+                        )
+                        # Toggle it back immediately
+                        requests.post(
+                            f"{proxy_url}{CONFIG_ENDPOINT}",
+                            json={"debug": debug_val},
+                            timeout=3,
+                        )
+                        # Re-read the config file — it now has the key
+                        if os.path.isfile(config_path):
+                            with open(config_path, "r", encoding="utf-8") as f:
+                                data = json.loads(f.read())
+                            key = data.get("apiKey", "") or ""
+                        if key:
+                            logger.info(
+                                "Antigravity: recovered API key from proxy config."
+                            )
+            except Exception:
+                pass
+
+        _cached_api_key = key
+        return key
+
+
+def invalidate_api_key_cache():
+    """Clear the cached API key so it is re-read on next request."""
+    global _cached_api_key
+    with _api_key_lock:
+        _cached_api_key = None
+
+
+def _build_headers() -> Dict[str, str]:
+    """Build the HTTP headers for a proxy request."""
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    key = _get_proxy_api_key()
+    if key:
+        headers["x-api-key"] = key
+    return headers
 
 
 def _wait_for_auth(
@@ -205,35 +294,17 @@ def _find_npx() -> Optional[str]:
 
 
 def _ensure_proxy_config():
-    """Ensure the proxy config disables API key auth.
+    """Ensure the proxy config directory exists.
 
-    The antigravity-claude-proxy validates an ``apiKey`` on every ``/v1/*``
-    request.  Glossarion talks to the proxy on localhost, so there is no
-    need for this gate.  We write ``{"apiKey": ""}`` (skip validation) into
-    the proxy's config file so that any dummy token we send is accepted.
-    Existing settings in the file are preserved; only ``apiKey`` is touched.
+    Note: We intentionally do NOT modify the apiKey in the config file.
+    The user sets their API key via the Antigravity desktop app or CLI,
+    and we read it from the config file at runtime.
     """
     try:
         config_dir = os.path.join(os.path.expanduser("~"), ".config", "antigravity-proxy")
         os.makedirs(config_dir, exist_ok=True)
-        config_path = os.path.join(config_dir, "config.json")
-
-        # Read existing config if present, otherwise start fresh
-        existing: Dict[str, Any] = {}
-        if os.path.isfile(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    existing = json.loads(f.read())
-            except Exception:
-                existing = {}
-
-        # Only write if apiKey is not already empty
-        if existing.get("apiKey", None) != "":
-            existing["apiKey"] = ""
-            with open(config_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(existing, indent=2))
     except Exception:
-        pass  # Non-critical – proxy may still work without this
+        pass  # Non-critical
 
 
 def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
@@ -445,11 +516,7 @@ def send_message(
     if system_prompt:
         payload["system"] = system_prompt
 
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": DUMMY_AUTH_TOKEN,
-        "anthropic-version": "2023-06-01",
-    }
+    headers = _build_headers()
 
     if log_fn:
         log_fn(f"🌀 Antigravity: Sending to proxy at {proxy_url} (model={model})")
@@ -469,13 +536,31 @@ def send_message(
             "The model may need more time for long translations."
         )
 
-    # Handle auth failure: open browser once and wait for user to authenticate
+    # Handle auth failure
     if resp.status_code in (401, 403):
+        # Parse error to distinguish API key rejection from Google auth
+        error_detail = ""
+        try:
+            err_json = resp.json()
+            error_detail = err_json.get("error", {}).get("message", "")
+        except Exception:
+            error_detail = resp.text[:200]
+
+        if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
+            # API key mismatch — clear cache & fail fast with a helpful message
+            invalidate_api_key_cache()
+            raise RuntimeError(
+                f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                f"Open {proxy_url} → Settings and check the API Key, "
+                f"or remove it to disable key validation."
+            )
+
+        # Otherwise it's likely a Google account auth issue → open browser
         auth_resp = _wait_for_auth(
             url, payload, headers, proxy_url, log_fn, stream=False
         )
         if auth_resp is not None and auth_resp.status_code == 200:
-            resp = auth_resp  # auth succeeded, continue with this response
+            resp = auth_resp
         else:
             raise RuntimeError(
                 f"Antigravity: Authentication timed out.\n"
@@ -566,11 +651,7 @@ def send_message_stream(
     if system_prompt:
         payload["system"] = system_prompt
 
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": DUMMY_AUTH_TOKEN,
-        "anthropic-version": "2023-06-01",
-    }
+    headers = _build_headers()
 
     if log_fn:
         log_fn(f"🌀 Antigravity: Streaming from proxy at {proxy_url} (model={model})")
@@ -590,13 +671,27 @@ def send_message_stream(
             f"Antigravity proxy streaming request timed out after {timeout}s."
         )
 
-    # Handle auth failure: open browser once and wait for user to authenticate
+    # Handle auth failure
     if resp.status_code in (401, 403):
+        error_detail = ""
+        try:
+            err_json = resp.json()
+            error_detail = err_json.get("error", {}).get("message", "")
+        except Exception:
+            error_detail = resp.text[:200]
+
+        if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
+            invalidate_api_key_cache()
+            raise RuntimeError(
+                f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                f"Open {proxy_url} → Settings and check the API Key."
+            )
+
         auth_resp = _wait_for_auth(
             url, payload, headers, proxy_url, log_fn, stream=True
         )
         if auth_resp is not None and auth_resp.status_code == 200:
-            resp = auth_resp  # auth succeeded, continue with this streaming response
+            resp = auth_resp
         else:
             raise RuntimeError(
                 f"Antigravity: Authentication timed out.\n"
