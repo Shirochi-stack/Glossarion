@@ -9,11 +9,11 @@ def get_model_options() -> List[str]:
     return [
     
         # OpenAI Models
-        "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1",
-        "gpt-3.5-turbo", "gpt-3.5-turbo-16k", "gpt-4", "gpt-4-32k","gpt-5.2", "gpt-5.2-pro", "gpt-5.2-chat-latest",
+        "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano",
+        "gpt-3.5-turbo", "gpt-5.2", "gpt-5.2-pro", "gpt-5.2-chat-latest",
         "gpt-5-mini","gpt-5","gpt-5-nano", "gpt-5-chat-latest", "gpt-5-codex", "gpt-5-pro", "gpt-5-pro-2025-10-06",
         "gpt-5.1", "gpt-5.1-chat-latest", "gpt-5.1-codex", "gpt-5.1-codex-mini",
-        "o1-preview", "o1-mini", "o3", "o4-mini",
+        "o1-preview", "o1-mini", "o3",
         
         # Google Gemini Models
         "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",

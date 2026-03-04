@@ -6401,18 +6401,46 @@ class BatchTranslationProcessor:
                 # If translating a plain text source, mirror non-merged behavior and write .txt
                 if getattr(self, 'is_text_file', False):
                     parent_fname = fname.replace('.html', '.txt')
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                    text_content = soup.get_text(strip=True)
-                    with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                        f.write(text_content)
                     saved_name = parent_fname
                 else:
-                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                        f.write(cleaned_to_save)
                     saved_name = fname
-                
-                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
+
+                # ------------------------------------------------------------------
+                # Truncation gate — check BEFORE writing to disk.
+                # When "Save interrupted chapters" is OFF we must NOT create a file
+                # for truncated merged results.
+                # ------------------------------------------------------------------
+                if merged_truncated:
+                    save_partial_results = (
+                        os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
+                        or bool(getattr(self.config, 'save_partial_results', False))
+                    )
+                    if save_partial_results:
+                        # User opted-in: write truncated output to disk
+                        if getattr(self, 'is_text_file', False):
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(cleaned_to_save, 'html.parser')
+                            text_content = soup.get_text(strip=True)
+                            with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(text_content)
+                        else:
+                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned_to_save)
+                        print(f"   💾 Saved merged content (truncated) to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
+                    else:
+                        print(f"   ⏭️ Merged content for Chapter {parent_actual_num} not saved (truncated) — 'Save interrupted chapters' is OFF")
+                else:
+                    # Not truncated — always save
+                    if getattr(self, 'is_text_file', False):
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(cleaned_to_save, 'html.parser')
+                        text_content = soup.get_text(strip=True)
+                        with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                            f.write(text_content)
+                    else:
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned_to_save)
+                    print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
                 
                 with self.progress_lock:
                     if merged_truncated:
