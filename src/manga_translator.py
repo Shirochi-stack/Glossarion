@@ -13581,6 +13581,18 @@ class MangaTranslator:
             ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
             det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
             model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+            # Sanitize model_id to match preload key (must mirror _preload_bubble_detectors logic)
+            try:
+                if det_type in ('rtdetr', 'rtdetr_onnx'):
+                    if model_id and (model_id.lower().endswith('.json') or os.path.isfile(model_id)):
+                        model_id = ''
+                    if not model_id:
+                        model_id = 'ogkalu/comic-text-and-bubble-detector'
+                elif det_type in ('yolo', 'custom'):
+                    if model_id and model_id.lower().endswith('.json'):
+                        model_id = ''
+            except Exception:
+                pass
             key = (det_type, model_id)
             
             # Polling parameters
