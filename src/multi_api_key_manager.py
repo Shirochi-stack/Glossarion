@@ -3979,6 +3979,42 @@ class MultiAPIKeyDialog(QDialog):
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
         
+        # Sync environment variables and UnifiedClient pool immediately
+        try:
+            import os as _os
+            if enabled:
+                _os.environ['USE_MULTI_API_KEYS'] = '1'
+                _os.environ['USE_MULTI_KEYS'] = '1'
+                # Apply rotation settings
+                force_rotation = bool(self.translator_gui.config.get('force_key_rotation', True))
+                rotation_frequency = int(self.translator_gui.config.get('rotation_frequency', 1))
+                _os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                _os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                # Setup in-memory pool
+                try:
+                    from unified_api_client import UnifiedClient
+                    mk_list = self.translator_gui.config.get('multi_api_keys', []) or []
+                    if mk_list:
+                        UnifiedClient.set_in_memory_multi_keys(
+                            mk_list,
+                            force_rotation=force_rotation,
+                            rotation_frequency=rotation_frequency,
+                        )
+                        UnifiedClient.setup_multi_key_pool(mk_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+                except Exception:
+                    pass
+            else:
+                _os.environ['USE_MULTI_API_KEYS'] = '0'
+                _os.environ['USE_MULTI_KEYS'] = '0'
+                # Clear in-memory pool so UnifiedClient stops rotating
+                try:
+                    from unified_api_client import UnifiedClient
+                    UnifiedClient.clear_in_memory_multi_keys()
+                except Exception:
+                    pass
+        except Exception as _env_err:
+            print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
+        
         # === Rotation Settings Frame ===
         if hasattr(self, 'rotation_frame'):
             if enabled:

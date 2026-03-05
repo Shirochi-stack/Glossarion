@@ -3354,7 +3354,7 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                     ms = self.main_gui.config.setdefault('manga_settings', {})
                     ocr_set = ms.setdefault('ocr', {})
                     changed = False
-                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
+                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', True))
                     if not bubble_enabled:
                         if 'detector_type' not in ocr_set:
                             ocr_set['detector_type'] = 'rtdetr_onnx'
@@ -10928,12 +10928,23 @@ def _get_ocr_config(self) -> dict:
         else:
             print(f"[DEBUG] Azure credentials not complete")
     elif config['provider'] == 'custom-api':
-        print(f"[DEBUG] Using custom-api provider (requires API key)")
         # For custom-api provider, we need to ensure the API key is available
         api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+        # Also check the main GUI config for API key
+        if not api_key and hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+            api_key = self.main_gui.config.get('api_key', '')
+        # Check if model uses own auth (no API key needed)
+        _model = ''
+        if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+            _model = (self.main_gui.config.get('model', '') or '').lower()
+        _uses_own_auth = _model.startswith('authgpt/') or _model.startswith('vertex/') or _model.startswith('antigravity/')
         if api_key:
+            print(f"[DEBUG] Using custom-api provider (API key available)")
             print(f"[DEBUG] API key available for custom-api OCR")
+        elif _uses_own_auth:
+            print(f"[DEBUG] Using custom-api provider (own-auth model: {_model})")
         else:
+            print(f"[DEBUG] Using custom-api provider (requires API key)")
             print(f"[DEBUG] WARNING: No API key available for custom-api OCR")
         # Also ensure OCR prompt is set in environment
         if hasattr(self, 'ocr_prompt') and self.ocr_prompt:

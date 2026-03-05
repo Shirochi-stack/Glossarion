@@ -272,10 +272,14 @@ class CustomAPIProvider(OCRProvider):
             else:
                 model = os.environ.get('MODEL', 'gpt-4o-mini')
             
-            if not api_key:
+            # Check if model uses own auth (no API key needed)
+            _ml = (model or '').lower()
+            if _ml.startswith('authgpt/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
+                api_key = 'own-auth'  # placeholder — actual auth handled by provider
+            elif not api_key:
                 self._log("❌ No API key configured", "error")
                 return False
-            
+        
             # Create UnifiedClient just like translations do
             self.client = UnifiedClient(model=model, api_key=api_key)
             
