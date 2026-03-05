@@ -6029,8 +6029,9 @@ def process_html_file_batch(args):
                                 'warning_desc': 'Chapter is essentially empty; word count check skipped'
                             }
                         else:
-                            # Detect if text is CJK for proper multiplier calculation
-                            script_hint = detect_dominant_script(raw_text)
+                            # Detect script from SOURCE text (word_count folder), not translated output
+                            _src_sample = _sample_text_from_word_count_folder(os.path.dirname(full_path))
+                            script_hint = detect_dominant_script(_src_sample) if _src_sample else detect_dominant_script(raw_text)
                             is_cjk = script_hint in ['cjk', 'japanese', 'korean']
                             
                             ratio = translated_wc / original_wc

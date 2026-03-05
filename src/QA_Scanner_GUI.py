@@ -366,20 +366,16 @@ class QAScannerMixin:
             }
           
         })
-        # Ensure multipliers include all defaults
-        wordcount_defaults = qa_settings.get('word_count_multipliers', {})
-        if not wordcount_defaults or not isinstance(wordcount_defaults, dict):
-            wordcount_defaults = {}
-        for _k, _v in {
-            # Character-based multipliers (source chars → target chars, no spaces)
+        # Force canonical multiplier defaults — always override stale old config values
+        # (Old configs may have e.g. chinese=1.6 which is incorrect; hardcoded values must always win)
+        _canonical_multipliers = {
             'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
             'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
             'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
             'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
             'other': 1.0
-        }.items():
-            wordcount_defaults.setdefault(_k, _v)
-        qa_settings['word_count_multipliers'] = wordcount_defaults
+        }
+        qa_settings['word_count_multipliers'] = _canonical_multipliers
         # Keep QA target language aligned with the main target language.
         # This ensures the scanner respects the same language the user
         # selected for translation.
