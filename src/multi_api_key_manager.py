@@ -1197,8 +1197,10 @@ class MultiAPIKeyDialog(QDialog):
         # Load existing keys from config
         self._load_keys_from_config()
         
-        # Create and show dialog
+        # Create and show dialog (suppress toggle logs during init)
+        self._initializing = True
         self._create_dialog()
+        self._initializing = False
         
         # Make it a window (not just a dialog)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
@@ -2602,6 +2604,32 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
         
+        # Show status message
+        status = "enabled" if enabled else "disabled"
+        self._show_status(f"Fallback Keys {status}")
+        if not getattr(self, '_initializing', False):
+            fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+            if enabled:
+                msg = f"🔑 Fallback key pool: {len(fallback_keys)} keys loaded"
+            else:
+                msg = f"🔑 Fallback key pool: disabled"
+            print(msg)
+            if hasattr(self.translator_gui, 'append_log'):
+                try:
+                    self.translator_gui.append_log(msg)
+                except Exception:
+                    pass
+        
+        # Sync env vars immediately
+        try:
+            import os as _os
+            if enabled:
+                _os.environ['USE_FALLBACK_KEYS'] = '1'
+            else:
+                _os.environ['USE_FALLBACK_KEYS'] = '0'
+        except Exception:
+            pass
+        
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
 
@@ -3979,41 +4007,48 @@ class MultiAPIKeyDialog(QDialog):
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
         
-        # Sync environment variables and UnifiedClient pool immediately
-        try:
-            import os as _os
-            if enabled:
-                _os.environ['USE_MULTI_API_KEYS'] = '1'
-                _os.environ['USE_MULTI_KEYS'] = '1'
-                # Apply rotation settings
-                force_rotation = bool(self.translator_gui.config.get('force_key_rotation', True))
-                rotation_frequency = int(self.translator_gui.config.get('rotation_frequency', 1))
-                _os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
-                _os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
-                # Setup in-memory pool
-                try:
-                    from unified_api_client import UnifiedClient
-                    mk_list = self.translator_gui.config.get('multi_api_keys', []) or []
-                    if mk_list:
-                        UnifiedClient.set_in_memory_multi_keys(
-                            mk_list,
-                            force_rotation=force_rotation,
-                            rotation_frequency=rotation_frequency,
-                        )
-                        UnifiedClient.setup_multi_key_pool(mk_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
-                except Exception:
-                    pass
-            else:
-                _os.environ['USE_MULTI_API_KEYS'] = '0'
-                _os.environ['USE_MULTI_KEYS'] = '0'
-                # Clear in-memory pool so UnifiedClient stops rotating
-                try:
-                    from unified_api_client import UnifiedClient
-                    UnifiedClient.clear_in_memory_multi_keys()
-                except Exception:
-                    pass
-        except Exception as _env_err:
-            print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
+        # Sync environment variables and UnifiedClient pool immediately (skip during init)
+        if not getattr(self, '_initializing', False):
+            try:
+                import os as _os
+                if enabled:
+                    _os.environ['USE_MULTI_API_KEYS'] = '1'
+                    _os.environ['USE_MULTI_KEYS'] = '1'
+                    # Apply rotation settings
+                    force_rotation = bool(self.translator_gui.config.get('force_key_rotation', True))
+                    rotation_frequency = int(self.translator_gui.config.get('rotation_frequency', 1))
+                    _os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                    _os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                    # Setup in-memory pool
+                    try:
+                        from unified_api_client import UnifiedClient
+                        mk_list = self.translator_gui.config.get('multi_api_keys', []) or []
+                        if mk_list:
+                            UnifiedClient.set_in_memory_multi_keys(
+                                mk_list,
+                                force_rotation=force_rotation,
+                                rotation_frequency=rotation_frequency,
+                            )
+                    except Exception:
+                        pass
+                else:
+                    _os.environ['USE_MULTI_API_KEYS'] = '0'
+                    _os.environ['USE_MULTI_KEYS'] = '0'
+                    # Clear in-memory pool so UnifiedClient stops rotating
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.clear_in_memory_multi_keys()
+                    except Exception:
+                        pass
+                    msg = "🔑 Multi-key pool: disabled"
+                    print(msg)
+                    if hasattr(self.translator_gui, 'append_log'):
+                        try:
+                            self.translator_gui.append_log(msg)
+                        except Exception:
+                            pass
+            except Exception as _env_err:
+                print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
         
         # === Rotation Settings Frame ===
         if hasattr(self, 'rotation_frame'):
