@@ -1895,21 +1895,37 @@ class MultiAPIKeyDialog(QDialog):
         move_layout = QVBoxLayout(self.fallback_move_frame)
         move_layout.setContentsMargins(0, 0, 5, 0)
         
-        order_label = QLabel("Order")
+        order_label = QLabel("Reorder")
         order_font = QFont()
         order_font.setBold(True)
         order_label.setFont(order_font)
         move_layout.addWidget(order_label)
         
+        # Move to top button
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_fallback_key('top'))
+        move_layout.addWidget(top_btn)
+        
         up_btn = QPushButton("↑")
-        up_btn.setFixedWidth(40)
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_fallback_key('up'))
         move_layout.addWidget(up_btn)
         
         down_btn = QPushButton("↓")
-        down_btn.setFixedWidth(40)
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_fallback_key('down'))
         move_layout.addWidget(down_btn)
+        
+        # Move to bottom button
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_fallback_key('bottom'))
+        move_layout.addWidget(bottom_btn)
         
         move_layout.addStretch()
         container_layout.addWidget(self.fallback_move_frame)
@@ -1917,23 +1933,35 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Status', 'Times Used'])
-        self.fallback_tree.setColumnWidth(0, 220)
-        self.fallback_tree.setColumnWidth(1, 220)
-        self.fallback_tree.setColumnWidth(2, 110)  # Output Limit
-        self.fallback_tree.setColumnWidth(3, 120)  # Status
-        self.fallback_tree.setColumnWidth(4, 100)  # Times Used
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.fallback_tree.setColumnWidth(0, 125)  # API Key
+        self.fallback_tree.setColumnWidth(1, 230)  # Model
+        self.fallback_tree.setColumnWidth(2, 100)  # Output Limit
+        self.fallback_tree.setColumnWidth(3, 80)   # Status
+        self.fallback_tree.setColumnWidth(4, 65)   # Success
+        self.fallback_tree.setColumnWidth(5, 60)   # Errors
+        self.fallback_tree.setColumnWidth(6, 90)   # Times Used
+        
+        # Set header font to match multi-key tree
+        fb_header = self.fallback_tree.header()
+        fb_header_font = QFont()
+        fb_header_font.setBold(True)
+        fb_header_font.setPointSize(11)
+        fb_header.setFont(fb_header_font)
+        
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
         self.fallback_tree.setMinimumHeight(150)
         
         # Enable drag and drop for fallback tree using InternalMove (like profile manager)
-        # This is the simplest approach - let Qt handle everything
         self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.fallback_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
         # Connect to model's rowsMoved signal to sync data after Qt moves items
         self.fallback_tree.model().rowsMoved.connect(self._on_fallback_rows_moved)
+        
+        # Connect double-click for inline editing (consistent with multi-key tree)
+        self.fallback_tree.itemDoubleClicked.connect(self._on_fallback_click)
         
         container_layout.addWidget(self.fallback_tree)
         
@@ -2201,11 +2229,28 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 output_limit_str = "global"
             
-            # Insert into tree
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, "Not tested", str(times_used)])
-            # Untested styling
+            # Determine status and coloring (match multi-key tree style)
+            test_result = key_data.get('last_test_result')
+            if test_result == 'passed':
+                status = "✅ Passed"
+                color = Qt.darkGreen
+            elif test_result == 'failed':
+                status = "❌ Failed"
+                color = Qt.red
+            elif test_result == 'error':
+                status = "❌ Error"
+                color = Qt.darkRed
+            else:
+                status = "Not tested"
+                color = Qt.gray
+            
+            # Insert into tree (with Success and Errors columns matching multi-key tree)
+            success_count = int(key_data.get('success_count', 0))
+            error_count = int(key_data.get('error_count', 0))
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, status, str(success_count), str(error_count), str(times_used)])
+            # Apply status-based coloring (consistent with multi-key tree)
             for col in range(item.columnCount()):
-                item.setForeground(col, Qt.gray)
+                item.setForeground(col, color)
             
             # Tooltip for per-key output token limit
             if per_key_limit and per_key_limit > 0:
@@ -2324,14 +2369,19 @@ class MultiAPIKeyDialog(QDialog):
             return
         
         new_index = index
-        if direction == 'up' and index > 0:
+        if direction == 'top' and index > 0:
+            new_index = 0
+        elif direction == 'up' and index > 0:
             new_index = index - 1
         elif direction == 'down' and index < len(fallback_keys) - 1:
             new_index = index + 1
+        elif direction == 'bottom' and index < len(fallback_keys) - 1:
+            new_index = len(fallback_keys) - 1
         
         if new_index != index:
-            # Swap keys
-            fallback_keys[index], fallback_keys[new_index] = fallback_keys[new_index], fallback_keys[index]
+            # Move key to new position (pop and insert for top/bottom support)
+            key = fallback_keys.pop(index)
+            fallback_keys.insert(new_index, key)
             
             # Save to config
             self.translator_gui.config['fallback_keys'] = fallback_keys
@@ -2388,6 +2438,10 @@ class MultiAPIKeyDialog(QDialog):
         if index < len(fallback_keys):
             try:
                 fallback_keys[index]['times_used'] = int(fallback_keys[index].get('times_used', 0)) + 1
+                if success:
+                    fallback_keys[index]['success_count'] = int(fallback_keys[index].get('success_count', 0)) + 1
+                else:
+                    fallback_keys[index]['error_count'] = int(fallback_keys[index].get('error_count', 0)) + 1
                 # Persist
                 self.translator_gui.config['fallback_keys'] = fallback_keys
                 self.translator_gui.save_config(show_message=False)
@@ -2397,14 +2451,31 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                # Update status (column 3)
-                item.setText(3, "✅ Passed" if success else "❌ Failed")
-                # Update times used cell (column 4)
+                # Update status (column 3) and apply coloring (consistent with multi-key tree)
+                if success:
+                    item.setText(3, "✅ Passed")
+                    color = Qt.darkGreen
+                else:
+                    item.setText(3, "❌ Failed")
+                    color = Qt.red
+                for col in range(item.columnCount()):
+                    item.setForeground(col, color)
+                # Update success (col 4) / errors (col 5) cells
                 try:
-                    current_times = int(item.text(4))
-                    item.setText(4, str(current_times + 1))
+                    if success:
+                        current = int(item.text(4))
+                        item.setText(4, str(current + 1))
+                    else:
+                        current = int(item.text(5))
+                        item.setText(5, str(current + 1))
                 except Exception:
-                    item.setText(4, "1")
+                    pass
+                # Update times used cell (column 6)
+                try:
+                    current_times = int(item.text(6))
+                    item.setText(6, str(current_times + 1))
+                except Exception:
+                    item.setText(6, "1")
 
     def _test_single_fallback_key(self, key_data, index):
         """Test a single fallback key - REAL API TEST"""
@@ -3347,6 +3418,27 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['fallback_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
             self._show_fallback_status("Reordered fallback keys")
+
+    def _on_fallback_click(self, item, column):
+        """Handle double-click on fallback tree item for inline editing (consistent with multi-key tree)"""
+        if not item:
+            return
+        
+        index = self.fallback_tree.indexOfTopLevelItem(item)
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if index >= len(fallback_keys):
+            return
+        
+        # Column 1 = Model (editable)
+        if column == 1:
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                fallback_keys[index]['model'] = new_value
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated model to: {new_value}")
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
