@@ -8576,40 +8576,87 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     openai_h.addWidget(self.openai_clear_button)
     section_v.addWidget(openai_row)
     
-    # Help text
-    help_lbl = QLabel("Enable checkbox to use custom endpoint. For Ollama: <a href='http://localhost:11434/v1'>http://localhost:11434/v1</a>")
-    help_lbl.setStyleSheet("color: gray; font-size: 8pt;")
-    help_lbl.setContentsMargins(0, 0, 0, 10)
-    help_lbl.setTextFormat(Qt.RichText)
-    help_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
-    help_lbl.setOpenExternalLinks(False)
-    help_lbl.setToolTip("Double-click the URL to paste it into the endpoint field")
-    try:
-        from PySide6.QtGui import QGuiApplication
-        from PySide6.QtCore import QTimer, QEvent
-        _ollama_url = "http://localhost:11434/v1"
-        orig_style = help_lbl.styleSheet()
-        orig_text = help_lbl.text()
-        def _dbl_click(event):
-            # Paste into field
-            self.openai_base_url_entry.setText(_ollama_url)
-            self.openai_base_url_var = _ollama_url
-            # Copy to clipboard
-            try:
-                QGuiApplication.clipboard().setText(_ollama_url)
-            except Exception:
-                pass
-            # Flash green feedback
-            try:
-                help_lbl.setStyleSheet(orig_style + " color: #00d084;")
-                help_lbl.setText(f"✓ Pasted: {_ollama_url}")
-                QTimer.singleShot(900, lambda: (help_lbl.setStyleSheet(orig_style), help_lbl.setText(orig_text)))
-            except Exception:
-                pass
-        help_lbl.mouseDoubleClickEvent = _dbl_click
-    except Exception:
-        pass
-    section_v.addWidget(help_lbl)
+    # Help text with shortcut URLs for Ollama and LM Studio
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtCore import QTimer
+    _ollama_url = "http://localhost:11434/v1"
+    _lmstudio_url = "http://localhost:1234/v1"
+
+    help_row = QWidget()
+    help_h = QHBoxLayout(help_row)
+    help_h.setContentsMargins(0, 0, 0, 10)
+    help_h.setSpacing(0)
+
+    help_prefix = QLabel("Enable checkbox to use custom endpoint. ")
+    help_prefix.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(help_prefix)
+
+    # Ollama shortcut label
+    ollama_lbl = QLabel(f"Ollama: <a href='#'>{_ollama_url}</a>")
+    ollama_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    ollama_lbl.setTextFormat(Qt.RichText)
+    ollama_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    ollama_lbl.setOpenExternalLinks(False)
+    ollama_lbl.setToolTip("Double-click to paste Ollama URL into the endpoint field")
+    _ollama_orig_style = ollama_lbl.styleSheet()
+    _ollama_orig_text = ollama_lbl.text()
+    def _dbl_click_ollama(event):
+        self.openai_base_url_entry.setText(_ollama_url)
+        self.openai_base_url_var = _ollama_url
+        try:
+            QGuiApplication.clipboard().setText(_ollama_url)
+        except Exception:
+            pass
+        try:
+            ollama_lbl.setStyleSheet(_ollama_orig_style + " color: #00d084;")
+            ollama_lbl.setTextFormat(Qt.PlainText)
+            ollama_lbl.setText(f"✓ Pasted: {_ollama_url}")
+            QTimer.singleShot(900, lambda: (
+                ollama_lbl.setStyleSheet(_ollama_orig_style),
+                ollama_lbl.setTextFormat(Qt.RichText),
+                ollama_lbl.setText(_ollama_orig_text),
+            ))
+        except Exception:
+            pass
+    ollama_lbl.mouseDoubleClickEvent = _dbl_click_ollama
+    help_h.addWidget(ollama_lbl)
+
+    sep_lbl = QLabel("  |  ")
+    sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(sep_lbl)
+
+    # LM Studio shortcut label
+    lmstudio_lbl = QLabel(f"LM Studio: <a href='#'>{_lmstudio_url}</a>")
+    lmstudio_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    lmstudio_lbl.setTextFormat(Qt.RichText)
+    lmstudio_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    lmstudio_lbl.setOpenExternalLinks(False)
+    lmstudio_lbl.setToolTip("Double-click to paste LM Studio URL into the endpoint field")
+    _lms_orig_style = lmstudio_lbl.styleSheet()
+    _lms_orig_text = lmstudio_lbl.text()
+    def _dbl_click_lmstudio(event):
+        self.openai_base_url_entry.setText(_lmstudio_url)
+        self.openai_base_url_var = _lmstudio_url
+        try:
+            QGuiApplication.clipboard().setText(_lmstudio_url)
+        except Exception:
+            pass
+        try:
+            lmstudio_lbl.setStyleSheet(_lms_orig_style + " color: #00d084;")
+            lmstudio_lbl.setTextFormat(Qt.PlainText)
+            lmstudio_lbl.setText(f"✓ Pasted: {_lmstudio_url}")
+            QTimer.singleShot(900, lambda: (
+                lmstudio_lbl.setStyleSheet(_lms_orig_style),
+                lmstudio_lbl.setTextFormat(Qt.RichText),
+                lmstudio_lbl.setText(_lms_orig_text),
+            ))
+        except Exception:
+            pass
+    lmstudio_lbl.mouseDoubleClickEvent = _dbl_click_lmstudio
+    help_h.addWidget(lmstudio_lbl)
+
+    help_h.addStretch()
+    section_v.addWidget(help_row)
     
     # Azure version frame (initially hidden)
     self.azure_version_frame = QWidget()
