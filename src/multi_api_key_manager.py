@@ -4081,6 +4081,28 @@ class MultiAPIKeyDialog(QDialog):
         status = "enabled" if enabled else "disabled"
         self._show_status(f"Multi-Key Mode {status}")
         
+        # Update multi-key status labels in other settings and manga integration
+        if hasattr(self.translator_gui, '_update_multi_key_status_label'):
+            try:
+                self.translator_gui._update_multi_key_status_label()
+            except Exception:
+                pass
+        # Update manga integration label if it exists
+        if hasattr(self.translator_gui, '_manga_widget') and self.translator_gui._manga_widget:
+            try:
+                mw = self.translator_gui._manga_widget
+                if hasattr(mw, 'multi_key_label'):
+                    if enabled:
+                        mk_list = self.translator_gui.config.get('multi_api_keys', [])
+                        active = sum(1 for k in mk_list if k.get('enabled', True))
+                        mw.multi_key_label.setText(f"• Multi-Key: ON ({active} keys)")
+                        mw.multi_key_label.setStyleSheet("color: green;")
+                    else:
+                        mw.multi_key_label.setText("• Multi-Key: OFF")
+                        mw.multi_key_label.setStyleSheet("color: gray;")
+            except Exception:
+                pass
+        
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
     

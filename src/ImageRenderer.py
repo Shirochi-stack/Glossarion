@@ -3369,7 +3369,11 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 except Exception:
                     self._preloaded_bd = None
 
-                # 5) Load custom-api provider if needed - MUST PASS API KEY/MODEL
+                # 5) Load custom-api provider - ALWAYS reload to pick up current multi-key state
+                # Force fresh UnifiedClient creation so toggling multi-key mode takes effect
+                provider_obj = self.ocr_manager.get_provider(provider)
+                if provider_obj:
+                    provider_obj.is_loaded = False  # force reload with current env vars
                 if not self.ocr_manager.get_provider(provider).is_loaded:
                     print(f"[OCR_REGIONS] Loading OCR provider: {provider}")
                     load_kwargs = {}
