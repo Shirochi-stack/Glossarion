@@ -1243,7 +1243,7 @@ class MangaTranslator:
             # Models should only be loaded when actually needed
             # This was causing unnecessary RAM usage
             ocr_settings = self.manga_settings.get('ocr', {})
-            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
             if bubble_detection_enabled:
                 self._log("📦 BATCH MODE: Bubble detection will be loaded on first use")
             else:
@@ -2445,7 +2445,7 @@ class MangaTranslator:
         if enabled:
             # Check if bubble detection is actually enabled before considering preload
             ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
-            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
             
             # Only suggest preloading if bubble detection is actually going to be used
             if bubble_detection_enabled:
@@ -2511,13 +2511,13 @@ class MangaTranslator:
             self._log("\n🔍 CRITICAL DETECTION SETTINGS:", "info")
             self._log(f"   • Detector type: {detector_type}", "info")
             self._log(f"   • RT-DETR for OCR regions: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "info")
-            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', False)}", "info")
+            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', True)}", "info")
             self._log(f"   • Free text enabled: {ocr_settings.get('detect_free_text', True)}", "info")
             
             # Log current OCR and detection settings
             self._log("⚙️ Current OCR Settings:", "info")
             self._log(f"   • Detector: {detector_type}", "info")
-            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', False)}", "info")
+            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', True)}", "info")
             self._log(f"   • RT-DETR guide: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "info")
             self._log(f"   • Free text detection: {ocr_settings.get('detect_free_text', True)}", "info")
             self._log(f"   • RT-DETR confidence: {ocr_settings.get('rtdetr_confidence', 0.3)}", "info")
@@ -2531,7 +2531,7 @@ class MangaTranslator:
                 return self._merge_nearby_regions(regions, threshold=threshold)
             
             # Check if bubble detection is enabled
-            if not ocr_settings.get('bubble_detection_enabled', False):
+            if not ocr_settings.get('bubble_detection_enabled', True):
                 self._log("📦 Bubble detection is disabled in settings", "info")
                 # Use more conservative threshold for Azure/Google to avoid cross-bubble merging
                 threshold = 30 if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') else 50
@@ -3788,7 +3788,7 @@ class MangaTranslator:
                 
                 # If bubble detection is enabled and batch variables suggest batching, do ROI-based batched OCR
                 try:
-                    use_roi_locality = ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('roi_locality_enabled', False)
+                    use_roi_locality = ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('roi_locality_enabled', False)
                     # Determine OCR batching enable
                     if 'ocr_batch_enabled' in ocr_settings:
                         ocr_batch_enabled = bool(ocr_settings.get('ocr_batch_enabled'))
@@ -3978,7 +3978,7 @@ class MangaTranslator:
                 import io
                 
                 # Check if we should use RT-DETR for text region detection (NEW FEATURE)
-                if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                if ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
                     self._log("🎯 Azure Vision full image → match to RT-DETR blocks")
                     
                     # Run RT-DETR to detect text regions first
@@ -4354,7 +4354,7 @@ class MangaTranslator:
                 # 2. ROI locality is explicitly enabled AND
                 # 3. use_rtdetr_for_ocr_regions is NOT explicitly disabled (or RT-DETR guidance is intended)
                 try:
-                    use_roi_locality = (ocr_settings.get('bubble_detection_enabled', False) and 
+                    use_roi_locality = (ocr_settings.get('bubble_detection_enabled', True) and 
                                        ocr_settings.get('roi_locality_enabled', False) and 
                                        ocr_settings.get('use_rtdetr_for_ocr_regions', True))
                     if 'ocr_batch_enabled' in ocr_settings:
@@ -4827,7 +4827,7 @@ class MangaTranslator:
                     ocr_results = []
                     
                     # Check if we should use bubble detection for regions
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("📝 Using bubble detection regions for manga-ocr...")
                         
                         # Run bubble detection to get regions
@@ -4903,7 +4903,7 @@ class MangaTranslator:
                     self._log("🍩 Qwen2-VL OCR for Korean text recognition")
                     
                     # Check if we should use bubble detection for regions
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("📝 Using bubble detection regions for Qwen2-VL...")
                         
                         # Get regions from bubble detector
@@ -4974,7 +4974,7 @@ class MangaTranslator:
                     self._log("🔌 Using Custom API for OCR")
                     
                     # Check if we should use bubble detection for regions
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("📝 Using bubble detection regions for Custom API...")
                         
                         # Get regions from bubble detector
@@ -5078,7 +5078,7 @@ class MangaTranslator:
                             self.ocr_manager.load_provider('easyocr')
                     
                     # Check if we should use bubble detection
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("📝 Using bubble detection regions for EasyOCR...")
                         
                         # Get regions from bubble detector
@@ -5175,7 +5175,7 @@ class MangaTranslator:
                             self._log(f"🔥 Reloaded PaddleOCR with language: {paddle_lang}")
                     
                     # Check if we should use bubble detection
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("📝 Using bubble detection regions for PaddleOCR...")
                         
                         # Run bubble detection to get regions (thread-local)
@@ -5259,7 +5259,7 @@ class MangaTranslator:
                     self._log("📄 DocTR OCR for document text recognition")
                     
                     # Check if we should use bubble detection
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("📝 Using bubble detection regions for DocTR...")
                         
                         # Run bubble detection to get regions (thread-local)
@@ -5343,7 +5343,7 @@ class MangaTranslator:
                     self._log("📋 Azure Document Intelligence OCR (successor to Azure AI Vision)")
                     
                     # Check if we should use RT-DETR for text region detection (same check as Azure Vision)
-                    if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                    if ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
                         self._log("🎯 Azure Doc Intelligence full image → match to RT-DETR blocks")
                         
                         # Run bubble detection to get regions (thread-local)
@@ -5615,7 +5615,7 @@ class MangaTranslator:
                     self._log(f"⚡ RapidOCR - Recognition: {'Full' if use_recognition else 'Detection Only'}")
                     
                     # Check if we should use bubble detection for regions
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    if ocr_settings.get('bubble_detection_enabled', True):
                         self._log("🎯 Using comic-translate approach: RapidOCR full image → match to RT-DETR blocks")
                         
                         # Run bubble detection to get regions (thread-local)
@@ -5796,7 +5796,7 @@ class MangaTranslator:
             
             # MERGING SECTION (applies to all providers)
             # Check if bubble detection is enabled
-            if ocr_settings.get('bubble_detection_enabled', False):
+            if ocr_settings.get('bubble_detection_enabled', True):
                 # Build list of providers that should skip merging
                 skip_merge_providers = ['rapidocr', 'manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']
                 
@@ -9126,7 +9126,7 @@ class MangaTranslator:
             try:
                 ocr_settings = manga_settings.get('ocr', {})
                 use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
-                bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+                bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
 
                 # Determine dilation settings based on OCR provider and RT-DETR status
                 ocr_provider = getattr(self, 'ocr_provider', '').lower()
@@ -14189,7 +14189,7 @@ class MangaTranslator:
         """Emit concise status lines for already-loaded heavy models to avoid confusing 'loading' logs."""
         try:
             ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
-            if ocr_settings.get('bubble_detection_enabled', False):
+            if ocr_settings.get('bubble_detection_enabled', True):
                 loaded, det = self._is_bubble_detector_loaded(ocr_settings)
                 if loaded:
                     self._log("🤖 Bubble detector ready", "info")

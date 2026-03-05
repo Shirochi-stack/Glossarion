@@ -1326,7 +1326,7 @@ class MangaTranslationTab(QObject):
         try:
             import time as _time
             start = _time.time()
-            if not ocr_settings.get('bubble_detection_enabled', False):
+            if not ocr_settings.get('bubble_detection_enabled', True):
                 return False
             det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
             model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
@@ -1385,7 +1385,7 @@ class MangaTranslationTab(QObject):
         inpaint_settings = manga_settings.get('inpainting', {})
         
         models_to_load = []
-        bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+        bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
         skip_inpainting = self.main_gui.config.get('manga_skip_inpainting', False)
         inpainting_method = inpaint_settings.get('method', 'local')
         inpainting_enabled = not skip_inpainting and inpainting_method == 'local'
@@ -2505,7 +2505,7 @@ class MangaTranslationTab(QObject):
             # Check if AI bubble detection is enabled
             manga_settings = self.main_gui.config.get('manga_settings', {})
             ocr_settings = manga_settings.get('ocr', {})
-            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
             
             if api_key:
                 if bubble_detection_enabled:
@@ -2515,8 +2515,18 @@ class MangaTranslationTab(QObject):
                     self.provider_status_label.setText("⚠️ Enable AI bubble detection for best results")
                     self.provider_status_label.setStyleSheet("color: orange;")
             else:
-                self.provider_status_label.setText("❌ API key needed")
-                self.provider_status_label.setStyleSheet("color: red;")
+                # Check if model uses own auth (no API key needed)
+                _model = (self.main_gui.config.get('model', '') or '').lower()
+                if _model.startswith('authgpt/') or _model.startswith('vertex/') or _model.startswith('antigravity/'):
+                    if bubble_detection_enabled:
+                        self.provider_status_label.setText("✅ Ready (own-auth model)")
+                        self.provider_status_label.setStyleSheet("color: green;")
+                    else:
+                        self.provider_status_label.setText("⚠️ Enable AI bubble detection for best results")
+                        self.provider_status_label.setStyleSheet("color: orange;")
+                else:
+                    self.provider_status_label.setText("❌ API key needed")
+                    self.provider_status_label.setStyleSheet("color: red;")
      
         elif provider == 'Qwen2-VL':
             # Initialize OCR manager if needed
@@ -10690,8 +10700,28 @@ class MangaTranslationTab(QObject):
         try:
             self._log("🔧 Initializing manga translator...", "info")
             
-            # Get manga settings
+            # Get manga settings — apply defaults on first launch (no config.json)
             manga_settings = self.main_gui.config.get('manga_settings', {})
+            if not manga_settings or 'ocr' not in manga_settings:
+                # First launch: ensure critical OCR defaults match MangaSettingsDialog
+                default_ocr = {
+                    'bubble_detection_enabled': True,
+                    'detector_type': 'rtdetr_onnx',
+                    'rtdetr_confidence': 0.3,
+                    'detect_empty_bubbles': True,
+                    'detect_text_bubbles': True,
+                    'detect_free_text': True,
+                    'use_rtdetr_for_ocr_regions': True,
+                }
+                if 'manga_settings' not in self.main_gui.config:
+                    self.main_gui.config['manga_settings'] = {}
+                ms = self.main_gui.config['manga_settings']
+                if 'ocr' not in ms:
+                    ms['ocr'] = {}
+                for k, v in default_ocr.items():
+                    ms['ocr'].setdefault(k, v)
+                manga_settings = ms
+                self._log("📋 Applied default manga OCR settings (first launch)", "info")
             ocr_settings = manga_settings.get('ocr', {})
             
             # Build OCR config
@@ -11025,7 +11055,7 @@ class MangaTranslationTab(QObject):
             try:
                 manga_settings = self.main_gui.config.get('manga_settings', {})
                 ocr_settings = manga_settings.get('ocr', {})
-                bubble_enabled = ocr_settings.get('bubble_detection_enabled', False)
+                bubble_enabled = ocr_settings.get('bubble_detection_enabled', True)
                 detect_empty = ocr_settings.get('detect_empty_bubbles', False)
                 use_rtdetr_for_ocr = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
                 detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
@@ -11354,7 +11384,7 @@ class MangaTranslationTab(QObject):
                     ms = self.main_gui.config.setdefault('manga_settings', {})
                     ocr_set = ms.setdefault('ocr', {})
                     changed = False
-                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
+                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', True))
                     
                     if not bubble_enabled:
                         # User has bubble detection OFF -> set non-intrusive defaults only
@@ -11693,7 +11723,7 @@ class MangaTranslationTab(QObject):
         # Preflight RT-DETR to avoid first-page fallback after aggressive cleanup
         try:
             ocr_set = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) or {}
-            if ocr_set.get('bubble_detection_enabled', False):
+            if ocr_set.get('bubble_detection_enabled', True):
                 # Ensure a default RT-DETR model id exists when required
                 if ocr_set.get('detector_type', 'rtdetr') in ('rtdetr', 'auto'):
                     if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
