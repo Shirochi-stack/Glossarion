@@ -9072,22 +9072,27 @@ def test_api_connections(self):
             fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
             endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
     
-    # Gemini OpenAI-Compatible endpoint
+    # Gemini Custom Endpoint — detect gRPC vs OpenAI-compatible REST
     if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
         gemini_url = self.gemini_openai_endpoint_var
         if gemini_url:
-            # Ensure the endpoint ends with /openai/ for compatibility
-            if not gemini_url.endswith('/openai/'):
-                if gemini_url.endswith('/'):
-                    gemini_url = gemini_url + 'openai/'
-                else:
-                    gemini_url = gemini_url + '/openai/'
+            _ep = gemini_url.strip().lower()
+            _is_grpc = not ('/openai' in _ep or _ep.startswith('http://') or _ep.startswith('https://'))
             
-            # For Gemini OpenAI-compatible endpoints, use the current model or a suitable default
             current_model = self.model_var if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
-            # Remove any 'gemini/' prefix for the OpenAI-compatible endpoint
             gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
-            endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
+            
+            if _is_grpc:
+                # Bare hostname → gRPC (eRPC) endpoint
+                endpoints_to_test.append(("Gemini (gRPC)", gemini_url.strip(), gemini_model, "grpc_gemini"))
+            else:
+                # URL with /openai or http(s):// → OpenAI-compatible REST
+                if not gemini_url.endswith('/openai/'):
+                    if gemini_url.endswith('/'):
+                        gemini_url = gemini_url + 'openai/'
+                    else:
+                        gemini_url = gemini_url + '/openai/'
+                endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
     
     if not endpoints_to_test:
         msg_box = QMessageBox()
@@ -9218,7 +9223,32 @@ def test_api_connections(self):
         for endpoint_info in endpoints_to_test:
             if cancel_event.is_set():
                 break
-            if len(endpoint_info) == 4 and endpoint_info[3] == "azure":
+            if len(endpoint_info) == 4 and endpoint_info[3] == "grpc_gemini":
+                # gRPC (eRPC) Gemini endpoint
+                name, grpc_host, model, _ = endpoint_info
+                try:
+                    from grpc_gemini_client import GrpcGeminiClient, GRPC_AVAILABLE, GrpcGeminiError
+                    if not GRPC_AVAILABLE:
+                        results.append(f"❌ {name}: gRPC dependencies not installed (pip install grpcio google-ai-generativelanguage)")
+                        continue
+                    client = GrpcGeminiClient(api_key=api_key, endpoint=grpc_host)
+                    try:
+                        resp = client.generate_content(
+                            model=model,
+                            messages=[{"role": "user", "content": "Hi"}],
+                            max_output_tokens=5
+                        )
+                        results.append(f"✅ {name}: Connected successfully! (Model: {model}, Endpoint: {grpc_host})")
+                    finally:
+                        client.close()
+                except Exception as e:
+                    error_msg = str(e)[:150]
+                    if "UNAUTHENTICATED" in error_msg or "401" in error_msg or "403" in error_msg:
+                        error_msg = "Authentication failed. Check API key."
+                    elif "UNAVAILABLE" in error_msg:
+                        error_msg = f"gRPC endpoint unreachable: {grpc_host}"
+                    results.append(f"❌ {name}: {error_msg}")
+            elif len(endpoint_info) == 4 and endpoint_info[3] == "azure":
                 # Azure endpoint
                 name, base_url, model, endpoint_type = endpoint_info
                 try:
