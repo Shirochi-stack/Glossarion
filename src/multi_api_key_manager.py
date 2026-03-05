@@ -1937,7 +1937,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.setColumnWidth(0, 125)  # API Key
         self.fallback_tree.setColumnWidth(1, 230)  # Model
         self.fallback_tree.setColumnWidth(2, 100)  # Output Limit
-        self.fallback_tree.setColumnWidth(3, 80)   # Status
+        self.fallback_tree.setColumnWidth(3, 100)  # Status
         self.fallback_tree.setColumnWidth(4, 65)   # Success
         self.fallback_tree.setColumnWidth(5, 60)   # Errors
         self.fallback_tree.setColumnWidth(6, 90)   # Times Used
@@ -2237,6 +2237,9 @@ class MultiAPIKeyDialog(QDialog):
             elif test_result == 'failed':
                 status = "❌ Failed"
                 color = Qt.red
+            elif test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                color = Qt.darkYellow
             elif test_result == 'error':
                 status = "❌ Error"
                 color = Qt.darkRed
@@ -2477,6 +2480,16 @@ class MultiAPIKeyDialog(QDialog):
                 except Exception:
                     item.setText(6, "1")
 
+    @Slot(int) if HAS_GUI else lambda x: x
+    def _update_fallback_timeout_status(self, index):
+        """Update fallback tree item with timeout status (distinct from pass/fail)"""
+        if index < self.fallback_tree.topLevelItemCount():
+            item = self.fallback_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏱️ Timed Out")
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+
     def _test_single_fallback_key(self, key_data, index):
         """Test a single fallback key - REAL API TEST"""
         api_key = key_data.get('api_key', '')
@@ -2586,6 +2599,7 @@ class MultiAPIKeyDialog(QDialog):
                     _client = client_ref[0]
                     if _client:
                         try:
+                            _client._cancelled = True  # signal internal retry loops to stop
                             oc = getattr(_client, 'openai_client', None)
                             if oc and hasattr(oc, 'close'):
                                 oc.close()
@@ -2593,10 +2607,11 @@ class MultiAPIKeyDialog(QDialog):
                                 oc._client.close()
                         except Exception:
                             pass
+                    # Set timeout status directly on tree item (distinct from generic failure)
                     if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                        QMetaObject.invokeMethod(self, "_update_fallback_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
                     else:
-                        self._update_fallback_test_result(index, False)
+                        self._update_fallback_timeout_status(index)
                 except Exception:
                     pass  # Already handled inside run_api_test
         
@@ -3091,7 +3106,7 @@ class MultiAPIKeyDialog(QDialog):
         self.tree.setColumnWidth(1, 230)  # Model (decreased from 320)
         self.tree.setColumnWidth(2, 80)   # Cooldown
         self.tree.setColumnWidth(3, 100)  # Output Limit
-        self.tree.setColumnWidth(4, 80)   # Status
+        self.tree.setColumnWidth(4, 100)  # Status
         self.tree.setColumnWidth(5, 65)   # Success (increased from 40)
         self.tree.setColumnWidth(6, 60)   # Errors (increased from 40)
         self.tree.setColumnWidth(7, 90)   # Times Used
@@ -3521,6 +3536,9 @@ class MultiAPIKeyDialog(QDialog):
             elif key.last_test_result == 'failed':
                 status = "❌ Failed"
                 tags = ('failed',)
+            elif key.last_test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                tags = ('timeout',)
             elif key.last_test_result == 'rate_limited':
                 status = "⚠️ Rate Limited"
                 tags = ('ratelimited',)
@@ -3585,6 +3603,9 @@ class MultiAPIKeyDialog(QDialog):
                 for col in range(item.columnCount()):
                     item.setForeground(col, Qt.red)
             elif tags == ('ratelimited',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+            elif tags == ('timeout',):
                 for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkYellow)
             elif tags == ('error',):
@@ -4536,6 +4557,7 @@ class MultiAPIKeyDialog(QDialog):
                     _client = client_ref[0]
                     if _client:
                         try:
+                            _client._cancelled = True  # signal internal retry loops to stop
                             # Close OpenAI SDK client (kills underlying httpx transport)
                             oc = getattr(_client, 'openai_client', None)
                             if oc and hasattr(oc, 'close'):
@@ -4568,7 +4590,10 @@ class MultiAPIKeyDialog(QDialog):
                 key.set_test_result('passed', message)
             else:
                 key.mark_error()
-                key.set_test_result('failed', message)
+                if 'Timed out' in (message or ''):
+                    key.set_test_result('timeout', message)
+                else:
+                    key.set_test_result('failed', message)
             
             self._test_results.append((index, success, message))
             print(f"[DEBUG] Key {index} test completed - {'PASSED' if success else 'FAILED'}: {message}")
