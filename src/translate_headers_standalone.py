@@ -445,17 +445,24 @@ def apply_existing_translations(
     # Build explicit mapping if output files are available
     explicit_mapping = {}
     if output_files:
-        # Map source basename -> output clean name
-        # Check if chapter numbers are 0-based or 1-based in the file
-        has_chapter_zero = 0 in output_files
-        
-        for idx, source_file in enumerate(spine_order):
-            # Assume strict ordering matching spine order
-            chapter_num = idx if has_chapter_zero else idx + 1
-            
-            if chapter_num in output_files:
-                source_basename = get_basename_without_ext(os.path.basename(source_file))
-                explicit_mapping[source_basename] = output_files[chapter_num]
+        # Build a reverse map: output_clean_name -> chapter_num
+        # Then match source basenames by using the source_headers to find the right source file
+        # This avoids the fragile spine-position = chapter-number assumption
+        for chapter_num, output_clean_name in output_files.items():
+            # Find the matching source file by checking if the output_clean_name
+            # appears as a source basename in source_mapping
+            # The output_clean_name was originally derived from the source file during translation
+            if output_clean_name in source_mapping:
+                # Direct match: output_clean_name IS the source basename
+                explicit_mapping[output_clean_name] = output_clean_name
+            else:
+                # Try matching via the source title from translated_headers.txt
+                if chapter_num in source_headers:
+                    orig_title = source_headers[chapter_num]
+                    for src_basename, src_title in source_mapping.items():
+                        if src_title == orig_title:
+                            explicit_mapping[src_basename] = output_clean_name
+                            break
     
     # Step 3: Match output files to source chapters
     log("🔗 Matching output files to source chapters...")
