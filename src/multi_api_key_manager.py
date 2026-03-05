@@ -2493,6 +2493,9 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
         
+        # Shared ref so timeout wrapper can hard-cancel the HTTP session
+        client_ref = [None]
+        
         def run_api_test():
             try:
                 client = UnifiedClient(
@@ -2500,6 +2503,7 @@ class MultiAPIKeyDialog(QDialog):
                     model=model,
                     output_dir=None
                 )
+                client_ref[0] = client  # expose to timeout wrapper
                 
                 # Force 1 retries for testing to speed up failure detection
                 try:
@@ -2570,12 +2574,36 @@ class MultiAPIKeyDialog(QDialog):
                 else:
                     self._update_fallback_test_result(index, False)
         
-        # Submit to shared executor like translation does
+        # Submit to shared executor with 30-second timeout
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=30)
+                except FuturesTimeout:
+                    print(f"[DEBUG] Fallback key test TIMED OUT for {model} (30s)")
+                    _client = client_ref[0]
+                    if _client:
+                        try:
+                            oc = getattr(_client, 'openai_client', None)
+                            if oc and hasattr(oc, 'close'):
+                                oc.close()
+                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                                oc._client.close()
+                        except Exception:
+                            pass
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_fallback_test_result(index, False)
+                except Exception:
+                    pass  # Already handled inside run_api_test
+        
         if executor:
-            executor.submit(run_api_test)
+            executor.submit(run_with_timeout)
         else:
-            # Fallback to thread if no executor
-            thread = threading.Thread(target=run_api_test, daemon=True)
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
             thread.start()
 
     def _remove_selected_fallback(self):
@@ -4420,6 +4448,9 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
         
+        # Shared ref so timeout wrapper can hard-cancel the HTTP session
+        client_ref = [None]
+        
         def run_api_test():
             try:
                 client = UnifiedClient(
@@ -4427,6 +4458,7 @@ class MultiAPIKeyDialog(QDialog):
                     model=key.model,
                     output_dir=None
                 )
+                client_ref[0] = client  # expose to timeout wrapper
                 
                 # Force 1 retries for testing to speed up failure detection
                 try:
@@ -4490,12 +4522,39 @@ class MultiAPIKeyDialog(QDialog):
                 else:
                     self._handle_test_result(index, False, f"Error: {error_msg}")
         
-        # Submit to shared executor like translation does
+        # Submit to shared executor with 30-second timeout
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            # Use a separate single-thread pool so we can enforce the timeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=30)
+                except FuturesTimeout:
+                    # 30 seconds elapsed — hard-cancel the HTTP session and mark as error
+                    print(f"[DEBUG] Key test TIMED OUT for {key.model} (30s)")
+                    _client = client_ref[0]
+                    if _client:
+                        try:
+                            # Close OpenAI SDK client (kills underlying httpx transport)
+                            oc = getattr(_client, 'openai_client', None)
+                            if oc and hasattr(oc, 'close'):
+                                oc.close()
+                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                                oc._client.close()
+                        except Exception:
+                            pass
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Timed out (30s)"))
+                    else:
+                        self._handle_test_result(index, False, "Timed out (30s)")
+                except Exception:
+                    pass  # Already handled inside run_api_test
+        
         if executor:
-            executor.submit(run_api_test)
+            executor.submit(run_with_timeout)
         else:
-            # Fallback to thread if no executor
-            thread = threading.Thread(target=run_api_test, daemon=True)
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
             thread.start()
     
     # Decorate _handle_test_result as a slot
