@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v7.8.4 - PyInstaller Specification File (Linux)
+Glossarion Lite v7.8.5 - PyInstaller Specification File (Linux)
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -13,7 +13,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite_v7.8.4_Linux'
+APP_NAME = 'L_Glossarion_Lite_v7.8.5_Linux'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -136,6 +136,9 @@ app_files = [
 
     # Antigravity Cloud Code proxy
     ('antigravity_proxy.py', '.'),
+
+    # gRPC Gemini client
+    ('grpc_gemini_client.py', '.'),
 ]
 
 # Add application files to datas
@@ -197,6 +200,7 @@ app_modules = [
     'large_env',
     'authgpt_auth',  # ChatGPT subscription OAuth
     'antigravity_proxy',  # Antigravity Cloud Code proxy
+    'grpc_gemini_client',  # gRPC Gemini client
 ]
 
 # GUI Framework

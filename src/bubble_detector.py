@@ -36,8 +36,6 @@ if IS_FROZEN:
     # Use HF_HOME instead of deprecated TRANSFORMERS_CACHE (v5+ compatibility)
     hf_cache_dir = os.path.join(MEIPASS, 'huggingface')
     os.environ['HF_HOME'] = hf_cache_dir
-    # Also set transformers cache to same location for backward compatibility
-    os.environ['TRANSFORMERS_CACHE'] = os.path.join(hf_cache_dir, 'transformers')
     if _is_main_process():
         logger.info(f"Running in frozen environment: {MEIPASS}")
 

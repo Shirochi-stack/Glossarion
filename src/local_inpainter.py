@@ -27,8 +27,9 @@ IS_FROZEN = getattr(sys, 'frozen', False)
 if IS_FROZEN:
     MEIPASS = sys._MEIPASS
     os.environ['TORCH_HOME'] = MEIPASS
-    os.environ['TRANSFORMERS_CACHE'] = os.path.join(MEIPASS, 'transformers')
-    os.environ['HF_HOME'] = os.path.join(MEIPASS, 'huggingface')
+    # Use HF_HOME instead of deprecated TRANSFORMERS_CACHE (v5+ compatibility)
+    hf_cache_dir = os.path.join(MEIPASS, 'huggingface')
+    os.environ['HF_HOME'] = hf_cache_dir
     logger.info(f"Running in frozen environment: {MEIPASS}")
 
 # Environment variables for ONNX
