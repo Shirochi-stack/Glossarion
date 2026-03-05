@@ -2506,8 +2506,9 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
         
-        # Shared ref so timeout wrapper can hard-cancel the HTTP session
+        # Shared refs so timeout wrapper can hard-cancel and suppress stale results
         client_ref = [None]
+        timed_out = [False]
         
         def run_api_test():
             try:
@@ -2567,25 +2568,27 @@ class MultiAPIKeyDialog(QDialog):
                     content, _ = response
                     if content and "test successful" in content.lower():
                         print(f"[DEBUG] Fallback key test completed for {model}: PASSED")
-                        # Update directly - we're in executor thread, so use invokeMethod or signals
-                        if HAS_GUI:
-                            QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                        else:
-                            self._update_fallback_test_result(index, True)
+                        if not timed_out[0]:
+                            if HAS_GUI:
+                                QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                            else:
+                                self._update_fallback_test_result(index, True)
                         return
                 
                 # Failed
                 print(f"[DEBUG] Fallback key test completed for {model}: FAILED")
-                if HAS_GUI:
-                    QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                else:
-                    self._update_fallback_test_result(index, False)
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_fallback_test_result(index, False)
             except Exception as e:
                 print(f"[DEBUG] Fallback key test error for {model}: {e}")
-                if HAS_GUI:
-                    QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                else:
-                    self._update_fallback_test_result(index, False)
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_fallback_test_result(index, False)
         
         # Submit to shared executor with 30-second timeout
         def run_with_timeout():
@@ -2595,6 +2598,7 @@ class MultiAPIKeyDialog(QDialog):
                 try:
                     future.result(timeout=30)
                 except FuturesTimeout:
+                    timed_out[0] = True  # suppress stale results from run_api_test
                     print(f"[DEBUG] Fallback key test TIMED OUT for {model} (30s)")
                     _client = client_ref[0]
                     if _client:
@@ -2607,6 +2611,12 @@ class MultiAPIKeyDialog(QDialog):
                                 oc._client.close()
                         except Exception:
                             pass
+                    # Clear watchdog so progress bar stops showing in-flight
+                    try:
+                        from unified_api_client import _api_watchdog_reset
+                        _api_watchdog_reset()
+                    except Exception:
+                        pass
                     # Set timeout status directly on tree item (distinct from generic failure)
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_fallback_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
@@ -4469,8 +4479,9 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
         
-        # Shared ref so timeout wrapper can hard-cancel the HTTP session
+        # Shared refs so timeout wrapper can hard-cancel and suppress stale results
         client_ref = [None]
+        timed_out = [False]
         
         def run_api_test():
             try:
@@ -4525,23 +4536,26 @@ class MultiAPIKeyDialog(QDialog):
                     content, _ = response
                     if content and "test successful" in content.lower():
                         # Success - update via signal/slot for thread safety
-                        if HAS_GUI:
-                            QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True), Q_ARG(str, "Test passed"))
-                        else:
-                            self._handle_test_result(index, True, "Test passed")
+                        if not timed_out[0]:
+                            if HAS_GUI:
+                                QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True), Q_ARG(str, "Test passed"))
+                            else:
+                                self._handle_test_result(index, True, "Test passed")
                         return
                 
                 # Failed - update via signal/slot
-                if HAS_GUI:
-                    QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Unexpected response"))
-                else:
-                    self._handle_test_result(index, False, "Unexpected response")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Unexpected response"))
+                    else:
+                        self._handle_test_result(index, False, "Unexpected response")
             except Exception as e:
-                error_msg = str(e)[:50]
-                if HAS_GUI:
-                    QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Error: {error_msg}"))
-                else:
-                    self._handle_test_result(index, False, f"Error: {error_msg}")
+                if not timed_out[0]:
+                    error_msg = str(e)[:50]
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Error: {error_msg}"))
+                    else:
+                        self._handle_test_result(index, False, f"Error: {error_msg}")
         
         # Submit to shared executor with 30-second timeout
         def run_with_timeout():
@@ -4552,7 +4566,8 @@ class MultiAPIKeyDialog(QDialog):
                 try:
                     future.result(timeout=30)
                 except FuturesTimeout:
-                    # 30 seconds elapsed — hard-cancel the HTTP session and mark as error
+                    # 30 seconds elapsed — hard-cancel the HTTP session and mark as timeout
+                    timed_out[0] = True  # suppress stale results from run_api_test
                     print(f"[DEBUG] Key test TIMED OUT for {key.model} (30s)")
                     _client = client_ref[0]
                     if _client:
@@ -4566,6 +4581,12 @@ class MultiAPIKeyDialog(QDialog):
                                 oc._client.close()
                         except Exception:
                             pass
+                    # Clear watchdog so progress bar stops showing in-flight
+                    try:
+                        from unified_api_client import _api_watchdog_reset
+                        _api_watchdog_reset()
+                    except Exception:
+                        pass
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Timed out (30s)"))
                     else:
