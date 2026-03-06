@@ -6740,6 +6740,167 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
             return int(match.group(1)), method
     return None, None
 
+def retroactive_update_image_references(output_dir, source_dir=None):
+    """Retroactively update image references in translated HTML files to use new chapter-based format.
+    
+    Scans all HTML files in the output directory for image references that use old names
+    and updates them to match the image_rename_map.json format.
+    
+    Uses content.opf manifest to reliably identify HTML content files by media-type,
+    and handles response_ prefixed translated output files.
+    
+    Args:
+        output_dir: Directory containing translated HTML output files
+        source_dir: Directory containing the image_rename_map.json (defaults to output_dir)
+    """
+    if source_dir is None:
+        source_dir = output_dir
+    
+    rename_map_path = os.path.join(source_dir, 'image_rename_map.json')
+    
+    if not os.path.exists(rename_map_path):
+        # No rename map available — nothing to update
+        return
+    
+    try:
+        with open(rename_map_path, 'r', encoding='utf-8') as f:
+            rename_map = json.load(f)
+    except Exception as e:
+        print(f"⚠️ Could not load image rename map: {e}")
+        return
+    
+    if not rename_map:
+        return
+    
+    # Filter out identity mappings (already renamed)
+    actual_renames = {old: new for old, new in rename_map.items() if old != new}
+    if not actual_renames:
+        return
+    
+    # Build set of known HTML core names from content.opf manifest (more reliable than extensions)
+    opf_core_names = set()  # core names (no extension, no response_ prefix) from OPF
+    opf_path = os.path.join(output_dir, 'content.opf')
+    if os.path.exists(opf_path):
+        try:
+            import xml.etree.ElementTree as ET
+            tree = ET.parse(opf_path)
+            root = tree.getroot()
+            ns_uri = ''
+            if root.tag.startswith('{'):
+                ns_uri = root.tag[1:root.tag.index('}')]
+            ns = {'opf': ns_uri} if ns_uri else {}
+            xpath = './/opf:manifest/opf:item' if ns else \
+                    './/{http://www.idpf.org/2007/opf}manifest/{http://www.idpf.org/2007/opf}item'
+            for item in root.findall(xpath, ns if ns else None):
+                href = item.get('href', '')
+                media = item.get('media-type', '')
+                if not href:
+                    continue
+                # Use media-type to identify HTML content (more reliable than extensions)
+                if 'html' in media.lower():
+                    basename = os.path.basename(href)
+                    core = os.path.splitext(basename)[0].lower()
+                    opf_core_names.add(core)
+        except Exception as e:
+            print(f"⚠️ Could not parse content.opf for HTML file list: {e}")
+    
+    # Find HTML files in output directory
+    # Strategy: if OPF is available, match files by core name; otherwise fall back to extensions
+    html_files = []
+    try:
+        for f in os.listdir(output_dir):
+            if not os.path.isfile(os.path.join(output_dir, f)):
+                continue
+            
+            if opf_core_names:
+                # Strip response_ prefix and extension to get core name
+                base = f
+                if base.lower().startswith('response_'):
+                    base = base[len('response_'):]
+                core = os.path.splitext(base)[0].lower()
+                if core in opf_core_names:
+                    html_files.append(f)
+            else:
+                # Fallback: use file extensions, ignore response_ prefix
+                check_name = f
+                if check_name.lower().startswith('response_'):
+                    check_name = check_name[len('response_'):]
+                if check_name.lower().endswith(('.html', '.xhtml', '.htm')):
+                    html_files.append(f)
+    except Exception as e:
+        print(f"⚠️ Could not scan output directory for HTML files: {e}")
+        return
+    
+    if not html_files:
+        return
+    
+    print(f"🔍 Checking {len(html_files)} translated files for old image references...")
+    
+    updated_files = 0
+    total_replacements = 0
+    
+    for html_file in html_files:
+        file_path = os.path.join(output_dir, html_file)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception:
+            continue
+        
+        # Check if any old image names appear in the content
+        modified = False
+        from bs4 import BeautifulSoup
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Update <img src> tags
+            for img_tag in soup.find_all('img'):
+                src = img_tag.get('src', '')
+                if not src or src.startswith('data:'):
+                    continue
+                
+                clean_src = src.split('?')[0]
+                basename = os.path.basename(clean_src)
+                
+                if basename in actual_renames:
+                    new_name = actual_renames[basename]
+                    dir_part = os.path.dirname(clean_src)
+                    new_src = f"{dir_part}/{new_name}" if dir_part else new_name
+                    img_tag['src'] = new_src
+                    modified = True
+                    total_replacements += 1
+            
+            # Update <image> tags (SVG xlink:href / href)
+            for image_tag in soup.find_all('image'):
+                for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
+                    href = image_tag.get(attr, '')
+                    if not href or href.startswith('data:'):
+                        continue
+                    
+                    clean_href = href.split('?')[0]
+                    basename = os.path.basename(clean_href)
+                    
+                    if basename in actual_renames:
+                        new_name = actual_renames[basename]
+                        dir_part = os.path.dirname(clean_href)
+                        new_href = f"{dir_part}/{new_name}" if dir_part else new_name
+                        image_tag[attr] = new_href
+                        modified = True
+                        total_replacements += 1
+            
+            if modified:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(str(soup))
+                updated_files += 1
+        except Exception as e:
+            print(f"   ⚠️ Error updating {html_file}: {e}")
+    
+    if updated_files > 0:
+        print(f"✅ Updated image references in {updated_files} translated files ({total_replacements} replacements)")
+    else:
+        print(f"✅ All translated files already use the new image format")
+
+
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
                          check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
     """Process and translate images in a chapter"""
@@ -8947,6 +9108,11 @@ def main(log_callback=None, stop_callback=None):
     
     progress_manager.migrate_to_content_hash(chapters)
     progress_manager.save()
+
+    # Retroactively update image references in existing translated files
+    # This ensures old translations use the new chapter-based image naming format
+    if not is_text_file and not is_pdf_file:
+        retroactive_update_image_references(out)
 
     if check_stop():
         return

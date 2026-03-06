@@ -4207,10 +4207,21 @@ img {
         """Process image paths and inline SVG in chapter content.
         - Rewrites <img src> to use images/ paths and prefers PNG fallback for SVGs.
         - Converts inline <svg> elements to <img src="data:image/png;base64,..."> when CairoSVG is available.
+        - Uses image_rename_map.json to resolve old image names to new chapter-based names.
         """
         try:
             soup = BeautifulSoup(xhtml_content, 'lxml')
             changed = False
+            
+            # Load image rename map for resolving old names to new chapter-based names
+            image_rename_map = {}
+            rename_map_path = os.path.join(self.output_dir, 'image_rename_map.json')
+            if os.path.exists(rename_map_path):
+                try:
+                    with open(rename_map_path, 'r', encoding='utf-8') as f:
+                        image_rename_map = json.load(f)
+                except Exception:
+                    pass
             
             # Track statistics for summary
             total_images = 0
@@ -4242,26 +4253,43 @@ img {
                         changed = True
                     found_images += 1
                 else:
-                    # Try without extension variations
-                    name_without_ext = os.path.splitext(basename)[0]
-                    found = False
-                    for original_name, safe_name in processed_images.items():
-                        if os.path.splitext(original_name)[0] == name_without_ext:
-                            img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
-                            new_src = f"{img_prefix}{safe_name}"
-                            img['src'] = new_src
-                            changed = True
-                            found = True
-                            found_images += 1
-                            break
-                    
-                    if not found:
-                        missing_images.append(basename)
-                        # Still update the path to use images/ prefix if it doesn't have it
+                    # Try rename map: old name -> new chapter-based name
+                    renamed_basename = image_rename_map.get(basename)
+                    if renamed_basename and renamed_basename in processed_images:
+                        safe_name = processed_images[renamed_basename]
                         img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
-                        if not src.startswith(('images/', '../images/')):
-                            img['src'] = f"{img_prefix}{basename}"
-                            changed = True
+                        new_src = f"{img_prefix}{safe_name}"
+                        img['src'] = new_src
+                        changed = True
+                        found_images += 1
+                    elif renamed_basename:
+                        # Renamed file exists but not in processed_images — use directly
+                        img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                        new_src = f"{img_prefix}{renamed_basename}"
+                        img['src'] = new_src
+                        changed = True
+                        found_images += 1
+                    else:
+                        # Try without extension variations
+                        name_without_ext = os.path.splitext(basename)[0]
+                        found = False
+                        for original_name, safe_name in processed_images.items():
+                            if os.path.splitext(original_name)[0] == name_without_ext:
+                                img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                                new_src = f"{img_prefix}{safe_name}"
+                                img['src'] = new_src
+                                changed = True
+                                found = True
+                                found_images += 1
+                                break
+                    
+                        if not found:
+                            missing_images.append(basename)
+                            # Still update the path to use images/ prefix if it doesn't have it
+                            img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                            if not src.startswith(('images/', '../images/')):
+                                img['src'] = f"{img_prefix}{basename}"
+                                changed = True
                 
                 # Ensure alt attribute exists (required for XHTML)
                 if not img.get('alt'):

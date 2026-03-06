@@ -78,6 +78,256 @@ def sanitize_resource_filename(filename):
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
     return filename
 
+def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=None):
+    """Rename image files to chapter-based format and update all references.
+    
+    Format: chapter{NNN}_img_{M}.{ext}
+    - NNN: 3-digit zero-padded chapter number
+    - M: sequential image number within that chapter (1-based)
+    - ext: original file extension preserved
+    
+    Also saves image_rename_map.json for use by TransateKRtoEN.py and epub_converter.py.
+    This operation is idempotent — re-running produces the same result.
+    """
+    images_dir = os.path.join(output_dir, 'images')
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    
+    if not os.path.isdir(images_dir):
+        print("📸 No images directory found — skipping image rename")
+        return chapters
+    
+    # Collect existing image files
+    existing_images = set()
+    try:
+        existing_images = {f for f in os.listdir(images_dir) if os.path.isfile(os.path.join(images_dir, f))}
+    except Exception as e:
+        print(f"⚠️ Could not list images directory: {e}")
+        return chapters
+    
+    if not existing_images:
+        print("📸 No image files found — skipping image rename")
+        return chapters
+    
+    print(f"\n🖼️ Renaming {len(existing_images)} images to chapter-based format...")
+    
+    # Pattern to detect already-renamed images
+    already_renamed_pattern = re.compile(r'^chapter\d{3}_img_\d+\.')
+    
+    # Build mapping: scan each chapter body for <img> references
+    # Track which images belong to which chapter (first reference wins)
+    rename_map = {}  # original_name -> new_name
+    claimed_images = set()  # images that have been assigned to a chapter
+    
+    for chapter in chapters:
+        chapter_num = chapter.get('num', 0)
+        body = chapter.get('body', '')
+        if not body:
+            continue
+        
+        try:
+            soup = BeautifulSoup(body, 'html.parser')
+        except Exception:
+            continue
+        
+        # Collect all image references: <img src>, <image xlink:href/href> (SVG)
+        image_srcs = []
+        for img_tag in soup.find_all('img'):
+            src = img_tag.get('src', '')
+            if src:
+                image_srcs.append(src)
+        # SVG <image> tags use xlink:href or href for their source
+        for image_tag in soup.find_all('image'):
+            href = (image_tag.get('xlink:href') or 
+                    image_tag.get('href') or 
+                    image_tag.get('{http://www.w3.org/1999/xlink}href') or '')
+            if href:
+                image_srcs.append(href)
+        
+        img_counter = 1
+        for src in image_srcs:
+            # Skip data URIs
+            if src.startswith('data:'):
+                continue
+            
+            # Extract basename from various path formats
+            # Handle: ../images/foo.jpg, images/foo.jpg, foo.jpg, etc.
+            clean_src = src.split('?')[0]  # Remove query params
+            basename = os.path.basename(clean_src)
+            
+            if not basename or basename in claimed_images:
+                continue
+            
+            # Skip if already in chapter format
+            if already_renamed_pattern.match(basename):
+                claimed_images.add(basename)
+                img_counter += 1
+                continue
+            
+            # Check if file actually exists
+            if basename not in existing_images:
+                # Try case-insensitive match
+                matched = None
+                for existing in existing_images:
+                    if existing.lower() == basename.lower():
+                        matched = existing
+                        break
+                if matched:
+                    basename = matched
+                else:
+                    continue
+            
+            # Generate new name
+            ext = os.path.splitext(basename)[1]  # Preserve original extension
+            new_name = f"chapter{chapter_num:03d}_img_{img_counter}{ext}"
+            
+            # Handle collision (shouldn't happen with proper numbering, but be safe)
+            while new_name in rename_map.values():
+                img_counter += 1
+                new_name = f"chapter{chapter_num:03d}_img_{img_counter}{ext}"
+            
+            rename_map[basename] = new_name
+            claimed_images.add(basename)
+            img_counter += 1
+    
+    # Handle unclaimed images (not referenced by any chapter) — name as Cover
+    unclaimed = existing_images - claimed_images
+    # Filter out already-renamed ones
+    unclaimed_to_rename = [img for img in sorted(unclaimed) if not already_renamed_pattern.match(img)]
+    if unclaimed_to_rename:
+        is_single = len(unclaimed_to_rename) == 1
+        for idx, img_name in enumerate(unclaimed_to_rename, 1):
+            ext = os.path.splitext(img_name)[1]
+            if is_single:
+                new_name = f"Cover{ext}"
+            else:
+                new_name = f"Cover_{idx}{ext}"
+            while new_name in rename_map.values():
+                idx += 1
+                new_name = f"Cover_{idx}{ext}"
+            rename_map[img_name] = new_name
+        print(f"   📎 {len(unclaimed_to_rename)} unclaimed images named as Cover")
+    
+    if not rename_map:
+        print("📸 All images already in chapter format — no renames needed")
+        # Still save the map (could be empty or identity)
+        try:
+            # Build identity map for already-renamed images
+            identity_map = {}
+            for img_name in existing_images:
+                if already_renamed_pattern.match(img_name):
+                    identity_map[img_name] = img_name
+            with open(rename_map_path, 'w', encoding='utf-8') as f:
+                json.dump(identity_map, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return chapters
+    
+    # Phase 1: Physically rename image files (use temp names to avoid collisions)
+    print(f"   📁 Renaming {len(rename_map)} image files...")
+    temp_renames = {}  # temp_name -> final_name
+    successful_renames = {}  # original_name -> new_name (only successful ones)
+    
+    # First pass: rename to temporary names
+    for original, new_name in rename_map.items():
+        original_path = os.path.join(images_dir, original)
+        if not os.path.exists(original_path):
+            continue
+        temp_name = f"_temp_rename_{original}"
+        temp_path = os.path.join(images_dir, temp_name)
+        try:
+            os.rename(original_path, temp_path)
+            temp_renames[temp_name] = new_name
+            successful_renames[original] = new_name
+        except Exception as e:
+            print(f"   ⚠️ Could not rename {original}: {e}")
+    
+    # Second pass: rename from temp to final names
+    for temp_name, final_name in temp_renames.items():
+        temp_path = os.path.join(images_dir, temp_name)
+        final_path = os.path.join(images_dir, final_name)
+        try:
+            os.rename(temp_path, final_path)
+        except Exception as e:
+            print(f"   ⚠️ Could not finalize rename {temp_name} -> {final_name}: {e}")
+            # Try to restore original name
+            original_name = temp_name.replace('_temp_rename_', '', 1)
+            try:
+                os.rename(temp_path, os.path.join(images_dir, original_name))
+                if original_name in successful_renames:
+                    del successful_renames[original_name]
+            except Exception:
+                pass
+    
+    print(f"   ✅ Successfully renamed {len(successful_renames)} image files")
+    
+    # Phase 2: Update <img> and <image> (SVG) references in chapter bodies
+    print(f"   📝 Updating image references in {len(chapters)} chapters...")
+    updated_chapters = 0
+    for chapter in chapters:
+        body = chapter.get('body', '')
+        if not body:
+            continue
+        
+        modified = False
+        try:
+            soup = BeautifulSoup(body, 'html.parser')
+            
+            # Update <img src> tags
+            for img_tag in soup.find_all('img'):
+                src = img_tag.get('src', '')
+                if not src or src.startswith('data:'):
+                    continue
+                
+                clean_src = src.split('?')[0]
+                basename = os.path.basename(clean_src)
+                
+                if basename in successful_renames:
+                    new_name = successful_renames[basename]
+                    dir_part = os.path.dirname(clean_src)
+                    new_src = f"{dir_part}/{new_name}" if dir_part else new_name
+                    img_tag['src'] = new_src
+                    modified = True
+            
+            # Update <image> tags (SVG xlink:href / href)
+            for image_tag in soup.find_all('image'):
+                # Check all href attribute variants
+                for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
+                    href = image_tag.get(attr, '')
+                    if not href or href.startswith('data:'):
+                        continue
+                    
+                    clean_href = href.split('?')[0]
+                    basename = os.path.basename(clean_href)
+                    
+                    if basename in successful_renames:
+                        new_name = successful_renames[basename]
+                        dir_part = os.path.dirname(clean_href)
+                        new_href = f"{dir_part}/{new_name}" if dir_part else new_name
+                        image_tag[attr] = new_href
+                        modified = True
+            
+            if modified:
+                chapter['body'] = str(soup)
+                updated_chapters += 1
+        except Exception as e:
+            print(f"   ⚠️ Error updating chapter {chapter.get('num', '?')}: {e}")
+    
+    print(f"   ✅ Updated image references in {updated_chapters} chapters")
+    
+    # Phase 3: Save rename map for other scripts
+    try:
+        with open(rename_map_path, 'w', encoding='utf-8') as f:
+            json.dump(successful_renames, f, ensure_ascii=False, indent=2)
+        print(f"   💾 Saved image rename map to: image_rename_map.json")
+    except Exception as e:
+        print(f"   ⚠️ Could not save rename map: {e}")
+    
+    # Phase 4: Update the extracted_resources list if it exists as .resources_extracted marker
+    # The resources list in chapters_info.json will be updated when chapters_info is saved
+    
+    print(f"🖼️ Image renaming complete: {len(successful_renames)} images renamed")
+    return chapters
+
 def _get_best_parser():
     """Determine the best parser available, preferring lxml for CJK text"""
     try:
@@ -441,6 +691,9 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     if not chapters:
         print("❌ No chapters could be extracted!")
         return []
+    
+    # Rename images to chapter-based format (chapter001_img_1.jpg, etc.)
+    chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
     
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
     chapters_info = []
