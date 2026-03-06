@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.8.5"
+        __version__ = "7.8.6"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.5')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.6')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2681,7 +2681,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.8.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.8.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -9601,12 +9601,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Get temperature and other settings from glossary config
             temperature = float(self.config.get('manual_glossary_temperature', 0.1))
-            max_tokens = int(self.max_output_tokens) if hasattr(self, 'max_output_tokens') else 8192
+            # Use glossary-specific output token limit; fall back to global if -1
+            glossary_token_cfg = self.config.get('glossary_max_output_tokens', -1)
+            if str(glossary_token_cfg) == '-1':
+                max_tokens = int(self.max_output_tokens) if hasattr(self, 'max_output_tokens') else 8192
+            else:
+                max_tokens = int(glossary_token_cfg)
             api_delay = float(self.delay_entry.text()) if hasattr(self, 'delay_entry') else 2.0
             
             self.append_log(f"🔧 Glossary extraction settings:")
             self.append_log(f"   Temperature: {temperature}")
-            self.append_log(f"   Max tokens: {max_tokens}")
+            self.append_log(f"   Max tokens: {max_tokens} ({'glossary override' if str(glossary_token_cfg) != '-1' else 'global'})")
             self.append_log(f"   API delay: {api_delay}s")
             format_parts = ["type", "raw_name", "translated_name", "gender"]
             custom_fields_json = self.config.get('manual_custom_fields', '[]')
@@ -10290,6 +10295,13 @@ Important rules:
             
             try:
                 # Set up environment variables
+                # Resolve glossary-specific output token limit; fall back to global when -1
+                glossary_token_cfg = self.config.get('glossary_max_output_tokens', -1)
+                if str(glossary_token_cfg) == '-1':
+                    resolved_glossary_tokens = int(self.max_output_tokens)
+                else:
+                    resolved_glossary_tokens = int(glossary_token_cfg)
+                
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
                     'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 2)),
@@ -10297,7 +10309,8 @@ Important rules:
                     'OPENAI_API_KEY': api_key,
                     'OPENAI_OR_Gemini_API_KEY': api_key,
                     'API_KEY': api_key,
-                    'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+                    'MAX_OUTPUT_TOKENS': str(resolved_glossary_tokens),
+                    'GLOSSARY_MAX_OUTPUT_TOKENS': str(resolved_glossary_tokens),
                     'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
                     'BATCH_SIZE': str(self.batch_size_var),
                     'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
@@ -10422,7 +10435,7 @@ Important rules:
                 ]
                 
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
-                self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
+                self.append_log(f"📤 Output Token Limit: {resolved_glossary_tokens} ({'glossary override' if str(glossary_token_cfg) != '-1' else 'global'})")
                 format_parts = ["type", "raw_name", "translated_name", "gender"]
                 custom_fields_json = self.config.get('manual_custom_fields', '[]')
                 try:
@@ -15059,7 +15072,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.8.5...")
+    print("🚀 Starting Glossarion v7.8.6...")
     
     # Initialize splash screen
     splash_manager = None
