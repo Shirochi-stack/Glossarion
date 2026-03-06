@@ -110,8 +110,8 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     
     print(f"\n🖼️ Renaming {len(existing_images)} images to chapter-based format...")
     
-    # Pattern to detect already-renamed images
-    already_renamed_pattern = re.compile(r'^chapter\d{3}_img_\d+\.')
+    # Pattern to detect already-renamed images (chapter format + Cover format)
+    already_renamed_pattern = re.compile(r'^(chapter\d{3}_img_\d+|\d+_Cover)\.')
     
     # Build mapping: scan each chapter body for <img> references
     # Track which images belong to which chapter (first reference wins)
@@ -119,7 +119,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     claimed_images = set()  # images that have been assigned to a chapter
     
     for chapter in chapters:
-        chapter_num = chapter.get('num', 0)
+        chapter_num = int(chapter.get('num', 0))  # Cast to int (can be float for section files like 1.1)
         body = chapter.get('body', '')
         if not body:
             continue
@@ -178,12 +178,12 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
             
             # Generate new name
             ext = os.path.splitext(basename)[1]  # Preserve original extension
-            new_name = f"chapter{chapter_num:03d}_img_{img_counter}{ext}"
+            new_name = f"chapter{int(chapter_num):03d}_img_{img_counter}{ext}"
             
             # Handle collision (shouldn't happen with proper numbering, but be safe)
             while new_name in rename_map.values():
                 img_counter += 1
-                new_name = f"chapter{chapter_num:03d}_img_{img_counter}{ext}"
+                new_name = f"chapter{int(chapter_num):03d}_img_{img_counter}{ext}"
             
             rename_map[basename] = new_name
             claimed_images.add(basename)
@@ -194,12 +194,12 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     # Filter out already-renamed ones
     unclaimed_to_rename = [img for img in sorted(unclaimed) if not already_renamed_pattern.match(img)]
     if unclaimed_to_rename:
-        for idx, img_name in enumerate(unclaimed_to_rename, 1):
+        for idx, img_name in enumerate(unclaimed_to_rename):
             ext = os.path.splitext(img_name)[1]
-            new_name = f"Cover_{idx}{ext}"
+            new_name = f"{idx}_Cover{ext}"
             while new_name in rename_map.values():
                 idx += 1
-                new_name = f"Cover_{idx}{ext}"
+                new_name = f"{idx}_Cover{ext}"
             rename_map[img_name] = new_name
         print(f"   📎 {len(unclaimed_to_rename)} unclaimed images named as Cover")
     
