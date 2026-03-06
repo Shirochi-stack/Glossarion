@@ -6871,6 +6871,7 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                     href = image_tag.get(attr, '')
                     if href and not href.startswith('data:'):
                         img_refs.append((image_tag, attr, href))
+                        break  # One entry per <image> tag, avoid double-counting
             
             # Collect all referenced basenames in this file
             all_referenced = set()
