@@ -330,8 +330,62 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     except Exception as e:
         print(f"   ⚠️ Could not save rename map: {e}")
     
-    # Phase 4: Update the extracted_resources list if it exists as .resources_extracted marker
-    # The resources list in chapters_info.json will be updated when chapters_info is saved
+    # Phase 4: Update on-disk HTML files that were already saved during extraction
+    # These files were written before the rename, so they still reference old image names
+    print(f"   📄 Updating on-disk HTML files in output directory...")
+    disk_updated = 0
+    try:
+        for fname in os.listdir(output_dir):
+            fpath = os.path.join(output_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if not fname.lower().endswith(('.html', '.xhtml', '.htm')):
+                continue
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                file_modified = False
+                
+                # Update <img src> tags
+                for img_tag in soup.find_all('img'):
+                    src = img_tag.get('src', '')
+                    if not src or src.startswith('data:'):
+                        continue
+                    clean_src = src.split('?')[0]
+                    basename = os.path.basename(clean_src)
+                    if basename in successful_renames:
+                        new_name = successful_renames[basename]
+                        dir_part = os.path.dirname(clean_src)
+                        img_tag['src'] = f"{dir_part}/{new_name}" if dir_part else new_name
+                        file_modified = True
+                
+                # Update <image> tags (SVG)
+                for image_tag in soup.find_all('image'):
+                    for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
+                        href = image_tag.get(attr, '')
+                        if not href or href.startswith('data:'):
+                            continue
+                        clean_href = href.split('?')[0]
+                        basename = os.path.basename(clean_href)
+                        if basename in successful_renames:
+                            new_name = successful_renames[basename]
+                            dir_part = os.path.dirname(clean_href)
+                            image_tag[attr] = f"{dir_part}/{new_name}" if dir_part else new_name
+                            file_modified = True
+                
+                if file_modified:
+                    with open(fpath, 'w', encoding='utf-8') as f:
+                        f.write(str(soup))
+                    disk_updated += 1
+            except Exception as e:
+                print(f"   ⚠️ Error updating {fname}: {e}")
+    except Exception as e:
+        print(f"   ⚠️ Error scanning output directory: {e}")
+    
+    if disk_updated > 0:
+        print(f"   ✅ Updated {disk_updated} on-disk HTML files")
     
     print(f"🖼️ Image renaming complete: {len(successful_renames)} images renamed")
     return chapters
