@@ -4311,6 +4311,17 @@ Recent translations to summarize:
         self.chapter_range_entry.customContextMenuRequested.connect(self._show_chapter_range_context_menu)
         chapter_range_layout.addWidget(self.chapter_range_entry)
         
+        # Preview button (emoji)
+        preview_btn = QPushButton("🔍")
+        preview_btn.setFixedSize(26, 26)
+        preview_btn.setToolTip("Preview files in range")
+        preview_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none; font-size: 14px; padding: 0; }"
+            "QPushButton:hover { background-color: #3a3a3a; border-radius: 4px; }"
+        )
+        preview_btn.clicked.connect(self._preview_chapter_range_files)
+        chapter_range_layout.addWidget(preview_btn)
+        
         self.use_spine_order_checkbox = self._create_styled_checkbox("Spine Order")
         self.use_spine_order_checkbox.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
@@ -7131,7 +7142,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
         dlg = QDialog(self, Qt.WindowStaysOnTopHint)
         dlg.setWindowTitle(f"Chapter Range Preview ({start}-{end})" +
                           (" — Spine Order" if spine_mode else ""))
-        dlg.setMinimumSize(480, 340)
+        # Use ratio-based sizing (25% width, 35% height of screen)
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                geom = screen.availableGeometry()
+                dlg_w = int(geom.width() * 0.25)
+                dlg_h = int(geom.height() * 0.35)
+            else:
+                dlg_w, dlg_h = 480, 380
+        except Exception:
+            dlg_w, dlg_h = 480, 380
+        dlg.setMinimumSize(dlg_w, dlg_h)
         dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
         layout = QVBoxLayout(dlg)
 
