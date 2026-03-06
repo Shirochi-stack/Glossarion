@@ -7089,7 +7089,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         menu.exec(self.chapter_range_entry.mapToGlobal(pos))
 
     def _preview_chapter_range_files(self):
-        """Show a dialog previewing which files will be translated for the current chapter range."""
+        """Show a non-modal, stay-on-top dialog previewing which files will be translated."""
         chap_range = self.chapter_range_entry.text().strip()
         if not chap_range or not re.match(r"^\d+\s*-\s*\d+$", chap_range):
             QMessageBox.information(self, "Preview", "Enter a valid chapter range (e.g. 5-10) first.")
@@ -7112,7 +7112,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QMessageBox.information(self, "Preview", "File preview is only available for EPUB files.")
             return
 
-        filenames = self._get_spine_filenames_for_preview(input_path, start, end, spine_mode)
+        # Check translate_special_files setting
+        translate_special = getattr(self, 'translate_special_files_var', False)
+
+        filenames = self._get_spine_filenames_for_preview(input_path, start, end, spine_mode, translate_special)
 
         if not filenames:
             QMessageBox.information(self, "Preview",
@@ -7120,20 +7123,28 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 (" (spine order)" if spine_mode else "") + ".")
             return
 
-        # Build preview dialog
-        dlg = QDialog(self)
+        # Count translatable vs skipped
+        translatable = [f for f in filenames if not f[2]]
+        skipped = [f for f in filenames if f[2]]
+
+        # Build non-modal, stay-on-top preview dialog
+        dlg = QDialog(self, Qt.WindowStaysOnTopHint)
         dlg.setWindowTitle(f"Chapter Range Preview ({start}-{end})" +
                           (" — Spine Order" if spine_mode else ""))
-        dlg.setMinimumSize(420, 300)
+        dlg.setMinimumSize(480, 340)
         dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
         layout = QVBoxLayout(dlg)
 
-        header = QLabel(f"{'Spine' if spine_mode else 'Chapter'} range {start}–{end}: "
-                       f"{len(filenames)} file(s) will be translated")
+        header_text = (f"{'Spine' if spine_mode else 'Chapter'} range {start}–{end}: "
+                       f"{len(translatable)} file(s) will be translated")
+        if skipped:
+            header_text += f"  •  {len(skipped)} special file(s) skipped"
+        header = QLabel(header_text)
         header.setStyleSheet("color: #5a9fd4; font-weight: bold; font-size: 10pt;")
+        header.setWordWrap(True)
         layout.addWidget(header)
 
-        from PySide6.QtWidgets import QListWidget
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem
         file_list = QListWidget()
         file_list.setStyleSheet("""
             QListWidget { background-color: #2d2d2d; color: white; border: 1px solid #4a5568; }
@@ -7141,13 +7152,26 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QListWidget::item:alternate { background-color: #333333; }
         """)
         file_list.setAlternatingRowColors(True)
-        for idx, (pos_label, fname) in enumerate(filenames):
-            file_list.addItem(f"  {pos_label}  →  {fname}")
+        for pos_label, fname, is_special in filenames:
+            if is_special:
+                item = QListWidgetItem(f"  {pos_label}  →  {fname}  ⏩ Skipped (special file)")
+                item.setForeground(QColor("#888888"))
+            else:
+                item = QListWidgetItem(f"  {pos_label}  →  {fname}")
+            file_list.addItem(item)
         layout.addWidget(file_list)
+
+        # Legend for special files
+        if skipped and not translate_special:
+            legend = QLabel("ℹ️ Special files (cover, nav, toc, etc.) are skipped because "
+                           "\"Translate Special Files\" is disabled.")
+            legend.setStyleSheet("color: #888888; font-size: 9pt; font-style: italic;")
+            legend.setWordWrap(True)
+            layout.addWidget(legend)
 
         close_btn = QPushButton("Close")
         close_btn.setStyleSheet("background-color: #3d3d3d; color: white; padding: 6px 16px;")
-        close_btn.clicked.connect(dlg.accept)
+        close_btn.clicked.connect(dlg.close)
         layout.addWidget(close_btn, alignment=Qt.AlignRight)
 
         # Set Halgakos icon
@@ -7158,14 +7182,33 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
 
-        dlg.exec()
+        # Non-modal: show() instead of exec()
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        # Keep a reference so it doesn't get garbage collected
+        self._preview_dialog = dlg
 
-    def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode):
+    def _is_special_file(self, filename):
+        """Check if a filename is a special file (cover, nav, toc, or no digits)."""
+        name_lower = filename.lower()
+        name_noext = os.path.splitext(name_lower)[0]
+        # Check known special-file patterns
+        if any(skip in name_lower for skip in ['nav.', 'toc.', 'cover.']):
+            return True
+        # Check if filename has no digits (special file heuristic from TransateKRtoEN)
+        if not re.search(r'\d', name_noext):
+            return True
+        return False
+
+    def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode, translate_special=False):
         """
-        Read the EPUB spine and return list of (position_label, filename) tuples
+        Read the EPUB spine and return list of (position_label, filename, is_special_skipped) tuples
         that fall within the given range.
-        If spine_mode is True, range refers to spine position (1-based).
+        If spine_mode is True, range refers to spine position (1-based), offset past special files.
         If spine_mode is False, range refers to chapter numbers extracted from filenames.
+        is_special_skipped is True when translate_special is False and the file is a special file.
         """
         results = []
         try:
@@ -7223,21 +7266,44 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             spine_items.append(manifest[idref])
 
                 if spine_mode:
-                    # Range refers to 1-based spine position
+                    # Spine order with offset: position 1 = first non-special file
+                    # when translate_special is off
+                    translatable_pos = 0
                     for i, fname in enumerate(spine_items):
-                        pos = i + 1  # 1-based
-                        if start <= pos <= end:
-                            results.append((f"Spine #{pos}", fname))
+                        is_special = self._is_special_file(fname)
+                        skip_this = (not translate_special and is_special)
+
+                        if not skip_this:
+                            translatable_pos += 1
+
+                        # Show all files in the absolute spine range for context,
+                        # but use the offset position for matching
+                        effective_pos = translatable_pos if not skip_this else None
+
+                        if effective_pos is not None and start <= effective_pos <= end:
+                            results.append((f"Spine #{effective_pos}", fname, False))
+                        elif skip_this:
+                            # Show special files that appear before/within the range
+                            # for context (e.g. between spine #1 and #5)
+                            raw_pos = i + 1
+                            if translatable_pos < end and (translatable_pos >= start - 1 or raw_pos <= end + 2):
+                                results.append((f"[Spine {raw_pos}]", fname, True))
                 else:
                     # Range refers to chapter numbers parsed from filenames
                     for i, fname in enumerate(spine_items):
+                        is_special = self._is_special_file(fname)
+                        skip_this = (not translate_special and is_special)
+
                         matches = re.findall(r'(\d+)', fname)
                         if matches:
                             chap_num = int(matches[-1])
                         else:
                             chap_num = 0
                         if start <= chap_num <= end:
-                            results.append((f"Ch.{chap_num}", fname))
+                            if skip_this:
+                                results.append((f"Ch.{chap_num}", fname, True))
+                            else:
+                                results.append((f"Ch.{chap_num}", fname, False))
 
         except Exception as e:
             print(f"⚠️ Could not preview chapter range: {e}")

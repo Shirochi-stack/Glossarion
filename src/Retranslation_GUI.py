@@ -209,8 +209,9 @@ class RetranslationMixin:
                 return False
             return False
  
-    def _flash_pm_button_green(self):
-        """Flash the Progress Manager button green to indicate a new folder was created."""
+    def _flash_pm_button_green(self, folder_path=None):
+        """Flash the Progress Manager button green to indicate a new folder was created.
+        Also plays a Windows sound and stores the folder path for the dialog status row."""
         try:
             pm_btn = getattr(self, 'pm_button', None)
             if pm_btn is None:
@@ -232,6 +233,19 @@ class RetranslationMixin:
 
             # Restore after 1.5 seconds
             QTimer.singleShot(1500, lambda: pm_btn.setStyleSheet(original_style))
+
+            # Play Windows system sound
+            try:
+                import platform
+                if platform.system() == 'Windows':
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+
+            # Store the created folder path so the dialog stats row can show it
+            if folder_path:
+                self._pm_created_folder = folder_path
         except Exception as e:
             print(f"⚠️ Could not flash PM button: {e}")
 
@@ -312,7 +326,7 @@ class RetranslationMixin:
                             cached_data['progress_file'] = pf
                             print(f"📁 Created output folder: {output_dir}")
                             # Flash the PM button green to signal folder creation
-                            self._flash_pm_button_green()
+                            self._flash_pm_button_green(output_dir)
                         except Exception as e:
                             self._show_message('error', "Error", f"Could not create output folder: {e}")
                             del self._retranslation_dialog_cache[file_key]
@@ -385,7 +399,7 @@ class RetranslationMixin:
                     json.dump(empty_prog, f, ensure_ascii=False, indent=2)
                 print(f"📁 Created output folder: {output_dir}")
                 # Flash the PM button green to signal folder creation
-                self._flash_pm_button_green()
+                self._flash_pm_button_green(output_dir)
             except Exception as e:
                 if not parent_dialog:
                     self._show_message('error', "Error", f"Could not create output folder: {e}")
@@ -1517,6 +1531,19 @@ class RetranslationMixin:
         
         
         stats_layout.addStretch()
+        
+        # Show temporary "folder created" label in the stats row if a folder was just created
+        created_folder = getattr(self, '_pm_created_folder', None)
+        if created_folder:
+            display_name = os.path.basename(created_folder) or created_folder
+            lbl_created = QLabel(f"📁 Created: {display_name}")
+            lbl_created.setFont(stats_font)
+            lbl_created.setStyleSheet("color: #27ae60; font-weight: bold;")
+            stats_layout.addWidget(lbl_created)
+            # Auto-hide after 2000ms
+            QTimer.singleShot(2000, lbl_created.hide)
+            # Clear the stored path so it doesn't re-appear on refresh
+            self._pm_created_folder = None
         
         # Main frame for listbox
         main_frame = QWidget()

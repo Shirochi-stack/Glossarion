@@ -10106,6 +10106,24 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
+    # When USE_SPINE_ORDER is active and special files are disabled,
+    # pre-compute offset spine positions that skip special files.
+    # This makes spine position 1 = first translatable file.
+    _spine_offset_map = {}  # idx -> offset_pos (1-based)
+    if use_spine_order and not translate_special:
+        _translatable_counter = 0
+        for _ci, _ch in enumerate(chapters):
+            _name = _ch.get('original_basename') or os.path.basename(_ch.get('filename', ''))
+            _name_noext = os.path.splitext(_name)[0] if _name else ''
+            _raw = FileUtilities.extract_actual_chapter_number(_ch, patterns=None, config=config)
+            _is_special = (_raw is None or _raw == 0) and not bool(re.search(r'\d', _name_noext))
+            if not _is_special:
+                _translatable_counter += 1
+                _spine_offset_map[_ci] = _translatable_counter
+            # special files get no entry → will not match any range
+        if _translatable_counter > 0:
+            print(f"📊 Spine order offset: {len(chapters) - _translatable_counter} special file(s) excluded from numbering")
+
     # Helper: sequential numbering with zero-phase.
     # Start at 0; only start incrementing once a digit >0 is seen in the filename.
     def _assign_chapter_num(name_noext, seq_counter, zero_phase):
@@ -10185,10 +10203,19 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
         if start is not None:
-            # When spine order is active, compare against 1-based spine position
+            # When spine order is active, compare against offset spine position
             if use_spine_order:
-                spine_pos_1based = (spine_pos + 1) if spine_pos is not None else (idx + 1)
-                range_match = start <= spine_pos_1based <= end
+                if _spine_offset_map:
+                    # Use pre-computed offset position (skips special files)
+                    spine_pos_1based = _spine_offset_map.get(idx)
+                    if spine_pos_1based is None:
+                        # This is a special file that was excluded, skip it
+                        range_match = False
+                    else:
+                        range_match = start <= spine_pos_1based <= end
+                else:
+                    spine_pos_1based = (spine_pos + 1) if spine_pos is not None else (idx + 1)
+                    range_match = start <= spine_pos_1based <= end
             else:
                 range_match = start <= c['actual_chapter_num'] <= end
             if not range_match:
@@ -10413,14 +10440,19 @@ def main(log_callback=None, stop_callback=None):
             # Skip chapters outside the range
             if start is not None:
                 if use_spine_order:
-                    _spine_pos = c.get('spine_order')
-                    if _spine_pos is None:
-                        _spine_pos = c.get('opf_spine_position')
-                    if _spine_pos is None:
-                        _spine_pos = idx
-                    _spine_1based = _spine_pos + 1
-                    if not (start <= _spine_1based <= end):
-                        continue
+                    if _spine_offset_map:
+                        _spine_1based = _spine_offset_map.get(idx)
+                        if _spine_1based is None or not (start <= _spine_1based <= end):
+                            continue
+                    else:
+                        _spine_pos = c.get('spine_order')
+                        if _spine_pos is None:
+                            _spine_pos = c.get('opf_spine_position')
+                        if _spine_pos is None:
+                            _spine_pos = idx
+                        _spine_1based = _spine_pos + 1
+                        if not (start <= _spine_1based <= end):
+                            continue
                 elif not (start <= actual_num <= end):
                     continue
             
