@@ -2811,13 +2811,17 @@ class ContentProcessor:
         return text
     
     @staticmethod
-    def emergency_restore_images(text, original_html=None, verbose=True):
+    def emergency_restore_images(text, original_html=None, verbose=True, rename_map=None):
         """Emergency restoration of images lost during translation - Filename Pattern Search
+        
+        Supports: <img src>, SVG <image href>, <object data>, <video poster>,
+        and CSS background-image: url(...).
         
         Args:
             text: Translated HTML or markdown text
             original_html: Original HTML before translation (can be actual HTML or converted markdown)
             verbose: Whether to print debug messages
+            rename_map: Optional dict mapping old image filenames to new ones (from image_rename_map.json)
             
         Returns:
             Text with restored image tags
@@ -2833,166 +2837,205 @@ class ContentProcessor:
             import re
             import os
             
+            # Auto-load rename map if not provided
+            if rename_map is None:
+                try:
+                    output_root = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
+                    if output_root:
+                        # Look for image_rename_map.json in the output dir or its subdirectories
+                        for candidate in [output_root]:
+                            map_path = os.path.join(candidate, 'image_rename_map.json')
+                            if os.path.exists(map_path):
+                                import json
+                                with open(map_path, 'r', encoding='utf-8') as f:
+                                    rename_map = json.load(f) or {}
+                                break
+                except Exception:
+                    pass
+            
             # Parse both documents
             soup_orig = BeautifulSoup(original_html, 'html.parser')
             soup_text = BeautifulSoup(text, 'html.parser')
             
-            # Extract images from source
-            orig_images = soup_orig.find_all('img')
-            if not orig_images:
-                return text
-                
-            # Extract images from translation
-            text_images = soup_text.find_all('img')
-            
-            # If counts match, nothing to do
-            if len(orig_images) == len(text_images):
-                return text
-                
-            # If translation has fewer images, try to restore them
-            if len(text_images) < len(orig_images):
-                log(f"🖼️ Image mismatch! Source: {len(orig_images)}, Translation: {len(text_images)}")
-                log("🔧 Attempting emergency image restoration (filename search method)...")
-                
-                # Get the set of image sources present in translation
-                present_srcs = set()
-                for img in text_images:
-                    src = img.get('src')
+            # Collect ALL image references from source (all supported formats)
+            def _collect_img_refs(soup):
+                """Collect (tag_name, attr, src_value, full_tag) for all image formats."""
+                refs = []
+                for tag in soup.find_all('img'):
+                    src = tag.get('src', '')
                     if src:
-                        present_srcs.add(src)
+                        refs.append(('img', 'src', src, tag))
+                for tag in soup.find_all('image'):
+                    href = (tag.get('xlink:href') or tag.get('href') or 
+                            tag.get('{http://www.w3.org/1999/xlink}href') or '')
+                    if href:
+                        refs.append(('image', 'href', href, tag))
+                for tag in soup.find_all('object'):
+                    data = tag.get('data', '')
+                    if data:
+                        refs.append(('object', 'data', data, tag))
+                for tag in soup.find_all('video'):
+                    poster = tag.get('poster', '')
+                    if poster:
+                        refs.append(('video', 'poster', poster, tag))
+                # CSS background-image
+                for tag in soup.find_all(style=True):
+                    style = tag.get('style', '')
+                    if 'url(' in style:
+                        for m in re.finditer(r'url\(["\']?([^"\')\s]+)["\']?\)', style):
+                            url = m.group(1)
+                            if url and not url.startswith('data:'):
+                                refs.append(('css', 'style', url, tag))
+                return refs
+            
+            orig_refs = _collect_img_refs(soup_orig)
+            text_refs = _collect_img_refs(soup_text)
+            
+            if not orig_refs:
+                return text
                 
-                # Collect missing images
-                missing_images = []
-                for img in orig_images:
-                    src = img.get('src')
-                    if src and src not in present_srcs:
-                        missing_images.append((src, img))
+            # If counts match, nothing to do
+            if len(text_refs) >= len(orig_refs):
+                return text
                 
-                if not missing_images:
-                    return text
+            log(f"🖼️ Image mismatch! Source: {len(orig_refs)}, Translation: {len(text_refs)}")
+            log("🔧 Attempting emergency image restoration (filename search method)...")
+            
+            # Determine which source values are missing from translation
+            # Use BASENAMES only to avoid path mismatches (../Images/X vs X)
+            present_basenames = set()
+            for _, _, src, _ in text_refs:
+                basename = os.path.basename(src)
+                present_basenames.add(basename)
+                # Also add the old name if rename_map maps old -> new and this is the new name
+                if rename_map:
+                    # Forward: if this basename is an old name, its new name is also present
+                    if basename in rename_map:
+                        present_basenames.add(rename_map[basename])
+                    # Reverse: if this basename is a new name, its old name is also present
+                    for old, new in rename_map.items():
+                        if new == basename:
+                            present_basenames.add(old)
+            
+            missing = []
+            for tag_name, attr, src, orig_tag in orig_refs:
+                # Check if this source (or its renamed version) is present
+                basename = os.path.basename(src)
+                renamed = rename_map.get(basename, basename) if rename_map else basename
                 
-                # Convert both to strings for searching
-                source_str = str(original_html)
-                text_str = str(text)
-                inserted_count = 0
-                
-                # For each missing image, find where it appears in source and insert at same relative position in output
-                for src, orig_img in missing_images:
-                    # Extract just the filename from the path
-                    filename = os.path.basename(src)
-                    log(f"   🔍 Processing missing image: {src}")
-                    
-                    # Try to find with full filename first (most specific)
-                    pattern = re.escape(filename)
-                    source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
-                    log(f"      Searching for full filename '{filename}': {len(source_matches)} matches")
-                    
-                    # If not found, try without response_ prefix
-                    if not source_matches and filename.lower().startswith('response_'):
-                        filename_no_prefix = filename[9:]  # Remove 'response_'
-                        pattern = re.escape(filename_no_prefix)
-                        source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
-                        log(f"      Searching without response_ prefix '{filename_no_prefix}': {len(source_matches)} matches")
-                    
-                    # If still not found, try core name without extension (least specific)
-                    if not source_matches:
-                        core_name = os.path.splitext(filename)[0]
-                        if core_name.lower().startswith('response_'):
-                            core_name = core_name[9:]
-                        pattern = re.escape(core_name)
-                        source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
-                        log(f"      Searching for core name '{core_name}': {len(source_matches)} matches")
-                    
-                    if source_matches:
-                        # Found the filename in source! Calculate its relative position
-                        source_pos = source_matches[0].start()
-                        source_len = len(source_str)
-                        
-                        # Calculate proportional position (0.0 to 1.0)
-                        relative_pos = source_pos / source_len if source_len > 0 else 0.5
-                        log(f"      Position in source: {source_pos}/{source_len} ({relative_pos:.1%})")
-                        
-                        # Calculate corresponding position in translation
-                        text_len = len(text_str)
-                        insert_pos = int(relative_pos * text_len)
-                        log(f"      Initial insert position in translation: {insert_pos}/{text_len}")
-                        
-                        # Find a good insertion point - prefer after closing tag or before opening tag
-                        # Search backwards for '>' or forwards for '<' within reasonable distance
-                        original_insert_pos = insert_pos
-                        max_search_distance = 200
-                        
-                        # Search backwards for closing tag
-                        backward_pos = insert_pos
-                        search_start = max(0, insert_pos - max_search_distance)
-                        while backward_pos > search_start and text_str[backward_pos] != '>':
-                            backward_pos -= 1
-                        backward_found = (text_str[backward_pos] == '>')
-                        backward_distance = insert_pos - backward_pos if backward_found else max_search_distance + 1
-                        
-                        # Search forwards for opening tag (but skip closing tags like </h1>)
-                        forward_pos = insert_pos
-                        search_end = min(len(text_str), insert_pos + max_search_distance)
-                        forward_found = False
-                        while forward_pos < search_end:
-                            if text_str[forward_pos] == '<':
-                                # Check if it's a closing tag
-                                if forward_pos + 1 < len(text_str) and text_str[forward_pos + 1] != '/':
-                                    # It's an opening tag, use it
-                                    forward_found = True
-                                    break
-                                # It's a closing tag, keep searching
-                            forward_pos += 1
-                        forward_distance = forward_pos - insert_pos if forward_found else max_search_distance + 1
-                        
-                        # Use whichever is closer
-                        if backward_found and backward_distance <= forward_distance:
-                            insert_pos = backward_pos + 1  # After the '>'
-                            log(f"      Adjusted to after closing tag at position {insert_pos} (moved {original_insert_pos - insert_pos} chars back)")
-                        elif forward_found:
-                            insert_pos = forward_pos  # Before the '<'
-                            log(f"      Adjusted to before opening tag at position {insert_pos} (moved {insert_pos - original_insert_pos} chars forward)")
-                        else:
-                            log(f"      No nearby tags found within {max_search_distance} chars, using original position: {insert_pos}")
-                        
-                        # Show context around insertion point
-                        context_start = max(0, insert_pos - 30)
-                        context_end = min(len(text_str), insert_pos + 30)
-                        before_context = text_str[context_start:insert_pos]
-                        after_context = text_str[insert_pos:context_end]
-                        log(f"      Context: ...{before_context}[INSERT HERE]{after_context}...")
-                        
-                        # Create the image tag HTML
-                        img_html = f'<p><img src="{src}"'
-                        for attr, val in orig_img.attrs.items():
-                            if attr != 'src':
-                                img_html += f' {attr}="{val}"'
-                        img_html += '/></p>'
-                        log(f"      Inserting: {img_html[:80]}...")
-                        
-                        # Insert the image HTML at the calculated position
-                        text_str = text_str[:insert_pos] + img_html + text_str[insert_pos:]
-                        inserted_count += 1
-                        log(f"      ✅ Inserted successfully at position {insert_pos}")
+                if basename not in present_basenames and renamed not in present_basenames:
+                    # Apply rename map to the src before insertion
+                    if rename_map and basename in rename_map:
+                        dir_part = os.path.dirname(src)
+                        new_src = f"{dir_part}/{rename_map[basename]}" if dir_part else rename_map[basename]
                     else:
-                        # Filename not found in source - append to end as fallback
-                        soup_text = BeautifulSoup(text_str, 'html.parser')
-                        body = soup_text.find('body')
-                        if not body:
-                            body = soup_text
-                        
-                        new_p = soup_text.new_tag('p')
-                        new_img = soup_text.new_tag('img', src=src)
-                        for attr, val in orig_img.attrs.items():
-                            if attr != 'src':
-                                new_img[attr] = val
-                        new_p.append(new_img)
-                        body.append(new_p)
-                        text_str = str(soup_text)
-                        inserted_count += 1
+                        new_src = src
+                    missing.append((tag_name, attr, src, new_src, orig_tag))
+            
+            if not missing:
+                return text
+            
+            # Convert to string for positional insertion
+            source_str = str(original_html)
+            text_str = str(text)
+            inserted_count = 0
+            
+            for tag_name, attr, orig_src, new_src, orig_tag in missing:
+                filename = os.path.basename(orig_src)
+                log(f"   🔍 Processing missing {tag_name}: {orig_src}")
                 
-                log(f"✅ Restored {inserted_count} missing images using filename search")
-                return text_str
+                # Find position in source
+                pattern = re.escape(filename)
+                source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
+                
+                if not source_matches and filename.lower().startswith('response_'):
+                    filename_no_prefix = filename[9:]
+                    pattern = re.escape(filename_no_prefix)
+                    source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
+                
+                if not source_matches:
+                    core_name = os.path.splitext(filename)[0]
+                    if core_name.lower().startswith('response_'):
+                        core_name = core_name[9:]
+                    pattern = re.escape(core_name)
+                    source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
+                
+                if source_matches:
+                    source_pos = source_matches[0].start()
+                    source_len = len(source_str)
+                    relative_pos = source_pos / source_len if source_len > 0 else 0.5
+                    
+                    text_len = len(text_str)
+                    insert_pos = int(relative_pos * text_len)
+                    
+                    # Find good insertion point
+                    max_search_distance = 200
+                    
+                    backward_pos = insert_pos
+                    search_start = max(0, insert_pos - max_search_distance)
+                    while backward_pos > search_start and text_str[backward_pos] != '>':
+                        backward_pos -= 1
+                    backward_found = (backward_pos > search_start and text_str[backward_pos] == '>')
+                    backward_distance = insert_pos - backward_pos if backward_found else max_search_distance + 1
+                    
+                    forward_pos = insert_pos
+                    search_end = min(len(text_str), insert_pos + max_search_distance)
+                    forward_found = False
+                    while forward_pos < search_end:
+                        if text_str[forward_pos] == '<':
+                            if forward_pos + 1 < len(text_str) and text_str[forward_pos + 1] != '/':
+                                forward_found = True
+                                break
+                        forward_pos += 1
+                    forward_distance = forward_pos - insert_pos if forward_found else max_search_distance + 1
+                    
+                    if backward_found and backward_distance <= forward_distance:
+                        insert_pos = backward_pos + 1
+                    elif forward_found:
+                        insert_pos = forward_pos
+                    
+                    # Build the tag HTML using NEW (renamed) src
+                    if tag_name == 'img':
+                        img_html = f'<p><img src="{new_src}"'
+                        for a, v in orig_tag.attrs.items():
+                            if a != 'src':
+                                img_html += f' {a}="{v}"'
+                        img_html += '/></p>'
+                    elif tag_name == 'image':
+                        img_html = f'<p><img src="{new_src}"'
+                        for a, v in orig_tag.attrs.items():
+                            if a not in ('xlink:href', 'href', '{http://www.w3.org/1999/xlink}href'):
+                                img_html += f' {a}="{v}"'
+                        img_html += '/></p>'
+                    elif tag_name == 'object':
+                        img_html = f'<p><img src="{new_src}"/></p>'
+                    elif tag_name == 'video':
+                        img_html = f'<p><img src="{new_src}"/></p>'
+                    else:
+                        img_html = f'<p><img src="{new_src}"/></p>'
+                    
+                    text_str = text_str[:insert_pos] + img_html + text_str[insert_pos:]
+                    inserted_count += 1
+                    log(f"      ✅ Inserted {tag_name} at position {insert_pos} (src: {new_src})")
+                else:
+                    # Append to end as fallback
+                    soup_text = BeautifulSoup(text_str, 'html.parser')
+                    body = soup_text.find('body')
+                    if not body:
+                        body = soup_text
+                    
+                    new_p = soup_text.new_tag('p')
+                    new_img = soup_text.new_tag('img', src=new_src)
+                    for a, v in orig_tag.attrs.items():
+                        if a != 'src' and a not in ('xlink:href', 'href', '{http://www.w3.org/1999/xlink}href', 'data', 'poster'):
+                            new_img[a] = v
+                    new_p.append(new_img)
+                    body.append(new_p)
+                    text_str = str(soup_text)
+                    inserted_count += 1
+            
+            log(f"✅ Restored {inserted_count} missing images using filename search")
+            return text_str
                 
         except Exception as e:
             log(f"⚠️ Failed to restore images: {e}")

@@ -6174,7 +6174,7 @@ def _create_processing_options_section(self, parent):
     img_restore_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(img_restore_cb)
     
-    img_restore_desc = QLabel("Restores &lt;img&gt; tags if missing in translation<br>(Matches source images to output)")
+    img_restore_desc = QLabel("Restores &lt;img&gt;, SVG, &lt;object&gt;, &lt;video&gt;, CSS url() tags<br>if missing in translation (uses rename map)")
     img_restore_desc.setStyleSheet("color: gray; font-size: 10pt;")
     img_restore_desc.setContentsMargins(20, 0, 0, 5)
     img_restore_desc.setTextFormat(Qt.RichText)

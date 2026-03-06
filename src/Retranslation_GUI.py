@@ -2352,76 +2352,24 @@ class RetranslationMixin:
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_insert_img and chosen == act_insert_img:
-                # IN-PLACE RESTORATION LOGIC
+                # IN-PLACE RESTORATION LOGIC using ContentProcessor
                 try:
                     from bs4 import BeautifulSoup
                     import zipfile
-                    import scan_html_folder  # Use the helper module
+                    from TransateKRtoEN import ContentProcessor
                     
-                    # Helper function for restoration (local version to ensure self-contained logic)
-                    def emergency_restore_images_local(text, original_html):
-                        if not original_html or not text: return text
+                    # Load rename map from output directory
+                    rename_map = None
+                    rename_map_path = os.path.join(data['output_dir'], 'image_rename_map.json')
+                    if os.path.exists(rename_map_path):
                         try:
-                            soup_orig = BeautifulSoup(original_html, 'html.parser')
-                            soup_text = BeautifulSoup(text, 'html.parser')
-                            orig_images = soup_orig.find_all('img')
-                            text_images = soup_text.find_all('img')
-                            
-                            if not orig_images or len(text_images) >= len(orig_images):
-                                return text
-                                
-                            present_srcs = set(img.get('src') for img in text_images if img.get('src'))
-                            missing_images = []
-                            for img in orig_images:
-                                src = img.get('src')
-                                if src and src not in present_srcs:
-                                    missing_images.append((src, img))
-                            
-                            if not missing_images: return text
-                            
-                            source_str = str(original_html)
-                            text_str = str(text)
-                            text_chars = list(text_str)
-                            offset = 0
-                            
-                            # Sort by position in source
-                            missing_images.sort(key=lambda x: source_str.find(x[0]) if x[0] in source_str else -1)
-                            
-                            for src, orig_img in missing_images:
-                                img_tag_str = str(orig_img)
-                                source_pos = source_str.find(img_tag_str)
-                                if source_pos == -1: source_pos = source_str.find(src)
-                                
-                                if source_pos != -1:
-                                    relative_pos = source_pos / len(source_str)
-                                    target_pos = int(len(text_str) * relative_pos)
-                                    
-                                    # Find paragraph break
-                                    best_pos = target_pos
-                                    min_dist = len(text_str)
-                                    # Use simpler regex search
-                                    for match in re.finditer(r'</p>|<br/?>|\n\n', text_str):
-                                        end_pos = match.end()
-                                        dist = abs(end_pos - target_pos)
-                                        if dist < min_dist:
-                                            min_dist = dist
-                                            best_pos = end_pos
-                                    
-                                    insert_pos = best_pos + offset
-                                    if insert_pos > len(text_chars): insert_pos = len(text_chars)
-                                    
-                                    insertion = f"\n<p>{img_tag_str}</p>\n"
-                                    text_chars[insert_pos:insert_pos] = list(insertion)
-                                    offset += len(insertion)
-                            
-                            return "".join(text_chars)
-                        except Exception as e:
-                            print(f"Restoration error: {e}")
-                            return text
+                            with open(rename_map_path, 'r', encoding='utf-8') as f:
+                                rename_map = json.load(f) or {}
+                        except Exception:
+                            pass
 
-                    # 1. Get Source Content
+                    # 1. Get Source Content from EPUB
                     epub_path = data['file_path']
-                    # Use filename matching locally since scan_html_folder helper isn't available
                     original_filename = display_info.get('original_filename')
                     source_html = None
                     
@@ -2454,8 +2402,10 @@ class RetranslationMixin:
                             with open(output_path, 'r', encoding='utf-8') as f:
                                 translated_html = f.read()
                                 
-                            # 3. Restore
-                            restored_html = emergency_restore_images_local(translated_html, source_html)
+                            # 3. Restore using ContentProcessor (supports all image formats + rename map)
+                            restored_html = ContentProcessor.emergency_restore_images(
+                                translated_html, source_html, verbose=True, rename_map=rename_map
+                            )
                             
                             if restored_html != translated_html:
                                 # 4. Save
@@ -2463,8 +2413,6 @@ class RetranslationMixin:
                                     f.write(restored_html)
                                     
                                 # 5. Update Progress (Clear QA flags)
-                                # Search for the entry by filename to ensure persistence
-                                # This avoids relying on internal _key injection if it's unreliable
                                 found_key = None
                                 target_out = display_info.get('output_file')
                                 
@@ -2479,10 +2427,7 @@ class RetranslationMixin:
                                     real_entry['status'] = 'completed'
                                     for key in ['qa_issues', 'qa_issues_found', 'qa_timestamp', 'failure_reason', 'error_message']:
                                         real_entry.pop(key, None)
-                                    print(f"DEBUG: Updated progress entry {found_key} (matched by filename)")
                                 else:
-                                    # Fallback: modify the object we have
-                                    print(f"DEBUG: Could not find entry by filename '{target_out}', modifying object directly")
                                     progress_entry['status'] = 'completed'
                                     for key in ['qa_issues', 'qa_issues_found', 'qa_timestamp', 'failure_reason', 'error_message']:
                                         progress_entry.pop(key, None)
