@@ -6758,24 +6758,19 @@ def retroactive_update_image_references(output_dir, source_dir=None):
     
     rename_map_path = os.path.join(source_dir, 'image_rename_map.json')
     
-    if not os.path.exists(rename_map_path):
-        # No rename map available — nothing to update
-        return
-    
-    try:
-        with open(rename_map_path, 'r', encoding='utf-8') as f:
-            rename_map = json.load(f)
-    except Exception as e:
-        print(f"⚠️ Could not load image rename map: {e}")
-        return
+    rename_map = {}
+    if os.path.exists(rename_map_path):
+        try:
+            with open(rename_map_path, 'r', encoding='utf-8') as f:
+                rename_map = json.load(f) or {}
+        except Exception as e:
+            print(f"⚠️ Could not load image rename map: {e}")
     
     if not rename_map:
-        return
+        rename_map = {}
     
     # Filter out identity mappings (already renamed)
     actual_renames = {old: new for old, new in rename_map.items() if old != new}
-    if not actual_renames:
-        return
     
     # Build set of known HTML core names from content.opf manifest (more reliable than extensions)
     opf_core_names = set()  # core names (no extension, no response_ prefix) from OPF
@@ -6836,8 +6831,21 @@ def retroactive_update_image_references(output_dir, source_dir=None):
     
     print(f"🔍 Checking {len(html_files)} translated files for old image references...")
     
+    # Build set of actual image files for broken reference repair
+    images_dir = os.path.join(output_dir, 'images')
+    existing_images = set()
+    if os.path.isdir(images_dir):
+        try:
+            existing_images = {f for f in os.listdir(images_dir) if os.path.isfile(os.path.join(images_dir, f))}
+        except Exception:
+            pass
+    
+    # Also build reverse map (new_name -> old_name) for completeness
+    reverse_map = {new: old for old, new in rename_map.items()}
+    
     updated_files = 0
     total_replacements = 0
+    repaired_refs = 0
     
     for html_file in html_files:
         file_path = os.path.join(output_dir, html_file)
@@ -6847,46 +6855,89 @@ def retroactive_update_image_references(output_dir, source_dir=None):
         except Exception:
             continue
         
-        # Check if any old image names appear in the content
         modified = False
         from bs4 import BeautifulSoup
         try:
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Update <img src> tags
+            # Process all image-bearing tags: <img src> and <image href>
+            img_refs = []
             for img_tag in soup.find_all('img'):
                 src = img_tag.get('src', '')
-                if not src or src.startswith('data:'):
-                    continue
-                
-                clean_src = src.split('?')[0]
-                basename = os.path.basename(clean_src)
-                
-                if basename in actual_renames:
-                    new_name = actual_renames[basename]
-                    dir_part = os.path.dirname(clean_src)
-                    new_src = f"{dir_part}/{new_name}" if dir_part else new_name
-                    img_tag['src'] = new_src
-                    modified = True
-                    total_replacements += 1
-            
-            # Update <image> tags (SVG xlink:href / href)
+                if src and not src.startswith('data:'):
+                    img_refs.append((img_tag, 'src', src))
             for image_tag in soup.find_all('image'):
                 for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
                     href = image_tag.get(attr, '')
-                    if not href or href.startswith('data:'):
-                        continue
-                    
-                    clean_href = href.split('?')[0]
-                    basename = os.path.basename(clean_href)
-                    
-                    if basename in actual_renames:
-                        new_name = actual_renames[basename]
-                        dir_part = os.path.dirname(clean_href)
-                        new_href = f"{dir_part}/{new_name}" if dir_part else new_name
-                        image_tag[attr] = new_href
-                        modified = True
-                        total_replacements += 1
+                    if href and not href.startswith('data:'):
+                        img_refs.append((image_tag, attr, href))
+            
+            # Collect all referenced basenames in this file for deduction
+            all_referenced = set()
+            for _, _, rv in img_refs:
+                all_referenced.add(os.path.basename(rv.split('?')[0]))
+            
+            for tag, attr, ref_value in img_refs:
+                clean_ref = ref_value.split('?')[0]
+                basename = os.path.basename(clean_ref)
+                dir_part = os.path.dirname(clean_ref)
+                
+                # Step 1: Check rename map (old name -> new name)
+                if basename in actual_renames:
+                    new_name = actual_renames[basename]
+                    tag[attr] = f"{dir_part}/{new_name}" if dir_part else new_name
+                    modified = True
+                    total_replacements += 1
+                    continue
+                
+                # Step 2: If the referenced file exists, it's fine
+                if basename in existing_images:
+                    continue
+                
+                # Step 3: Broken reference — file doesn't exist, try repairs
+                best_match = None
+                
+                # Strategy A: check reverse rename map
+                if basename in reverse_map:
+                    original = reverse_map[basename]
+                    if original in existing_images:
+                        best_match = original
+                
+                # Strategy B: case-insensitive exact match
+                if not best_match:
+                    for existing in existing_images:
+                        if existing.lower() == basename.lower():
+                            best_match = existing
+                            break
+                
+                # Strategy C: prefix + extension match, excluding already-referenced files
+                # e.g., "chapter_notice0002_img_.webp" -> prefix "chapter_notice0002_img_"
+                # Candidates: _img_1, _img_2, _img_3. Already referenced: _img_1, _img_3
+                # Unreferenced: _img_2 -> that's our match
+                if not best_match:
+                    img_prefix_match = re.match(r'^(.+_img_)', os.path.splitext(basename)[0])
+                    if img_prefix_match:
+                        prefix = img_prefix_match.group(1)
+                        ref_ext = os.path.splitext(basename)[1].lower()
+                        candidates = [f for f in existing_images 
+                                     if os.path.splitext(f)[0].startswith(prefix) 
+                                     and os.path.splitext(f)[1].lower() == ref_ext]
+                        # Filter out candidates already referenced by other tags
+                        unreferenced = [c for c in candidates if c not in all_referenced]
+                        if len(unreferenced) == 1:
+                            best_match = unreferenced[0]
+                        elif len(candidates) == 1:
+                            best_match = candidates[0]
+                
+                if best_match:
+                    tag[attr] = f"{dir_part}/{best_match}" if dir_part else best_match
+                    modified = True
+                    repaired_refs += 1
+                    # Update all_referenced so subsequent broken refs can also deduce correctly
+                    all_referenced.add(best_match)
+                    print(f"   🔧 Repaired: {basename} → {best_match}")
+                else:
+                    print(f"   ❌ Broken reference in {html_file}: {basename} (no matching file found)")
             
             if modified:
                 with open(file_path, 'w', encoding='utf-8') as f:
@@ -6895,8 +6946,8 @@ def retroactive_update_image_references(output_dir, source_dir=None):
         except Exception as e:
             print(f"   ⚠️ Error updating {html_file}: {e}")
     
-    if updated_files > 0:
-        print(f"✅ Updated image references in {updated_files} translated files ({total_replacements} replacements)")
+    if updated_files > 0 or repaired_refs > 0:
+        print(f"✅ Updated {updated_files} translated files ({total_replacements} renames, {repaired_refs} repairs)")
     else:
         print(f"✅ All translated files already use the new image format")
 
