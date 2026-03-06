@@ -7142,18 +7142,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
         dlg = QDialog(self, Qt.WindowStaysOnTopHint)
         dlg.setWindowTitle(f"Chapter Range Preview ({start}-{end})" +
                           (" — Spine Order" if spine_mode else ""))
-        # Use ratio-based sizing (25% width, 35% height of screen)
+        # Use ratio-based sizing (20% width, 35% height of screen)
         try:
             screen = QApplication.primaryScreen()
             if screen:
                 geom = screen.availableGeometry()
-                dlg_w = int(geom.width() * 0.25)
+                dlg_w = int(geom.width() * 0.20)
                 dlg_h = int(geom.height() * 0.35)
             else:
-                dlg_w, dlg_h = 480, 380
+                dlg_w, dlg_h = 380, 360
         except Exception:
-            dlg_w, dlg_h = 480, 380
-        dlg.setMinimumSize(dlg_w, dlg_h)
+            dlg_w, dlg_h = 380, 360
+        dlg.resize(dlg_w, dlg_h)
+        dlg.setMinimumSize(280, 200)
         dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
         layout = QVBoxLayout(dlg)
 
@@ -7194,7 +7195,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         close_btn = QPushButton("Close")
         close_btn.setStyleSheet("background-color: #3d3d3d; color: white; padding: 6px 16px;")
         close_btn.clicked.connect(dlg.close)
-        layout.addWidget(close_btn, alignment=Qt.AlignRight)
+        layout.addWidget(close_btn)
 
         # Set Halgakos icon
         try:
