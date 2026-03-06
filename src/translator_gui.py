@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.9.0"
+        __version__ = "7.9.1"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.0')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.1')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2681,7 +2681,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.9.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.9.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -4329,8 +4329,8 @@ Recent translations to summarize:
             "position instead of chapter numbers extracted from filenames. "
             "Spine position 1 = first item in the EPUB's reading order.</p></qt>"
         )
-        self.use_spine_order_checkbox.setChecked(self.config.get('use_spine_order', False))
         self.use_spine_order_checkbox.stateChanged.connect(self._on_spine_order_toggle)
+        self.use_spine_order_checkbox.setChecked(self.config.get('use_spine_order', False))
         chapter_range_layout.addWidget(self.use_spine_order_checkbox)
         chapter_range_layout.addStretch()
         
@@ -7063,7 +7063,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.config['use_spine_order'] = checked
         # Update placeholder to hint the user
         if checked:
-            self.chapter_range_entry.setPlaceholderText("e.g. 1-10 (spine pos)")
+            self.chapter_range_entry.setPlaceholderText("e.g. 5-10  📓")
         else:
             self.chapter_range_entry.setPlaceholderText("e.g. 5-10")
 
@@ -15391,7 +15391,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.9.0...")
+    print("🚀 Starting Glossarion v7.9.1...")
     
     # Initialize splash screen
     splash_manager = None
