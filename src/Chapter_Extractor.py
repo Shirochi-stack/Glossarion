@@ -194,13 +194,9 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     # Filter out already-renamed ones
     unclaimed_to_rename = [img for img in sorted(unclaimed) if not already_renamed_pattern.match(img)]
     if unclaimed_to_rename:
-        is_single = len(unclaimed_to_rename) == 1
         for idx, img_name in enumerate(unclaimed_to_rename, 1):
             ext = os.path.splitext(img_name)[1]
-            if is_single:
-                new_name = f"Cover{ext}"
-            else:
-                new_name = f"Cover_{idx}{ext}"
+            new_name = f"Cover_{idx}{ext}"
             while new_name in rename_map.values():
                 idx += 1
                 new_name = f"Cover_{idx}{ext}"
