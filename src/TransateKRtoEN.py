@@ -6872,72 +6872,108 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                     if href and not href.startswith('data:'):
                         img_refs.append((image_tag, attr, href))
             
-            # Collect all referenced basenames in this file for deduction
+            # Collect all referenced basenames in this file
             all_referenced = set()
             for _, _, rv in img_refs:
                 all_referenced.add(os.path.basename(rv.split('?')[0]))
             
-            for tag, attr, ref_value in img_refs:
+            # Pass 1: Handle exact matches (rename map, existing files)
+            # and collect broken refs for batch repair
+            broken_refs = []  # [(index, tag, attr, basename, dir_part)]
+            
+            for idx, (tag, attr, ref_value) in enumerate(img_refs):
                 clean_ref = ref_value.split('?')[0]
                 basename = os.path.basename(clean_ref)
                 dir_part = os.path.dirname(clean_ref)
                 
-                # Step 1: Check rename map (old name -> new name)
+                # Check rename map (old name -> new name)
                 if basename in actual_renames:
                     new_name = actual_renames[basename]
                     tag[attr] = f"{dir_part}/{new_name}" if dir_part else new_name
                     modified = True
                     total_replacements += 1
+                    all_referenced.discard(basename)
+                    all_referenced.add(new_name)
                     continue
                 
-                # Step 2: If the referenced file exists, it's fine
+                # If the referenced file exists, it's fine
                 if basename in existing_images:
                     continue
                 
-                # Step 3: Broken reference — file doesn't exist, try repairs
-                best_match = None
-                
-                # Strategy A: check reverse rename map
+                # Check reverse rename map
                 if basename in reverse_map:
                     original = reverse_map[basename]
                     if original in existing_images:
-                        best_match = original
+                        tag[attr] = f"{dir_part}/{original}" if dir_part else original
+                        modified = True
+                        repaired_refs += 1
+                        all_referenced.discard(basename)
+                        all_referenced.add(original)
+                        print(f"   🔧 Repaired: {basename} → {original}")
+                        continue
                 
-                # Strategy B: case-insensitive exact match
-                if not best_match:
-                    for existing in existing_images:
-                        if existing.lower() == basename.lower():
-                            best_match = existing
-                            break
-                
-                # Strategy C: prefix + extension match, excluding already-referenced files
-                # e.g., "chapter_notice0002_img_.webp" -> prefix "chapter_notice0002_img_"
-                # Candidates: _img_1, _img_2, _img_3. Already referenced: _img_1, _img_3
-                # Unreferenced: _img_2 -> that's our match
-                if not best_match:
-                    img_prefix_match = re.match(r'^(.+_img_)', os.path.splitext(basename)[0])
-                    if img_prefix_match:
-                        prefix = img_prefix_match.group(1)
-                        ref_ext = os.path.splitext(basename)[1].lower()
-                        candidates = [f for f in existing_images 
-                                     if os.path.splitext(f)[0].startswith(prefix) 
-                                     and os.path.splitext(f)[1].lower() == ref_ext]
-                        # Filter out candidates already referenced by other tags
-                        unreferenced = [c for c in candidates if c not in all_referenced]
-                        if len(unreferenced) == 1:
-                            best_match = unreferenced[0]
-                        elif len(candidates) == 1:
-                            best_match = candidates[0]
-                
-                if best_match:
-                    tag[attr] = f"{dir_part}/{best_match}" if dir_part else best_match
+                # Case-insensitive exact match
+                case_match = None
+                for existing in existing_images:
+                    if existing.lower() == basename.lower():
+                        case_match = existing
+                        break
+                if case_match:
+                    tag[attr] = f"{dir_part}/{case_match}" if dir_part else case_match
                     modified = True
                     repaired_refs += 1
-                    # Update all_referenced so subsequent broken refs can also deduce correctly
-                    all_referenced.add(best_match)
-                    print(f"   🔧 Repaired: {basename} → {best_match}")
+                    all_referenced.discard(basename)
+                    all_referenced.add(case_match)
+                    print(f"   🔧 Repaired: {basename} → {case_match}")
+                    continue
+                
+                # Still broken — collect for batch repair
+                broken_refs.append((idx, tag, attr, basename, dir_part))
+            
+            # Pass 2: Position-based repair using chapter stem from filename
+            # The Nth <img> tag should reference {chapter_stem}_img_{N}
+            if broken_refs:
+                # Derive chapter stem from the HTML filename
+                # e.g., "response_chapter_notice0002.html" -> "chapter_notice0002"
+                html_stem = os.path.splitext(html_file)[0]
+                if html_stem.startswith('response_'):
+                    html_stem = html_stem[len('response_'):]
+                
+                # Find all images belonging to this chapter
+                chapter_images = [f for f in existing_images 
+                                 if os.path.splitext(f)[0].startswith(html_stem + '_img_')]
+                
+                if chapter_images and len(chapter_images) == len(img_refs):
+                    # Sort by _img_N number — position N maps to _img_N
+                    def _img_num(fname):
+                        m = re.search(r'_img_(\d+)', fname)
+                        return int(m.group(1)) if m else 0
+                    chapter_images.sort(key=_img_num)
+                    
+                    # Get a dir_part from any existing reference
+                    default_dir = ''
+                    for _, _, rv in img_refs:
+                        d = os.path.dirname(rv.split('?')[0])
+                        if d:
+                            default_dir = d
+                            break
+                    
+                    # Enforce: position N -> chapter_images[N]
+                    for i, (tag, attr, ref_value) in enumerate(img_refs):
+                        expected = chapter_images[i]
+                        clean_ref = ref_value.split('?')[0]
+                        current_basename = os.path.basename(clean_ref)
+                        dir_part = os.path.dirname(clean_ref) or default_dir
+                        
+                        if current_basename != expected:
+                            tag[attr] = f"{dir_part}/{expected}" if dir_part else expected
+                            modified = True
+                            repaired_refs += 1
+                            print(f"   🔧 Repaired: '{current_basename}' → {expected}")
                 else:
-                    print(f"   ❌ Broken reference in {html_file}: {basename} (no matching file found)")
+                    for _, _, _, basename, _ in broken_refs:
+                        count = len(chapter_images) if chapter_images else 0
+                        print(f"   ❌ Broken reference in {html_file}: '{basename}' ({count} chapter images for {len(img_refs)} img tags)")
             
             if modified:
                 with open(file_path, 'w', encoding='utf-8') as f:
