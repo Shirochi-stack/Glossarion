@@ -110,8 +110,8 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     
     print(f"\n🖼️ Renaming {len(existing_images)} images to chapter-based format...")
     
-    # Pattern to detect already-renamed images (chapter format + Cover format)
-    already_renamed_pattern = re.compile(r'^(chapter\d{3}_img_\d+|\d+_Cover)\.')
+    # Pattern to detect already-renamed images (filename_img_N format + Cover format)
+    already_renamed_pattern = re.compile(r'^.+_img_\d+\..+$|^\d+_Cover\.')
     
     # Build mapping: scan each chapter body for <img> references
     # Track which images belong to which chapter (first reference wins)
@@ -119,10 +119,22 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     claimed_images = set()  # images that have been assigned to a chapter
     
     for chapter in chapters:
-        chapter_num = int(chapter.get('num', 0))  # Cast to int (can be float for section files like 1.1)
         body = chapter.get('body', '')
         if not body:
             continue
+        
+        # Get the actual chapter filename stem for naming
+        chapter_basename = chapter.get('original_basename', '')
+        if not chapter_basename:
+            # Fallback: derive from filename
+            chapter_filename = chapter.get('filename', '')
+            chapter_basename = os.path.splitext(os.path.basename(chapter_filename))[0] if chapter_filename else ''
+        if not chapter_basename:
+            # Last resort: use chapter number
+            chapter_basename = f"chapter{int(chapter.get('num', 0)):03d}"
+        
+        # Remove extension from basename if it still has one
+        chapter_stem = os.path.splitext(chapter_basename)[0]
         
         try:
             soup = BeautifulSoup(body, 'html.parser')
@@ -157,7 +169,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
             if not basename or basename in claimed_images:
                 continue
             
-            # Skip if already in chapter format
+            # Skip if already in our renamed format
             if already_renamed_pattern.match(basename):
                 claimed_images.add(basename)
                 img_counter += 1
@@ -176,14 +188,14 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
                 else:
                     continue
             
-            # Generate new name
+            # Generate new name using actual chapter filename
             ext = os.path.splitext(basename)[1]  # Preserve original extension
-            new_name = f"chapter{int(chapter_num):03d}_img_{img_counter}{ext}"
+            new_name = f"{chapter_stem}_img_{img_counter}{ext}"
             
-            # Handle collision (shouldn't happen with proper numbering, but be safe)
+            # Handle collision
             while new_name in rename_map.values():
                 img_counter += 1
-                new_name = f"chapter{int(chapter_num):03d}_img_{img_counter}{ext}"
+                new_name = f"{chapter_stem}_img_{img_counter}{ext}"
             
             rename_map[basename] = new_name
             claimed_images.add(basename)
