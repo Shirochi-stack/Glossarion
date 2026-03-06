@@ -10083,10 +10083,13 @@ def main(log_callback=None, stop_callback=None):
     rng = os.getenv("CHAPTER_RANGE", "")
     start = None
     end = None
+    use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
             start, end = map(int, rng.split("-", 1))
             
-            if config.DISABLE_ZERO_DETECTION:
+            if use_spine_order:
+                print(f"📊 Using SPINE ORDER for chapter range: positions {start}-{end}")
+            elif config.DISABLE_ZERO_DETECTION:
                 print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
             elif uses_zero_based:
                 print(f"📊 0-based novel detected")
@@ -10182,7 +10185,13 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
         if start is not None:
-            if not (start <= c['actual_chapter_num'] <= end):
+            # When spine order is active, compare against 1-based spine position
+            if use_spine_order:
+                spine_pos_1based = (spine_pos + 1) if spine_pos is not None else (idx + 1)
+                range_match = start <= spine_pos_1based <= end
+            else:
+                range_match = start <= c['actual_chapter_num'] <= end
+            if not range_match:
                 # Track skipped chapters for summary (don't print individually)
                 if not hasattr(config, '_range_skipped_chapters'):
                     config._range_skipped_chapters = []
@@ -10402,8 +10411,18 @@ def main(log_callback=None, stop_callback=None):
                     continue
             
             # Skip chapters outside the range
-            if start is not None and not (start <= actual_num <= end):
-                continue
+            if start is not None:
+                if use_spine_order:
+                    _spine_pos = c.get('spine_order')
+                    if _spine_pos is None:
+                        _spine_pos = c.get('opf_spine_position')
+                    if _spine_pos is None:
+                        _spine_pos = idx
+                    _spine_1based = _spine_pos + 1
+                    if not (start <= _spine_1based <= end):
+                        continue
+                elif not (start <= actual_num <= end):
+                    continue
             
             # Check if chapter needs translation
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(

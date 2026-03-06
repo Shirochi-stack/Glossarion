@@ -209,6 +209,32 @@ class RetranslationMixin:
                 return False
             return False
  
+    def _flash_pm_button_green(self):
+        """Flash the Progress Manager button green to indicate a new folder was created."""
+        try:
+            pm_btn = getattr(self, 'pm_button', None)
+            if pm_btn is None:
+                return
+
+            original_style = pm_btn.styleSheet()
+
+            # Flash to green
+            green_style = original_style
+            # Replace the background-color in the stylesheet
+            import re as _re
+            green_style = _re.sub(
+                r'background-color:\s*#[0-9a-fA-F]+',
+                'background-color: #27ae60',
+                green_style,
+                count=1
+            )
+            pm_btn.setStyleSheet(green_style)
+
+            # Restore after 1.5 seconds
+            QTimer.singleShot(1500, lambda: pm_btn.setStyleSheet(original_style))
+        except Exception as e:
+            print(f"⚠️ Could not flash PM button: {e}")
+
     def force_retranslation(self):
         """Force retranslation of specific chapters or images with improved display"""
         
@@ -275,10 +301,23 @@ class RetranslationMixin:
                         progress_file = cached_data['progress_file']
 
                     if not os.path.exists(output_dir):
-                        # Output folder was deleted - show message and remove from cache
-                        self._show_message('info', "Info", "No translation output found for this file.")
+                        # Output folder doesn't exist - create it with an empty progress file
+                        try:
+                            os.makedirs(output_dir, exist_ok=True)
+                            empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+                            pf = os.path.join(output_dir, "translation_progress.json")
+                            with open(pf, 'w', encoding='utf-8') as f:
+                                json.dump(empty_prog, f, ensure_ascii=False, indent=2)
+                            cached_data['output_dir'] = output_dir
+                            cached_data['progress_file'] = pf
+                            print(f"📁 Created output folder: {output_dir}")
+                            # Flash the PM button green to signal folder creation
+                            self._flash_pm_button_green()
+                        except Exception as e:
+                            self._show_message('error', "Error", f"Could not create output folder: {e}")
+                            del self._retranslation_dialog_cache[file_key]
+                            return
                         del self._retranslation_dialog_cache[file_key]
-                        return
 
                     if not progress_file or not os.path.exists(progress_file):
                         # Progress file was deleted - show message and remove from cache,
@@ -337,9 +376,20 @@ class RetranslationMixin:
             output_dir = epub_base
         
         if not os.path.exists(output_dir):
-            if not parent_dialog:
-                self._show_message('info', "Info", "No translation output found for this file.")
-            return None
+            # Output folder doesn't exist - create it with an empty progress file
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+                progress_file_path = os.path.join(output_dir, "translation_progress.json")
+                with open(progress_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(empty_prog, f, ensure_ascii=False, indent=2)
+                print(f"📁 Created output folder: {output_dir}")
+                # Flash the PM button green to signal folder creation
+                self._flash_pm_button_green()
+            except Exception as e:
+                if not parent_dialog:
+                    self._show_message('error', "Error", f"Could not create output folder: {e}")
+                return None
         
         progress_file = os.path.join(output_dir, "translation_progress.json")
         if not os.path.exists(progress_file):

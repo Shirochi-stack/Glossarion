@@ -876,7 +876,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "7.8.6"
+        __version__ = "7.8.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -949,7 +949,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.6')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.8.7')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2681,7 +2681,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.8.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.8.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -4297,11 +4297,33 @@ Recent translations to summarize:
         chapter_range_label = QLabel("Chapter range:")
         self.frame.addWidget(chapter_range_label, 5, 0, Qt.AlignLeft)
         
+        # Container for chapter range entry + spine order toggle
+        chapter_range_container = QWidget()
+        chapter_range_layout = QHBoxLayout(chapter_range_container)
+        chapter_range_layout.setContentsMargins(0, 0, 0, 0)
+        chapter_range_layout.setSpacing(6)
+        
         self.chapter_range_entry = QLineEdit()
         self.chapter_range_entry.setPlaceholderText("e.g. 5-10")
         self.chapter_range_entry.setText(self.config.get('chapter_range', ''))
         self.chapter_range_entry.setMaximumWidth(120)
-        self.frame.addWidget(self.chapter_range_entry, 5, 1, Qt.AlignLeft)
+        self.chapter_range_entry.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.chapter_range_entry.customContextMenuRequested.connect(self._show_chapter_range_context_menu)
+        chapter_range_layout.addWidget(self.chapter_range_entry)
+        
+        self.use_spine_order_checkbox = self._create_styled_checkbox("Spine Order")
+        self.use_spine_order_checkbox.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "When enabled, the chapter range uses the exact EPUB spine (reading order) "
+            "position instead of chapter numbers extracted from filenames. "
+            "Spine position 1 = first item in the EPUB's reading order.</p></qt>"
+        )
+        self.use_spine_order_checkbox.setChecked(self.config.get('use_spine_order', False))
+        self.use_spine_order_checkbox.stateChanged.connect(self._on_spine_order_toggle)
+        chapter_range_layout.addWidget(self.use_spine_order_checkbox)
+        chapter_range_layout.addStretch()
+        
+        self.frame.addWidget(chapter_range_container, 5, 1, Qt.AlignLeft)
         
         # Token limit
         token_limit_label = QLabel("Input Token limit:")
@@ -7024,6 +7046,204 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             self.append_log("🖥️ Fullscreen mode disabled")
     
+    def _on_spine_order_toggle(self, state):
+        """Save spine order checkbox state to config."""
+        checked = state == Qt.Checked.value if hasattr(Qt.Checked, 'value') else bool(state)
+        self.config['use_spine_order'] = checked
+        # Update placeholder to hint the user
+        if checked:
+            self.chapter_range_entry.setPlaceholderText("e.g. 1-10 (spine pos)")
+        else:
+            self.chapter_range_entry.setPlaceholderText("e.g. 5-10")
+
+    def _show_chapter_range_context_menu(self, pos):
+        """Show right-click context menu on chapter range entry with file preview option."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #2d2d2d; color: white; border: 1px solid #4a5568; }
+            QMenu::item:selected { background-color: #5a9fd4; }
+            QMenu::item:disabled { color: #888888; }
+        """)
+
+        # Standard text edit actions
+        undo_action = menu.addAction("Undo")
+        undo_action.triggered.connect(self.chapter_range_entry.undo)
+        redo_action = menu.addAction("Redo")
+        redo_action.triggered.connect(self.chapter_range_entry.redo)
+        menu.addSeparator()
+        cut_action = menu.addAction("Cut")
+        cut_action.triggered.connect(self.chapter_range_entry.cut)
+        copy_action = menu.addAction("Copy")
+        copy_action.triggered.connect(self.chapter_range_entry.copy)
+        paste_action = menu.addAction("Paste")
+        paste_action.triggered.connect(self.chapter_range_entry.paste)
+        menu.addSeparator()
+        select_all_action = menu.addAction("Select All")
+        select_all_action.triggered.connect(self.chapter_range_entry.selectAll)
+        menu.addSeparator()
+
+        # Preview action
+        preview_action = menu.addAction("📋 Preview files in range")
+        preview_action.triggered.connect(self._preview_chapter_range_files)
+
+        menu.exec(self.chapter_range_entry.mapToGlobal(pos))
+
+    def _preview_chapter_range_files(self):
+        """Show a dialog previewing which files will be translated for the current chapter range."""
+        chap_range = self.chapter_range_entry.text().strip()
+        if not chap_range or not re.match(r"^\d+\s*-\s*\d+$", chap_range):
+            QMessageBox.information(self, "Preview", "Enter a valid chapter range (e.g. 5-10) first.")
+            return
+
+        start, end = map(int, chap_range.split("-", 1))
+        use_spine = getattr(self, 'use_spine_order_checkbox', None)
+        spine_mode = use_spine and use_spine.isChecked()
+
+        # Get input file
+        input_path = ""
+        if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
+            input_path = self.entry_epub.text().strip()
+
+        if not input_path or not os.path.isfile(input_path):
+            QMessageBox.information(self, "Preview", "Please select an EPUB file first.")
+            return
+
+        if not input_path.lower().endswith('.epub'):
+            QMessageBox.information(self, "Preview", "File preview is only available for EPUB files.")
+            return
+
+        filenames = self._get_spine_filenames_for_preview(input_path, start, end, spine_mode)
+
+        if not filenames:
+            QMessageBox.information(self, "Preview",
+                f"No files found in range {start}-{end}" +
+                (" (spine order)" if spine_mode else "") + ".")
+            return
+
+        # Build preview dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Chapter Range Preview ({start}-{end})" +
+                          (" — Spine Order" if spine_mode else ""))
+        dlg.setMinimumSize(420, 300)
+        dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
+        layout = QVBoxLayout(dlg)
+
+        header = QLabel(f"{'Spine' if spine_mode else 'Chapter'} range {start}–{end}: "
+                       f"{len(filenames)} file(s) will be translated")
+        header.setStyleSheet("color: #5a9fd4; font-weight: bold; font-size: 10pt;")
+        layout.addWidget(header)
+
+        from PySide6.QtWidgets import QListWidget
+        file_list = QListWidget()
+        file_list.setStyleSheet("""
+            QListWidget { background-color: #2d2d2d; color: white; border: 1px solid #4a5568; }
+            QListWidget::item { padding: 3px; }
+            QListWidget::item:alternate { background-color: #333333; }
+        """)
+        file_list.setAlternatingRowColors(True)
+        for idx, (pos_label, fname) in enumerate(filenames):
+            file_list.addItem(f"  {pos_label}  →  {fname}")
+        layout.addWidget(file_list)
+
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("background-color: #3d3d3d; color: white; padding: 6px 16px;")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignRight)
+
+        # Set Halgakos icon
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                dlg.setWindowIcon(QIcon(ico_path))
+        except Exception:
+            pass
+
+        dlg.exec()
+
+    def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode):
+        """
+        Read the EPUB spine and return list of (position_label, filename) tuples
+        that fall within the given range.
+        If spine_mode is True, range refers to spine position (1-based).
+        If spine_mode is False, range refers to chapter numbers extracted from filenames.
+        """
+        results = []
+        try:
+            import xml.etree.ElementTree as ET
+            import zipfile
+
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                # Find content.opf
+                opf_path = None
+                try:
+                    container_content = zf.read('META-INF/container.xml')
+                    container_root = ET.fromstring(container_content)
+                    rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                    if rootfile is not None:
+                        opf_path = rootfile.get('full-path')
+                except Exception:
+                    pass
+
+                if not opf_path:
+                    for name in zf.namelist():
+                        if name.endswith('content.opf') or name.endswith('.opf'):
+                            opf_path = name
+                            break
+
+                if not opf_path:
+                    return results
+
+                opf_content = zf.read(opf_path)
+                root = ET.fromstring(opf_content)
+
+                ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                if root.tag.startswith('{'):
+                    default_ns = root.tag[1:root.tag.index('}')]
+                    ns = {'opf': default_ns}
+
+                # Build manifest
+                manifest = {}
+                for item in root.findall('.//opf:manifest/opf:item', ns):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    media_type = item.get('media-type', '')
+                    if item_id and href and (
+                        'html' in media_type.lower() or
+                        href.endswith(('.html', '.xhtml', '.htm'))
+                    ):
+                        manifest[item_id] = os.path.basename(href)
+
+                # Get spine order
+                spine = root.find('.//opf:spine', ns)
+                spine_items = []
+                if spine is not None:
+                    for itemref in spine.findall('opf:itemref', ns):
+                        idref = itemref.get('idref')
+                        if idref and idref in manifest:
+                            spine_items.append(manifest[idref])
+
+                if spine_mode:
+                    # Range refers to 1-based spine position
+                    for i, fname in enumerate(spine_items):
+                        pos = i + 1  # 1-based
+                        if start <= pos <= end:
+                            results.append((f"Spine #{pos}", fname))
+                else:
+                    # Range refers to chapter numbers parsed from filenames
+                    for i, fname in enumerate(spine_items):
+                        matches = re.findall(r'(\d+)', fname)
+                        if matches:
+                            chap_num = int(matches[-1])
+                        else:
+                            chap_num = 0
+                        if start <= chap_num <= end:
+                            results.append((f"Ch.{chap_num}", fname))
+
+        except Exception as e:
+            print(f"⚠️ Could not preview chapter range: {e}")
+
+        return results
+
     def _get_opf_file_order(self, file_list):
         """
         Sort files based on OPF spine order if available.
@@ -8817,7 +9037,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 chap_range = self.chapter_range_entry.text().strip()
                 if chap_range:
                     os.environ['CHAPTER_RANGE'] = chap_range
-                    self.append_log(f"📊 Chapter Range: {chap_range}")
+                    use_spine = getattr(self, 'use_spine_order_checkbox', None)
+                    if use_spine and use_spine.isChecked():
+                        os.environ['USE_SPINE_ORDER'] = '1'
+                        self.append_log(f"📊 Chapter Range (Spine Order): {chap_range}")
+                    else:
+                        os.environ['USE_SPINE_ORDER'] = '0'
+                        self.append_log(f"📊 Chapter Range: {chap_range}")
+                else:
+                    os.environ.pop('USE_SPINE_ORDER', None)
                 
                 # Set other environment variables (token limits, etc.)
                 if hasattr(self, 'token_limit_disabled') and self.token_limit_disabled:
@@ -10318,6 +10546,7 @@ Important rules:
                     'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
                     'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
+                    'USE_SPINE_ORDER': '1' if (hasattr(self, 'use_spine_order_checkbox') and self.use_spine_order_checkbox.isChecked()) else '0',
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
                     'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var else "0",
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
@@ -13739,6 +13968,7 @@ Important rules:
                 ('contextual', ['contextual_var'], None, bool),
                 ('api_key', ['api_key_entry'], '', str),
                 ('chapter_range', ['chapter_range_entry'], '', str),
+                ('use_spine_order', ['use_spine_order_checkbox'], False, bool),
                 
                 # Numeric settings
                 ('delay', ['delay_entry'], 2.0, lambda v: safe_float(v, 2.0)),
@@ -15072,7 +15302,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.8.6...")
+    print("🚀 Starting Glossarion v7.8.7...")
     
     # Initialize splash screen
     splash_manager = None
