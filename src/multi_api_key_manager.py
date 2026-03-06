@@ -4385,6 +4385,11 @@ class MultiAPIKeyDialog(QDialog):
     
     def _test_selected(self):
         """Test selected API keys with inline progress"""
+        # Guard against re-entrant clicks while tests are running
+        if getattr(self, '_tests_in_flight', False):
+            print("[DEBUG] Tests already in progress, ignoring click")
+            return
+        
         selected = self.tree.selectedItems()
         if not selected:
             QMessageBox.warning(self, "Warning", "Please select keys to test")
@@ -4416,6 +4421,7 @@ class MultiAPIKeyDialog(QDialog):
         self._test_results = []
         self._total_tests = len(indices)
         self._completed_tests = 0
+        self._tests_in_flight = True
         
         # Submit all tests to executor at once
         for index in indices:
@@ -4423,6 +4429,11 @@ class MultiAPIKeyDialog(QDialog):
 
     def _test_all(self):
         """Test all enabled API keys with inline progress"""
+        # Guard against re-entrant clicks while tests are running
+        if getattr(self, '_tests_in_flight', False):
+            print("[DEBUG] Tests already in progress, ignoring click")
+            return
+        
         if not self.key_pool.keys:
             QMessageBox.warning(self, "Warning", "No keys to test")
             return
@@ -4457,6 +4468,7 @@ class MultiAPIKeyDialog(QDialog):
         self._test_results = []
         self._total_tests = len(indices)
         self._completed_tests = 0
+        self._tests_in_flight = True
         
         # Submit all tests to executor at once
         for index in indices:
@@ -4604,6 +4616,14 @@ class MultiAPIKeyDialog(QDialog):
     @Slot(int, bool, str) if HAS_GUI else lambda x: x
     def _handle_test_result(self, index, success, message):
         """Handle test result from background thread"""
+        # Defensive init — prevents AttributeError if called from stale thread callback
+        if not hasattr(self, '_test_results'):
+            self._test_results = []
+        if not hasattr(self, '_completed_tests'):
+            self._completed_tests = 0
+        if not hasattr(self, '_total_tests'):
+            self._total_tests = 0
+        
         if index < len(self.key_pool.keys):
             key = self.key_pool.keys[index]
             if success:
@@ -4627,19 +4647,22 @@ class MultiAPIKeyDialog(QDialog):
         print(f"[DEBUG] Completed {self._completed_tests}/{self._total_tests} tests")
         
         # If all tests done, finalize
-        if self._completed_tests >= self._total_tests:
+        if self._total_tests > 0 and self._completed_tests >= self._total_tests:
             self._finalize_tests()
     
     def _finalize_tests(self):
         """Finalize after all tests complete"""
+        # Clear re-entrancy guard
+        self._tests_in_flight = False
+        
         # Clear testing flags
         for i, key in enumerate(self.key_pool.keys):
             if hasattr(key, '_testing'):
                 delattr(key, '_testing')
         
         # Calculate summary
-        success_count = sum(1 for _, success, _ in self._test_results if success)
-        total_count = len(self._test_results)
+        success_count = sum(1 for _, success, _ in getattr(self, '_test_results', []) if success)
+        total_count = len(getattr(self, '_test_results', []))
         
         # Final UI update
         self._refresh_key_list()
@@ -4706,9 +4729,9 @@ class MultiAPIKeyDialog(QDialog):
             if result:
                 results.append(result)
                 print(f"[DEBUG] Got result: {result}")
-                # Update UI immediately
-                self._refresh_key_list()
-                QApplication.processEvents()
+                # Schedule UI update on main thread (NOT from background thread)
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_refresh_key_list", Qt.QueuedConnection)
         
         print(f"[DEBUG] All tests complete. Results: {len(results)}")
         
@@ -4724,13 +4747,19 @@ class MultiAPIKeyDialog(QDialog):
                     delattr(key, '_testing')
                     print(f"[DEBUG] Cleared testing flag for key {index}")
         
-        # Final update - we're already in a thread, just update directly
-        print(f"[DEBUG] Refreshing UI with results")
-        self._refresh_key_list()
-        self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
-        # Auto-save to persist test results
-        self._save_keys_to_config()
-        QApplication.processEvents()
+        # Schedule final UI update on main thread
+        def _final_update():
+            try:
+                self._refresh_key_list()
+                self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
+                self._save_keys_to_config()
+            except Exception as e:
+                print(f"[WARN] Final update error: {e}")
+        
+        if HAS_GUI:
+            QTimer.singleShot(0, _final_update)
+        else:
+            _final_update()
         print(f"[DEBUG] UI refresh and save completed")
         
 
@@ -5038,7 +5067,7 @@ class MultiAPIKeyDialog(QDialog):
         while not self.test_results.empty():
             try:
                 results.append(self.test_results.get_nowait())
-            except:
+            except Exception:
                 break
         
         if results:
