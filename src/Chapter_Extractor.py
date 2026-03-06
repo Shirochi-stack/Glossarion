@@ -78,6 +78,113 @@ def sanitize_resource_filename(filename):
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
     return filename
 
+def _collect_image_srcs(soup):
+    """Collect all image source URLs from a BeautifulSoup document.
+    
+    Supports: <img src>, SVG <image href>, <object data>, <video poster>,
+    and CSS background-image: url(...) in inline styles.
+    """
+    image_srcs = []
+    
+    # <img src>
+    for tag in soup.find_all('img'):
+        src = tag.get('src', '')
+        if src:
+            image_srcs.append(src)
+    
+    # SVG <image> (xlink:href / href) — one per tag
+    for tag in soup.find_all('image'):
+        href = (tag.get('xlink:href') or 
+                tag.get('href') or 
+                tag.get('{http://www.w3.org/1999/xlink}href') or '')
+        if href:
+            image_srcs.append(href)
+    
+    # <object data> (embedded images/SVGs)
+    for tag in soup.find_all('object'):
+        data = tag.get('data', '')
+        if data:
+            image_srcs.append(data)
+    
+    # <video poster>
+    for tag in soup.find_all('video'):
+        poster = tag.get('poster', '')
+        if poster:
+            image_srcs.append(poster)
+    
+    # CSS background-image: url(...) in inline styles
+    for tag in soup.find_all(style=True):
+        style = tag.get('style', '')
+        if 'url(' in style:
+            for m in re.finditer(r'url\(["\']?([^"\')\s]+)["\']?\)', style):
+                url = m.group(1)
+                if url:
+                    image_srcs.append(url)
+    
+    return image_srcs
+
+def _update_image_refs_in_soup(soup, rename_map):
+    """Update all image references in a BeautifulSoup document using the rename map.
+    
+    Returns True if any references were modified.
+    Supports: <img src>, SVG <image href>, <object data>, <video poster>,
+    and CSS background-image: url(...) in inline styles.
+    """
+    modified = False
+    
+    def _update_attr(tag, attr):
+        nonlocal modified
+        val = tag.get(attr, '')
+        if not val or val.startswith('data:'):
+            return
+        clean = val.split('?')[0]
+        basename = os.path.basename(clean)
+        if basename in rename_map:
+            new_name = rename_map[basename]
+            dir_part = os.path.dirname(clean)
+            tag[attr] = f"{dir_part}/{new_name}" if dir_part else new_name
+            modified = True
+    
+    # <img src>
+    for tag in soup.find_all('img'):
+        _update_attr(tag, 'src')
+    
+    # SVG <image> (all href variants)
+    for tag in soup.find_all('image'):
+        for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
+            _update_attr(tag, attr)
+    
+    # <object data>
+    for tag in soup.find_all('object'):
+        _update_attr(tag, 'data')
+    
+    # <video poster>
+    for tag in soup.find_all('video'):
+        _update_attr(tag, 'poster')
+    
+    # CSS background-image: url(...) in inline styles
+    for tag in soup.find_all(style=True):
+        style = tag.get('style', '')
+        if 'url(' not in style:
+            continue
+        new_style = style
+        for m in re.finditer(r'url\(["\']?([^"\')\s]+)["\']?\)', style):
+            url = m.group(1)
+            if not url or url.startswith('data:'):
+                continue
+            clean = url.split('?')[0]
+            basename = os.path.basename(clean)
+            if basename in rename_map:
+                new_name = rename_map[basename]
+                dir_part = os.path.dirname(clean)
+                new_url = f"{dir_part}/{new_name}" if dir_part else new_name
+                new_style = new_style.replace(url, new_url)
+                modified = True
+        if new_style != style:
+            tag['style'] = new_style
+    
+    return modified
+
 def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=None):
     """Rename image files to chapter-based format and update all references.
     
@@ -141,19 +248,8 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
         except Exception:
             continue
         
-        # Collect all image references: <img src>, <image xlink:href/href> (SVG)
-        image_srcs = []
-        for img_tag in soup.find_all('img'):
-            src = img_tag.get('src', '')
-            if src:
-                image_srcs.append(src)
-        # SVG <image> tags use xlink:href or href for their source
-        for image_tag in soup.find_all('image'):
-            href = (image_tag.get('xlink:href') or 
-                    image_tag.get('href') or 
-                    image_tag.get('{http://www.w3.org/1999/xlink}href') or '')
-            if href:
-                image_srcs.append(href)
+        # Collect all image references from all supported formats
+        image_srcs = _collect_image_srcs(soup)
         
         img_counter = 1
         for src in image_srcs:
@@ -268,7 +364,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     
     print(f"   ✅ Successfully renamed {len(successful_renames)} image files")
     
-    # Phase 2: Update <img> and <image> (SVG) references in chapter bodies
+    # Phase 2: Update all image references in chapter bodies
     print(f"   📝 Updating image references in {len(chapters)} chapters...")
     updated_chapters = 0
     for chapter in chapters:
@@ -276,43 +372,9 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
         if not body:
             continue
         
-        modified = False
         try:
             soup = BeautifulSoup(body, 'html.parser')
-            
-            # Update <img src> tags
-            for img_tag in soup.find_all('img'):
-                src = img_tag.get('src', '')
-                if not src or src.startswith('data:'):
-                    continue
-                
-                clean_src = src.split('?')[0]
-                basename = os.path.basename(clean_src)
-                
-                if basename in successful_renames:
-                    new_name = successful_renames[basename]
-                    dir_part = os.path.dirname(clean_src)
-                    new_src = f"{dir_part}/{new_name}" if dir_part else new_name
-                    img_tag['src'] = new_src
-                    modified = True
-            
-            # Update <image> tags (SVG xlink:href / href)
-            for image_tag in soup.find_all('image'):
-                # Check all href attribute variants
-                for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
-                    href = image_tag.get(attr, '')
-                    if not href or href.startswith('data:'):
-                        continue
-                    
-                    clean_href = href.split('?')[0]
-                    basename = os.path.basename(clean_href)
-                    
-                    if basename in successful_renames:
-                        new_name = successful_renames[basename]
-                        dir_part = os.path.dirname(clean_href)
-                        new_href = f"{dir_part}/{new_name}" if dir_part else new_name
-                        image_tag[attr] = new_href
-                        modified = True
+            modified = _update_image_refs_in_soup(soup, successful_renames)
             
             if modified:
                 chapter['body'] = str(soup)
@@ -346,34 +408,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
                     content = f.read()
                 
                 soup = BeautifulSoup(content, 'html.parser')
-                file_modified = False
-                
-                # Update <img src> tags
-                for img_tag in soup.find_all('img'):
-                    src = img_tag.get('src', '')
-                    if not src or src.startswith('data:'):
-                        continue
-                    clean_src = src.split('?')[0]
-                    basename = os.path.basename(clean_src)
-                    if basename in successful_renames:
-                        new_name = successful_renames[basename]
-                        dir_part = os.path.dirname(clean_src)
-                        img_tag['src'] = f"{dir_part}/{new_name}" if dir_part else new_name
-                        file_modified = True
-                
-                # Update <image> tags (SVG)
-                for image_tag in soup.find_all('image'):
-                    for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
-                        href = image_tag.get(attr, '')
-                        if not href or href.startswith('data:'):
-                            continue
-                        clean_href = href.split('?')[0]
-                        basename = os.path.basename(clean_href)
-                        if basename in successful_renames:
-                            new_name = successful_renames[basename]
-                            dir_part = os.path.dirname(clean_href)
-                            image_tag[attr] = f"{dir_part}/{new_name}" if dir_part else new_name
-                            file_modified = True
+                file_modified = _update_image_refs_in_soup(soup, successful_renames)
                 
                 if file_modified:
                     with open(fpath, 'w', encoding='utf-8') as f:

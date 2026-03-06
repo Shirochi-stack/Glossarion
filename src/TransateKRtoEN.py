@@ -6860,23 +6860,59 @@ def retroactive_update_image_references(output_dir, source_dir=None):
         try:
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Process all image-bearing tags: <img src> and <image href>
+            # Process all image-bearing tags
             img_refs = []
+            # <img src>
             for img_tag in soup.find_all('img'):
                 src = img_tag.get('src', '')
                 if src and not src.startswith('data:'):
                     img_refs.append((img_tag, 'src', src))
+            # SVG <image> (one entry per tag)
             for image_tag in soup.find_all('image'):
                 for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
                     href = image_tag.get(attr, '')
                     if href and not href.startswith('data:'):
                         img_refs.append((image_tag, attr, href))
                         break  # One entry per <image> tag, avoid double-counting
+            # <object data>
+            for obj_tag in soup.find_all('object'):
+                data = obj_tag.get('data', '')
+                if data and not data.startswith('data:'):
+                    img_refs.append((obj_tag, 'data', data))
+            # <video poster>
+            for vid_tag in soup.find_all('video'):
+                poster = vid_tag.get('poster', '')
+                if poster and not poster.startswith('data:'):
+                    img_refs.append((vid_tag, 'poster', poster))
             
             # Collect all referenced basenames in this file
             all_referenced = set()
             for _, _, rv in img_refs:
                 all_referenced.add(os.path.basename(rv.split('?')[0]))
+            
+            # Pre-pass: Update CSS background-image: url(...) in inline styles
+            for styled_tag in soup.find_all(style=True):
+                style = styled_tag.get('style', '')
+                if 'url(' not in style:
+                    continue
+                new_style = style
+                for m in re.finditer(r'url\(["\']?([^"\')\s]+)["\']?\)', style):
+                    url = m.group(1)
+                    if not url or url.startswith('data:'):
+                        continue
+                    clean = url.split('?')[0]
+                    basename = os.path.basename(clean)
+                    if basename in actual_renames:
+                        new_name = actual_renames[basename]
+                        dir_part = os.path.dirname(clean)
+                        new_url = f"{dir_part}/{new_name}" if dir_part else new_name
+                        new_style = new_style.replace(url, new_url)
+                        total_replacements += 1
+                    elif basename not in existing_images:
+                        all_referenced.add(basename)  # Track for broken ref reporting
+                if new_style != style:
+                    styled_tag['style'] = new_style
+                    modified = True
             
             # Pass 1: Handle exact matches (rename map, existing files)
             # and collect broken refs for batch repair
