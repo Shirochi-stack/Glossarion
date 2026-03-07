@@ -563,27 +563,32 @@ def _build_responses_body(
     instructions = ""
     input_items: List[Dict[str, Any]] = []
 
-    def _convert_content_parts(content) -> List[Dict[str, Any]]:
+    def _convert_content_parts(content, role="user") -> List[Dict[str, Any]]:
         """Convert Chat Completions content to Responses API content parts.
 
         Handles both plain strings and multi-modal lists (text + image_url).
+        The Codex Responses API requires 'output_text' for assistant messages
+        and 'input_text' for user/developer messages.
         """
+        # Assistant role must use output_text (Responses API schema requirement)
+        text_type = "output_text" if role == "assistant" else "input_text"
+
         if isinstance(content, str):
-            return [{"type": "input_text", "text": content}]
+            return [{"type": text_type, "text": content}]
 
         if not isinstance(content, list):
-            return [{"type": "input_text", "text": str(content)}]
+            return [{"type": text_type, "text": str(content)}]
 
         parts: List[Dict[str, Any]] = []
         for part in content:
             if isinstance(part, str):
-                parts.append({"type": "input_text", "text": part})
+                parts.append({"type": text_type, "text": part})
                 continue
             if not isinstance(part, dict):
                 continue
             ptype = part.get("type", "")
             if ptype == "text":
-                parts.append({"type": "input_text", "text": part.get("text", "")})
+                parts.append({"type": text_type, "text": part.get("text", "")})
             elif ptype == "image_url":
                 # Chat Completions: {"type": "image_url", "image_url": {"url": "..."}}
                 # Responses API:    {"type": "input_image", "image_url": "..."}
@@ -592,7 +597,12 @@ def _build_responses_body(
                 if url:
                     parts.append({"type": "input_image", "image_url": url})
             elif ptype == "input_text":
-                # Already in Responses format
+                # Already in Responses format — but fix the type if this is an assistant msg
+                if role == "assistant":
+                    parts.append({"type": "output_text", "text": part.get("text", "")})
+                else:
+                    parts.append(part)
+            elif ptype == "output_text":
                 parts.append(part)
             elif ptype == "input_image":
                 parts.append(part)
@@ -600,8 +610,8 @@ def _build_responses_body(
                 # Unknown part type — pass text if present
                 text = part.get("text")
                 if text:
-                    parts.append({"type": "input_text", "text": str(text)})
-        return parts or [{"type": "input_text", "text": ""}]
+                    parts.append({"type": text_type, "text": str(text)})
+        return parts or [{"type": text_type, "text": ""}]
 
     for msg in messages:
         role = msg.get("role", "user")
@@ -630,7 +640,7 @@ def _build_responses_body(
         input_items.append({
             "type": "message",
             "role": "developer" if role == "system" else role,
-            "content": _convert_content_parts(content),
+            "content": _convert_content_parts(content, role),
         })
 
     body: Dict[str, Any] = {
