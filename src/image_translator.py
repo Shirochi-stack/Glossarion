@@ -1199,15 +1199,30 @@ class ImageTranslator:
             # Fallback to original behavior if no progress manager provided
             progress_file = os.path.join(self.output_dir, "translation_progress.json")
             try:
-                # Write to a temporary file first
+                # Write to a temporary file first, with retry for file locks
                 temp_file = progress_file + '.tmp'
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        with open(temp_file, 'w', encoding='utf-8') as f:
+                            json.dump(prog, f, ensure_ascii=False, indent=2)
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.1 * (2 ** attempt))
+                        else:
+                            raise
                 
-                # If successful, replace the original file
-                if os.path.exists(progress_file):
-                    os.remove(progress_file)
-                os.rename(temp_file, progress_file)
+                # Atomically replace the original file (with retry)
+                for attempt in range(max_retries):
+                    try:
+                        os.replace(temp_file, progress_file)
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.1 * (2 ** attempt))
+                        else:
+                            raise
             except Exception as e:
                 print(f"⚠️ Warning: Failed to save progress: {e}")
                 # Clean up temp file if it exists

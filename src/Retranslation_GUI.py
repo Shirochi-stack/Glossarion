@@ -2744,15 +2744,35 @@ class RetranslationMixin:
                     progress_dir = os.path.dirname(data['progress_file'])
                     if progress_dir:
                         os.makedirs(progress_dir, exist_ok=True)
-                    with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                        json.dump(prog, f, ensure_ascii=False, indent=2)
+                    # Retry write in case another thread holds the file lock
+                    for _attempt in range(5):
+                        try:
+                            with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                                json.dump(prog, f, ensure_ascii=False, indent=2)
+                            break
+                        except PermissionError:
+                            if _attempt < 4:
+                                import time as _time; _time.sleep(0.1 * (2 ** _attempt))
+                            else:
+                                raise
                 except Exception as e:
                     QMessageBox.warning(data.get('dialog', self), "Progress File Error",
                                         f"Could not recreate progress file:\n{e}")
                     return
             
-            with open(data['progress_file'], 'r', encoding='utf-8') as f:
-                data['prog'] = json.load(f)
+            # Retry reading the progress file — it may be briefly locked or
+            # absent while ProgressManager.save() atomically replaces it.
+            _max_read_retries = 5
+            for _read_attempt in range(_max_read_retries):
+                try:
+                    with open(data['progress_file'], 'r', encoding='utf-8') as f:
+                        data['prog'] = json.load(f)
+                    break  # Read succeeded
+                except (PermissionError, FileNotFoundError):
+                    if _read_attempt < _max_read_retries - 1:
+                        import time as _time; _time.sleep(0.1 * (2 ** _read_attempt))
+                    else:
+                        raise
             
             # Clean up missing files and merged children before display unless disabled
             if not data.get('skip_cleanup', False):
@@ -2762,9 +2782,17 @@ class RetranslationMixin:
                 temp_progress.cleanup_missing_files(data['output_dir'])
                 data['prog'] = temp_progress.prog
                 
-                # Save the cleaned progress back to file
-                with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                    json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                # Save the cleaned progress back to file (with retry for file locks)
+                for _attempt in range(5):
+                    try:
+                        with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                            json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                        break
+                    except PermissionError:
+                        if _attempt < 4:
+                            import time as _time; _time.sleep(0.1 * (2 ** _attempt))
+                        else:
+                            raise
             
             # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):

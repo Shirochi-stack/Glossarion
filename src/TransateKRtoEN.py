@@ -2003,7 +2003,7 @@ class ProgressManager:
         return spine_key or chapter_key
     
     def save(self):
-        """Save progress to file"""
+        """Save progress to file with retry logic for Windows file locks"""
         try:
             self.prog["completed_list"] = []
             for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
@@ -2021,12 +2021,32 @@ class ProgressManager:
                 self.prog["completed_list"].sort(key=lambda x: x["num"])
             
             temp_file = self.PROGRESS_FILE + '.tmp'
-            with open(temp_file, "w", encoding="utf-8") as pf:
-                json.dump(self.prog, pf, ensure_ascii=False, indent=2)
             
-            if os.path.exists(self.PROGRESS_FILE):
-                os.remove(self.PROGRESS_FILE)
-            os.rename(temp_file, self.PROGRESS_FILE)
+            # Retry loop for writing the temp file (can also be locked)
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    with open(temp_file, "w", encoding="utf-8") as pf:
+                        json.dump(self.prog, pf, ensure_ascii=False, indent=2)
+                    break  # Write succeeded
+                except PermissionError:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
+                    else:
+                        raise
+            
+            # Use os.replace() instead of os.remove()+os.rename() — it's atomic on
+            # Windows and avoids the window where the file doesn't exist at all.
+            # Retry the replace in case the target is still locked by another reader.
+            for attempt in range(max_retries):
+                try:
+                    os.replace(temp_file, self.PROGRESS_FILE)
+                    break  # Replace succeeded
+                except PermissionError:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
+                    else:
+                        raise
         except Exception as e:
             print(f"⚠️ Warning: Failed to save progress: {e}")
             temp_file = self.PROGRESS_FILE + '.tmp'

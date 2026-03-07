@@ -8185,20 +8185,36 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             return {"images": {}, "content_hashes": {}, "version": "1.0"}
                     
                     def save(self):
-                        """Save progress to file atomically"""
+                        """Save progress to file atomically with retry for file locks"""
                         if not self.PROGRESS_FILE:
                             return
                         try:
+                            import time as _time
                             # Ensure directory exists
                             os.makedirs(os.path.dirname(self.PROGRESS_FILE), exist_ok=True)
                             
                             temp_file = self.PROGRESS_FILE + '.tmp'
-                            with open(temp_file, "w", encoding="utf-8") as pf:
-                                json.dump(self.prog, pf, ensure_ascii=False, indent=2)
+                            max_retries = 5
+                            for attempt in range(max_retries):
+                                try:
+                                    with open(temp_file, "w", encoding="utf-8") as pf:
+                                        json.dump(self.prog, pf, ensure_ascii=False, indent=2)
+                                    break
+                                except PermissionError:
+                                    if attempt < max_retries - 1:
+                                        _time.sleep(0.1 * (2 ** attempt))
+                                    else:
+                                        raise
                             
-                            if os.path.exists(self.PROGRESS_FILE):
-                                os.remove(self.PROGRESS_FILE)
-                            os.rename(temp_file, self.PROGRESS_FILE)
+                            for attempt in range(max_retries):
+                                try:
+                                    os.replace(temp_file, self.PROGRESS_FILE)
+                                    break
+                                except PermissionError:
+                                    if attempt < max_retries - 1:
+                                        _time.sleep(0.1 * (2 ** attempt))
+                                    else:
+                                        raise
                         except Exception as e:
                             if hasattr(self, 'append_log'):
                                 self.append_log(f"⚠️ Failed to save progress: {e}")
