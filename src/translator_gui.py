@@ -3305,7 +3305,7 @@ Recent translations to summarize:
         <h4>ChatGPT Subscription (authgpt/)</h4>
         <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
         <ul>
-            <li><b>authgpt/gpt-5.2</b> - GPT-5.2 via ChatGPT subscription</li>
+            <li><b>authgpt/gpt-5.4</b> - GPT-5.4 via ChatGPT subscription</li>
             <li><b>authgpt/gpt-5.2-pro</b> - GPT-5.2 Pro (Pro subscribers)</li>
             <li><b>authgpt/gpt-5.2-codex</b> - Codex via ChatGPT subscription</li>
         </ul>
@@ -3434,7 +3434,7 @@ Recent translations to summarize:
         self.frame.addWidget(model_label, 1, 0, Qt.AlignLeft)
         
         # Get default model and model list
-        default_model = self.config.get('model', 'authgpt/gpt-5.2')
+        default_model = self.config.get('model', 'authgpt/gpt-5.4')
         self.model_var = default_model
         # Use custom model list from config if saved, otherwise default catalog
         models = self.config.get('custom_model_list', None)
