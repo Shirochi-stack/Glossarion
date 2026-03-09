@@ -13205,6 +13205,49 @@ Important rules:
         self.selected_files = []
         self.file_path = None
         self.current_file_index = 0
+
+        # Clear cached Progress Manager dialogs/tabs
+        try:
+            # Single-file cache
+            if hasattr(self, '_retranslation_dialog_cache'):
+                cache = getattr(self, '_retranslation_dialog_cache', None)
+                if isinstance(cache, dict):
+                    for _k, _v in list(cache.items()):
+                        try:
+                            dlg = _v.get('dialog') if isinstance(_v, dict) else None
+                            if dlg:
+                                dlg.hide()
+                                dlg.close()
+                                dlg.deleteLater()
+                        except Exception:
+                            pass
+                    cache.clear()
+            # Multi-file dialog
+            if hasattr(self, '_multi_file_retranslation_dialog') and self._multi_file_retranslation_dialog:
+                try:
+                    self._multi_file_retranslation_dialog.hide()
+                    self._multi_file_retranslation_dialog.close()
+                    self._multi_file_retranslation_dialog.deleteLater()
+                except Exception:
+                    pass
+                self._multi_file_retranslation_dialog = None
+            if hasattr(self, '_multi_file_selection_key'):
+                self._multi_file_selection_key = None
+            # Image folder dialog cache
+            if hasattr(self, '_image_retranslation_dialog_cache'):
+                img_cache = getattr(self, '_image_retranslation_dialog_cache', None)
+                if isinstance(img_cache, dict):
+                    for _k, _dlg in list(img_cache.items()):
+                        try:
+                            if _dlg:
+                                _dlg.hide()
+                                _dlg.close()
+                                _dlg.deleteLater()
+                        except Exception:
+                            pass
+                    img_cache.clear()
+        except Exception:
+            pass
         
         # Clear EPUB tracking
         if hasattr(self, 'selected_epub_path'):
