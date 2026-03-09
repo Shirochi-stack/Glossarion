@@ -2239,14 +2239,14 @@ def _create_context_management_section(self, parent):
     
     section_v.addWidget(output_dir_row)
 
-    # Halgakos icon at bottom (128x128 HiDPI)
+    # Halgakos icon at bottom (150x150 HiDPI)
     _icon_label = QLabel()
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     if os.path.exists(_icon_path):
         from PySide6.QtGui import QPixmap
         _pixmap = QPixmap(_icon_path)
         if not _pixmap.isNull():
-            _scaled = _pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _scaled = _pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             _icon_label.setPixmap(_scaled)
             _icon_label.setAlignment(Qt.AlignCenter)
             section_v.addWidget(_icon_label)
@@ -5081,6 +5081,34 @@ def _create_prompt_management_section(self, parent):
     title_desc.setStyleSheet("color: gray; font-size: 9pt;")
     title_desc.setContentsMargins(20, 0, 0, 8)
     section_v.addWidget(title_desc)
+
+    # Skip image title translation (manga/image output filenames)
+    if not hasattr(self, 'skip_image_title_translation_var'):
+        # Default to enabled
+        self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
+        # Persist default if not set
+        if 'skip_image_title_translation' not in self.config:
+            self.config['skip_image_title_translation'] = True
+    skip_img_title_cb = self._create_styled_checkbox("Skip image title translation (use original filename)")
+    skip_img_title_cb.setToolTip(
+        "When enabled, image title/filename translation is skipped.\n"
+        "Translated HTML will use the original image base name."
+    )
+    try:
+        skip_img_title_cb.setChecked(bool(self.skip_image_title_translation_var))
+    except Exception:
+        pass
+
+    def _on_skip_image_title_toggle(checked):
+        try:
+            self.skip_image_title_translation_var = bool(checked)
+            self.config['skip_image_title_translation'] = bool(checked)
+            os.environ['SKIP_IMAGE_TITLE_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    skip_img_title_cb.toggled.connect(_on_skip_image_title_toggle)
+    section_v.addWidget(skip_img_title_cb)
     
     def _on_glossary_title_toggle(checked):
         try:

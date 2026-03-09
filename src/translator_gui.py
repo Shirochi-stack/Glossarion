@@ -8426,6 +8426,38 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.image_progress_manager.update(image_path, content_hash, status="cancelled")
                 return False
             
+            # Apply multi-key settings for image translation (same as main translation path)
+            try:
+                use_mk = bool(self.config.get('use_multi_api_keys', False))
+                mk_list = self.config.get('multi_api_keys', []) or []
+                force_rotation = bool(self.config.get('force_key_rotation', True))
+                rotation_frequency = int(self.config.get('rotation_frequency', 1))
+                if use_mk and mk_list:
+                    os.environ['USE_MULTI_API_KEYS'] = '1'
+                    os.environ['USE_MULTI_KEYS'] = '1'
+                    os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                    os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.set_in_memory_multi_keys(
+                            mk_list,
+                            force_rotation=force_rotation,
+                            rotation_frequency=rotation_frequency,
+                        )
+                    except Exception:
+                        pass
+                    self.append_log(f"🔑 Multi-key mode ENABLED for image translation ({len(mk_list)} keys)")
+                else:
+                    os.environ['USE_MULTI_API_KEYS'] = '0'
+                    os.environ['USE_MULTI_KEYS'] = '0'
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.clear_in_memory_multi_keys()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
             # Initialize API client with output_dir to enable multi-key mode from environment
             try:
                 from unified_api_client import UnifiedClient
@@ -8890,8 +8922,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     if not book_title_system_prompt:
                         book_title_system_prompt = system_prompt
                     
-                    # Translate the image filename/title
-                    self.append_log(f"📝 Translating image title...")
+                    # Translate the image filename/title (unless skipped)
+                    skip_img_title = bool(getattr(self, 'skip_image_title_translation_var', False) or self.config.get('skip_image_title_translation', False) or os.environ.get('SKIP_IMAGE_TITLE_TRANSLATION') == '1')
+                    if skip_img_title:
+                        self.append_log("⏭️ Skipping image title translation (setting enabled)")
+                        translated_title = base_name
+                    else:
+                        self.append_log(f"📝 Translating image title...")
                     
                     # Replace {target_lang} variable in both system and user prompts with output language
                     output_lang = self.config.get('output_language', 'English')
@@ -8903,35 +8940,36 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         {"role": "user", "content": f"{book_title_prompt_formatted}\n\n{base_name}" if book_title_prompt != system_prompt else base_name}
                     ]
                     
-                    try:
-                        # Check for stop before title translation
-                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                        if self.stop_requested or graceful_stop_active:
-                            self.append_log("⏹️ Image translation cancelled before title translation")
-                            self.image_progress_manager.update(image_path, content_hash, status="cancelled")
-                            return False
-                        
-                        title_response = client.send(
-                            title_messages,
-                            temperature=temperature,
-                            max_tokens=max_tokens
-                        )
-                        
-                        # Extract title translation
-                        if hasattr(title_response, 'content'):
-                            translated_title = title_response.content.strip() if title_response.content else base_name
-                        else:
-                            # Handle tuple response
-                            title_content, *_ = title_response
-                            translated_title = title_content.strip() if title_content else base_name
-                    except Exception as e:
-                        # If stop/graceful stop toggled during title call, don't treat as failure
-                        if self.stop_requested or os.environ.get('GRACEFUL_STOP') == '1' or "cancelled" in str(e).lower():
-                            self.append_log("⏹️ Image title translation cancelled")
-                            translated_title = base_name
-                        else:
-                            self.append_log(f"⚠️ Title translation failed: {str(e)}")
-                            translated_title = base_name  # Fallback to original if translation fails
+                    if not skip_img_title:
+                        try:
+                            # Check for stop before title translation
+                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                            if self.stop_requested or graceful_stop_active:
+                                self.append_log("⏹️ Image translation cancelled before title translation")
+                                self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                                return False
+                            
+                            title_response = client.send(
+                                title_messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens
+                            )
+                            
+                            # Extract title translation
+                            if hasattr(title_response, 'content'):
+                                translated_title = title_response.content.strip() if title_response.content else base_name
+                            else:
+                                # Handle tuple response
+                                title_content, *_ = title_response
+                                translated_title = title_content.strip() if title_content else base_name
+                        except Exception as e:
+                            # If stop/graceful stop toggled during title call, don't treat as failure
+                            if self.stop_requested or os.environ.get('GRACEFUL_STOP') == '1' or "cancelled" in str(e).lower():
+                                self.append_log("⏹️ Image title translation cancelled")
+                                translated_title = base_name
+                            else:
+                                self.append_log(f"⚠️ Title translation failed: {str(e)}")
+                                translated_title = base_name  # Fallback to original if translation fails
                     
                     # Create clean HTML content with just the translated title and content
                     html_content = f'''<!DOCTYPE html>

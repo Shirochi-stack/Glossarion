@@ -4454,6 +4454,7 @@ class RetranslationMixin:
         
         # Find all HTML files in the output directory
         html_files = []
+        _html_seen = set()
         image_files = []
         progress_data = None
         
@@ -4469,12 +4470,23 @@ class RetranslationMixin:
                 for key, value in progress_data.items():
                     if isinstance(value, dict) and 'output_file' in value:
                         output_file = value['output_file']
-                        # Handle both forward and backslashes in paths
-                        output_file = output_file.replace('\\', '/')
-                        if '/' in output_file:
-                            output_file = os.path.basename(output_file)
-                        html_files.append(output_file)
-                        print(f"Found tracked file: {output_file}")
+                        if not output_file:
+                            continue
+                        # Normalize path
+                        output_norm = os.path.normpath(str(output_file))
+                        # If absolute and under output_dir, store as relative
+                        try:
+                            if os.path.isabs(output_norm) and output_dir:
+                                outdir_norm = os.path.normpath(output_dir)
+                                if output_norm.startswith(outdir_norm):
+                                    output_norm = os.path.relpath(output_norm, outdir_norm)
+                        except Exception:
+                            pass
+                        if output_norm in _html_seen:
+                            continue
+                        _html_seen.add(output_norm)
+                        html_files.append(output_norm)
+                        print(f"Found tracked file: {output_norm}")
             except Exception as e:
                 print(f"Error loading progress file: {e}")
                 import traceback
@@ -4489,7 +4501,8 @@ class RetranslationMixin:
                 # Include HTML files (any name)
                 if (os.path.isfile(file_path) and 
                     file.lower().endswith(('.html', '.xhtml', '.htm')) and 
-                    file not in html_files):
+                    file not in html_files and file not in _html_seen):
+                    _html_seen.add(file)
                     html_files.append(file)
                     print(f"Found HTML file: {file}")
                 # Also include generated image files (not in images/ subdirectory)
