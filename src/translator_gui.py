@@ -9436,7 +9436,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         os.environ['MAX_INPUT_TOKENS'] = '1000000'
                 
                 # Validate glossary path
-                if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                # Check per-file mapping first (set by the main loop before calling this method)
+                _mapped_gp = os.environ.get('MANUAL_GLOSSARY', '')
+                if _mapped_gp and os.path.exists(_mapped_gp):
+                    # Already set by the per-EPUB mapping loop – keep it
+                    pass
+                elif hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
                     if (hasattr(self, 'auto_loaded_glossary_path') and 
                         self.manual_glossary_path == self.auto_loaded_glossary_path):
                         if (hasattr(self, 'auto_loaded_glossary_for_file') and 
@@ -9527,6 +9532,32 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception as e:
             self.append_log(f"❌ Error in text file processing: {str(e)}")
             return False
+
+    def _resolve_glossary_for_env(self, file_path: str) -> str:
+        """Return the glossary path to use for a given input file.
+
+        Priority:
+        1) Per-EPUB mapping (manual_glossary_map) — used when multiple EPUBs are loaded
+        2) Global manual_glossary_path — used for single-EPUB or manual load
+        3) Empty string — no glossary
+        """
+        try:
+            mgm = getattr(self, 'manual_glossary_map', None)
+            if isinstance(mgm, dict) and mgm and file_path:
+                key = os.path.normpath(os.path.abspath(file_path))
+                gp = mgm.get(file_path) or mgm.get(key) or mgm.get(os.path.normpath(file_path))
+                if gp and os.path.exists(gp):
+                    return gp
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                return self.manual_glossary_path
+        except Exception:
+            pass
+
+        return ''
 
     def _get_environment_variables(self, epub_path, api_key):
         """Get all environment variables for translation/glossary"""
@@ -9746,7 +9777,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
-            'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
+            'MANUAL_GLOSSARY': self._resolve_glossary_for_env(epub_path),
             'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var else '0',
             'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var else "0",
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var else "0",
@@ -14260,8 +14291,9 @@ Important rules:
         1) App folder: `./Glossary/` (next to the executable/script)
         2) CWD: `./Glossary/`
         3) Per-book output folder: `<output>/<book>/Glossary/`
+        4) Per-book output root: `<output>/<book>/glossary.*` (generic names)
 
-        Matching rules (case-insensitive):
+        Matching rules (case-insensitive) for steps 1-3:
         - Prefer exact stem match to `<epub_stem>_glossary` (ignoring extension)
         - Fallback: exact stem match to `<epub_stem>`
         - Ignore progress files like `*_glossary_progress.*`
@@ -14337,6 +14369,18 @@ Important rules:
             hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
             if hit:
                 return hit
+
+            # 4) Per-book output root: generic glossary.* files
+            #    (matches auto_load_glossary_for_file behaviour so multi-EPUB
+            #     auto-mapping can find <output>/<book>/glossary.csv etc.)
+            if os.path.isdir(output_dir):
+                generic_candidates = [
+                    os.path.join(output_dir, f"glossary{ext}")
+                    for ext in ext_priority  # .csv, .json, .txt, .md
+                ]
+                for candidate in generic_candidates:
+                    if os.path.isfile(candidate):
+                        return candidate
 
             return None
         except Exception:
