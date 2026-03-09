@@ -486,6 +486,7 @@ class GlossaryManagerMixin:
                 # Without updating them here, changes won't take effect until GUI restart
                 checkbox_to_var_mapping = [
                     ('append_glossary_checkbox', 'append_glossary_var'),
+                    ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load_var'),
                     ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
@@ -517,6 +518,17 @@ class GlossaryManagerMixin:
                 for checkbox_name, var_name in checkbox_to_var_mapping:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())
+
+                # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
+                try:
+                    if (
+                        hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked() and
+                        hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
+                    ):
+                        if hasattr(self, '_autofill_glossary_for_current_selection'):
+                            self._autofill_glossary_for_current_selection()
+                except Exception:
+                    pass
                 
                 # Update glossary request merging checkbox
                 if hasattr(self, 'glossary_request_merging_checkbox'):
@@ -1813,7 +1825,7 @@ CRITICAL EXTRACTION RULES:
         # Append glossary toggle
         append_widget = QWidget()
         append_layout = QHBoxLayout(append_widget)
-        append_layout.setContentsMargins(0, 0, 0, 15)
+        append_layout.setContentsMargins(0, 0, 0, 6)
         auto_layout.addWidget(append_widget)
         
         if not hasattr(self, 'append_glossary_checkbox'):
@@ -1826,9 +1838,27 @@ CRITICAL EXTRACTION RULES:
         append_layout.addWidget(self.append_glossary_checkbox)
         
         label2 = QLabel("(Applies to ALL glossaries - manual and automatic)")
-        # label2.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         append_layout.addWidget(label2)
         append_layout.addStretch()
+
+        # Auto-load glossaries toggle (under Append Glossary)
+        auto_load_widget = QWidget()
+        auto_load_layout = QHBoxLayout(auto_load_widget)
+        auto_load_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(auto_load_widget)
+
+        if not hasattr(self, 'append_glossary_auto_load_checkbox'):
+            self.append_glossary_auto_load_checkbox = self._create_styled_checkbox("Auto-Mapping (Auto-Fill)")
+        try:
+            self.append_glossary_auto_load_checkbox.setChecked(self.config.get('append_glossary_auto_load', False))
+        except Exception:
+            pass
+        self.append_glossary_auto_load_checkbox.setToolTip(
+            "When Append Glossary is enabled, automatically Auto-Fill glossary mapping\n"
+            "based on filename matching. If disabled, use Load Glossary / Auto-Fill manually."
+        )
+        auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
+        auto_load_layout.addStretch()
         
         # Add additional glossary toggle (below append glossary)
         additional_glossary_widget = QWidget()

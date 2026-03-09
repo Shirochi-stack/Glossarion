@@ -1254,6 +1254,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Glossary-related variables (existing)
         self.append_glossary_var = self.config.get('append_glossary', False)
+        # When enabled, automatically auto-fill glossary selection/mapping when Append Glossary is enabled.
+        self.append_glossary_auto_load_var = self.config.get('append_glossary_auto_load', False)
         self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
@@ -8182,6 +8184,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         gp = mgm.get(file_path) or mgm.get(key) or mgm.get(os.path.normpath(file_path))
                         if gp:
                             os.environ['MANUAL_GLOSSARY'] = gp
+                            # Inform user which glossary is used for this EPUB
+                            try:
+                                if str(file_path).lower().endswith('.epub'):
+                                    self.append_log(
+                                        f"📑 Using mapped glossary for {os.path.basename(file_path)}: {os.path.basename(gp)}"
+                                    )
+                            except Exception:
+                                pass
                         else:
                             os.environ.pop('MANUAL_GLOSSARY', None)
                 except Exception:
@@ -13689,13 +13699,58 @@ Important rules:
                     self.save_config(show_message=False)
                 except Exception:
                     pass
+
+                    # If Append Glossary + Auto-load are enabled, log which glossary is selected/auto-loaded.
+                try:
+                    append_enabled = bool(getattr(self, 'append_glossary_var', False) or self.config.get('append_glossary', False))
+                    if hasattr(self, 'append_glossary_checkbox'):
+                        append_enabled = bool(self.append_glossary_checkbox.isChecked())
+                except Exception:
+                    append_enabled = False
+
+                try:
+                    auto_load_enabled = bool(getattr(self, 'append_glossary_auto_load_var', False) or self.config.get('append_glossary_auto_load', False))
+                    if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                        auto_load_enabled = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                except Exception:
+                    auto_load_enabled = False
+
+                if append_enabled and auto_load_enabled:
+                    try:
+                        # If no glossary is currently selected, attempt an auto-fill.
+                        # (The auto-fill function logs the glossary filename on success.)
+                        if not getattr(self, 'manual_glossary_path', None):
+                            if hasattr(self, '_autofill_glossary_for_current_selection'):
+                                filled = int(self._autofill_glossary_for_current_selection() or 0)
+                                if not filled:
+                                    self.append_log("📑 Auto-mapping enabled, but no matching glossary was found")
+                    except Exception:
+                        pass
             elif len(epub_files) > 1:
                 # Multiple EPUBs - clear glossary but update EPUB path tracking
                 if hasattr(self, 'auto_loaded_glossary_path'):
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
-                    self.append_log("📁 Multiple files selected - glossary auto-loading disabled")
+                    # If Append Glossary + Auto-load are enabled, we auto-map immediately, so this message is noisy.
+                    try:
+                        append_enabled = bool(getattr(self, 'append_glossary_var', False) or self.config.get('append_glossary', False))
+                        if hasattr(self, 'append_glossary_checkbox'):
+                            append_enabled = bool(self.append_glossary_checkbox.isChecked())
+                    except Exception:
+                        append_enabled = False
+
+                    try:
+                        auto_load_enabled = bool(getattr(self, 'append_glossary_auto_load_var', False) or self.config.get('append_glossary_auto_load', False))
+                        if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                            auto_load_enabled = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                    except Exception:
+                        auto_load_enabled = False
+
+                    if not (append_enabled and auto_load_enabled):
+                        self.append_log(
+                            "📁 Multiple EPUBs selected — glossary auto-load disabled (use Load Glossary to map, or click Auto-Fill)"
+                        )
                 
                 # For multiple EPUBs, set the selected_epub_path to the first one
                 # but track all EPUBs for word count analysis
@@ -13708,6 +13763,29 @@ Important rules:
                     
                     # Log that multiple EPUBs are selected
                     self.append_log(f"📖 {len(epub_files)} EPUB files selected - using '{os.path.basename(epub_files[0])}' as primary for word count analysis")
+
+                    # If Append Glossary + Auto-load are enabled, auto-map glossaries immediately.
+                    # (This also emits the Auto-mapped log so users know what's happening.)
+                    try:
+                        append_enabled = bool(getattr(self, 'append_glossary_var', False) or self.config.get('append_glossary', False))
+                        if hasattr(self, 'append_glossary_checkbox'):
+                            append_enabled = bool(self.append_glossary_checkbox.isChecked())
+                    except Exception:
+                        append_enabled = False
+
+                    try:
+                        auto_load_enabled = bool(getattr(self, 'append_glossary_auto_load_var', False) or self.config.get('append_glossary_auto_load', False))
+                        if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                            auto_load_enabled = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                    except Exception:
+                        auto_load_enabled = False
+
+                    if append_enabled and auto_load_enabled:
+                        try:
+                            if hasattr(self, '_autofill_glossary_for_current_selection'):
+                                self._autofill_glossary_for_current_selection()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             elif pdf_files or txt_files:
@@ -14002,6 +14080,134 @@ Important rules:
                     print(f"[DEBUG] Stack trace: {''.join(traceback.format_stack()[-3:-1])}")
         super().__setattr__(name, value)
 
+    def _autofill_glossary_for_current_selection(self) -> int:
+        """Auto-fill glossary selection/mapping for the currently selected input files.
+
+        - For a single EPUB selection, sets self.manual_glossary_path if empty.
+        - For multiple EPUBs, fills self.manual_glossary_map (per-EPUB) and clears manual_glossary_path.
+
+        Returns the number of EPUBs that received a glossary assignment.
+        """
+        try:
+            files = list(getattr(self, 'selected_files', []) or [])
+        except Exception:
+            files = []
+
+        epubs = [p for p in files if str(p).lower().endswith('.epub')]
+        if not epubs:
+            return 0
+
+        # Single EPUB: set a single glossary path (only if user hasn't chosen one).
+        if len(epubs) == 1:
+            try:
+                if getattr(self, 'manual_glossary_path', None):
+                    return 0
+            except Exception:
+                pass
+
+            gp = None
+            try:
+                gp = self._guess_glossary_for_input_file(epubs[0])
+            except Exception:
+                gp = None
+
+            if gp and os.path.exists(gp):
+                try:
+                    self.manual_glossary_path = gp
+                    # This is auto-filled, not explicitly loaded by user
+                    self.manual_glossary_manually_loaded = False
+                    self.config['manual_glossary_path'] = gp
+                except Exception:
+                    pass
+                try:
+                    os.environ['MANUAL_GLOSSARY'] = gp
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'append_log'):
+                        self.append_log(f"📑 Auto-loaded glossary: {os.path.basename(gp)}")
+                except Exception:
+                    pass
+                return 1
+
+            return 0
+
+        # Multiple EPUBs: build per-EPUB mapping.
+        try:
+            existing = getattr(self, 'manual_glossary_map', {}) or {}
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+
+        mapping = {}
+        assigned = 0
+        log_pairs = []
+
+        for epub_path in epubs:
+            key = os.path.normpath(os.path.abspath(epub_path))
+
+            # Keep existing if valid
+            try:
+                prev = existing.get(epub_path) or existing.get(key) or existing.get(os.path.normpath(epub_path))
+            except Exception:
+                prev = None
+
+            if prev and os.path.exists(prev):
+                prev_n = os.path.normpath(os.path.abspath(prev))
+                mapping[key] = prev_n
+                assigned += 1
+                try:
+                    log_pairs.append((os.path.basename(epub_path), os.path.basename(prev_n)))
+                except Exception:
+                    pass
+                continue
+
+            gp = None
+            try:
+                gp = self._guess_glossary_for_input_file(epub_path)
+            except Exception:
+                gp = None
+
+            if gp and os.path.exists(gp):
+                gp_n = os.path.normpath(os.path.abspath(gp))
+                mapping[key] = gp_n
+                assigned += 1
+                try:
+                    log_pairs.append((os.path.basename(epub_path), os.path.basename(gp_n)))
+                except Exception:
+                    pass
+
+        try:
+            # Enable mapping + disable global glossary path so it doesn't apply to all files.
+            self.manual_glossary_map = mapping
+            self.config['manual_glossary_map'] = mapping
+            self.manual_glossary_path = None
+            self.config['manual_glossary_path'] = ''
+            self.manual_glossary_manually_loaded = False
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'append_log'):
+                if assigned:
+                    self.append_log(f"📑 Auto-mapped glossaries for {assigned}/{len(epubs)} EPUB(s)")
+                    # Show a short preview of mappings
+                    try:
+                        preview = log_pairs[:5]
+                        for epub_name, gloss_name in preview:
+                            self.append_log(f"   • {epub_name} → {gloss_name}")
+                        if len(log_pairs) > 5:
+                            self.append_log(f"   • …and {len(log_pairs) - 5} more")
+                    except Exception:
+                        pass
+                else:
+                    self.append_log("📑 Auto-map glossaries: no matches found")
+        except Exception:
+            pass
+
+        return int(assigned)
+
     def _guess_glossary_for_input_file(self, input_path: str):
         """Auto-detect a glossary for an input file.
 
@@ -14026,22 +14232,11 @@ Important rules:
             # Prefer CSV over JSON, then TXT/MD.
             ext_priority = [".csv", ".json", ".txt", ".md"]
 
-            # Optional fallback: match by leading bracketed ID if present, e.g. "[403536] ..."
-            file_id = None
-            try:
-                import re
-                m = re.match(r'^\[(\d+)\]\s*', base)
-                if m:
-                    file_id = m.group(1)
-            except Exception:
-                file_id = None
-
             def _find_in_dir(glossary_dir: str):
                 if not glossary_dir or not os.path.isdir(glossary_dir):
                     return None
 
                 direct_matches = []
-                id_matches = []
 
                 try:
                     for fn in os.listdir(glossary_dir):
@@ -14061,22 +14256,12 @@ Important rules:
 
                         if stem_cf in preferred_stems:
                             direct_matches.append((preferred_stems.index(stem_cf), ext_priority.index(ext_l), full))
-                            continue
-
-                        # Fallback: if input file has an ID, allow any "[ID] ..._glossary" stem
-                        if file_id:
-                            if stem_cf.startswith(f"[{file_id}]".casefold()) and stem_cf.endswith('_glossary'):
-                                id_matches.append((ext_priority.index(ext_l), full))
                 except Exception:
                     return None
 
                 if direct_matches:
                     direct_matches.sort(key=lambda t: (t[0], t[1]))
                     return direct_matches[0][2]
-
-                if id_matches:
-                    id_matches.sort(key=lambda t: t[0])
-                    return id_matches[0][1]
 
                 return None
 
@@ -14387,20 +14572,20 @@ Important rules:
         # Footer: bulk actions on the left, Cancel/Save on the right
         footer = QHBoxLayout()
 
-        clear_all_btn = QPushButton("Clear All")
         apply_all_btn = QPushButton("Use one Glossary")
+        clear_all_btn = QPushButton("Clear All")
         autofill_btn = QPushButton("Auto-Fill")
 
-        clear_all_btn.clicked.connect(clear_all)
         apply_all_btn.clicked.connect(apply_to_all)
+        clear_all_btn.clicked.connect(clear_all)
         autofill_btn.clicked.connect(autofill)
 
-        _make_big(clear_all_btn, 130)
         _make_big(apply_all_btn, 160)
+        _make_big(clear_all_btn, 130)
         _make_big(autofill_btn, 130)
 
-        footer.addWidget(clear_all_btn)
         footer.addWidget(apply_all_btn)
+        footer.addWidget(clear_all_btn)
         footer.addWidget(autofill_btn)
 
         footer.addStretch()
