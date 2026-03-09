@@ -2176,11 +2176,8 @@ class RetranslationMixin:
             # Use QTimer to run refresh after animation starts
             def do_refresh():
                 try:
-                    # Check if this is part of a multi-tab dialog and refresh all tabs, otherwise just refresh current
-                    if data.get('dialog') and hasattr(data['dialog'], '_tab_data'):
-                        self._refresh_all_tabs(data['dialog']._tab_data)
-                    else:
-                        self._refresh_retranslation_data(data)
+                    # Always refresh only this tab's data (not all tabs)
+                    self._refresh_retranslation_data(data)
 
                     # Schedule watchdog: if after 3 seconds there are still no visible entries,
                     # but our data says there should be, rebuild the GUI.
@@ -2554,7 +2551,10 @@ class RetranslationMixin:
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
 
         # Automatically refresh once when dialog is opened
-        animated_refresh()
+        # Skip for multi-tab dialogs — the parent will do a single bulk refresh
+        is_multi_tab = data.get('dialog') and hasattr(data['dialog'], '_tab_data')
+        if not is_multi_tab:
+            animated_refresh()
 
     def _refresh_all_tabs(self, tab_data_list):
         """Refresh all tabs in a multi-file retranslation dialog"""
