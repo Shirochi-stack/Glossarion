@@ -8235,7 +8235,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             failed += 1
                     elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md'}:
                         # Process as EPUB/TXT/CSV/JSON/PDF/MD
-                        if self._process_text_file(file_path):
+                        self.append_log(f"[DEBUG] ⏳ Calling _process_text_file for: {os.path.basename(file_path)}")
+                        result = self._process_text_file(file_path)
+                        self.append_log(f"[DEBUG] 📋 _process_text_file returned: {result} for {os.path.basename(file_path)}")
+                        if result:
                             successful += 1
                         else:
                             failed += 1
@@ -9477,6 +9480,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # ValueError is used for user-facing errors like invalid chapter range
                 # These already have clear error messages, so no need for traceback
                 error_msg = str(e)
+                self.append_log(f"[DEBUG] ValueError caught in _process_text_file: {error_msg}")
                 if "Chapter range" not in error_msg:
                     # If it's not a chapter range error, show the message
                     self.append_log(f"❌ Translation error: {e}")

@@ -9137,7 +9137,6 @@ def main(log_callback=None, stop_callback=None):
         try:
             txt_processor = TextFileProcessor(input_path, out)
             chapters = txt_processor.extract_chapters()
-            txt_processor.save_original_structure()
             
             metadata = {
                 "title": os.path.splitext(os.path.basename(input_path))[0],
@@ -10514,7 +10513,7 @@ def main(log_callback=None, stop_callback=None):
             _name = _ch.get('original_basename') or os.path.basename(_ch.get('filename', ''))
             _name_noext = os.path.splitext(_name)[0] if _name else ''
             _raw = FileUtilities.extract_actual_chapter_number(_ch, patterns=None, config=config)
-            _is_special = (_raw is None or _raw == 0) and not bool(re.search(r'\d', _name_noext))
+            _is_special = (_raw is None or _raw == 0) and not bool(re.search(r'\d', _name_noext)) and not is_text_file
             if not _is_special:
                 _translatable_counter += 1
                 _spine_offset_map[_ci] = _translatable_counter
@@ -10588,7 +10587,8 @@ def main(log_callback=None, stop_callback=None):
         
         # Skip special files (chapter 0) if translation is disabled
         # IMPORTANT: Do NOT treat files with digits (including 0) in their name as special.
-        if not translate_special and raw_num == 0:
+        # IMPORTANT: Never skip text-file chapters — "special files" only apply to EPUBs.
+        if not translate_special and raw_num == 0 and not is_text_file:
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
             name_noext = os.path.splitext(name)[0] if name else ''
             has_digits_in_name = bool(re.search(r'\d', name_noext))

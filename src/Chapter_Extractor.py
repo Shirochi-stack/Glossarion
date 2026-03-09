@@ -1266,6 +1266,26 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         if progress_callback:
             progress_callback(f"Starting {max_workers} extraction workers...")
         
+        # --- Heartbeat: show elapsed time while workers start up ----
+        _heartbeat_stop = threading.Event()
+        _startup_start = time.time()
+
+        def _heartbeat():
+            elapsed = 0
+            while not _heartbeat_stop.is_set():
+                _heartbeat_stop.wait(3.0)       # tick every 3 s
+                if _heartbeat_stop.is_set():
+                    break
+                elapsed = time.time() - _startup_start
+                msg = f"⏱️ Spawning workers... elapsed {elapsed:.0f}s"
+                if progress_callback:
+                    progress_callback(msg)
+                print(msg)
+
+        _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        _hb_thread.start()
+        # -----------------------------------------------------------
+
         # Use ProcessPoolExecutor for true multi-process parallelism
         # Now that all functions are at module level and picklable, we can use processes
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -1291,6 +1311,15 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                 for idx, file_path in enumerate(files_to_process)
             }
             
+            # Stop heartbeat once submissions are done and results start flowing
+            _heartbeat_stop.set()
+            _startup_elapsed = time.time() - _startup_start
+            if _startup_elapsed >= 2.0:
+                msg = f"✅ Workers ready ({_startup_elapsed:.1f}s)"
+                print(msg)
+                if progress_callback:
+                    progress_callback(msg)
+
             # Collect results as they complete with progress tracking
             processed_count = 0
             for future in as_completed(future_to_file):
