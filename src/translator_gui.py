@@ -2156,15 +2156,21 @@ Text to analyze:
                 path = source()
                 if path and os.path.exists(path):
                     epub_path = path
-                    print(f"[DEBUG] Found EPUB path from source: {path}")  # Debug line
                     break
             except Exception as e:
-                print(f"[DEBUG] Error checking source: {e}")  # Debug line
+                # Keep debug for unexpected source-check failures
+                try:
+                    print(f"[DEBUG] Error checking source: {e}")
+                except Exception:
+                    pass
                 continue
-        
+
         if not epub_path:
-            print("[DEBUG] No EPUB path found from any source")  # Debug line
-        
+            try:
+                print("[DEBUG] No EPUB path found from any source")
+            except Exception:
+                pass
+
         return epub_path
     
     def _clean_old_backups(self, backup_dir, original_name, max_backups):

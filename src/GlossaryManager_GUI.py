@@ -1891,6 +1891,30 @@ CRITICAL EXTRACTION RULES:
         )
         auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
         auto_load_layout.addStretch()
+
+        # Auto-Mapping only makes sense when Append Glossary is enabled.
+        def _sync_auto_mapping_enabled_state(*_args):
+            try:
+                enabled = bool(self.append_glossary_checkbox.isChecked())
+            except Exception:
+                enabled = False
+            try:
+                self.append_glossary_auto_load_checkbox.setEnabled(enabled)
+            except Exception:
+                pass
+
+        # Set initial enabled/disabled state
+        _sync_auto_mapping_enabled_state()
+
+        # Keep it in sync when Append Glossary changes (avoid duplicate connections)
+        try:
+            self.append_glossary_checkbox.toggled.disconnect(_sync_auto_mapping_enabled_state)
+        except Exception:
+            pass
+        try:
+            self.append_glossary_checkbox.toggled.connect(_sync_auto_mapping_enabled_state)
+        except Exception:
+            pass
         
         # Add additional glossary toggle (below append glossary)
         additional_glossary_widget = QWidget()
