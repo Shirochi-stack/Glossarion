@@ -6037,9 +6037,9 @@ class UnifiedClient:
                     import traceback
                     http_status = getattr(e, "http_status", None)
                     error_str_lower = str(e).lower()
-                    # For transient errors that will be retried, avoid noisy tracebacks.
-                    if http_status in (429, 500, 502, 503, 504) or '429' in error_str_lower or 'resource' in error_str_lower and 'exhausted' in error_str_lower:
-                        print(f"{log_prefix} ❌ Transient error (rate limit/server): {str(e)[:200]}")
+                    # For transient errors (rate limit / server), show full error but skip noisy traceback.
+                    if http_status in (429, 500, 502, 503, 504) or '429' in error_str_lower or ('resource' in error_str_lower and 'exhausted' in error_str_lower):
+                        print(f"{log_prefix} ❌ UnifiedClientError: {e}")
                         continue
                     tb = traceback.format_exc()
                     if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:
