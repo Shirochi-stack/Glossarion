@@ -3981,10 +3981,11 @@ class RetranslationMixin:
                 print(f"[DEBUG] Checking EPUB/text: {file_base}")
                 
                 # Quick check if output exists (respect override output directory)
+                # NOTE: For multi-file, don't skip when missing — the tab builder will
+                # create the output folder (same as single-file behavior).
                 output_dir = os.path.join(override_dir, file_base) if override_dir else file_base
                 if not os.path.exists(output_dir):
-                    print(f"[DEBUG] Skipping {file_base} - output folder doesn't exist: {output_dir}")
-                    continue
+                    print(f"[DEBUG] Output folder missing for {file_base}; will create via tab builder: {output_dir}")
                 
                 print(f"[DEBUG] Creating tab for {file_base}")
                 
