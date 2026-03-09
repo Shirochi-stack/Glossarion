@@ -14003,34 +14003,114 @@ Important rules:
         super().__setattr__(name, value)
 
     def _guess_glossary_for_input_file(self, input_path: str):
-        """Best-effort glossary auto-detect for a given input file."""
+        """Auto-detect a glossary for an input file.
+
+        Search order (first hit wins):
+        1) App folder: `./Glossary/` (next to the executable/script)
+        2) CWD: `./Glossary/`
+        3) Per-book output folder: `<output>/<book>/Glossary/`
+
+        Matching rules (case-insensitive):
+        - Prefer exact stem match to `<epub_stem>_glossary` (ignoring extension)
+        - Fallback: exact stem match to `<epub_stem>`
+        - Ignore progress files like `*_glossary_progress.*`
+        """
         try:
             if not input_path:
                 return None
-            base = os.path.splitext(os.path.basename(input_path))[0]
 
+            base = os.path.splitext(os.path.basename(input_path))[0]
+            base_cf = base.casefold()
+            preferred_stems = [f"{base}_glossary".casefold(), base_cf]
+
+            # Prefer CSV over JSON, then TXT/MD.
+            ext_priority = [".csv", ".json", ".txt", ".md"]
+
+            # Optional fallback: match by leading bracketed ID if present, e.g. "[403536] ..."
+            file_id = None
+            try:
+                import re
+                m = re.match(r'^\[(\d+)\]\s*', base)
+                if m:
+                    file_id = m.group(1)
+            except Exception:
+                file_id = None
+
+            def _find_in_dir(glossary_dir: str):
+                if not glossary_dir or not os.path.isdir(glossary_dir):
+                    return None
+
+                direct_matches = []
+                id_matches = []
+
+                try:
+                    for fn in os.listdir(glossary_dir):
+                        full = os.path.join(glossary_dir, fn)
+                        if not os.path.isfile(full):
+                            continue
+
+                        stem, ext = os.path.splitext(fn)
+                        stem_cf = stem.casefold()
+                        ext_l = ext.lower()
+                        if ext_l not in ext_priority:
+                            continue
+
+                        # Skip progress/metadata helpers
+                        if stem_cf.endswith('_glossary_progress') or stem_cf.endswith('glossary_progress') or '_progress' in stem_cf:
+                            continue
+
+                        if stem_cf in preferred_stems:
+                            direct_matches.append((preferred_stems.index(stem_cf), ext_priority.index(ext_l), full))
+                            continue
+
+                        # Fallback: if input file has an ID, allow any "[ID] ..._glossary" stem
+                        if file_id:
+                            if stem_cf.startswith(f"[{file_id}]".casefold()) and stem_cf.endswith('_glossary'):
+                                id_matches.append((ext_priority.index(ext_l), full))
+                except Exception:
+                    return None
+
+                if direct_matches:
+                    direct_matches.sort(key=lambda t: (t[0], t[1]))
+                    return direct_matches[0][2]
+
+                if id_matches:
+                    id_matches.sort(key=lambda t: t[0])
+                    return id_matches[0][1]
+
+                return None
+
+            # 1) App folder Glossary/
+            try:
+                app_glossary_dir = os.path.join(getattr(self, 'base_dir', ''), 'Glossary')
+                hit = _find_in_dir(app_glossary_dir)
+                if hit:
+                    return hit
+            except Exception:
+                pass
+
+            # 2) CWD Glossary/
+            try:
+                cwd_glossary_dir = os.path.join(os.getcwd(), 'Glossary')
+                hit = _find_in_dir(cwd_glossary_dir)
+                if hit:
+                    return hit
+            except Exception:
+                pass
+
+            # 3) Per-book output Glossary/
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
             if override_dir:
                 output_dir = os.path.join(os.path.abspath(override_dir), base)
             else:
                 output_dir = base
+            hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
+            if hit:
+                return hit
 
-            candidates = [
-                os.path.join(output_dir, "glossary.csv"),
-                os.path.join(output_dir, "Glossary", "glossary.csv"),
-                os.path.join(output_dir, "glossary.json"),
-                os.path.join(output_dir, "Glossary", "glossary.json"),
-                os.path.join(output_dir, "glossary.txt"),
-                os.path.join(output_dir, "Glossary", "glossary.txt"),
-                os.path.join(output_dir, "glossary.md"),
-                os.path.join(output_dir, "Glossary", "glossary.md"),
-            ]
-            for p in candidates:
-                if os.path.exists(p):
-                    return p
+            return None
         except Exception:
             return None
-        return None
 
     def _open_glossary_mapping_dialog(self, input_files):
         """Dialog to map glossary files to individual input EPUBs."""
@@ -14217,12 +14297,6 @@ Important rules:
         scroll.setWidget(container)
         layout.addWidget(scroll, 1)
 
-        # Bulk actions
-        bulk = QHBoxLayout()
-        apply_all_btn = QPushButton("Apply to All…")
-        autofill_btn = QPushButton("Auto-Fill")
-        clear_all_btn = QPushButton("Clear All")
-
         def apply_to_all():
             path = _pick_glossary_file("Select glossary file (apply to all)")
             if path:
@@ -14230,31 +14304,18 @@ Important rules:
                     _le.setText(path)
 
         def autofill():
+            matched = 0
             for _ep, _le in rows:
                 gp = self._guess_glossary_for_input_file(_ep)
                 if gp:
                     _le.setText(gp)
+                    matched += 1
+            if matched == 0:
+                QMessageBox.information(dialog, "Auto-Fill", "No matching glossaries were found.")
 
         def clear_all():
             for _ep, _le in rows:
                 _le.setText("")
-
-        apply_all_btn.clicked.connect(apply_to_all)
-        autofill_btn.clicked.connect(autofill)
-        clear_all_btn.clicked.connect(clear_all)
-
-        bulk.addWidget(apply_all_btn)
-        bulk.addWidget(autofill_btn)
-        bulk.addWidget(clear_all_btn)
-        bulk.addStretch()
-        layout.addLayout(bulk)
-
-        # Bottom buttons
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        cancel_btn = QPushButton("Cancel")
-        save_btn = QPushButton("Save")
-        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
 
         def do_save():
             mapping = {}
@@ -14312,11 +14373,52 @@ Important rules:
             self.append_log(f"📑 Saved glossary mapping for {len(mapping)} EPUB(s)")
             dialog.accept()
 
+        def _make_big(btn: QPushButton, min_w: int):
+            try:
+                btn.setMinimumHeight(44)
+                btn.setMinimumWidth(min_w)
+            except Exception:
+                pass
+            try:
+                btn.setStyleSheet((btn.styleSheet() or "") + " padding: 8px 14px; font-size: 10pt;")
+            except Exception:
+                pass
+
+        # Footer: bulk actions on the left, Cancel/Save on the right
+        footer = QHBoxLayout()
+
+        clear_all_btn = QPushButton("Clear All")
+        apply_all_btn = QPushButton("Use one Glossary")
+        autofill_btn = QPushButton("Auto-Fill")
+
+        clear_all_btn.clicked.connect(clear_all)
+        apply_all_btn.clicked.connect(apply_to_all)
+        autofill_btn.clicked.connect(autofill)
+
+        _make_big(clear_all_btn, 130)
+        _make_big(apply_all_btn, 160)
+        _make_big(autofill_btn, 130)
+
+        footer.addWidget(clear_all_btn)
+        footer.addWidget(apply_all_btn)
+        footer.addWidget(autofill_btn)
+
+        footer.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+
         cancel_btn.clicked.connect(dialog.reject)
         save_btn.clicked.connect(do_save)
-        buttons.addWidget(cancel_btn)
-        buttons.addWidget(save_btn)
-        layout.addLayout(buttons)
+
+        _make_big(cancel_btn, 120)
+        _make_big(save_btn, 120)
+
+        footer.addWidget(cancel_btn)
+        footer.addWidget(save_btn)
+
+        layout.addLayout(footer)
 
         dialog.exec()
 
