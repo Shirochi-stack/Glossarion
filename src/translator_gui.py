@@ -2526,7 +2526,11 @@ Recent translations to summarize:
             "Chinese_BeautifulSoup",
             "Korean_html2text",
             "Japanese_html2text",
-            "Chinese_html2text"
+            "Chinese_html2text",
+            # OCR profiles (keys match self.default_prompts)
+            "korean_OCR",
+            "japanese_OCR",
+            "chinese_OCR",
         ]
         
         # Add missing required profiles while preserving existing profile positions
@@ -3754,8 +3758,23 @@ Recent translations to summarize:
         
         # Instructions
         instructions = QLabel("Drag and drop profiles to reorder them (Ctrl+Click for multiple):")
-        instructions.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        instructions.setStyleSheet("font-weight: bold; margin-bottom: 6px;")
         layout.addWidget(instructions)
+
+        # Info / naming conventions
+        info = QLabel(
+            "<span style='font-weight:600;'>Profile name tags</span> <span style='color:#94a3b8;'>(case-insensitive)</span>:<br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_beautifulsoup</span>: BeautifulSoup extraction <span style='color:#94a3b8;'>(image translation off)</span><br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_html2text</span>: html2text extraction <span style='color:#94a3b8;'>(image translation off)</span><br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_ocr</span>: <span style='color:#e2e8f0;'>image translation on</span><br><br>"
+            "Built-in profiles are protected <span style='color:#94a3b8;'>(can’t be deleted)</span> and will restore themselves on restart."
+        )
+        info.setWordWrap(True)
+        # Make text selectable so tags can be copy/pasted
+        info.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        info.setCursor(Qt.IBeamCursor)
+        info.setStyleSheet("color: #cbd5e1; font-size: 9pt; margin-bottom: 10px;")
+        layout.addWidget(info)
         
         # Horizontal layout for list and buttons
         content_layout = QHBoxLayout()
@@ -3872,15 +3891,53 @@ Recent translations to summarize:
             selected_items = list_widget.selectedItems()
             if not selected_items:
                 return
-            
-            # Confirm deletion
+
+            # Built-in/required profiles are protected (restored on next restart if missing)
+            protected_profiles = {
+                "Universal",
+                "Korean_BeautifulSoup",
+                "Japanese_BeautifulSoup",
+                "Chinese_BeautifulSoup",
+                "Korean_html2text",
+                "Japanese_html2text",
+                "Chinese_html2text",
+                "korean_OCR",
+                "japanese_OCR",
+                "chinese_OCR",
+            }
+
             from PySide6.QtWidgets import QMessageBox
             profile_names = [item.text() for item in selected_items]
-            msg = f"Delete {len(profile_names)} profile(s)?\n\n" + "\n".join(profile_names)
-            reply = QMessageBox.question(dialog, "Confirm Delete", msg, 
-                                        QMessageBox.Yes | QMessageBox.No)
+
+            protected_selected = [n for n in profile_names if n in protected_profiles]
+            deletable_selected = [n for n in profile_names if n not in protected_profiles]
+
+            # If user selected only protected items, just explain and stop.
+            if protected_selected and not deletable_selected:
+                QMessageBox.information(
+                    dialog,
+                    "Protected Profiles",
+                    "These built-in profiles can’t be deleted:\n\n" + "\n".join(protected_selected),
+                )
+                return
+
+            # If selection contains a mix, explain what's protected, then confirm deletion of the rest.
+            if protected_selected and deletable_selected:
+                msg = (
+                    "These built-in profiles can’t be deleted:\n\n"
+                    + "\n".join(protected_selected)
+                    + "\n\nDelete the remaining profile(s)?\n\n"
+                    + "\n".join(deletable_selected)
+                )
+            else:
+                msg = f"Delete {len(deletable_selected)} profile(s)?\n\n" + "\n".join(deletable_selected)
+
+            reply = QMessageBox.question(dialog, "Confirm Delete", msg, QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
+                # Remove only deletable items
                 for item in selected_items:
+                    if item.text() in protected_profiles:
+                        continue
                     list_widget.takeItem(list_widget.row(item))
                 save_state()
         delete_btn.clicked.connect(delete_profiles)
