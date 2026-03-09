@@ -4556,15 +4556,16 @@ class RetranslationMixin:
         
         # Add translated HTML files
         for html_file in sorted(set(html_files)):  # Use set to avoid duplicates
+            display_name = os.path.basename(html_file)
             # Extract original image name from HTML filename
             # Expected format: response_001_imagename.html
-            match = re.match(r'response_(\d+)_(.+)\.html', html_file)
+            match = re.match(r'response_(\d+)_(.+)\.html', display_name)
             if match:
                 index = match.group(1)
                 base_name = match.group(2)
                 display = f"📄 Image {index} | {base_name} | ✅ Completed"
             else:
-                display = f"📄 {html_file} | ✅ Completed"
+                display = f"📄 {display_name} | ✅ Completed"
             
             listbox.addItem(display)
             
@@ -4573,14 +4574,20 @@ class RetranslationMixin:
             if progress_data:
                 for key, value in progress_data.items():
                     if isinstance(value, dict) and 'output_file' in value:
-                        if html_file in value['output_file']:
+                        outp = str(value.get('output_file') or '')
+                        if html_file == outp or display_name == os.path.basename(outp) or html_file in outp:
                             hash_key = key
                             break
             
+            # Build absolute path (preserve subfolders if present)
+            if os.path.isabs(html_file):
+                abs_path = html_file
+            else:
+                abs_path = os.path.join(output_dir, html_file)
             file_info.append({
                 'type': 'translated',
-                'file': html_file,
-                'path': os.path.join(output_dir, html_file),
+                'file': html_file,  # may include subfolders relative to output_dir
+                'path': abs_path,
                 'hash_key': hash_key,
                 'output_dir': output_dir  # Store for later use
             })
@@ -4685,7 +4692,7 @@ class RetranslationMixin:
             """Move selected images to the images folder to be skipped"""
             selected_items = listbox.selectedItems()
             if not selected_items:
-                QMessageBox.warning(self, "No Selection", "Please select at least one image to mark as skipped.")
+                QMessageBox.warning(dialog, "No Selection", "Please select at least one image to mark as skipped.")
                 return
             
             # Get all selected items
@@ -4696,11 +4703,11 @@ class RetranslationMixin:
             items_to_move = [(i, item) for i, item in items_with_info if item['type'] != 'cover']
             
             if not items_to_move:
-                QMessageBox.information(self, "Info", "Selected items are already in the images folder (skipped).")
+                QMessageBox.information(dialog, "Info", "Selected items are already in the images folder (skipped).")
                 return
             
             count = len(items_to_move)
-            reply = QMessageBox.question(self, "Confirm Mark as Skipped", 
+            reply = QMessageBox.question(dialog, "Confirm Mark as Skipped", 
                                       f"Move {count} translated image(s) to the images folder?\n\n"
                                       "This will:\n"
                                       "• Delete the translated HTML files\n"
@@ -4722,7 +4729,8 @@ class RetranslationMixin:
                     # Extract the original image name from the HTML filename
                     # Expected format: response_001_imagename.html (also accept compound extensions)
                     html_file = item['file']
-                    match = re.match(r'^response_\d+_([^\.]*)\.(?:html?|xhtml|htm)(?:\.xhtml)?$', html_file, re.IGNORECASE)
+                    html_base = os.path.basename(html_file)
+                    match = re.match(r'^response_\d+_([^\.]*)\.(?:html?|xhtml|htm)(?:\.xhtml)?$', html_base, re.IGNORECASE)
                     
                     if match:
                         base_name = match.group(1)
@@ -4775,14 +4783,14 @@ class RetranslationMixin:
                                 del progress_data[hash_key]
                     
                     # Update the listbox display
-                    display = f"🖼️ Skipped | {base_name if match else item['file']} | ⏭️ Moved to images folder"
+                    display = f"🖼️ Skipped | {base_name if match else html_base} | ⏭️ Moved to images folder"
                     listbox.item(idx).setText(display)
                     
                     # Update file_info
                     file_info[idx] = {
                         'type': 'cover',  # Treat as cover type since it's in images folder
-                        'file': base_name + ext if match and original_found else item['file'],
-                        'path': os.path.join(images_dir, base_name + ext if match and original_found else item['file']),
+                        'file': base_name + ext if match and original_found else html_base,
+                        'path': os.path.join(images_dir, base_name + ext if match and original_found else html_base),
                         'hash_key': None,
                         'output_dir': output_dir
                     }
@@ -4811,18 +4819,18 @@ class RetranslationMixin:
             
             # Show result
             if failed_count > 0:
-                QMessageBox.warning(self, "Partial Success", 
+                QMessageBox.warning(dialog, "Partial Success", 
                     f"Moved {moved_count} image(s) to be skipped.\n"
                     f"Failed to process {failed_count} item(s).")
             else:
-                QMessageBox.information(self, "Success", 
+                QMessageBox.information(dialog, "Success", 
                     f"Moved {moved_count} image(s) to the images folder.\n"
                     "They will be skipped in future translations.")
         
         def retranslate_selected():
             selected_items = listbox.selectedItems()
             if not selected_items:
-                QMessageBox.warning(self, "No Selection", "Please select at least one file.")
+                QMessageBox.warning(dialog, "No Selection", "Please select at least one file.")
                 return
             
             selected_indices = [listbox.row(item) for item in selected_items]
@@ -4840,7 +4848,7 @@ class RetranslationMixin:
             
             confirm_msg = f"This will delete {' and '.join(msg_parts)}.\n\nContinue?"
             
-            reply = QMessageBox.question(self, "Confirm Deletion", confirm_msg,
+            reply = QMessageBox.question(dialog, "Confirm Deletion", confirm_msg,
                                        QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
@@ -4884,7 +4892,7 @@ class RetranslationMixin:
             if 'refresh_data' in locals():
                 self._refresh_image_folder_data(refresh_data)
             
-            QMessageBox.information(self, "Success", 
+            QMessageBox.information(dialog, "Success", 
                 f"Deleted {deleted_count} file(s).\n\n"
                 "They will be retranslated on the next run.")
             
