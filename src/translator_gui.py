@@ -1000,6 +1000,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.auto_loaded_glossary_path = None
         self.auto_loaded_glossary_for_file = None
         self.manual_glossary_manually_loaded = False
+        # Optional per-input glossary mapping (used for multi-file runs)
+        self.manual_glossary_map = {}
         
         # Load icon for window and taskbar
         ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
@@ -1060,6 +1062,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         except: 
             self.config = {}
             
+        # Load any persisted per-input glossary mapping
+        try:
+            mgm = self.config.get('manual_glossary_map', {})
+            self.manual_glossary_map = mgm if isinstance(mgm, dict) else {}
+        except Exception:
+            self.manual_glossary_map = {}
+
         # Ensure default values exist
         if 'auto_update_check' not in self.config:
             self.config['auto_update_check'] = True
@@ -8086,14 +8095,29 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 pass
 
             # SET GLOSSARY IN ENVIRONMENT
-            if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
-                os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
-                self.append_log(f"📑 Set glossary in environment: {os.path.basename(self.manual_glossary_path)}")
+            # If a per-input mapping exists, we set MANUAL_GLOSSARY per file inside the loop.
+            use_glossary_map = False
+            try:
+                mgm = getattr(self, 'manual_glossary_map', None)
+                use_glossary_map = isinstance(mgm, dict) and any(v for v in mgm.values())
+            except Exception:
+                use_glossary_map = False
+
+            if use_glossary_map:
+                os.environ.pop('MANUAL_GLOSSARY', None)
+                try:
+                    mapped = len([1 for _k, _v in (self.manual_glossary_map or {}).items() if _v])
+                except Exception:
+                    mapped = 0
+                self.append_log(f"📑 Glossary mapping enabled ({mapped} file(s) mapped)")
             else:
-                # Clear any previous glossary from environment
-                if 'MANUAL_GLOSSARY' in os.environ:
-                    del os.environ['MANUAL_GLOSSARY']
-                self.append_log(f"ℹ️ No glossary loaded")
+                if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                    os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                    self.append_log(f"📑 Set glossary in environment: {os.path.basename(self.manual_glossary_path)}")
+                else:
+                    # Clear any previous glossary from environment
+                    os.environ.pop('MANUAL_GLOSSARY', None)
+                    self.append_log(f"ℹ️ No glossary loaded")
 
             # ========== NEW: APPLY OPF-BASED SORTING ==========
             # Sort files based on OPF order if available
@@ -8149,6 +8173,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if self.stop_requested:
                     # Suppress per-file stop spam; summary will be shown later
                     break
+
+                # Apply per-file glossary mapping (if present)
+                try:
+                    mgm = getattr(self, 'manual_glossary_map', None)
+                    if isinstance(mgm, dict) and mgm:
+                        key = os.path.normpath(os.path.abspath(file_path))
+                        gp = mgm.get(file_path) or mgm.get(key) or mgm.get(os.path.normpath(file_path))
+                        if gp:
+                            os.environ['MANUAL_GLOSSARY'] = gp
+                        else:
+                            os.environ.pop('MANUAL_GLOSSARY', None)
+                except Exception:
+                    pass
                 
                 self.current_file_index = i
                 
@@ -13421,6 +13458,13 @@ Important rules:
         self.file_path = None
         self.current_file_index = 0
 
+        # Clear any per-input glossary mapping
+        try:
+            self.manual_glossary_map = {}
+            self.config['manual_glossary_map'] = {}
+        except Exception:
+            pass
+
         # Clear cached Progress Manager dialogs/tabs
         try:
             # Single-file cache
@@ -13549,6 +13593,14 @@ Important rules:
         # Store the list of selected files (using processed paths)
         self.selected_files = processed_paths
         self.current_file_index = 0
+
+        # Clear any per-input glossary mapping on new selection
+        # (mappings are specific to the currently selected input set)
+        try:
+            self.manual_glossary_map = {}
+            self.config['manual_glossary_map'] = {}
+        except Exception:
+            pass
         
         # Persist last selection to config for next session
         try:
@@ -13950,10 +14002,386 @@ Important rules:
                     print(f"[DEBUG] Stack trace: {''.join(traceback.format_stack()[-3:-1])}")
         super().__setattr__(name, value)
 
+    def _guess_glossary_for_input_file(self, input_path: str):
+        """Best-effort glossary auto-detect for a given input file."""
+        try:
+            if not input_path:
+                return None
+            base = os.path.splitext(os.path.basename(input_path))[0]
+
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            if override_dir:
+                output_dir = os.path.join(os.path.abspath(override_dir), base)
+            else:
+                output_dir = base
+
+            candidates = [
+                os.path.join(output_dir, "glossary.csv"),
+                os.path.join(output_dir, "Glossary", "glossary.csv"),
+                os.path.join(output_dir, "glossary.json"),
+                os.path.join(output_dir, "Glossary", "glossary.json"),
+                os.path.join(output_dir, "glossary.txt"),
+                os.path.join(output_dir, "Glossary", "glossary.txt"),
+                os.path.join(output_dir, "glossary.md"),
+                os.path.join(output_dir, "Glossary", "glossary.md"),
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    return p
+        except Exception:
+            return None
+        return None
+
+    def _open_glossary_mapping_dialog(self, input_files):
+        """Dialog to map glossary files to individual input EPUBs."""
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
+            QFileDialog, QScrollArea, QWidget, QMessageBox, QApplication
+        )
+        from PySide6.QtCore import Qt
+
+        # Only map EPUBs for now
+        epubs = [p for p in (input_files or []) if str(p).lower().endswith('.epub')]
+        if len(epubs) <= 1:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Map Glossaries to EPUBs")
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        # Ratio-based sizing (consistent with other manager dialogs)
+        try:
+            screen = QApplication.primaryScreen().availableGeometry()
+            dialog_width = int(screen.width() * 0.42)
+            dialog_height = int(screen.height() * 0.55)
+            dialog.setMinimumWidth(int(screen.width() * 0.30))
+            dialog.setMinimumHeight(int(screen.height() * 0.40))
+            dialog.resize(dialog_width, dialog_height)
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(dialog)
+
+        header = QLabel("Select which glossary should be appended for each EPUB:")
+        header.setStyleSheet("font-weight: bold; margin-bottom: 6px;")
+        layout.addWidget(header)
+
+        # Scrollable list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        # Drop-support: allow dragging a glossary file onto a row (or onto the dialog to apply to all)
+        allowed_gloss_exts = {'.json', '.csv', '.txt', '.md'}
+
+        def _normalize_drop_path(p: str) -> str:
+            try:
+                p = (p or '').strip().strip('"')
+                if not p:
+                    return ''
+                return os.path.normpath(os.path.abspath(p))
+            except Exception:
+                return (p or '').strip()
+
+        def _is_allowed_glossary(p: str) -> bool:
+            try:
+                if not p or not os.path.exists(p):
+                    return False
+                return os.path.splitext(p)[1].lower() in allowed_gloss_exts
+            except Exception:
+                return False
+
+        class _DropGlossaryLineEdit(QLineEdit):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                try:
+                    self.setAcceptDrops(True)
+                except Exception:
+                    pass
+
+            def dragEnterEvent(self, event):
+                try:
+                    md = event.mimeData()
+                    if md and md.hasUrls():
+                        urls = md.urls()
+                        if urls:
+                            p = _normalize_drop_path(urls[0].toLocalFile())
+                            if _is_allowed_glossary(p):
+                                event.acceptProposedAction()
+                                return
+                except Exception:
+                    pass
+                event.ignore()
+
+            def dropEvent(self, event):
+                try:
+                    md = event.mimeData()
+                    if md and md.hasUrls():
+                        urls = md.urls()
+                        if urls:
+                            p = _normalize_drop_path(urls[0].toLocalFile())
+                            if _is_allowed_glossary(p):
+                                self.setText(p)
+                                event.acceptProposedAction()
+                                return
+                except Exception:
+                    pass
+                event.ignore()
+
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+
+        try:
+            dialog.setAcceptDrops(True)
+        except Exception:
+            pass
+
+        # Drop a glossary file onto the dialog background to apply to all rows
+        def _dialog_drag_enter(event):
+            try:
+                md = event.mimeData()
+                if md and md.hasUrls():
+                    urls = md.urls()
+                    if urls:
+                        p = _normalize_drop_path(urls[0].toLocalFile())
+                        if _is_allowed_glossary(p):
+                            event.acceptProposedAction()
+                            return
+            except Exception:
+                pass
+            event.ignore()
+
+        def _dialog_drop(event):
+            try:
+                md = event.mimeData()
+                if md and md.hasUrls():
+                    urls = md.urls()
+                    if urls:
+                        p = _normalize_drop_path(urls[0].toLocalFile())
+                        if _is_allowed_glossary(p):
+                            reply = QMessageBox.question(
+                                dialog,
+                                "Apply to All",
+                                "Apply this glossary to all EPUBs?\n\n" + os.path.basename(p),
+                                QMessageBox.Yes | QMessageBox.No,
+                            )
+                            if reply == QMessageBox.Yes:
+                                for _ep, _le in rows:
+                                    _le.setText(p)
+                            event.acceptProposedAction()
+                            return
+            except Exception:
+                pass
+            event.ignore()
+
+        # Monkey-patch drag/drop handlers (simple, keeps changes localized)
+        try:
+            dialog.dragEnterEvent = _dialog_drag_enter
+            dialog.dropEvent = _dialog_drop
+        except Exception:
+            pass
+
+        # Existing mapping as defaults
+        existing_map = {}
+        try:
+            existing_map = getattr(self, 'manual_glossary_map', {}) or {}
+            if not isinstance(existing_map, dict):
+                existing_map = {}
+        except Exception:
+            existing_map = {}
+
+        rows = []  # list of (epub_path, lineedit)
+
+        file_filter = (
+            "Supported files (*.json *.csv *.txt *.md);;"
+            "JSON files (*.json);;CSV files (*.csv);;Text files (*.txt);;Markdown files (*.md);;All files (*.*)"
+        )
+
+        def _pick_glossary_file(title: str) -> str:
+            """Pick a glossary file (single native picker, parented to this dialog)."""
+            try:
+                dialog.raise_()
+                dialog.activateWindow()
+            except Exception:
+                pass
+
+            try:
+                path, _ = QFileDialog.getOpenFileName(dialog, title, "", file_filter)
+                return path or ""
+            except Exception:
+                return ""
+
+        def _browse_for_line(le: QLineEdit):
+            path = _pick_glossary_file("Select glossary file")
+            if path:
+                le.setText(path)
+
+        for epub_path in epubs:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+
+            name = QLabel(os.path.basename(epub_path))
+            name.setMinimumWidth(220)
+            name.setToolTip(epub_path)
+
+            le = _DropGlossaryLineEdit()
+            le.setReadOnly(True)
+            le.setPlaceholderText("(no glossary)")
+            # QLineEdit text is already selectable/copyable; keep it read-only.
+            try:
+                le.setDragEnabled(True)
+            except Exception:
+                pass
+
+            # Prefill: existing map -> guessed -> empty
+            gp = None
+            try:
+                key = os.path.normpath(os.path.abspath(epub_path))
+                gp = existing_map.get(epub_path) or existing_map.get(key) or existing_map.get(os.path.normpath(epub_path))
+            except Exception:
+                gp = None
+            if not gp:
+                gp = self._guess_glossary_for_input_file(epub_path)
+            if gp:
+                le.setText(gp)
+
+            browse_btn = QPushButton("Browse")
+            browse_btn.clicked.connect(lambda _=False, _le=le: _browse_for_line(_le))
+
+            clear_btn = QPushButton("Clear")
+            clear_btn.clicked.connect(lambda _=False, _le=le: _le.setText(""))
+
+            h.addWidget(name)
+            h.addWidget(le, 1)
+            h.addWidget(browse_btn)
+            h.addWidget(clear_btn)
+
+            v.addWidget(row)
+            rows.append((epub_path, le))
+
+        v.addStretch()
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+
+        # Bulk actions
+        bulk = QHBoxLayout()
+        apply_all_btn = QPushButton("Apply to All…")
+        autofill_btn = QPushButton("Auto-Fill")
+        clear_all_btn = QPushButton("Clear All")
+
+        def apply_to_all():
+            path = _pick_glossary_file("Select glossary file (apply to all)")
+            if path:
+                for _ep, _le in rows:
+                    _le.setText(path)
+
+        def autofill():
+            for _ep, _le in rows:
+                gp = self._guess_glossary_for_input_file(_ep)
+                if gp:
+                    _le.setText(gp)
+
+        def clear_all():
+            for _ep, _le in rows:
+                _le.setText("")
+
+        apply_all_btn.clicked.connect(apply_to_all)
+        autofill_btn.clicked.connect(autofill)
+        clear_all_btn.clicked.connect(clear_all)
+
+        bulk.addWidget(apply_all_btn)
+        bulk.addWidget(autofill_btn)
+        bulk.addWidget(clear_all_btn)
+        bulk.addStretch()
+        layout.addLayout(bulk)
+
+        # Bottom buttons
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+
+        def do_save():
+            mapping = {}
+            missing = []
+            for _ep, _le in rows:
+                p = _le.text().strip()
+                if not p:
+                    continue
+                if not os.path.exists(p):
+                    missing.append(f"{os.path.basename(_ep)} → {p}")
+                    continue
+                mapping[os.path.normpath(os.path.abspath(_ep))] = os.path.normpath(os.path.abspath(p))
+
+            if missing:
+                QMessageBox.warning(
+                    dialog,
+                    "Missing glossary file",
+                    "These mappings point to files that don’t exist:\n\n" + "\n".join(missing),
+                )
+                return
+
+            # Persist mapping
+            try:
+                self.manual_glossary_map = mapping
+                self.config['manual_glossary_map'] = mapping
+            except Exception:
+                pass
+
+            # Disable the global glossary path so it doesn't get applied to all files.
+            try:
+                self.manual_glossary_path = None
+                self.manual_glossary_manually_loaded = bool(mapping)
+            except Exception:
+                pass
+
+            # Ensure glossary appending is enabled if any mapping exists
+            if mapping:
+                try:
+                    self.append_glossary_var = True
+                    self.config['append_glossary'] = True
+                    os.environ['APPEND_GLOSSARY'] = '1'
+                    if hasattr(self, 'append_glossary_checkbox'):
+                        try:
+                            self.append_glossary_checkbox.setChecked(True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+
+            self.append_log(f"📑 Saved glossary mapping for {len(mapping)} EPUB(s)")
+            dialog.accept()
+
+        cancel_btn.clicked.connect(dialog.reject)
+        save_btn.clicked.connect(do_save)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        layout.addLayout(buttons)
+
+        dialog.exec()
+
     def load_glossary(self):
         """Let the user pick a glossary file (JSON or CSV) and remember its path."""
         import json
         import shutil
+
+        # If multiple EPUBs are selected, let the user map glossaries per-EPUB.
+        try:
+            epubs = [p for p in getattr(self, 'selected_files', []) if str(p).lower().endswith('.epub')]
+        except Exception:
+            epubs = []
+        if len(epubs) > 1:
+            self._open_glossary_mapping_dialog(epubs)
+            return
         
         path, _ = QFileDialog.getOpenFileName(
             self,
