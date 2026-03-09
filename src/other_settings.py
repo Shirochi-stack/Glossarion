@@ -5313,7 +5313,7 @@ def _create_prompt_management_section(self, parent):
     if not hasattr(self, 'use_p_tag_toc_fallback_var'):
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
 
-    p_fallback_cb = self._create_styled_checkbox("Use TOC fallback titles")
+    p_fallback_cb = self._create_styled_checkbox("Use TOC fallback titles (Legacy)")
     p_fallback_cb.setToolTip(
         "When enabled, the TOC may fall back to the first <p> tag and generic Chapter N titles\n"
         "if no header tags are present. Disable to avoid any fallback titles."
@@ -5507,7 +5507,7 @@ def _create_prompt_management_section(self, parent):
     
     ignore_h.addSpacing(15)
     
-    use_title_cb = self._create_styled_checkbox("Use title")
+    use_title_cb = self._create_styled_checkbox("Use title (Legacy)")
     try:
         use_title_cb.setChecked(bool(self.use_title_var))
     except Exception:
