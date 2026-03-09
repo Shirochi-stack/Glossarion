@@ -3734,9 +3734,24 @@ Recent translations to summarize:
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QApplication
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QIcon
+
+        # Reuse existing window if it's already open
+        try:
+            existing = getattr(self, '_profile_manager_dialog', None)
+            if existing is not None and existing.isVisible():
+                existing.raise_()
+                existing.activateWindow()
+                return
+        except Exception:
+            pass
         
         dialog = QDialog(self)
         dialog.setWindowTitle("Manage Profiles")
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._profile_manager_dialog = dialog
+        dialog.finished.connect(lambda *_: setattr(self, '_profile_manager_dialog', None))
         
         # Use screen ratios for sizing
         screen = QApplication.primaryScreen().availableGeometry()
@@ -3964,8 +3979,10 @@ Recent translations to summarize:
         button_layout.addWidget(save_btn)
         
         layout.addLayout(button_layout)
-        
-        dialog.exec()
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
     
     def _get_list_order(self, list_widget):
         """Get the current order of items in the list."""
@@ -4069,8 +4086,23 @@ Recent translations to summarize:
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QIcon
 
+        # Reuse existing window if it's already open
+        try:
+            existing = getattr(self, '_model_manager_dialog', None)
+            if existing is not None and existing.isVisible():
+                existing.raise_()
+                existing.activateWindow()
+                return
+        except Exception:
+            pass
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Manage Models")
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._model_manager_dialog = dialog
+        dialog.finished.connect(lambda *_: setattr(self, '_model_manager_dialog', None))
 
         # Use screen ratios for sizing
         screen = QApplication.primaryScreen().availableGeometry()
@@ -4291,7 +4323,9 @@ Recent translations to summarize:
 
         layout.addLayout(button_layout)
 
-        dialog.exec()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _save_model_order(self, list_widget, dialog):
         """Save the new model order from the list widget."""
