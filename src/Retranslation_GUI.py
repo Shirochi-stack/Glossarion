@@ -3603,6 +3603,23 @@ class RetranslationMixin:
             progress_file = data['progress_file']
             folder_path = data['folder_path']
             
+            def _normalize_output_file(output_file, output_dir):
+                if not output_file:
+                    return None
+                # Normalize separators
+                normalized = str(output_file).replace('\\', '/')
+                # If absolute, try to store relative to output_dir when possible
+                if os.path.isabs(normalized):
+                    try:
+                        rel = os.path.relpath(normalized, output_dir)
+                        if not rel.startswith('..'):
+                            return rel.replace('\\', '/')
+                    except Exception:
+                        pass
+                    return normalized
+                # If it's a relative path, keep as-is (preserve subfolders)
+                return normalized
+            
             # ALWAYS reload progress data from file to catch deletions
             progress_data = None
             html_files = []
@@ -3621,15 +3638,11 @@ class RetranslationMixin:
                         # Newer structure: progress_data['images'][hash] = {entry}
                         for key, value in images_dict.items():
                             if isinstance(value, dict) and 'output_file' in value:
-                                output_file = value['output_file']
-                                # Handle both forward and backslashes in paths
-                                output_file = output_file.replace('\\', '/')
-                                if '/' in output_file:
-                                    output_file = os.path.basename(output_file)
+                                output_file = _normalize_output_file(value['output_file'], output_dir)
                                 
                                 # Only include if file actually exists on disk
                                 if output_file and output_file not in html_files:
-                                    full_path = os.path.join(output_dir, output_file)
+                                    full_path = output_file if os.path.isabs(output_file) else os.path.join(output_dir, output_file)
                                     if os.path.exists(full_path):
                                         html_files.append(output_file)
                                     else:
@@ -3638,15 +3651,11 @@ class RetranslationMixin:
                         # Older structure: progress_data[hash] = {entry}
                         for key, value in progress_data.items():
                             if isinstance(value, dict) and 'output_file' in value:
-                                output_file = value['output_file']
-                                # Handle both forward and backslashes in paths
-                                output_file = output_file.replace('\\', '/')
-                                if '/' in output_file:
-                                    output_file = os.path.basename(output_file)
+                                output_file = _normalize_output_file(value['output_file'], output_dir)
                                 
                                 # Only include if file actually exists on disk
                                 if output_file and output_file not in html_files:
-                                    full_path = os.path.join(output_dir, output_file)
+                                    full_path = output_file if os.path.isabs(output_file) else os.path.join(output_dir, output_file)
                                     if os.path.exists(full_path):
                                         html_files.append(output_file)
                                     else:
@@ -3684,17 +3693,18 @@ class RetranslationMixin:
             # Add translated files (both HTML and generated images)
             for html_file in sorted(set(html_files)):
                 # Determine file type and extract info
-                is_html = html_file.lower().endswith(('.html', '.xhtml', '.htm'))
-                is_image = html_file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
+                file_name = os.path.basename(html_file)
+                is_html = file_name.lower().endswith(('.html', '.xhtml', '.htm'))
+                is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
                 
                 if is_html:
-                    match = re.match(r'response_(\d+)_(.+)\.html', html_file)
+                    match = re.match(r'response_(\d+)_(.+)\.html', file_name)
                     if match:
                         index = match.group(1)
                         base_name = match.group(2)
                 elif is_image:
                     # For generated images, just use the filename
-                    base_name = os.path.splitext(html_file)[0]
+                    base_name = os.path.splitext(file_name)[0]
                 
                 # Find hash key if progress tracking exists
                 hash_key = None
@@ -3704,21 +3714,23 @@ class RetranslationMixin:
                     if images_dict:
                         for key, value in images_dict.items():
                             if isinstance(value, dict) and 'output_file' in value:
-                                if html_file in value['output_file']:
+                                output_file = _normalize_output_file(value['output_file'], output_dir)
+                                if output_file and output_file == html_file:
                                     hash_key = key
                                     break
                     else:
                         # Check flat structure
                         for key, value in progress_data.items():
                             if isinstance(value, dict) and 'output_file' in value:
-                                if html_file in value['output_file']:
+                                output_file = _normalize_output_file(value['output_file'], output_dir)
+                                if output_file and output_file == html_file:
                                     hash_key = key
                                     break
                 
                 file_info.append({
                     'type': 'translated',
                     'file': html_file,
-                    'path': os.path.join(output_dir, html_file),
+                    'path': html_file if os.path.isabs(html_file) else os.path.join(output_dir, html_file),
                     'hash_key': hash_key,
                     'output_dir': output_dir
                 })
@@ -3750,7 +3762,7 @@ class RetranslationMixin:
             # Add all tracked files to display
             for info in file_info:
                 if info['type'] == 'translated':
-                    file_name = info['file']
+                    file_name = os.path.basename(info['file'])
                     # Check if it's an HTML file or a generated image
                     is_html = file_name.lower().endswith(('.html', '.xhtml', '.htm'))
                     is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
@@ -4567,6 +4579,8 @@ class RetranslationMixin:
         # Keep track of file info
         file_info = []
         
+        progress_data_current = progress_data
+        
         # Add translated HTML files
         for html_file in sorted(set(html_files)):  # Use set to avoid duplicates
             display_name = os.path.basename(html_file)
@@ -4584,8 +4598,8 @@ class RetranslationMixin:
             
             # Find the hash key for this file if progress tracking exists
             hash_key = None
-            if progress_data:
-                for key, value in progress_data.items():
+            if progress_data_current:
+                for key, value in progress_data_current.items():
                     if isinstance(value, dict) and 'output_file' in value:
                         outp = str(value.get('output_file') or '')
                         if html_file == outp or display_name == os.path.basename(outp) or html_file in outp:
@@ -4696,7 +4710,8 @@ class RetranslationMixin:
         
         def select_translated():
             listbox.clearSelection()
-            for idx, info in enumerate(file_info):
+            info_list = refresh_data.get('file_info', file_info)
+            for idx, info in enumerate(info_list):
                 if info['type'] == 'translated':
                     listbox.item(idx).setSelected(True)
             update_selection_count()
@@ -4710,7 +4725,9 @@ class RetranslationMixin:
             
             # Get all selected items
             selected_indices = [listbox.row(item) for item in selected_items]
-            items_with_info = [(i, file_info[i]) for i in selected_indices]
+            info_list = refresh_data.get('file_info', file_info)
+            items_with_info = [(i, info_list[i]) for i in selected_indices]
+            progress_data_current = refresh_data.get('progress_data', progress_data)
             
             # Filter out items already in images folder (covers)
             items_to_move = [(i, item) for i, item in items_with_info if item['type'] != 'cover']
@@ -4786,27 +4803,28 @@ class RetranslationMixin:
                         print(f"Deleted translation: {item['path']}")
                         
                         # Remove from progress tracking if applicable
-                        if progress_data and item.get('hash_key'):
+                        if progress_data_current and item.get('hash_key'):
                             hash_key = item['hash_key']
                             # Check nested structure first
-                            if 'images' in progress_data and hash_key in progress_data['images']:
-                                del progress_data['images'][hash_key]
+                            if 'images' in progress_data_current and hash_key in progress_data_current['images']:
+                                del progress_data_current['images'][hash_key]
                             # Check flat structure
-                            elif hash_key in progress_data:
-                                del progress_data[hash_key]
+                            elif hash_key in progress_data_current:
+                                del progress_data_current[hash_key]
                     
                     # Update the listbox display
                     display = f"🖼️ Skipped | {base_name if match else html_base} | ⏭️ Moved to images folder"
                     listbox.item(idx).setText(display)
                     
                     # Update file_info
-                    file_info[idx] = {
+                    info_list[idx] = {
                         'type': 'cover',  # Treat as cover type since it's in images folder
                         'file': base_name + ext if match and original_found else html_base,
                         'path': os.path.join(images_dir, base_name + ext if match and original_found else html_base),
                         'hash_key': None,
                         'output_dir': output_dir
                     }
+                    refresh_data['file_info'] = info_list
                     
                     moved_count += 1
                     
@@ -4815,10 +4833,10 @@ class RetranslationMixin:
                     failed_count += 1
             
             # Save updated progress if modified
-            if progress_data:
+            if progress_data_current:
                 try:
                     with open(progress_file, 'w', encoding='utf-8') as f:
-                        json.dump(progress_data, f, ensure_ascii=False, indent=2)
+                        json.dump(progress_data_current, f, ensure_ascii=False, indent=2)
                     print(f"Updated progress tracking file")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
@@ -4847,10 +4865,12 @@ class RetranslationMixin:
                 return
             
             selected_indices = [listbox.row(item) for item in selected_items]
+            info_list = refresh_data.get('file_info', file_info)
+            progress_data_current = refresh_data.get('progress_data', progress_data)
             
             # Count types
-            translated_count = sum(1 for i in selected_indices if file_info[i]['type'] == 'translated')
-            cover_count = sum(1 for i in selected_indices if file_info[i]['type'] == 'cover')
+            translated_count = sum(1 for i in selected_indices if info_list[i]['type'] == 'translated')
+            cover_count = sum(1 for i in selected_indices if info_list[i]['type'] == 'cover')
             
             # Build confirmation message
             msg_parts = []
@@ -4870,7 +4890,7 @@ class RetranslationMixin:
             deleted_count = 0
             
             for idx in selected_indices:
-                info = file_info[idx]
+                info = info_list[idx]
                 try:
                     if os.path.exists(info['path']):
                         os.remove(info['path'])
@@ -4878,25 +4898,25 @@ class RetranslationMixin:
                         print(f"Deleted: {info['path']}")
                         
                         # Remove from progress tracking if applicable
-                        if progress_data and info.get('hash_key'):
+                        if progress_data_current and info.get('hash_key'):
                             hash_key = info['hash_key']
                             # Check nested structure first
-                            if 'images' in progress_data and hash_key in progress_data['images']:
-                                del progress_data['images'][hash_key]
+                            if 'images' in progress_data_current and hash_key in progress_data_current['images']:
+                                del progress_data_current['images'][hash_key]
                                 print(f"Removed {hash_key} from progress_data['images']")
                             # Check flat structure
-                            elif hash_key in progress_data:
-                                del progress_data[hash_key]
+                            elif hash_key in progress_data_current:
+                                del progress_data_current[hash_key]
                                 print(f"Removed {hash_key} from progress_data")
                             
                 except Exception as e:
                     print(f"Failed to delete {info['path']}: {e}")
             
             # ALWAYS save progress file after any deletions
-            if deleted_count > 0 and progress_data:
+            if deleted_count > 0 and progress_data_current:
                 try:
                     with open(progress_file, 'w', encoding='utf-8') as f:
-                        json.dump(progress_data, f, ensure_ascii=False, indent=2)
+                        json.dump(progress_data_current, f, ensure_ascii=False, indent=2)
                     print(f"Updated progress tracking file")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
