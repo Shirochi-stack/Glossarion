@@ -8905,7 +8905,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     
                     try:
                         # Check for stop before title translation
-                        if self.stop_requested:
+                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        if self.stop_requested or graceful_stop_active:
                             self.append_log("⏹️ Image translation cancelled before title translation")
                             self.image_progress_manager.update(image_path, content_hash, status="cancelled")
                             return False
@@ -8924,8 +8925,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             title_content, *_ = title_response
                             translated_title = title_content.strip() if title_content else base_name
                     except Exception as e:
-                        self.append_log(f"⚠️ Title translation failed: {str(e)}")
-                        translated_title = base_name  # Fallback to original if translation fails
+                        # If stop/graceful stop toggled during title call, don't treat as failure
+                        if self.stop_requested or os.environ.get('GRACEFUL_STOP') == '1' or "cancelled" in str(e).lower():
+                            self.append_log("⏹️ Image title translation cancelled")
+                            translated_title = base_name
+                        else:
+                            self.append_log(f"⚠️ Title translation failed: {str(e)}")
+                            translated_title = base_name  # Fallback to original if translation fails
                     
                     # Create clean HTML content with just the translated title and content
                     html_content = f'''<!DOCTYPE html>
