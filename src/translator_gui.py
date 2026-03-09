@@ -1254,8 +1254,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Glossary-related variables (existing)
         self.append_glossary_var = self.config.get('append_glossary', False)
-        # When enabled, automatically auto-fill glossary selection/mapping when Append Glossary is enabled.
+
+        # Auto-Mapping (Auto-Fill) toggle
+        # NOTE: this controls automatic mapping only; it does not control whether a manually loaded glossary is used.
+        if 'append_glossary_auto_load' not in self.config:
+            self.config['append_glossary_auto_load'] = False
         self.append_glossary_auto_load_var = self.config.get('append_glossary_auto_load', False)
+
         self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
@@ -13688,8 +13693,40 @@ Important rules:
             txt_files = [p for p in processed_paths if p.lower().endswith('.txt')]
             
             if len(epub_files) == 1:
-                # Single EPUB - auto-load glossary
-                self.auto_load_glossary_for_file(epub_files[0])
+                # Single EPUB - auto-load glossary (from the book's output folder)
+                try:
+                    self.auto_load_glossary_for_file(epub_files[0])
+                except Exception:
+                    pass
+
+                # If Append Glossary + Auto-Mapping are enabled, auto-fill a glossary ONLY if none is loaded.
+                # (Never override a user-loaded or already selected glossary.)
+                try:
+                    append_enabled = bool(getattr(self, 'append_glossary_var', False) or self.config.get('append_glossary', False))
+                    if hasattr(self, 'append_glossary_checkbox'):
+                        append_enabled = bool(self.append_glossary_checkbox.isChecked())
+                except Exception:
+                    append_enabled = False
+
+                try:
+                    auto_map_enabled = bool(getattr(self, 'append_glossary_auto_load_var', False) or self.config.get('append_glossary_auto_load', False))
+                    if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                        auto_map_enabled = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                except Exception:
+                    auto_map_enabled = False
+
+                try:
+                    has_glossary = bool(getattr(self, 'manual_glossary_path', None))
+                except Exception:
+                    has_glossary = False
+
+                if append_enabled and auto_map_enabled and (not has_glossary):
+                    try:
+                        if hasattr(self, '_autofill_glossary_for_current_selection'):
+                            self._autofill_glossary_for_current_selection()
+                    except Exception:
+                        pass
+
                 # Persist EPUB path for QA defaults
                 try:
                     self.selected_epub_path = epub_files[0]
@@ -14310,9 +14347,47 @@ Important rules:
         if len(epubs) <= 1:
             return
 
+        # Non-modal: if the dialog is already open, just bring it to the front.
+        try:
+            existing = getattr(self, '_glossary_mapping_dialog', None)
+            if existing is not None:
+                try:
+                    existing.raise_()
+                    existing.activateWindow()
+                    existing.show()
+                    return
+                except Exception:
+                    # Stale reference (deleted/invalid)
+                    self._glossary_mapping_dialog = None
+        except Exception:
+            pass
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Map Glossaries to EPUBs")
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.setModal(False)
+        try:
+            dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        except Exception:
+            pass
+
+        # Keep a reference so it doesn't get GC'd, and so we can reuse/raise it.
+        try:
+            self._glossary_mapping_dialog = dialog
+
+            def _clear_dialog_ref(*_args):
+                try:
+                    if getattr(self, '_glossary_mapping_dialog', None) is dialog:
+                        self._glossary_mapping_dialog = None
+                except Exception:
+                    pass
+
+            try:
+                dialog.destroyed.connect(_clear_dialog_ref)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Ratio-based sizing (consistent with other manager dialogs)
         try:
@@ -14556,7 +14631,10 @@ Important rules:
                 pass
 
             self.append_log(f"📑 Saved glossary mapping for {len(mapping)} EPUB(s)")
-            dialog.accept()
+            try:
+                dialog.close()
+            except Exception:
+                pass
 
         def _make_big(btn: QPushButton, min_w: int):
             try:
@@ -14594,7 +14672,7 @@ Important rules:
         save_btn = QPushButton("Save")
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
 
-        cancel_btn.clicked.connect(dialog.reject)
+        cancel_btn.clicked.connect(dialog.close)
         save_btn.clicked.connect(do_save)
 
         _make_big(cancel_btn, 120)
@@ -14605,7 +14683,16 @@ Important rules:
 
         layout.addLayout(footer)
 
-        dialog.exec()
+        # Non-modal show
+        try:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:
+            try:
+                dialog.show()
+            except Exception:
+                pass
 
     def load_glossary(self):
         """Let the user pick a glossary file (JSON or CSV) and remember its path."""
@@ -15114,6 +15201,7 @@ Important rules:
 
                 # Glossary Settings
                 ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),
+                ('append_glossary_auto_load', ['append_glossary_auto_load_checkbox', 'append_glossary_auto_load_var'], False, bool),
                 ('add_additional_glossary', ['add_additional_glossary_checkbox', 'add_additional_glossary_var'], False, bool),
                 ('additional_glossary_path', [('config', 'additional_glossary_path')], '', str),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),

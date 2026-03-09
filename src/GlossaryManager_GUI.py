@@ -517,7 +517,39 @@ class GlossaryManagerMixin:
                     setattr(self, 'glossary_skip_frequency_check_var', skip_frequency)
                 for checkbox_name, var_name in checkbox_to_var_mapping:
                     if hasattr(self, checkbox_name):
-                        setattr(self, var_name, getattr(self, checkbox_name).isChecked())
+                        checked = getattr(self, checkbox_name).isChecked()
+                        setattr(self, var_name, checked)
+                        # Ensure these toggle states persist to config.json
+                        if checkbox_name == 'append_glossary_checkbox':
+                            self.config['append_glossary'] = bool(checked)
+                        elif checkbox_name == 'append_glossary_auto_load_checkbox':
+                            self.config['append_glossary_auto_load'] = bool(checked)
+                        elif checkbox_name == 'enable_auto_glossary_checkbox':
+                            self.config['enable_auto_glossary'] = bool(checked)
+                        elif checkbox_name == 'add_additional_glossary_checkbox':
+                            self.config['add_additional_glossary'] = bool(checked)
+                        elif checkbox_name == 'compress_glossary_checkbox':
+                            self.config['compress_glossary_prompt'] = bool(checked)
+                        elif checkbox_name == 'enable_gender_nuance_checkbox':
+                            self.config['enable_gender_nuance'] = bool(checked)
+                        elif checkbox_name == 'include_gender_context_checkbox':
+                            self.config['include_gender_context'] = bool(checked)
+                        elif checkbox_name == 'include_description_checkbox':
+                            self.config['include_description'] = bool(checked)
+                        elif checkbox_name == 'glossary_history_rolling_checkbox':
+                            self.config['glossary_history_rolling'] = bool(checked)
+                        elif checkbox_name == 'strip_honorifics_checkbox':
+                            self.config['strip_honorifics'] = bool(checked)
+                        elif checkbox_name == 'disable_honorifics_checkbox':
+                            self.config['glossary_disable_honorifics_filter'] = bool(checked)
+                        elif checkbox_name == 'use_legacy_csv_checkbox':
+                            self.config['glossary_use_legacy_csv'] = bool(checked)
+                        elif checkbox_name == 'glossary_auto_compression_checkbox':
+                            self.config['glossary_auto_compression'] = bool(checked)
+                        elif checkbox_name == 'glossary_json_output_checkbox':
+                            self.config['glossary_output_legacy_json'] = bool(checked)
+                        elif checkbox_name == 'include_all_characters_checkbox':
+                            self.config['glossary_include_all_characters'] = bool(checked)
 
                 # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
                 try:
