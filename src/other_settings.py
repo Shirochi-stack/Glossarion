@@ -10370,21 +10370,80 @@ def save_profile(self):
     self.save_profiles()
 
 def delete_profile(self):
-    """Delete the selected profile."""
+    """Delete the selected profile (or reset built-in profiles to defaults)."""
     from PySide6.QtWidgets import QMessageBox
-    
+
     # Get name from combobox or profile_var
     name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
-    
+
     if name not in self.prompt_profiles:
         QMessageBox.critical(None, "Error", f"Profile '{name}' not found.")
         return
-    
-    # Show delete confirmation with Halgakos icon
+
+    # Built-in/required profiles: treat delete as reset-to-default.
+    try:
+        protected = set(self._get_protected_prompt_profiles())
+    except Exception:
+        protected = {
+            "Universal",
+            "Korean_BeautifulSoup",
+            "Japanese_BeautifulSoup",
+            "Chinese_BeautifulSoup",
+            "Korean_html2text",
+            "Japanese_html2text",
+            "Chinese_html2text",
+            "korean_OCR",
+            "japanese_OCR",
+            "chinese_OCR",
+        }
+
+    if name in protected:
+        from PySide6.QtGui import QIcon
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Reset Profile")
+        msg_box.setText(f"Reset built-in profile '{name}' to the latest default prompt?")
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+            if os.path.exists(icon_path):
+                msg_box.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+        _center_messagebox_buttons(msg_box)
+        result = msg_box.exec()
+
+        if result == QMessageBox.Yes:
+            ok = False
+            try:
+                ok = bool(self._reset_prompt_profile_to_default(name))
+            except Exception:
+                ok = False
+
+            if not ok:
+                QMessageBox.warning(None, "Reset Failed", f"Could not reset '{name}' (default prompt not found).")
+                return
+
+            # Refresh editor selection
+            try:
+                if hasattr(self, 'profile_menu'):
+                    self.profile_menu.setCurrentText(name)
+            except Exception:
+                pass
+            try:
+                self.on_profile_select()
+            except Exception:
+                pass
+
+            self.save_profiles()
+        return
+
+    # Custom profiles: delete as before
     from PySide6.QtGui import QIcon
     msg_box = QMessageBox()
     msg_box.setWindowTitle("Delete")
-    msg_box.setText(f"Are you sure you want to delete language '{name}'?")
+    msg_box.setText(f"Are you sure you want to delete profile '{name}'?")
     msg_box.setIcon(QMessageBox.Question)
     msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
     msg_box.setDefaultButton(QMessageBox.No)
@@ -10392,32 +10451,32 @@ def delete_profile(self):
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         if os.path.exists(icon_path):
             msg_box.setWindowIcon(QIcon(icon_path))
-    except:
+    except Exception:
         pass
     _center_messagebox_buttons(msg_box)
     result = msg_box.exec()
-    
+
     if result == QMessageBox.Yes:
         del self.prompt_profiles[name]
         self.config['prompt_profiles'] = self.prompt_profiles
-        
+
         if self.prompt_profiles:
             new = next(iter(self.prompt_profiles))
             self.profile_var = new
-            
+
             # Update combobox
             self.profile_menu.clear()
             self.profile_menu.addItems(list(self.prompt_profiles.keys()))
             self.profile_menu.setCurrentText(new)
-            
+
             self.on_profile_select()
         else:
             self.profile_var = ""
-            
+
             # Clear combobox and text
             self.profile_menu.clear()
             self.prompt_text.clear()
-        
+
         self.save_profiles()
 
 def save_profiles(self):

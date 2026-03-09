@@ -733,6 +733,75 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         except Exception as e:
             print(f"[Sanitizer] Failed to save config: {e}")
 
+    def _get_protected_prompt_profiles(self):
+        """Profiles that are treated as mandatory/built-in (cannot be deleted)."""
+        # Keep this list in sync with the always-include logic in _init_variables.
+        protected = {
+            "Universal",
+            "Korean_BeautifulSoup",
+            "Japanese_BeautifulSoup",
+            "Chinese_BeautifulSoup",
+            "Korean_html2text",
+            "Japanese_html2text",
+            "Chinese_html2text",
+            "korean_OCR",
+            "japanese_OCR",
+            "chinese_OCR",
+        }
+        return protected
+
+    def _reset_prompt_profile_to_default(self, name: str) -> bool:
+        """Reset a built-in profile's prompt text back to the latest built-in defaults."""
+        try:
+            if not hasattr(self, 'default_prompts'):
+                return False
+            if name not in getattr(self, 'default_prompts', {}):
+                return False
+            if not hasattr(self, 'prompt_profiles'):
+                return False
+
+            default_text = self.default_prompts[name]
+            self.prompt_profiles[name] = default_text
+            try:
+                self.config['prompt_profiles'] = self.prompt_profiles
+            except Exception:
+                pass
+
+            # If the user is currently editing/using this profile, refresh the editor.
+            try:
+                current_name = self.profile_menu.currentText().strip() if hasattr(self, 'profile_menu') else None
+            except Exception:
+                current_name = None
+
+            if current_name == name and hasattr(self, 'prompt_text'):
+                try:
+                    self.prompt_text.blockSignals(True)
+                except Exception:
+                    pass
+                try:
+                    self.prompt_text.setPlainText(default_text)
+                except Exception:
+                    try:
+                        self.prompt_text.setText(default_text)
+                    except Exception:
+                        pass
+                try:
+                    self.prompt_text.blockSignals(False)
+                except Exception:
+                    pass
+
+                # Keep original-content cache in sync if present
+                try:
+                    if not hasattr(self, '_original_profile_content'):
+                        self._original_profile_content = {}
+                    self._original_profile_content[name] = default_text
+                except Exception:
+                    pass
+
+            return True
+        except Exception:
+            return False
+
     def __init__(self, parent=None):
         # Initialize QMainWindow
         super().__init__(parent)
@@ -3907,49 +3976,54 @@ Recent translations to summarize:
             if not selected_items:
                 return
 
-            # Built-in/required profiles are protected (restored on next restart if missing)
-            protected_profiles = {
-                "Universal",
-                "Korean_BeautifulSoup",
-                "Japanese_BeautifulSoup",
-                "Chinese_BeautifulSoup",
-                "Korean_html2text",
-                "Japanese_html2text",
-                "Chinese_html2text",
-                "korean_OCR",
-                "japanese_OCR",
-                "chinese_OCR",
-            }
-
             from PySide6.QtWidgets import QMessageBox
-            profile_names = [item.text() for item in selected_items]
 
+            try:
+                protected_profiles = set(self._get_protected_prompt_profiles())
+            except Exception:
+                protected_profiles = {
+                    "Universal",
+                    "Korean_BeautifulSoup",
+                    "Japanese_BeautifulSoup",
+                    "Chinese_BeautifulSoup",
+                    "Korean_html2text",
+                    "Japanese_html2text",
+                    "Chinese_html2text",
+                    "korean_OCR",
+                    "japanese_OCR",
+                    "chinese_OCR",
+                }
+
+            profile_names = [item.text() for item in selected_items]
             protected_selected = [n for n in profile_names if n in protected_profiles]
             deletable_selected = [n for n in profile_names if n not in protected_profiles]
 
-            # If user selected only protected items, just explain and stop.
-            if protected_selected and not deletable_selected:
-                QMessageBox.information(
-                    dialog,
-                    "Protected Profiles",
-                    "These built-in profiles can’t be deleted:\n\n" + "\n".join(protected_selected),
+            # Protected profiles: treat "Delete" as "Reset to defaults".
+            if protected_selected:
+                msg = (
+                    "Reset the selected built-in profile(s) to the latest default prompts?\n\n"
+                    + "\n".join(protected_selected)
                 )
+                reply = QMessageBox.question(dialog, "Reset Built-in Profiles", msg, QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    for n in protected_selected:
+                        try:
+                            self._reset_prompt_profile_to_default(n)
+                        except Exception:
+                            pass
+                    # Persist immediately so reset survives restart
+                    try:
+                        self.save_profiles()
+                    except Exception:
+                        pass
+
+            # Custom profiles: still deletable from the list/order editor.
+            if not deletable_selected:
                 return
 
-            # If selection contains a mix, explain what's protected, then confirm deletion of the rest.
-            if protected_selected and deletable_selected:
-                msg = (
-                    "These built-in profiles can’t be deleted:\n\n"
-                    + "\n".join(protected_selected)
-                    + "\n\nDelete the remaining profile(s)?\n\n"
-                    + "\n".join(deletable_selected)
-                )
-            else:
-                msg = f"Delete {len(deletable_selected)} profile(s)?\n\n" + "\n".join(deletable_selected)
-
+            msg = f"Delete {len(deletable_selected)} profile(s)?\n\n" + "\n".join(deletable_selected)
             reply = QMessageBox.question(dialog, "Confirm Delete", msg, QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                # Remove only deletable items
                 for item in selected_items:
                     if item.text() in protected_profiles:
                         continue
