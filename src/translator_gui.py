@@ -13316,50 +13316,50 @@ Important rules:
        self.log_text.selectAll()
 
     def auto_load_glossary_for_file(self, file_path):
-        """Automatically load glossary if it exists in the output folder"""
-        
+        """Automatically load a glossary from the EPUB's output folder.
+
+        This is the *output-folder* auto-loader (e.g., `<output>/<book>/glossary.csv`).
+        Returns True if a glossary was auto-loaded, otherwise False.
+        """
+
         # CHECK FOR EPUB FIRST - before any clearing logic!
         if not file_path or not os.path.isfile(file_path):
-            return
-        
+            return False
+
         if not file_path.lower().endswith('.epub'):
-            return  # Exit early for non-EPUB files - don't touch glossaries!
-        
+            return False  # Exit early for non-EPUB files - don't touch glossaries!
+
         # Clear previous auto-loaded glossary if switching EPUB files
         if file_path != self.auto_loaded_glossary_for_file:
             # Only clear if the current glossary was auto-loaded AND not manually loaded
-            if (self.auto_loaded_glossary_path and 
+            if (
+                self.auto_loaded_glossary_path and
                 self.manual_glossary_path == self.auto_loaded_glossary_path and
-                not getattr(self, 'manual_glossary_manually_loaded', False)):  # Check manual flag
+                not getattr(self, 'manual_glossary_manually_loaded', False)
+            ):
                 self.manual_glossary_path = None
                 self.append_log("📑 Cleared auto-loaded glossary from previous novel")
-            
+
             self.auto_loaded_glossary_path = None
             self.auto_loaded_glossary_for_file = None
-        
-        # Check if manually loaded glossary matches the new file
+
+        # If the user manually loaded a glossary, keep using it until they clear it.
         if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
-            # Extract the base name from the current EPUB file (without extension)
-            current_file_base = os.path.splitext(os.path.basename(file_path))[0]
-            
-            # Get the glossary filename
-            glossary_name = os.path.basename(self.manual_glossary_path)
-            
-            # Check if the current EPUB's base name appears anywhere in the glossary filename
-            if current_file_base in glossary_name:
-                # Glossary matches the current file, keep it
-                self.append_log(f"📑 Keeping manually loaded glossary: {glossary_name}")
-                return
-            else:
-                # Glossary doesn't match, clear it
-                self.append_log(f"📑 Cleared manually loaded glossary from different novel: {glossary_name}")
-                self.manual_glossary_path = None
-                self.manual_glossary_manually_loaded = False
-                # Continue to auto-load logic below
-        
+            return False
+
         file_base = os.path.splitext(os.path.basename(file_path))[0]
-        output_dir = file_base
-        
+
+        # Honor output directory override (matches translation output behavior)
+        try:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        except Exception:
+            override_dir = None
+
+        if override_dir:
+            output_dir = os.path.join(override_dir, file_base)
+        else:
+            output_dir = file_base
+
         # Prefer CSV over JSON when both exist
         glossary_candidates = [
             os.path.join(output_dir, "glossary.csv"),
@@ -13372,32 +13372,46 @@ Important rules:
             os.path.join(output_dir, "glossary.md"),
             os.path.join(output_dir, "Glossary", "glossary.md"),
         ]
+
         for glossary_path in glossary_candidates:
-            if os.path.exists(glossary_path):
-                ext = os.path.splitext(glossary_path)[1].lower()
-                try:
-                    if ext == '.csv':
-                        # Accept CSV without parsing
-                        self.manual_glossary_path = glossary_path
-                        self.auto_loaded_glossary_path = glossary_path
-                        self.auto_loaded_glossary_for_file = file_path
-                        self.manual_glossary_manually_loaded = False  # This is auto-loaded
-                        self.append_log(f"📑 Auto-loaded glossary (CSV) for {file_base}: {os.path.basename(glossary_path)}")
-                        break
-                    else:
-                        with open(glossary_path, 'r', encoding='utf-8') as f:
-                            glossary_data = json.load(f)
-                        self.manual_glossary_path = glossary_path
-                        self.auto_loaded_glossary_path = glossary_path
-                        self.auto_loaded_glossary_for_file = file_path
-                        self.manual_glossary_manually_loaded = False  # This is auto-loaded
-                        self.append_log(f"📑 Auto-loaded glossary (JSON) for {file_base}: {os.path.basename(glossary_path)}")
-                        break
-                except Exception:
-                    # If JSON parsing fails, try next candidate
-                    continue
-                    continue
-        
+            if not os.path.exists(glossary_path):
+                continue
+
+            ext = os.path.splitext(glossary_path)[1].lower()
+
+            try:
+                if ext == '.csv':
+                    # Accept CSV without parsing
+                    self.manual_glossary_path = glossary_path
+                    self.auto_loaded_glossary_path = glossary_path
+                    self.auto_loaded_glossary_for_file = file_path
+                    self.manual_glossary_manually_loaded = False  # This is auto-loaded
+                    self.append_log(f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}")
+                    return True
+
+                # TXT / MD: accept as-is
+                if ext in ('.txt', '.md'):
+                    self.manual_glossary_path = glossary_path
+                    self.auto_loaded_glossary_path = glossary_path
+                    self.auto_loaded_glossary_for_file = file_path
+                    self.manual_glossary_manually_loaded = False
+                    self.append_log(f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}")
+                    return True
+
+                # JSON: validate parse before accepting
+                with open(glossary_path, 'r', encoding='utf-8') as f:
+                    json.load(f)
+                self.manual_glossary_path = glossary_path
+                self.auto_loaded_glossary_path = glossary_path
+                self.auto_loaded_glossary_for_file = file_path
+                self.manual_glossary_manually_loaded = False  # This is auto-loaded
+                self.append_log(f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}")
+                return True
+
+            except Exception:
+                # If parsing fails, try next candidate
+                continue
+
         return False
 
     # File Selection Methods
@@ -14104,19 +14118,6 @@ Important rules:
     # Note: open_other_settings method is bound from other_settings.py during __init__
     # No need to define it here - it's injected dynamically
             
-    def __setattr__(self, name, value):
-        """Debug method to track when manual_glossary_path gets cleared"""
-        if name == 'manual_glossary_path':
-            import traceback
-            if value is None and hasattr(self, 'manual_glossary_path') and self.manual_glossary_path is not None:
-                if hasattr(self, 'append_log'):
-                    self.append_log(f"[DEBUG] CLEARING manual_glossary_path from {self.manual_glossary_path} to None")
-                    self.append_log(f"[DEBUG] Stack trace: {''.join(traceback.format_stack()[-3:-1])}")
-                else:
-                    print(f"[DEBUG] CLEARING manual_glossary_path from {getattr(self, 'manual_glossary_path', 'unknown')} to None")
-                    print(f"[DEBUG] Stack trace: {''.join(traceback.format_stack()[-3:-1])}")
-        super().__setattr__(name, value)
-
     def _autofill_glossary_for_current_selection(self) -> int:
         """Auto-fill glossary selection/mapping for the currently selected input files.
 
@@ -14162,7 +14163,8 @@ Important rules:
                     pass
                 try:
                     if hasattr(self, 'append_log'):
-                        self.append_log(f"📑 Auto-loaded glossary: {os.path.basename(gp)}")
+                        # This is Auto-Fill filename matching (not output-folder auto-load)
+                        self.append_log(f"📑 Auto-mapped glossary: {os.path.basename(gp)}")
                 except Exception:
                     pass
                 return 1
