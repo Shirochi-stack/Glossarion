@@ -6036,12 +6036,12 @@ class UnifiedClient:
                 except UnifiedClientError as e:
                     import traceback
                     http_status = getattr(e, "http_status", None)
-                    # For transient 5xx errors that will be retried or already retried, avoid noisy tracebacks.
-                    if http_status in (500, 502, 503, 504):
-                        print(f"{log_prefix} ❌ Transient server error {http_status}: {str(e)[:200]}")
+                    error_str_lower = str(e).lower()
+                    # For transient errors that will be retried, avoid noisy tracebacks.
+                    if http_status in (429, 500, 502, 503, 504) or '429' in error_str_lower or 'resource' in error_str_lower and 'exhausted' in error_str_lower:
+                        print(f"{log_prefix} ❌ Transient error (rate limit/server): {str(e)[:200]}")
                         continue
                     tb = traceback.format_exc()
-                    error_str_lower = str(e).lower()
                     if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:
                         print(f"{log_prefix} Operation was cancelled during retry")
                         return None
@@ -6051,11 +6051,8 @@ class UnifiedClient:
                         print(f"{log_prefix} ❌ Content filter error: {str(e)[:200]}")
                         continue
                     
-                    if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:
-                        print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
-                    else:
-                        print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
-                        print(f"{log_prefix} Traceback:\\n{tb}")
+                    print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
+                    print(f"{log_prefix} Traceback:\n{tb}")
                     continue
                     
                 except Exception as e:

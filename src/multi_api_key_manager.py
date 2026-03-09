@@ -2737,12 +2737,13 @@ class MultiAPIKeyDialog(QDialog):
                 msg = f"🔑 Fallback key pool: {len(fallback_keys)} keys loaded"
             else:
                 msg = f"🔑 Fallback key pool: disabled"
-            print(msg)
             if hasattr(self.translator_gui, 'append_log'):
                 try:
                     self.translator_gui.append_log(msg)
                 except Exception:
-                    pass
+                    print(msg)  # fallback to print only if append_log fails
+            else:
+                print(msg)
         
         # Sync env vars immediately
         try:

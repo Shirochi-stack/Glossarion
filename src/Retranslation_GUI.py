@@ -3987,6 +3987,7 @@ class RetranslationMixin:
                     override_dir = None
 
             # Create tabs for EPUB/text files using shared logic
+            pending_tabs = []  # Collect before sorting
             for file_path in epub_files + text_files:
                 file_base = os.path.splitext(os.path.basename(file_path))[0]
                 
@@ -4014,14 +4015,24 @@ class RetranslationMixin:
                     show_special_files_state=global_show_special
                 )
                 
-                # Only add the tab if content was successfully created
+                # Only keep the tab if content was successfully created
                 if tab_result:
-                    notebook.addTab(tab_frame, tab_name)
-                    tab_data.append(tab_result)
-                    tabs_created = True
-                    print(f"[DEBUG] Successfully created tab for {file_base}")
+                    # Count progress for sorting
+                    cdi = tab_result.get('chapter_display_info', [])
+                    completed = sum(1 for info in cdi if info.get('status') == 'completed')
+                    in_progress = sum(1 for info in cdi if info.get('status') == 'in_progress')
+                    progress_score = completed + in_progress
+                    pending_tabs.append((progress_score, tab_frame, tab_name, tab_result))
+                    print(f"[DEBUG] Successfully created tab for {file_base} (progress: {completed} done, {in_progress} in-progress)")
                 else:
                     print(f"[DEBUG] Failed to create content for {file_base}")
+            
+            # Sort tabs: most progress first
+            pending_tabs.sort(key=lambda t: t[0], reverse=True)
+            for _score, tab_frame, tab_name, tab_result in pending_tabs:
+                notebook.addTab(tab_frame, tab_name)
+                tab_data.append(tab_result)
+                tabs_created = True
             
             # Create tabs for image folders (keeping existing logic for now)
             for folder_path in folders:
