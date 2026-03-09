@@ -14897,6 +14897,7 @@ class UnifiedClient:
                     continue
 
             except Exception as exc:
+                error_str = str(exc)
 
                 # 400 Bad Request: retry with random delay between half and full send interval
                 if "400" in error_str or "bad request" in error_str.lower():
@@ -14904,13 +14905,13 @@ class UnifiedClient:
                         interval = self._get_send_interval()
                         delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
                         print(f"🔄 AuthGPT 400 Bad Request – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
-                        time.sleep(delay)
+                        if not self._sleep_with_cancel(delay, 0.5):
+                            raise UnifiedClientError("AuthGPT: Translation stopped by user", error_type="cancelled")
                         continue
                     raise UnifiedClientError(
                         f"AuthGPT: {error_str}",
                         error_type="validation"
                     )
-                error_str = str(exc)
                 if "429" in error_str and "usage_limit_reached" in error_str:
                     rate_limit_retry_count += 1
                     print(f"⚠️ ChatGPT rate limit (retry #{rate_limit_retry_count}/{max_retries})")
