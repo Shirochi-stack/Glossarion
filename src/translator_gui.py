@@ -14132,55 +14132,6 @@ Important rules:
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
 
-        try:
-            dialog.setAcceptDrops(True)
-        except Exception:
-            pass
-
-        # Drop a glossary file onto the dialog background to apply to all rows
-        def _dialog_drag_enter(event):
-            try:
-                md = event.mimeData()
-                if md and md.hasUrls():
-                    urls = md.urls()
-                    if urls:
-                        p = _normalize_drop_path(urls[0].toLocalFile())
-                        if _is_allowed_glossary(p):
-                            event.acceptProposedAction()
-                            return
-            except Exception:
-                pass
-            event.ignore()
-
-        def _dialog_drop(event):
-            try:
-                md = event.mimeData()
-                if md and md.hasUrls():
-                    urls = md.urls()
-                    if urls:
-                        p = _normalize_drop_path(urls[0].toLocalFile())
-                        if _is_allowed_glossary(p):
-                            reply = QMessageBox.question(
-                                dialog,
-                                "Apply to All",
-                                "Apply this glossary to all EPUBs?\n\n" + os.path.basename(p),
-                                QMessageBox.Yes | QMessageBox.No,
-                            )
-                            if reply == QMessageBox.Yes:
-                                for _ep, _le in rows:
-                                    _le.setText(p)
-                            event.acceptProposedAction()
-                            return
-            except Exception:
-                pass
-            event.ignore()
-
-        # Monkey-patch drag/drop handlers (simple, keeps changes localized)
-        try:
-            dialog.dragEnterEvent = _dialog_drag_enter
-            dialog.dropEvent = _dialog_drop
-        except Exception:
-            pass
 
         # Existing mapping as defaults
         existing_map = {}
