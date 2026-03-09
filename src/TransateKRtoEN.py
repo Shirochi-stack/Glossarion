@@ -9644,9 +9644,11 @@ def main(log_callback=None, stop_callback=None):
         import traceback
         traceback.print_exc()
     
-    with open(metadata_path, 'w', encoding='utf-8') as mf:
-        json.dump(metadata, mf, ensure_ascii=False, indent=2)
-    print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
+    # Skip metadata.json for plain text files — it serves no purpose there
+    if not is_text_file:
+        with open(metadata_path, 'w', encoding='utf-8') as mf:
+            json.dump(metadata, mf, ensure_ascii=False, indent=2)
+        print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
         
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
