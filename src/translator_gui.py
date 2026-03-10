@@ -14462,7 +14462,7 @@ Important rules:
                                  "✓ Load your own glossary CSV",
                                  "✓ Best for pre-made glossaries",
                                  "✓ Zero extra API cost"],
-                    "bg": "#181e28", "hover": "#4a6080", "border": "#8090a8", "accent": "#b0c0d8",
+                    "bg": "#1e2636", "hover": "#506888", "border": "#90a8c8", "accent": "#c8d8f0",
                     "rec": None,
                 },
                 {
@@ -14473,7 +14473,7 @@ Important rules:
                                  "✓ No extra API calls needed",
                                  "✓ Lowest overhead possible",
                                  "⚠ May miss uncommon terms"],
-                    "bg": "#122018", "hover": "#387050", "border": "#2dd4a0", "accent": "#5eedc0",
+                    "bg": "#162820", "hover": "#3e7858", "border": "#40e8b0", "accent": "#70ffd8",
                     "rec": None,
                 },
                 {
@@ -14484,7 +14484,7 @@ Important rules:
                                  "✓ Runs extraction before translation",
                                  "✓ Best quality-to-cost ratio",
                                  "✓ Smart deduplication"],
-                    "bg": "#122040", "hover": "#3868c0", "border": "#5b9df6", "accent": "#80b8ff",
+                    "bg": "#162848", "hover": "#4070c8", "border": "#6aadff", "accent": "#a0d0ff",
                     "rec": "✅ Recommended for most users",
                 },
                 {
@@ -14495,7 +14495,7 @@ Important rules:
                                  "✓ Most thorough analysis possible",
                                  "✓ Catches rare names & terms",
                                  "💰 Higher API cost"],
-                    "bg": "#241c0c", "hover": "#6a5a30", "border": "#f5b820", "accent": "#ffd050",
+                    "bg": "#2c2414", "hover": "#726238", "border": "#ffc830", "accent": "#ffe070",
                     "rec": "⚡ Best for important novels",
                 },
             ]
@@ -14560,7 +14560,7 @@ Important rules:
                     fl = QLabel(feat)
                     fl.setFont(QFont("Arial", feat_pt))
                     fl.setWordWrap(True)
-                    fl.setStyleSheet("background:transparent; color:#e0e0e0; border:none;")
+                    fl.setStyleSheet("background:transparent; color:#f0f4ff; border:none;")
                     cl.addWidget(fl)
                 
                 if mi["rec"]:
@@ -14568,7 +14568,7 @@ Important rules:
                     rl = QLabel(mi["rec"])
                     rl.setFont(QFont("Segoe UI Semibold", feat_pt))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color:{mi['accent']}; color:#1a1a2e; padding:4px 8px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.15); color:{mi['accent']}; border: 1px solid {mi['accent']}; padding:4px 8px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
@@ -14608,7 +14608,7 @@ Important rules:
             
             format_data = [
                 {
-                    "value": "standard", "emoji": "📝", "title": "html2text",
+                    "value": "enhanced", "emoji": "📝", "title": "html2text",
                     "subtitle": "Best for token efficiency",
                     "features": [
                         "✓ Converts HTML to clean plaintext",
@@ -14617,11 +14617,11 @@ Important rules:
                         "✓ Compatible with all file types",
                         "⚠ May lose some formatting",
                     ],
-                    "bg": "#122040", "hover": "#3868c0", "border": "#5b9df6", "accent": "#80b8ff",
+                    "bg": "#162848", "hover": "#4070c8", "border": "#6aadff", "accent": "#a0d0ff",
                     "rec": None,
                 },
                 {
-                    "value": "enhanced", "emoji": "🔬", "title": "BeautifulSoup",
+                    "value": "standard", "emoji": "🔬", "title": "BeautifulSoup",
                     "subtitle": "Best for format preservation",
                     "features": [
                         "✓ Deep HTML parsing with BeautifulSoup",
@@ -14630,12 +14630,12 @@ Important rules:
                         "✓ Cleaner output for complex EPUBs",
                         "✓ Auto-selects per-language profiles",
                     ],
-                    "bg": "#122018", "hover": "#387050", "border": "#2dd4a0", "accent": "#5eedc0",
+                    "bg": "#162820", "hover": "#3e7858", "border": "#40e8b0", "accent": "#70ffd8",
                     "rec": "✅ Recommended for most novels",
                 },
             ]
             
-            selected_ext = [getattr(self, 'text_extraction_method_var', 'enhanced')]
+            selected_ext = [getattr(self, 'text_extraction_method_var', 'standard')]
             ext_card_frames = {}
             
             fmt_w = QWidget()
@@ -14694,7 +14694,7 @@ Important rules:
                     fl = QLabel(feat)
                     fl.setFont(QFont("Arial", feat_pt))
                     fl.setWordWrap(True)
-                    fl.setStyleSheet("background:transparent; color:#e0e0e0; border:none;")
+                    fl.setStyleSheet("background:transparent; color:#f0f4ff; border:none;")
                     cl.addWidget(fl)
                 
                 if fi["rec"]:
@@ -14702,7 +14702,7 @@ Important rules:
                     rl = QLabel(fi["rec"])
                     rl.setFont(QFont("Segoe UI Semibold", feat_pt))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color:{fi['accent']}; color:#1a1a2e; padding:4px 8px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.15); color:{fi['accent']}; border: 1px solid {fi['accent']}; padding:4px 8px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
@@ -14826,7 +14826,7 @@ Important rules:
                 dl = QLabel(desc)
                 dl.setFont(QFont("Arial", 8))
                 dl.setWordWrap(True)
-                dl.setStyleSheet("background:transparent; color:#c0c8d0; border:none;")
+                dl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                 cl.addWidget(dl)
             
             p3_lay.addWidget(pfx_w, 1)
@@ -14989,7 +14989,14 @@ Important rules:
                     self.config['text_extraction_method'] = ext_val
                     if hasattr(self, 'text_extraction_method_var'):
                         self.text_extraction_method_var = ext_val
-                    ext_label = 'BeautifulSoup' if ext_val == 'enhanced' else 'html2text'
+                    # Sync the radio buttons in Other Settings
+                    if ext_val == 'enhanced':
+                        if hasattr(self, 'enhanced_extraction_radio'):
+                            self.enhanced_extraction_radio.setChecked(True)
+                    else:
+                        if hasattr(self, 'standard_extraction_radio'):
+                            self.standard_extraction_radio.setChecked(True)
+                    ext_label = 'BeautifulSoup' if ext_val == 'standard' else 'html2text'
                     self.append_log(f"🔬 Text extraction mode set to: {ext_label}")
                     self.config['glossary_mode_dialog_shown'] = True
                     try:

@@ -1856,6 +1856,15 @@ CRITICAL EXTRACTION RULES:
             from PySide6.QtWidgets import QComboBox
             self.auto_glossary_mode_combo = QComboBox()
             self.auto_glossary_mode_combo.addItems(["Off", "Minimal", "Balanced", "Full"])
+            # Add Halgakos icon to each item
+            try:
+                _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(_ico_path):
+                    _combo_icon = QIcon(_ico_path)
+                    for i in range(self.auto_glossary_mode_combo.count()):
+                        self.auto_glossary_mode_combo.setItemIcon(i, _combo_icon)
+            except Exception:
+                pass
             # Read saved mode with backward compat
             saved_mode = self.config.get('auto_glossary_mode', None)
             if saved_mode is None:
@@ -1870,21 +1879,37 @@ CRITICAL EXTRACTION RULES:
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_mode_combo.setFixedWidth(120)
+        self.auto_glossary_mode_combo.setFixedWidth(150)
+        from PySide6.QtCore import QSize
+        self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_mode_combo.setStyleSheet("""
             QComboBox {
-                background-color: #3a3a3a;
-                color: white;
-                padding: 4px 8px;
-                border: 1px solid #555;
-                border-radius: 3px;
+                background-color: #1a2a44;
+                color: #e8f0ff;
+                padding: 5px 10px;
+                border: 2px solid #4a8fd4;
+                border-radius: 4px;
                 font-size: 10pt;
+                font-weight: bold;
             }
-            QComboBox:hover { border-color: #5a9fd4; }
+            QComboBox:hover { border-color: #70b8ff; background-color: #223a58; }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 6px;
+            }
             QComboBox QAbstractItemView {
-                background-color: #2a2a2a;
-                color: white;
-                selection-background-color: #5a9fd4;
+                background-color: #162848;
+                color: #e8f0ff;
+                selection-background-color: #4080d0;
+                selection-color: #ffffff;
+                border: 1px solid #4a8fd4;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #2a4a70;
             }
         """)
         master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
