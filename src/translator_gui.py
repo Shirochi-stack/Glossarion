@@ -14567,9 +14567,9 @@ Important rules:
                 if mi["rec"]:
                     cl.addSpacing(6)
                     rl = QLabel(mi["rec"])
-                    rl.setFont(QFont("Segoe UI Semibold", feat_pt))
+                    rl.setFont(QFont("Segoe UI Semibold", feat_pt, QFont.Bold))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.15); color:{mi['accent']}; border: 1px solid {mi['accent']}; padding:4px 8px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.08); color:white; border: 2px solid {mi['accent']}; padding:4px 8px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
@@ -14701,9 +14701,9 @@ Important rules:
                 if fi["rec"]:
                     cl.addSpacing(6)
                     rl = QLabel(fi["rec"])
-                    rl.setFont(QFont("Segoe UI Semibold", feat_pt))
+                    rl.setFont(QFont("Segoe UI Semibold", feat_pt, QFont.Bold))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.15); color:{fi['accent']}; border: 1px solid {fi['accent']}; padding:4px 8px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.08); color:white; border: 2px solid {fi['accent']}; padding:4px 8px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
@@ -14790,16 +14790,16 @@ Important rules:
                     "bg": "#162820", "accent": "#40e8b0",
                 },
                 {
-                    "key": "batch_translate_headers", "emoji": "📝", "title": "Batch Translate Headers",
-                    "desc": "Translate h1-h6 headings in a separate batch pass.",
-                    "default": False,
-                    "bg": "#2c2414", "accent": "#ffc830",
-                },
-                {
                     "key": "enable_streaming", "emoji": "🛰️", "title": "Enable Streaming",
-                    "desc": "Stream API responses token-by-token for real-time output.",
+                    "desc": "Stream API responses token-by-token for real-time output.\nStreaming logs are hidden during batch mode unless explicitly enabled in Other Settings.",
                     "default": False,
                     "bg": "#1e1828", "accent": "#a878d8",
+                },
+                {
+                    "key": "batch_translate_headers", "emoji": "📝", "title": "Translate Header Tags",
+                    "desc": "Translate h1-h6 headings in a separate batch pass.\nUpdates all HTML files containing header tags across the entire book.",
+                    "default": False,
+                    "bg": "#2c2414", "accent": "#ffc830",
                 },
                 {
                     "key": "enable_pdf_output", "emoji": "📄", "title": "PDF Output",
@@ -14809,7 +14809,7 @@ Important rules:
                 },
                 {
                     "key": "enable_image_compression", "emoji": "🖼️", "title": "Image Compression",
-                    "desc": "Compress images in the EPUB to reduce output file size.",
+                    "desc": "Compress images in the EPUB to reduce output file size.\nUses WebP for EPUB and JPEG for PDF.",
                     "default": False,
                     "bg": "#142014", "accent": "#60d060",
                 },
@@ -14838,22 +14838,15 @@ Important rules:
                 cl.setContentsMargins(10, 8, 10, 8)
                 cl.setSpacing(10)
                 
-                # Emoji
-                el = QLabel(td["emoji"])
-                el.setFont(QFont("Arial", 18))
-                el.setStyleSheet("background:transparent; border:none;")
-                el.setFixedWidth(30)
-                cl.addWidget(el)
-                
-                # Text column
+                # Text column with inline emoji
                 text_col = QVBoxLayout()
                 text_col.setSpacing(1)
-                tl = QLabel(td["title"])
-                tl.setFont(QFont("Arial", 11, QFont.Bold))
+                tl = QLabel(f"{td['emoji']} {td['title']}")
+                tl.setFont(QFont("Arial", 15, QFont.Bold))
                 tl.setStyleSheet("background:transparent; color:white; border:none;")
                 text_col.addWidget(tl)
                 dl = QLabel(td["desc"])
-                dl.setFont(QFont("Arial", 8))
+                dl.setFont(QFont("Arial", 11))
                 dl.setWordWrap(True)
                 dl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                 text_col.addWidget(dl)
