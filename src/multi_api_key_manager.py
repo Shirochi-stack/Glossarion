@@ -4193,12 +4193,13 @@ class MultiAPIKeyDialog(QDialog):
                     except Exception:
                         pass
                     msg = "🔑 Multi-key pool: disabled"
-                    print(msg)
                     if hasattr(self.translator_gui, 'append_log'):
                         try:
                             self.translator_gui.append_log(msg)
                         except Exception:
-                            pass
+                            print(msg)
+                    else:
+                        print(msg)
             except Exception as _env_err:
                 print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
         

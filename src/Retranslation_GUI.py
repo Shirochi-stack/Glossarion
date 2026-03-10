@@ -341,8 +341,15 @@ class RetranslationMixin:
                         del self._retranslation_dialog_cache[file_key]
                     else:
                         dialog = cached_data['dialog']
-                        # Refresh the data before showing
-                        self._refresh_retranslation_data(cached_data)
+                        # Trigger animated refresh (same as clicking the Refresh button)
+                        _rf = cached_data.get('refresh_func')
+                        if callable(_rf):
+                            try:
+                                _rf()
+                            except Exception:
+                                self._refresh_retranslation_data(cached_data)
+                        else:
+                            self._refresh_retranslation_data(cached_data)
                         dialog.show()
                         dialog.raise_()
                         dialog.activateWindow()
@@ -3885,8 +3892,14 @@ class RetranslationMixin:
                 # Reuse existing dialog - refresh all tabs before showing
                 cached_dialog = self._multi_file_retranslation_dialog
                 if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
-                    print(f"[DEBUG] Refreshing all {len(cached_dialog._tab_data)} tabs in cached dialog...")
-                    self._refresh_all_tabs(cached_dialog._tab_data)
+                    print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
+                    for _td in cached_dialog._tab_data:
+                        _rf = _td.get('refresh_func') if _td else None
+                        if callable(_rf):
+                            try:
+                                _rf()
+                            except Exception as _e:
+                                print(f"[WARN] Auto-refresh failed for a tab: {_e}")
                 cached_dialog.show()
                 cached_dialog.raise_()
                 cached_dialog.activateWindow()
@@ -4106,10 +4119,16 @@ class RetranslationMixin:
             self._multi_file_retranslation_dialog = dialog
             self._multi_file_selection_key = selection_key
             
-            # Refresh all tabs before showing the dialog
+            # Trigger animated refresh on every tab (same as clicking the Refresh button)
             if tab_data:
-                print(f"[DEBUG] Refreshing all {len(tab_data)} tabs on dialog open...")
-                self._refresh_all_tabs(tab_data)
+                print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
+                for _td in tab_data:
+                    _rf = _td.get('refresh_func') if _td else None
+                    if callable(_rf):
+                        try:
+                            _rf()
+                        except Exception as _e:
+                            print(f"[WARN] Auto-refresh failed for a tab: {_e}")
             else:
                 print(f"[WARN] No tab data to refresh on dialog open")
             

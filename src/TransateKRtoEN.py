@@ -13657,8 +13657,8 @@ def main(log_callback=None, stop_callback=None):
             # Handle both integer and float chapter numbers (e.g., 1.0, 1.1, etc.)
             translated_chapters.sort(key=lambda x: float(x['num']))
             
-            # Skip redundant combining when there's only 1 non-chunked section
-            if len(translated_chapters) == 1 and not translated_chapters[0].get('is_chunk'):
+            # Skip redundant combining when there's only 1 section (chunk or not)
+            if len(translated_chapters) == 1:
                 single = translated_chapters[0]
                 ext = '.pdf' if input_path.lower().endswith('.pdf') else '.txt'
                 combined_path = os.path.join(out, f"{txt_processor.file_base}_translated{ext}")
