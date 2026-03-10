@@ -14740,6 +14740,7 @@ Important rules:
             ]:
                 sl = QLabel(f"<code style='color:{scolor}; font-weight:bold;'>{sfx}</code> — {sdesc}")
                 sl.setTextFormat(Qt.RichText)
+                sl.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 sl.setFont(QFont("Arial", 9))
                 sl.setWordWrap(True)
                 sl.setStyleSheet("color: #e0e0e0;")
