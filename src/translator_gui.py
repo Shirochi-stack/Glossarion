@@ -14761,7 +14761,7 @@ Important rules:
 
             
             # ════════════════════════════════════════════
-            # PAGE 3: Model Provider Prefixes
+            # PAGE 3: Translation Toggles
             # ════════════════════════════════════════════
             page3 = QWidget()
             page3.setStyleSheet("background: transparent;")
@@ -14775,6 +14775,173 @@ Important rules:
             m3_row.addWidget(_make_mascot(48))
             m3_row.addStretch()
             p3_lay.addLayout(m3_row)
+            
+            toggle_data = [
+                {
+                    "key": "translate_book_title", "emoji": "📖", "title": "Translate Book Title",
+                    "desc": "Translate the EPUB title in metadata for your e-reader library.",
+                    "default": True,
+                    "bg": "#162848", "accent": "#6aadff",
+                },
+                {
+                    "key": "translate_toc", "emoji": "📑", "title": "Translate Table of Contents",
+                    "desc": "Translate chapter titles in the NCX/NAV table of contents.",
+                    "default": False,
+                    "bg": "#162820", "accent": "#40e8b0",
+                },
+                {
+                    "key": "batch_translate_headers", "emoji": "📝", "title": "Batch Translate Headers",
+                    "desc": "Translate h1-h6 headings in a separate batch pass.",
+                    "default": False,
+                    "bg": "#2c2414", "accent": "#ffc830",
+                },
+                {
+                    "key": "enable_streaming", "emoji": "🛰️", "title": "Enable Streaming",
+                    "desc": "Stream API responses token-by-token for real-time output.",
+                    "default": False,
+                    "bg": "#1e1828", "accent": "#a878d8",
+                },
+                {
+                    "key": "enable_pdf_output", "emoji": "📄", "title": "PDF Output",
+                    "desc": "Also generate a PDF copy alongside the translated EPUB.",
+                    "default": False,
+                    "bg": "#281418", "accent": "#e88080",
+                },
+                {
+                    "key": "enable_image_compression", "emoji": "🖼️", "title": "Image Compression",
+                    "desc": "Compress images in the EPUB to reduce output file size.",
+                    "default": False,
+                    "bg": "#142014", "accent": "#60d060",
+                },
+            ]
+            
+            toggle_states = {}
+            for td in toggle_data:
+                toggle_states[td["key"]] = td["default"]
+            
+            toggles_w = QWidget()
+            toggles_w.setStyleSheet("background: transparent;")
+            toggles_lay = QGridLayout(toggles_w)
+            toggles_lay.setSpacing(8)
+            for c in range(2):
+                toggles_lay.setColumnStretch(c, 1)
+            
+            from PySide6.QtWidgets import QCheckBox
+            
+            for idx, td in enumerate(toggle_data):
+                card = QFrame()
+                card.setFrameShape(QFrame.StyledPanel)
+                card.setCursor(Qt.PointingHandCursor)
+                card.setStyleSheet(f"QFrame {{ background-color: {td['bg']}; border: 1px solid {td['accent']}; border-radius: 5px; }}")
+                
+                cl = QHBoxLayout(card)
+                cl.setContentsMargins(10, 8, 10, 8)
+                cl.setSpacing(10)
+                
+                # Emoji
+                el = QLabel(td["emoji"])
+                el.setFont(QFont("Arial", 18))
+                el.setStyleSheet("background:transparent; border:none;")
+                el.setFixedWidth(30)
+                cl.addWidget(el)
+                
+                # Text column
+                text_col = QVBoxLayout()
+                text_col.setSpacing(1)
+                tl = QLabel(td["title"])
+                tl.setFont(QFont("Arial", 11, QFont.Bold))
+                tl.setStyleSheet("background:transparent; color:white; border:none;")
+                text_col.addWidget(tl)
+                dl = QLabel(td["desc"])
+                dl.setFont(QFont("Arial", 8))
+                dl.setWordWrap(True)
+                dl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
+                text_col.addWidget(dl)
+                cl.addLayout(text_col, 1)
+                
+                # Toggle checkbox with checkmark
+                cb = QCheckBox()
+                cb.setChecked(td["default"])
+                cb.setStyleSheet(f"""
+                    QCheckBox::indicator {{
+                        width: 26px; height: 26px;
+                        border: 2px solid {td['accent']};
+                        border-radius: 5px;
+                        background-color: #1a1a2e;
+                    }}
+                    QCheckBox::indicator:checked {{
+                        background-color: {td['accent']};
+                        border-color: {td['accent']};
+                        image: none;
+                    }}
+                    QCheckBox::indicator:hover {{
+                        border-color: white;
+                    }}
+                    QCheckBox {{ background: transparent; border: none; }}
+                """)
+                # Overlay checkmark label
+                check_label = QLabel("✓")
+                check_label.setFont(QFont("Arial", 16, QFont.Bold))
+                check_label.setAlignment(Qt.AlignCenter)
+                check_label.setFixedSize(26, 26)
+                check_label.setStyleSheet(f"color: {'#1a1a2e' if td['default'] else 'transparent'}; background: transparent; border: none;")
+                check_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                
+                # Stack checkbox + checkmark
+                from PySide6.QtWidgets import QStackedLayout
+                cb_container = QWidget()
+                cb_container.setFixedSize(30, 30)
+                cb_container.setStyleSheet("background: transparent; border: none;")
+                cb_stack = QStackedLayout(cb_container)
+                cb_stack.setStackingMode(QStackedLayout.StackAll)
+                cb_stack.addWidget(cb)
+                cb_stack.addWidget(check_label)
+                cl.addWidget(cb_container)
+                
+                def _make_toggle_handler(key, checkbox, chk_lbl, accent_color):
+                    def handler(state):
+                        toggle_states[key] = checkbox.isChecked()
+                        chk_lbl.setStyleSheet(f"color: {'#1a1a2e' if checkbox.isChecked() else 'transparent'}; background: transparent; border: none;")
+                    return handler
+                cb.stateChanged.connect(_make_toggle_handler(td["key"], cb, check_label, td["accent"]))
+                
+                # Make entire card clickable
+                def _make_card_click(checkbox):
+                    def handler(event):
+                        checkbox.setChecked(not checkbox.isChecked())
+                    return handler
+                card.mousePressEvent = _make_card_click(cb)
+                
+                row, col = divmod(idx, 2)
+                toggles_lay.addWidget(card, row, col)
+            
+            p3_lay.addWidget(toggles_w, 1)
+            
+            toggle_note = QLabel("💡 All of these can be changed later in Other Settings and Special Files Settings.")
+            toggle_note.setWordWrap(True)
+            toggle_note.setAlignment(Qt.AlignCenter)
+            toggle_note.setFont(QFont("Arial", 9))
+            toggle_note.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
+            p3_lay.addWidget(toggle_note)
+            stack.addWidget(page3)
+
+
+            
+            # ════════════════════════════════════════════
+            # PAGE 4: Model Provider Prefixes
+            # ════════════════════════════════════════════
+            page4 = QWidget()
+            page4.setStyleSheet("background: transparent;")
+            p4_lay = QVBoxLayout(page4)
+            p4_lay.setContentsMargins(10, 10, 10, 0)
+            p4_lay.setSpacing(8)
+            
+            # Mascot row
+            m4_row = QHBoxLayout()
+            m4_row.addStretch()
+            m4_row.addWidget(_make_mascot(48))
+            m4_row.addStretch()
+            p4_lay.addLayout(m4_row)
             
             prefix_data = [
                 ("🌐", "or/", "OpenRouter", "Any model via OpenRouter", "#122040", "#5b9df6"),
@@ -14830,7 +14997,7 @@ Important rules:
                 dl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                 cl.addWidget(dl)
             
-            p3_lay.addWidget(pfx_w, 1)
+            p4_lay.addWidget(pfx_w, 1)
             
             pfx_note = QLabel("💡 Type any model name in the Model field. Add the provider prefix to route through a specific service.\n"
                              "Example: eh/gpt-5.4 routes GPT-5.4 through ElectronHub. No prefix = direct API call.")
@@ -14838,30 +15005,30 @@ Important rules:
             pfx_note.setAlignment(Qt.AlignCenter)
             pfx_note.setFont(QFont("Arial", 9))
             pfx_note.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
-            p3_lay.addWidget(pfx_note)
-            stack.addWidget(page3)
+            p4_lay.addWidget(pfx_note)
+            stack.addWidget(page4)
             
             # ════════════════════════════════════════════
-            # PAGE 4: Quick Guide
+            # PAGE 5: Quick Guide
             # ════════════════════════════════════════════
-            page4 = QWidget()
-            page4.setStyleSheet("background: transparent;")
-            p4_lay = QVBoxLayout(page4)
-            p4_lay.setContentsMargins(20, 10, 20, 0)
-            p4_lay.setSpacing(12)
+            page5 = QWidget()
+            page5.setStyleSheet("background: transparent;")
+            p5_lay = QVBoxLayout(page5)
+            p5_lay.setContentsMargins(20, 10, 20, 0)
+            p5_lay.setSpacing(12)
             
             # Mascot
-            m4_row = QHBoxLayout()
-            m4_row.addStretch()
-            m4_row.addWidget(_make_mascot(56))
-            m4_row.addStretch()
-            p4_lay.addLayout(m4_row)
+            m5_row = QHBoxLayout()
+            m5_row.addStretch()
+            m5_row.addWidget(_make_mascot(56))
+            m5_row.addStretch()
+            p5_lay.addLayout(m5_row)
             
             flow = QLabel("🔍 Browse  →  ⚙️ Settings  →  📑 Extract  →  ▶ Translate  →  ✅ Done!")
             flow.setAlignment(Qt.AlignCenter)
             flow.setFont(QFont("Arial", 11, QFont.Bold))
             flow.setStyleSheet("color: #80b8ff; padding: 10px; background-color: rgba(30, 58, 95, 180); border-radius: 6px;")
-            p4_lay.addWidget(flow)
+            p5_lay.addWidget(flow)
             
             steps = [
                 ("1️⃣", "Browse", "Click '🔍 Browse' or drag & drop your file."),
@@ -14882,7 +15049,7 @@ Important rules:
                 tl.setFont(QFont("Arial", 10))
                 tl.setStyleSheet("color: #e0e0e0;")
                 rl.addWidget(tl, 1)
-                p4_lay.addLayout(rl)
+                p5_lay.addLayout(rl)
             
             tips_frame = QFrame()
             tips_frame.setStyleSheet("background-color: rgba(30, 58, 95, 120); border-radius: 6px; padding: 10px;")
@@ -14903,9 +15070,9 @@ Important rules:
                 tl.setFont(QFont("Arial", 9))
                 tl.setStyleSheet("color: #d0d0d0;")
                 tips_lay.addWidget(tl)
-            p4_lay.addWidget(tips_frame)
-            p4_lay.addStretch()
-            stack.addWidget(page4)
+            p5_lay.addWidget(tips_frame)
+            p5_lay.addStretch()
+            stack.addWidget(page5)
             
             # ════════════════════════════════════════════
             # Navigation Buttons
@@ -14913,6 +15080,7 @@ Important rules:
             page_titles = [
                 ("Choose Your Glossary Mode", "Select how glossary extraction runs when you translate"),
                 ("🔬 Text Extraction Modes", "How text is extracted from your EPUB files for translation"),
+                ("⚙️ Translation Toggles", "Choose which extra translation features to enable"),
                 ("🌐 Model Provider Prefixes", "Route API calls through different providers using prefixes"),
                 ("🗺️ Quick Guide", "How to use Glossarion with your selected mode"),
             ]
@@ -14999,6 +15167,38 @@ Important rules:
                             self.standard_extraction_radio.setChecked(True)
                     ext_label = 'BeautifulSoup' if ext_val == 'standard' else 'html2text'
                     self.append_log(f"🔬 Text extraction mode set to: {ext_label}")
+                    # Save translation toggles from page 3
+                    tb_title = toggle_states.get('translate_book_title', True)
+                    self.config['translate_book_title'] = tb_title
+                    self.translate_book_title_var = tb_title
+                    tb_toc = toggle_states.get('translate_toc', False)
+                    self.config['use_toc_ncx'] = tb_toc
+                    self.config['translate_toc_ncx'] = tb_toc
+                    if hasattr(self, 'use_toc_ncx_var'):
+                        self.use_toc_ncx_var = tb_toc
+                    if hasattr(self, 'translate_toc_ncx_var'):
+                        self.translate_toc_ncx_var = tb_toc
+                    tb_headers = toggle_states.get('batch_translate_headers', False)
+                    self.config['batch_translate_headers'] = tb_headers
+                    self.batch_translate_headers_var = tb_headers
+                    # Save additional toggles from page 3
+                    tb_streaming = toggle_states.get('enable_streaming', False)
+                    self.config['enable_streaming'] = tb_streaming
+                    self.enable_streaming_var = tb_streaming
+                    tb_pdf = toggle_states.get('enable_pdf_output', False)
+                    self.config['enable_pdf_output'] = tb_pdf
+                    self.enable_pdf_output_var = tb_pdf
+                    tb_imgcomp = toggle_states.get('enable_image_compression', False)
+                    self.config['enable_image_compression'] = tb_imgcomp
+                    self.enable_image_compression_var = tb_imgcomp
+                    enabled_toggles = []
+                    if tb_title: enabled_toggles.append("Book Title")
+                    if tb_toc: enabled_toggles.append("TOC")
+                    if tb_headers: enabled_toggles.append("Headers")
+                    if tb_streaming: enabled_toggles.append("Streaming")
+                    if tb_pdf: enabled_toggles.append("PDF Output")
+                    if tb_imgcomp: enabled_toggles.append("Image Compression")
+                    self.append_log(f"⚙️ Translation toggles: {', '.join(enabled_toggles) if enabled_toggles else 'None'}")
                     self.config['glossary_mode_dialog_shown'] = True
                     try:
                         self.save_config(show_message=False)
