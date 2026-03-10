@@ -14821,6 +14821,12 @@ Important rules:
                     "default": False,
                     "bg": "#1e1430", "accent": "#c080f0",
                 },
+                {
+                    "key": "retry_timeout", "emoji": "⏱️", "title": "Auto-retry API Timeouts",
+                    "desc": "Automatically retry chunks that take too long to process.\nAlso affects chapter extraction timeout.",
+                    "default": True,
+                    "bg": "#2a1a14", "accent": "#f0a060",
+                },
             ]
             
             toggle_states = {}
@@ -15193,6 +15199,12 @@ Important rules:
                     tb_imgcomp = toggle_states.get('enable_image_compression', False)
                     self.config['enable_image_compression'] = tb_imgcomp
                     self.enable_image_compression_var = tb_imgcomp
+                    tb_scan = toggle_states.get('scan_phase_enabled', False)
+                    self.config['scan_phase_enabled'] = tb_scan
+                    self.scan_phase_enabled_var = tb_scan
+                    tb_retry = toggle_states.get('retry_timeout', True)
+                    self.config['retry_timeout'] = tb_retry
+                    self.retry_timeout_var = tb_retry
                     enabled_toggles = []
                     if tb_title: enabled_toggles.append("Book Title")
                     if tb_toc: enabled_toggles.append("TOC")
@@ -15200,6 +15212,8 @@ Important rules:
                     if tb_streaming: enabled_toggles.append("Streaming")
                     if tb_pdf: enabled_toggles.append("PDF Output")
                     if tb_imgcomp: enabled_toggles.append("Image Compression")
+                    if tb_scan: enabled_toggles.append("Post-Translation Scanning")
+                    if tb_retry: enabled_toggles.append("API Timeout Retry")
                     self.append_log(f"⚙️ Translation toggles: {', '.join(enabled_toggles) if enabled_toggles else 'None'}")
                     self.config['glossary_mode_dialog_shown'] = True
                     try:
