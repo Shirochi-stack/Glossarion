@@ -4834,9 +4834,6 @@ Recent translations to summarize:
              QMessageBox.warning(self, "No File Selected", "Please select a file first.")
              return
 
-        # Determine output directory
-        # Logic matching run_translation_direct / _process_image_file / _process_text_file
-        
         # Check for output directory override
         override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
         
@@ -4844,49 +4841,204 @@ Recent translations to summarize:
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
         image_files = [f for f in files if os.path.splitext(f)[1].lower() in image_extensions]
         
-        output_path = None
-        
         if len(image_files) > 1 and len(image_files) == len(files):
-            # Batch image mode
+            # Batch image mode — single combined folder
             parent_dir = os.path.dirname(files[0])
             folder_name = os.path.basename(parent_dir) if parent_dir else "translated_images"
             if override_dir:
                 output_path = os.path.join(override_dir, folder_name)
             else:
                 output_path = os.path.join(os.getcwd(), folder_name)
-        else:
-            # Single file or non-batch-image
-            # Use the first file
-            file_path = files[0]
+            self._open_single_output_folder(output_path)
+            return
+        
+        if len(files) == 1:
+            # Single file — open directly
+            base_name = os.path.splitext(os.path.basename(files[0]))[0]
+            if override_dir:
+                output_path = os.path.join(override_dir, base_name)
+            else:
+                output_path = os.path.join(os.getcwd(), base_name)
+            self._open_single_output_folder(output_path)
+            return
+        
+        # ── Multiple files — show picker dialog ──────────────────────
+        self._show_output_folder_picker(files, override_dir)
+
+    def _open_single_output_folder(self, output_path):
+        """Open a single output folder, with fallback to parent if it doesn't exist."""
+        import subprocess
+        
+        if not os.path.exists(output_path):
+            reply = QMessageBox.question(self, "Folder Not Found", 
+                                  f"The output folder '{os.path.basename(output_path)}' does not exist yet.\n"
+                                  f"Expected path: {output_path}\n"
+                                  "Do you want to open the parent directory instead?",
+                                  QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                output_path = os.path.dirname(output_path)
+            else:
+                return
+        
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(output_path)
+            elif platform.system() == 'Darwin':
+                subprocess.call(['open', output_path])
+            else:
+                subprocess.call(['xdg-open', output_path])
+        except Exception as e:
+             QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
+
+    def _show_output_folder_picker(self, files, override_dir):
+        """Show a non-modal stay-on-top dialog to pick which output folder to open."""
+        import subprocess
+        
+        # Close previous picker if still open
+        if hasattr(self, '_folder_picker_dialog') and self._folder_picker_dialog is not None:
+            try:
+                self._folder_picker_dialog.close()
+            except Exception:
+                pass
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Open Output Folder")
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        # Scale relative to main window size (40% width, 50% height)
+        main_size = self.size()
+        dialog.resize(int(main_size.width() * 0.4), int(main_size.height() * 0.5))
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(6)
+        layout.setContentsMargins(12, 12, 12, 12)
+        
+        header = QLabel(f"📁 Select output folder to open ({len(files)} files)")
+        header.setStyleSheet("font-size: 11pt; font-weight: bold; color: #5a9fd4; margin-bottom: 6px;")
+        layout.addWidget(header)
+        
+        # Scrollable area for the folder list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background-color: #1e1e1e; }")
+        
+        scroll_widget = QWidget()
+        scroll_widget.setObjectName("folderPickerScrollContent")
+        scroll_widget.setStyleSheet("#folderPickerScrollContent { background-color: #1e1e1e; }")
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(4)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        
+        for file_path in files:
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             if override_dir:
                 output_path = os.path.join(override_dir, base_name)
             else:
                 output_path = os.path.join(os.getcwd(), base_name)
             
-        # Try to open
-        if output_path:
-            if not os.path.exists(output_path):
-                 # Check if we should warn or open parent
-                 reply = QMessageBox.question(self, "Folder Not Found", 
-                                      f"The output folder '{os.path.basename(output_path)}' does not exist yet.\n"
-                                      f"Expected path: {output_path}\n"
-                                      "Do you want to open the parent directory instead?",
-                                      QMessageBox.Yes | QMessageBox.No)
-                 if reply == QMessageBox.Yes:
-                     output_path = os.path.dirname(output_path)
-                 else:
-                     return
+            exists = os.path.exists(output_path)
             
-            try:
-                if platform.system() == 'Windows':
-                    os.startfile(output_path)
-                elif platform.system() == 'Darwin':
-                    subprocess.call(['open', output_path])
+            btn = QPushButton()
+            # Show filename + existence status
+            icon = "📂" if exists else "📁"
+            status = "" if exists else "  (not yet created)"
+            btn.setText(f"{icon}  {base_name}{status}")
+            btn.setToolTip(output_path)
+            btn.setCursor(Qt.PointingHandCursor)
+            
+            # Style based on whether the folder exists
+            if exists:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2d3748;
+                        color: #e0e0e0;
+                        border: 1px solid #4a5568;
+                        border-radius: 4px;
+                        padding: 8px 12px;
+                        text-align: left;
+                        font-size: 10pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #3d4f6a;
+                        border-color: #5a9fd4;
+                    }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2a2a2a;
+                        color: #777;
+                        border: 1px solid #3a3a3a;
+                        border-radius: 4px;
+                        padding: 8px 12px;
+                        text-align: left;
+                        font-size: 10pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #333;
+                        border-color: #555;
+                    }
+                """)
+            
+            # Capture output_path in lambda closure
+            btn.clicked.connect(lambda checked=False, p=output_path: self._open_single_output_folder(p))
+            scroll_layout.addWidget(btn)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+        
+        # Open All button
+        open_all_btn = QPushButton("Open All Existing Folders")
+        open_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        
+        def open_all():
+            for file_path in files:
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                if override_dir:
+                    p = os.path.join(override_dir, base_name)
                 else:
-                    subprocess.call(['xdg-open', output_path])
-            except Exception as e:
-                 QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
+                    p = os.path.join(os.getcwd(), base_name)
+                if os.path.exists(p):
+                    try:
+                        if platform.system() == 'Windows':
+                            os.startfile(p)
+                        elif platform.system() == 'Darwin':
+                            subprocess.call(['open', p])
+                        else:
+                            subprocess.call(['xdg-open', p])
+                    except Exception:
+                        pass
+        
+        open_all_btn.clicked.connect(open_all)
+        layout.addWidget(open_all_btn)
+        
+        self._folder_picker_dialog = dialog
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.destroyed.connect(lambda: setattr(self, '_folder_picker_dialog', None))
+        dialog.show()  # Non-modal
 
     def _create_api_section(self):
         """Create API key section"""
