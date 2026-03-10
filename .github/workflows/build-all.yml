@@ -103,7 +103,7 @@ jobs:
       - name: Upload Windows Lite artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-Lite-Windows
+          name: Z_Glossarion-Lite-Windows
           path: src/dist/*.exe
           if-no-files-found: error
 
@@ -200,7 +200,7 @@ jobs:
       - name: Upload Windows NoCuda artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-NoCuda-Windows
+          name: Z_Glossarion-NoCuda-Windows
           path: src/dist/*.exe
           if-no-files-found: error
 
@@ -238,14 +238,14 @@ jobs:
       - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-Lite-macOS
+          name: Z_Glossarion-Lite-macOS
           path: src/dist/*.dmg
           if-no-files-found: warn
       
       - name: Upload macOS app artifact (fallback)
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-Lite-macOS-App
+          name: Z_Glossarion-Lite-macOS-App
           path: src/dist/*.app
           if-no-files-found: warn
 
@@ -294,16 +294,16 @@ jobs:
         working-directory: src
       
       - name: Make executable
-        run: chmod +x src/dist/L_Glossarion_Lite_v7.9.3_Linux
+        run: chmod +x src/dist/L_Glossarion_Lite_v7.9.5_Linux
       
       - name: Create tarball
         run: |
           cd src/dist
-          tar -czvf Glossarion-Lite-Linux.tar.gz L_Glossarion_Lite_v7.9.3_Linux
+          tar -czvf Glossarion-Lite-Linux.tar.gz L_Glossarion_Lite_v7.9.5_Linux
       
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-Lite-Linux
+          name: Z_Glossarion-Lite-Linux
           path: src/dist/Glossarion-Lite-Linux.tar.gz
           if-no-files-found: error

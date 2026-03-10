@@ -40,7 +40,7 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-Lite-macOS
+          name: Z_Glossarion-Lite-macOS
           path: src/dist/*.dmg
           if-no-files-found: error
       
