@@ -6517,6 +6517,32 @@ def _create_processing_options_section(self, parent):
     empty_attr_bs_desc.setTextFormat(Qt.RichText)
     bs_opts_v.addWidget(empty_attr_bs_desc)
     
+    # Halgakos icon for BeautifulSoup mode
+    halgakos_label = QLabel()
+    halgakos_label.setAlignment(Qt.AlignCenter)
+    halgakos_label.setContentsMargins(0, 10, 0, 10)
+    try:
+        from PySide6.QtGui import QPixmap
+        base_dir = getattr(self, 'base_dir', os.getcwd())
+        ico_path = os.path.join(base_dir, 'Halgakos.ico')
+        if os.path.isfile(ico_path):
+            pixmap = QPixmap(ico_path)
+            if not pixmap.isNull():
+                screen = QApplication.primaryScreen()
+                dpr = screen.devicePixelRatio() if screen else 1.0
+                target = int(150 * dpr)
+                scaled = pixmap.scaled(
+                    target, target,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                scaled.setDevicePixelRatio(dpr)
+                halgakos_label.setPixmap(scaled)
+                halgakos_label.setFixedSize(150, 150)
+    except Exception:
+        pass
+    bs_opts_v.addWidget(halgakos_label)
+    
     extraction_v.addWidget(self.bs_options_frame)
     
     # Set initial visibility based on current extraction method
