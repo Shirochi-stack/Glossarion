@@ -15219,6 +15219,19 @@ class UnifiedClient:
             # Fallback to base OpenAI-compatible flow if unknown
             base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', 'https://api.openai.com/v1')
         
+        # xAI multi-agent models need the Responses API (/v1/responses)
+        # instead of chat completions (/v1/chat/completions)
+        effective_model = self.model
+        if provider == 'xai' and 'multi-agent' in effective_model.lower():
+            return self._send_xai_responses_api(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                base_url=base_url,
+                response_name=response_name,
+                model=effective_model
+            )
+
         return self._send_openai_compatible(
             messages=messages,
             temperature=temperature,
@@ -15228,6 +15241,173 @@ class UnifiedClient:
             provider=provider
         )
     
+    def _send_xai_responses_api(self, messages, temperature, max_tokens, base_url,
+                                 response_name, model) -> UnifiedResponse:
+        """Send request to xAI Responses API (/v1/responses) for multi-agent models.
+        
+        Multi-agent models like grok-4.20-multi-agent-* don't support /v1/chat/completions.
+        They require the Responses API which uses 'input' instead of 'messages'.
+        """
+        max_retries = self._get_max_retries()
+        api_delay = self._get_send_interval()
+        
+        # Strip grok/ prefix if present
+        effective_model = model
+        if effective_model.startswith('grok/'):
+            effective_model = effective_model[5:]
+        
+        # Convert messages to responses API format
+        # The responses API uses 'input' which can be a string or array of messages
+        input_messages = []
+        system_prompt = None
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                # System instructions go into 'instructions' parameter
+                if system_prompt:
+                    system_prompt += "\n\n" + content
+                else:
+                    system_prompt = content
+            else:
+                input_messages.append({"role": role, "content": content})
+        
+        for attempt in range(max_retries):
+            try:
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                if api_delay > 0 and attempt > 0:
+                    time.sleep(api_delay)
+                
+                # Create client with xAI base URL
+                client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=base_url
+                )
+                
+                # Build params for responses.create()
+                params = {
+                    "model": effective_model,
+                    "input": input_messages,
+                }
+                if system_prompt:
+                    params["instructions"] = system_prompt
+                if temperature is not None:
+                    params["temperature"] = temperature
+                if max_tokens:
+                    params["max_output_tokens"] = max_tokens
+                
+                print(f"🌀 [xai] Sending to Responses API (model={effective_model})")
+                
+                # Try SDK responses.create() first
+                try:
+                    response = client.responses.create(**params)
+                    
+                    # Extract text from response
+                    content = ""
+                    if hasattr(response, 'output') and response.output:
+                        for item in response.output:
+                            if hasattr(item, 'type') and item.type == 'message':
+                                if hasattr(item, 'content') and item.content:
+                                    for block in item.content:
+                                        if hasattr(block, 'text'):
+                                            content += block.text
+                            elif hasattr(item, 'text'):
+                                content += item.text
+                    elif hasattr(response, 'output_text'):
+                        content = response.output_text or ""
+                    
+                    # Extract usage
+                    usage_data = None
+                    if hasattr(response, 'usage') and response.usage:
+                        u = response.usage
+                        usage_data = {
+                            "prompt_tokens": getattr(u, 'input_tokens', 0) or 0,
+                            "completion_tokens": getattr(u, 'output_tokens', 0) or 0,
+                            "total_tokens": (getattr(u, 'input_tokens', 0) or 0) + (getattr(u, 'output_tokens', 0) or 0),
+                        }
+                    
+                    finish_reason = "stop"
+                    if hasattr(response, 'status'):
+                        if response.status == 'incomplete':
+                            finish_reason = "length"
+                    
+                    return UnifiedResponse(
+                        content=content.strip(),
+                        finish_reason=finish_reason,
+                        usage=usage_data,
+                        raw_response=response
+                    )
+                    
+                except AttributeError:
+                    # SDK doesn't have responses — fall back to raw HTTP
+                    import requests as req
+                    url = f"{base_url.rstrip('/')}/responses"
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    }
+                    
+                    resp = req.post(url, json=params, headers=headers, timeout=300)
+                    
+                    if resp.status_code != 200:
+                        error_msg = resp.text[:500]
+                        try:
+                            error_msg = resp.json().get("error", {}).get("message", error_msg)
+                        except Exception:
+                            pass
+                        raise UnifiedClientError(
+                            f"xAI Responses API error ({resp.status_code}): {error_msg}",
+                            error_type="api_error"
+                        )
+                    
+                    data = resp.json()
+                    content = ""
+                    for item in data.get("output", []):
+                        if item.get("type") == "message":
+                            for block in item.get("content", []):
+                                if block.get("type") == "output_text":
+                                    content += block.get("text", "")
+                        elif "text" in item:
+                            content += item["text"]
+                    
+                    if not content and "output_text" in data:
+                        content = data["output_text"]
+                    
+                    usage_data = None
+                    if "usage" in data:
+                        u = data["usage"]
+                        usage_data = {
+                            "prompt_tokens": u.get("input_tokens", 0),
+                            "completion_tokens": u.get("output_tokens", 0),
+                            "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
+                        }
+                    
+                    return UnifiedResponse(
+                        content=content.strip(),
+                        finish_reason="stop",
+                        usage=usage_data,
+                        raw_response=data
+                    )
+                    
+            except UnifiedClientError:
+                raise
+            except Exception as e:
+                error_str = str(e)
+                print(f"🛑 [xai] [Section {response_name}] Responses API error: {error_str}")
+                if attempt < max_retries - 1:
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    print(f"xai Responses API error (attempt {attempt + 1}) [{response_name}]: {error_str}")
+                    time.sleep(wait)
+                else:
+                    raise UnifiedClientError(
+                        f"xAI Responses API failed after {max_retries} attempts: {error_str}",
+                        error_type="api_error"
+                    )
+        
+        raise UnifiedClientError("xAI Responses API: all retries exhausted", error_type="api_error")
+
     def _send_azure(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Azure OpenAI"""
         # Prefer per-key (individual) endpoint/version when present, then fall back to env vars
