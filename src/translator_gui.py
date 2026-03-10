@@ -14823,7 +14823,7 @@ Important rules:
                 },
                 {
                     "key": "retry_timeout", "emoji": "⏱️", "title": "Auto-retry API Timeouts",
-                    "desc": "Automatically retry chunks that take too long to process.\nAlso affects chapter extraction timeout.",
+                    "desc": "Automatically retry text/image chunks that take too long to process.\nDefault timeout: 1800s (30 min). Configurable in Other Settings.",
                     "default": True,
                     "bg": "#2a1a14", "accent": "#f0a060",
                 },

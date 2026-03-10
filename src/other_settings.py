@@ -3595,7 +3595,7 @@ def _create_response_handling_section(self, parent):
     
     timeout_h.addStretch()
     
-    timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\nThis will also affect chapter extraction timeout")
+    timeout_desc = QLabel("Adds API timeout logic to text/image chunks that take too long")
     timeout_desc.setContentsMargins(20, 0, 0, 5)
     
     def _on_retry_slow_toggle(checked):
