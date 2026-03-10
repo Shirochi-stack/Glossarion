@@ -3823,6 +3823,31 @@ Recent translations to summarize:
         profile_buttons_layout.setContentsMargins(0, 0, 0, 0)
         profile_buttons_layout.setSpacing(10)
         
+        # Quick new profile "+" button
+        self._new_profile_btn = QPushButton("+")
+        self._new_profile_btn.setFixedSize(28, 28)
+        self._new_profile_btn.setToolTip("Create a new empty profile")
+        self._new_profile_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d5a2d;
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: bold;
+                border: 1px solid #3a7a3a;
+                border-radius: 4px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #3a7a3a;
+                border-color: #4a9a4a;
+            }
+            QPushButton:pressed {
+                background-color: #1e3e1e;
+            }
+        """)
+        self._new_profile_btn.clicked.connect(self._quick_new_profile)
+        profile_buttons_layout.addWidget(self._new_profile_btn)
+        
         # Save Profile button
         save_profile_btn = QPushButton("Save Profile")
         save_profile_btn.clicked.connect(self.save_profile)
@@ -3855,6 +3880,41 @@ Recent translations to summarize:
         
         if action == manage_action:
             self._open_profile_manager()
+    
+    def _quick_new_profile(self):
+        """Create a new empty profile with auto-incrementing name."""
+        existing = set(self.prompt_profiles.keys())
+        if hasattr(self, 'profile_menu'):
+            for i in range(self.profile_menu.count()):
+                existing.add(self.profile_menu.itemText(i))
+        
+        n = 1
+        while f"New Profile #{n}" in existing:
+            n += 1
+        name = f"New Profile #{n}"
+        
+        self.prompt_profiles[name] = ""
+        self.config['prompt_profiles'] = self.prompt_profiles
+        self.config['active_profile'] = name
+        
+        if hasattr(self, 'profile_menu'):
+            self.profile_menu.addItem(name)
+            self.profile_menu.setCurrentText(name)
+        
+        if hasattr(self, 'prompt_text'):
+            self.prompt_text.setPlainText("")
+        
+        self.profile_var = name
+        if not hasattr(self, '_original_profile_content'):
+            self._original_profile_content = {}
+        self._original_profile_content[name] = ""
+        self._active_profile_for_autosave = name
+        
+        if hasattr(self, 'save_profiles'):
+            self.save_profiles()
+        
+        if hasattr(self, 'append_log'):
+            self.append_log(f"✅ Created new profile: '{name}'")
     
     def _open_profile_manager(self):
         """Open a dialog for managing profile order with drag-and-drop."""
