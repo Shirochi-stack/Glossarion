@@ -1505,7 +1505,7 @@ Text to analyze:
             
             # Show first-time glossary mode selection dialog
             if not self.config.get('glossary_mode_dialog_shown', False):
-                QTimer.singleShot(2000, self._show_glossary_mode_welcome)
+                QTimer.singleShot(0, self._show_glossary_mode_welcome)
         except ImportError as e:
             self.update_manager = None
             print(f"[DEBUG] Update manager not available: {e}")
