@@ -445,7 +445,7 @@ class GlossaryManagerMixin:
         
         # Create and add tabs
         tabs = [
-            ("Manual Glossary Extraction", self._setup_manual_glossary_tab),
+            ("Balanced/Full Extraction", self._setup_manual_glossary_tab),
             ("Automatic Glossary Generation", self._setup_auto_glossary_tab),
             ("Glossary Editor", self._setup_glossary_editor_tab)
         ]
@@ -1491,7 +1491,7 @@ CRITICAL EXTRACTION RULES:
         prompt_controls_layout.addStretch()
         
         # Settings
-        settings_frame = QGroupBox("Extraction Settings")
+        settings_frame = QGroupBox("Balanced/Full Extraction Settings")
         settings_frame_layout = QVBoxLayout(settings_frame)
         manual_layout.addWidget(settings_frame)
         
@@ -2227,7 +2227,7 @@ CRITICAL EXTRACTION RULES:
         notebook.addTab(extraction_tab, "Extraction Settings")
         
         # Extraction settings
-        settings_label_frame = QGroupBox("Targeted Extraction Settings")
+        settings_label_frame = QGroupBox("Minimal Extraction Settings")
         settings_label_layout = QVBoxLayout(settings_label_frame)
         settings_label_layout.setContentsMargins(6, 6, 6, 6)
         extraction_tab_layout.addWidget(settings_label_frame)
