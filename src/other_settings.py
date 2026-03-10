@@ -5164,6 +5164,33 @@ def _create_prompt_management_section(self, parent):
     title_desc.setContentsMargins(20, 0, 0, 8)
     section_v.addWidget(title_desc)
 
+    # Skip .txt book title translation (enabled by default)
+    if not hasattr(self, 'skip_txt_title_translation_var'):
+        self.skip_txt_title_translation_var = bool(self.config.get('skip_txt_title_translation', True))
+        if 'skip_txt_title_translation' not in self.config:
+            self.config['skip_txt_title_translation'] = True
+    skip_txt_title_cb = self._create_styled_checkbox("Skip .txt book title translation")
+    skip_txt_title_cb.setToolTip(
+        "When enabled, book title translation is skipped for .txt files.\n"
+        "Plain text files typically derive their title from the filename,\n"
+        "which doesn't need translation."
+    )
+    try:
+        skip_txt_title_cb.setChecked(bool(self.skip_txt_title_translation_var))
+    except Exception:
+        pass
+
+    def _on_skip_txt_title_toggle(checked):
+        try:
+            self.skip_txt_title_translation_var = bool(checked)
+            self.config['skip_txt_title_translation'] = bool(checked)
+            os.environ['SKIP_TXT_TITLE_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    skip_txt_title_cb.toggled.connect(_on_skip_txt_title_toggle)
+    section_v.addWidget(skip_txt_title_cb)
+
     # Skip image title translation (manga/image output filenames)
     if not hasattr(self, 'skip_image_title_translation_var'):
         # Default to enabled

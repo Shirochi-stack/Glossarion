@@ -9379,10 +9379,14 @@ def main(log_callback=None, stop_callback=None):
         client.reset_cleanup_state()
         
     if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
-        original_title = metadata["title"]
-        print(f"📚 Original title: {original_title}")
-        
-        if not check_stop():
+        # Skip title translation for .txt files when the toggle is enabled
+        is_txt = input_path.lower().endswith(('.txt',))
+        skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
+        if is_txt and skip_txt_title:
+            print(f"📚 Skipping title translation for .txt file")
+        elif not check_stop():
+            original_title = metadata["title"]
+            print(f"📚 Original title: {original_title}")
             translated_title = translate_title(
                 original_title, 
                 client, 

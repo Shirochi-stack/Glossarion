@@ -2528,6 +2528,7 @@ Recent translations to summarize:
             ('translation_history_rolling_var', 'translation_history_rolling', False),
             ('glossary_history_rolling_var', 'glossary_history_rolling', False),
             ('translate_book_title_var', 'translate_book_title', True),
+            ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
             ('include_book_title_glossary_var', 'include_book_title_glossary', False),
             ('enable_auto_glossary_var', 'enable_auto_glossary', True),
             ('append_glossary_var', 'append_glossary', True),
@@ -10010,6 +10011,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
+            'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
@@ -11719,6 +11721,7 @@ Important rules:
             
             # Set book title translation settings
             os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
+            os.environ['SKIP_TXT_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0"
             # Replace {target_lang} variable in book title prompts with output language
             output_lang = self.config.get('output_language', 'English')
             self.append_log(f"[DEBUG] output_language from config: '{output_lang}'")
@@ -16538,6 +16541,7 @@ Important rules:
                 # Whether to reuse previous source text as memory/history context
                 ('include_source_in_history', ['include_source_in_history_var'], False, bool),
                 ('translate_book_title', ['translate_book_title_var'], False, bool),
+                ('skip_txt_title_translation', ['skip_txt_title_translation_var'], False, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
@@ -17531,6 +17535,7 @@ Important rules:
 
                 # Book title handling
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
+                ('SKIP_TXT_TITLE_TRANSLATION', '1' if getattr(self, 'skip_txt_title_translation_var', True) else '0'),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
                 ('GLOSSARY_AUTO_INJECT_BOOK_TITLE', '1' if getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)) else '0'),
