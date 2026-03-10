@@ -507,20 +507,33 @@ def send_message(
     if log_fn:
         log_fn(f"🌀 Antigravity: Sending to proxy at {proxy_url} (model={model})")
 
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    except requests.ConnectionError:
-        raise RuntimeError(
-            "Antigravity proxy connection refused. "
-            "Make sure the proxy is running:\n"
-            "  npx antigravity-claude-proxy@latest start\n"
-            "  Then open http://localhost:8080 and add your Google account."
-        )
-    except requests.Timeout:
-        raise RuntimeError(
-            f"Antigravity proxy request timed out after {timeout}s. "
-            "The model may need more time for long translations."
-        )
+    # Retry on transient 401/403 (OAuth token refresh race condition)
+    resp = None
+    for _auth_attempt in range(4):  # 1 initial + 3 retries
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        except requests.ConnectionError:
+            raise RuntimeError(
+                "Antigravity proxy connection refused. "
+                "Make sure the proxy is running:\n"
+                "  npx antigravity-claude-proxy@latest start\n"
+                "  Then open http://localhost:8080 and add your Google account."
+            )
+        except requests.Timeout:
+            raise RuntimeError(
+                f"Antigravity proxy request timed out after {timeout}s. "
+                "The model may need more time for long translations."
+            )
+
+        if resp.status_code not in (401, 403) or _auth_attempt >= 3:
+            break
+        # Transient auth failure — wait for token refresh and retry
+        wait = 2 * (_auth_attempt + 1)  # 2s, 4s, 6s
+        if log_fn:
+            log_fn(f"⏳ Antigravity: Auth error (HTTP {resp.status_code}), retrying in {wait}s... ({_auth_attempt + 1}/3)")
+        time.sleep(wait)
+        invalidate_api_key_cache()
+        headers = _build_headers()  # refresh key
 
     # Handle auth failure
     if resp.status_code in (401, 403):
@@ -691,44 +704,62 @@ def send_message_stream(
     resp = None
     _httpx_ctx = None
 
-    if use_httpx:
-        try:
-            _timeout = _httpx.Timeout(timeout, connect=30.0)
-            _httpx_ctx = _httpx.stream(
-                "POST", url, json=payload, headers=headers, timeout=_timeout
-            )
-            resp = _httpx_ctx.__enter__()
-        except Exception as exc:
-            if _httpx_ctx is not None:
-                try:
-                    _httpx_ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
-            exc_str = str(exc).lower()
-            if "connect" in exc_str or "refused" in exc_str:
+    # Retry on transient 401/403 (OAuth token refresh race condition)
+    for _auth_attempt in range(4):  # 1 initial + 3 retries
+        if use_httpx:
+            try:
+                _timeout = _httpx.Timeout(timeout, connect=30.0)
+                _httpx_ctx = _httpx.stream(
+                    "POST", url, json=payload, headers=headers, timeout=_timeout
+                )
+                resp = _httpx_ctx.__enter__()
+            except Exception as exc:
+                if _httpx_ctx is not None:
+                    try:
+                        _httpx_ctx.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                exc_str = str(exc).lower()
+                if "connect" in exc_str or "refused" in exc_str:
+                    raise RuntimeError(
+                        "Antigravity proxy connection refused. "
+                        "Make sure the proxy is running:\n"
+                        "  npx antigravity-claude-proxy@latest start"
+                    )
+                raise RuntimeError(
+                    f"Antigravity proxy streaming error: {exc}"
+                )
+        else:
+            try:
+                resp = requests.post(
+                    url, json=payload, headers=headers, timeout=timeout, stream=True
+                )
+            except requests.ConnectionError:
                 raise RuntimeError(
                     "Antigravity proxy connection refused. "
                     "Make sure the proxy is running:\n"
                     "  npx antigravity-claude-proxy@latest start"
                 )
-            raise RuntimeError(
-                f"Antigravity proxy streaming error: {exc}"
-            )
-    else:
-        try:
-            resp = requests.post(
-                url, json=payload, headers=headers, timeout=timeout, stream=True
-            )
-        except requests.ConnectionError:
-            raise RuntimeError(
-                "Antigravity proxy connection refused. "
-                "Make sure the proxy is running:\n"
-                "  npx antigravity-claude-proxy@latest start"
-            )
-        except requests.Timeout:
-            raise RuntimeError(
-                f"Antigravity proxy streaming request timed out after {timeout}s."
-            )
+            except requests.Timeout:
+                raise RuntimeError(
+                    f"Antigravity proxy streaming request timed out after {timeout}s."
+                )
+
+        if resp.status_code not in (401, 403) or _auth_attempt >= 3:
+            break
+        # Transient auth failure — close stream and retry after backoff
+        if use_httpx and _httpx_ctx:
+            try:
+                _httpx_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+            _httpx_ctx = None
+        wait = 2 * (_auth_attempt + 1)  # 2s, 4s, 6s
+        _log(f"⏳ Antigravity: Auth error (HTTP {resp.status_code}), retrying in {wait}s... ({_auth_attempt + 1}/3)")
+        time.sleep(wait)
+        invalidate_api_key_cache()
+        headers = _build_headers()  # refresh key
+        resp = None
 
     # Handle auth failure
     if resp.status_code in (401, 403):
