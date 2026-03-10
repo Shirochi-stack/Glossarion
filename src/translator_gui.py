@@ -4734,6 +4734,42 @@ Recent translations to summarize:
         
         batch_layout.addWidget(self.batch_icon)
         batch_layout.addWidget(self.batch_checkbox)
+        
+        # Spacer between batch checkbox and auto glossary toggle
+        batch_layout.addSpacing(16)
+        
+        # Duplicate Auto Glossary toggle (synced with main auto_glossary_mode_combo)
+        self.auto_glossary_shortcut_checkbox = self._create_styled_checkbox("Auto Glossary")
+        self.auto_glossary_shortcut_checkbox.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Quick toggle for Automatic Glossary Generation. "
+            "Synced with the mode selector in Glossary Settings.<br><br>"
+            "Checked = Minimal mode (lightweight in-process extraction)<br>"
+            "Unchecked = Off</p></qt>"
+        )
+        # Initialize from config
+        _auto_mode = self.config.get('auto_glossary_mode', None)
+        if _auto_mode is None:
+            _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+        self.auto_glossary_shortcut_checkbox.setChecked(_auto_mode.lower() != 'off')
+        
+        def _on_auto_glossary_shortcut_toggled(checked):
+            """Sync shortcut checkbox → main auto_glossary_mode_combo."""
+            new_mode = 'minimal' if checked else 'off'
+            self.config['auto_glossary_mode'] = new_mode
+            self.config['enable_auto_glossary'] = checked
+            self.enable_auto_glossary_var = checked
+            self.auto_glossary_mode_var = new_mode
+            if hasattr(self, 'auto_glossary_mode_combo'):
+                idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(new_mode, 0)
+                self.auto_glossary_mode_combo.blockSignals(True)
+                self.auto_glossary_mode_combo.setCurrentIndex(idx)
+                self.auto_glossary_mode_combo.blockSignals(False)
+            self.save_config(show_message=False)
+        
+        self.auto_glossary_shortcut_checkbox.toggled.connect(_on_auto_glossary_shortcut_toggled)
+        batch_layout.addWidget(self.auto_glossary_shortcut_checkbox)
+        
         batch_layout.addStretch()
         
         self.frame.addWidget(batch_container, 7, 2, Qt.AlignLeft)
@@ -15265,6 +15301,10 @@ Important rules:
                     if hasattr(self, 'auto_glossary_mode_combo'):
                         idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 2)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
+                    if hasattr(self, 'auto_glossary_shortcut_checkbox'):
+                        self.auto_glossary_shortcut_checkbox.blockSignals(True)
+                        self.auto_glossary_shortcut_checkbox.setChecked(mode_val != 'off')
+                        self.auto_glossary_shortcut_checkbox.blockSignals(False)
                     if mode_val != 'off':
                         self.config['append_glossary'] = True
                         setattr(self, 'append_glossary_var', True)

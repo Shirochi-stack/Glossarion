@@ -15037,6 +15037,9 @@ class UnifiedClient:
         for attempt in range(max_retries):
             # Check stop flag
             if self._is_stop_requested():
+                # Also signal the antigravity cancel event so any in-flight stream aborts
+                if _antigravity_cancel_stream is not None:
+                    _antigravity_cancel_stream()
                 raise UnifiedClientError(
                     "Antigravity: Translation stopped by user",
                     error_type="cancelled"
@@ -15083,6 +15086,14 @@ class UnifiedClient:
                     raise UnifiedClientError(
                         "Antigravity: Translation stopped by user",
                         error_type="cancelled"
+                    )
+
+                # API key rejected — fatal, don't retry
+                if "api key rejected" in error_str.lower() or "api key" in error_str.lower():
+                    raise UnifiedClientError(
+                        f"Antigravity: {error_str}\n"
+                        f"Open http://localhost:8080 → Settings and check/remove the API Key.",
+                        error_type="config_error"
                     )
 
                 # Connection refused – proxy not running
@@ -16675,6 +16686,12 @@ def set_stop_flag(value: bool = True):
         UnifiedClient.set_global_cancellation(global_stop_flag)
     except Exception:
         pass
+    # Also signal the antigravity proxy cancel event so in-flight streams abort
+    if value and _antigravity_cancel_stream is not None:
+        try:
+            _antigravity_cancel_stream()
+        except Exception:
+            pass
 
 
 def is_stop_requested() -> bool:
@@ -16690,3 +16707,9 @@ def hard_cancel_all():
         UnifiedClient.hard_cancel_all()
     except Exception:
         pass
+    # Also signal the antigravity proxy cancel event
+    if _antigravity_cancel_stream is not None:
+        try:
+            _antigravity_cancel_stream()
+        except Exception:
+            pass

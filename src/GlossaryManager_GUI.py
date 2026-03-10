@@ -2806,6 +2806,15 @@ CRITICAL EXTRACTION RULES:
         # Connect signals
         self.auto_glossary_mode_combo.currentIndexChanged.connect(update_auto_glossary_state)
         self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
+        
+        # Sync main combo → shortcut checkbox on the main UI
+        def _sync_shortcut_from_combo(*_args):
+            if hasattr(self, 'auto_glossary_shortcut_checkbox'):
+                mode = self.auto_glossary_mode_combo.currentText().lower()
+                self.auto_glossary_shortcut_checkbox.blockSignals(True)
+                self.auto_glossary_shortcut_checkbox.setChecked(mode != 'off')
+                self.auto_glossary_shortcut_checkbox.blockSignals(False)
+        self.auto_glossary_mode_combo.currentIndexChanged.connect(_sync_shortcut_from_combo)
 
     def _open_glossary_anti_duplicate_dialog(self, parent):
         """Open glossary-specific anti-duplicate parameters dialog."""
