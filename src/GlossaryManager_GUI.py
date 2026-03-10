@@ -2775,9 +2775,11 @@ CRITICAL EXTRACTION RULES:
         def update_auto_glossary_state(*_args):
             mode = self.auto_glossary_mode_combo.currentText().lower() if hasattr(self, 'auto_glossary_mode_combo') else 'off'
             enabled = mode != 'off'
+            # Targeted Extraction Settings only apply to Minimal mode
+            extraction_enabled = mode == 'minimal'
             
             # Enable/disable the entire Targeted Extraction Settings group box
-            settings_label_frame.setEnabled(enabled)
+            settings_label_frame.setEnabled(extraction_enabled)
             
             # Enable/disable all extraction grid widgets (for thorough coverage)
             for i in range(extraction_grid.count()):
@@ -2785,12 +2787,12 @@ CRITICAL EXTRACTION RULES:
                 if item:
                     widget = item.widget()
                     if widget:
-                        widget.setEnabled(enabled)
+                        widget.setEnabled(extraction_enabled)
                         # Also enable/disable all children within compound widgets
                         for child in widget.findChildren(QWidget):
-                            child.setEnabled(enabled)
+                            child.setEnabled(extraction_enabled)
             
-            # Enable/disable text widgets
+            # Enable/disable text widgets (prompt still relevant for all non-off modes)
             self.auto_prompt_text.setEnabled(enabled)
         
         def update_append_prompt_state(checked=None):
