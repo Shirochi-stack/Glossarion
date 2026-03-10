@@ -14514,9 +14514,9 @@ Important rules:
                 selected_mode[0] = val
                 for v, (card, mi) in card_frames.items():
                     if v == val:
-                        card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 3px solid {mi['accent']}; border-radius: 5px; }}")
+                        card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 2px solid {mi['accent']}; border-radius: 5px; }}")
                     else:
-                        card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 2px solid {mi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
+                        card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 1px solid {mi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
             
             for idx, mi in enumerate(mode_data):
                 card = QFrame()
@@ -14527,9 +14527,9 @@ Important rules:
                 
                 is_sel = mi["value"] == "balanced"
                 if is_sel:
-                    card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 3px solid {mi['accent']}; border-radius: 5px; }}")
+                    card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 2px solid {mi['accent']}; border-radius: 5px; }}")
                 else:
-                    card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 2px solid {mi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
+                    card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 1px solid {mi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
                 
                 cl = QVBoxLayout(card)
                 m = max(6, int(10 * ui_s))
@@ -14560,7 +14560,7 @@ Important rules:
                     fl = QLabel(feat)
                     fl.setFont(QFont("Arial", feat_pt))
                     fl.setWordWrap(True)
-                    fl.setStyleSheet("background:transparent; color:#f0f4ff; border:none;")
+                    fl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                     cl.addWidget(fl)
                 
                 if mi["rec"]:
@@ -14649,9 +14649,9 @@ Important rules:
                 selected_ext[0] = val
                 for v, (card, fi) in ext_card_frames.items():
                     if v == val:
-                        card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 3px solid {fi['accent']}; border-radius: 5px; }}")
+                        card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 2px solid {fi['accent']}; border-radius: 5px; }}")
                     else:
-                        card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 2px solid {fi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+                        card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 1px solid {fi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
             
             for idx, fi in enumerate(format_data):
                 card = QFrame()
@@ -14661,9 +14661,9 @@ Important rules:
                 
                 is_sel = fi["value"] == selected_ext[0]
                 if is_sel:
-                    card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 3px solid {fi['accent']}; border-radius: 5px; }}")
+                    card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 2px solid {fi['accent']}; border-radius: 5px; }}")
                 else:
-                    card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 2px solid {fi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+                    card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 1px solid {fi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
                 fmt_lay.addWidget(card, 0, idx)
                 
                 cl = QVBoxLayout(card)
@@ -14694,7 +14694,7 @@ Important rules:
                     fl = QLabel(feat)
                     fl.setFont(QFont("Arial", feat_pt))
                     fl.setWordWrap(True)
-                    fl.setStyleSheet("background:transparent; color:#f0f4ff; border:none;")
+                    fl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                     cl.addWidget(fl)
                 
                 if fi["rec"]:

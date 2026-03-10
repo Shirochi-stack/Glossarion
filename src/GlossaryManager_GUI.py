@@ -1387,7 +1387,7 @@ class GlossaryManagerMixin:
         language_frame_layout.addWidget(lang_desc)
         
         # Prompt section
-        prompt_frame = QGroupBox("Extraction Prompt")
+        prompt_frame = QGroupBox("Balanced/Full Extraction Prompt")
         prompt_frame_layout = QVBoxLayout(prompt_frame)
         manual_layout.addWidget(prompt_frame)
         
@@ -2684,10 +2684,10 @@ CRITICAL EXTRACTION RULES:
         glossary_prompt_tab = QWidget()
         glossary_prompt_tab_layout = QVBoxLayout(glossary_prompt_tab)
         glossary_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
-        notebook.addTab(glossary_prompt_tab, "Glossary Prompt")
+        notebook.addTab(glossary_prompt_tab, "Minimal Glossary Prompt")
         
         # Unified glossary prompt section
-        glossary_prompt_frame = QGroupBox("Glossary Extraction Prompt")
+        glossary_prompt_frame = QGroupBox("Minimal Glossary Extraction Prompt")
         glossary_prompt_frame_layout = QVBoxLayout(glossary_prompt_frame)
         glossary_prompt_tab_layout.addWidget(glossary_prompt_frame)
         
