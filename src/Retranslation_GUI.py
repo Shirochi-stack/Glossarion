@@ -217,22 +217,28 @@ class RetranslationMixin:
             if pm_btn is None:
                 return
 
-            original_style = pm_btn.styleSheet()
+            # Remember the definitive original style (first call wins)
+            # This prevents re-capturing an already-green style on rapid re-calls
+            if not hasattr(self, '_pm_original_style') or not self._pm_original_style:
+                self._pm_original_style = pm_btn.styleSheet()
 
-            # Flash to green
-            green_style = original_style
-            # Replace the background-color in the stylesheet
+            # Flash to green using the definitive original as base
             import re as _re
             green_style = _re.sub(
                 r'background-color:\s*#[0-9a-fA-F]+',
                 'background-color: #27ae60',
-                green_style,
+                self._pm_original_style,
                 count=1
             )
             pm_btn.setStyleSheet(green_style)
 
-            # Restore after 1.5 seconds
-            QTimer.singleShot(1500, lambda: pm_btn.setStyleSheet(original_style))
+            # Restore using the definitive original style after 1.5 seconds
+            def _restore_pm_style():
+                try:
+                    pm_btn.setStyleSheet(self._pm_original_style)
+                except Exception:
+                    pass
+            QTimer.singleShot(1500, _restore_pm_style)
 
             # Play Windows system sound
             try:

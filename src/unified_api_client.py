@@ -4393,11 +4393,8 @@ class UnifiedClient:
         
         elif self.client_type == 'xai':
             # xAI (Grok) uses OpenAI-compatible endpoint
-            if openai is None:
-                logger.info("xAI will use HTTP API")
-            else:
+            if openai is not None:
                 base_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
-                logger.info(f"xAI will use endpoint: {base_url}")
         elif self.client_type == 'nvidia':
             # NVIDIA NIM uses OpenAI-compatible endpoint
             if openai is None:

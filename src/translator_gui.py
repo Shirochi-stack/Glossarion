@@ -945,7 +945,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "7.9.2"
+        __version__ = "7.9.3"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1020,7 +1020,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.2')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.3')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2786,7 +2786,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.9.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.9.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -8064,14 +8064,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         
                         try:
                             # Reuse the exact same Extract Glossary flow
+                            self._glossary_stop_was_requested = False  # Reset before extraction
                             self.run_glossary_extraction_direct()
                             
-                            # Check if stopped by user during extraction
-                            if self.stop_requested:
+                            # Check saved stop flag (run_glossary_extraction_direct resets self.stop_requested in finally)
+                            if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
                                 self.append_log("⏹️ Translation cancelled during glossary extraction")
                                 return
                             
-                            # Auto-load the generated glossary
+                            # Auto-load the generated glossary (only if extraction completed fully)
                             self._auto_load_glossary_after_extraction()
                             
                             self.append_log(f"\n📑 Glossary extraction complete, proceeding to translation...")
@@ -8380,9 +8381,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             failed += 1
                     elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md'}:
                         # Process as EPUB/TXT/CSV/JSON/PDF/MD
-                        self.append_log(f"[DEBUG] ⏳ Calling _process_text_file for: {os.path.basename(file_path)}")
                         result = self._process_text_file(file_path)
-                        self.append_log(f"[DEBUG] 📋 _process_text_file returned: {result} for {os.path.basename(file_path)}")
                         if result:
                             successful += 1
                         else:
@@ -10326,6 +10325,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"❌ Full error: {traceback.format_exc()}")
         
         finally:
+            # Save stop state for callers (balanced/full mode auto-trigger checks this)
+            if self.stop_requested:
+                self._glossary_stop_was_requested = True
             self.stop_requested = False
             if glossary_stop_flag:
                 glossary_stop_flag(False)
@@ -11151,7 +11153,7 @@ Important rules:
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
-                    'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))),
+                    'COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
@@ -17629,7 +17631,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.9.2...")
+    print("🚀 Starting Glossarion v7.9.3...")
     
     # Initialize splash screen
     splash_manager = None
