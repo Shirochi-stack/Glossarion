@@ -4157,7 +4157,6 @@ def main(log_callback=None, stop_callback=None):
                         
                         if len(group) > 1:
                             child_indices = [g[0] for g in group[1:]]
-                            print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (budget-aware)")
                             for child_idx in child_indices:
                                 merged_children.add(child_idx)
             else:
@@ -4168,15 +4167,16 @@ def main(log_callback=None, stop_callback=None):
                     merge_groups[parent_idx] = group
                     if len(group) > 1:
                         child_indices = [g[0] for g in group[1:]]
-                        print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (count-based)")
                         for child_idx in child_indices:
                             merged_children.add(child_idx)
             
             if merge_groups:
-                if chapter_split_enabled:
-                    print(f"   📊 Created {len(merge_groups)} merge groups (budget-aware)")
-                else:
-                    print(f"   📊 Created {len(merge_groups)} merge groups (count-based)")
+                mode_label = "budget-aware" if chapter_split_enabled else "count-based"
+                multi_groups = {p: g for p, g in merge_groups.items() if len(g) > 1}
+                if multi_groups:
+                    group_descs = [f"{p+1}+{[g[0]+1 for g in grp[1:]]}" for p, grp in sorted(multi_groups.items())]
+                    print(f"   📎 {len(multi_groups)} merge groups ({mode_label}): {', '.join(group_descs)}")
+                print(f"   📊 Created {len(merge_groups)} merge groups total ({mode_label})")
         
         for idx, chap in enumerate(chapters):
             # Check for graceful stop completion at START of each chapter iteration
@@ -4198,7 +4198,6 @@ def main(log_callback=None, stop_callback=None):
             
             # Skip if this chapter was merged into another (current run only)
             if idx in merged_children:
-                print(f"⏭️ Skipping chapter {idx+1} (merged into parent)")
                 continue
             
             # Apply chapter range filter
@@ -4695,12 +4694,15 @@ def main(log_callback=None, stop_callback=None):
                 
                 # If this was a merged request, also mark child chapters as completed
                 if idx in merge_groups:
+                    marked_children = []
                     for g_idx, _ in merge_groups[idx]:
                         if g_idx != idx and g_idx not in completed:
                             completed.append(g_idx)
-                            print(f"   ✅ Marked chapter {g_idx+1} as completed (merged)")
+                            marked_children.append(g_idx + 1)
                         if g_idx != idx and g_idx not in merged_indices:
                             merged_indices.append(g_idx)
+                    if marked_children:
+                        print(f"   ✅ Marked chapters {marked_children} as completed (merged with {idx+1})")
 
                 # Only add to history if contextual is enabled
                 if contextual_enabled:

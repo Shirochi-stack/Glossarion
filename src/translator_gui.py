@@ -14815,6 +14815,12 @@ Important rules:
                     "default": False,
                     "bg": "#142014", "accent": "#60d060",
                 },
+                {
+                    "key": "scan_phase_enabled", "emoji": "🧪", "title": "Post-Translation Scanning",
+                    "desc": "Automatically run QA Scanner after translation completes.\nDetects untranslated text, duplicates, and quality issues.",
+                    "default": False,
+                    "bg": "#1e1430", "accent": "#c080f0",
+                },
             ]
             
             toggle_states = {}

@@ -11750,6 +11750,7 @@ def main(log_callback=None, stop_callback=None):
             # Check graceful stop before logging merge groups
             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
             
+            merge_plan_entries = []
             for group in groups:
                 if len(group) > 1:
                     parent_idx = group[0][0]  # First chapter in group is the parent
@@ -11762,10 +11763,12 @@ def main(log_callback=None, stop_callback=None):
                         if i > 0:
                             merged_children.add(idx)
                     
-                    # Only log merge planning if not in graceful stop
-                    if not graceful_stop_active:
-                        child_nums = [g[2] for g in group[1:]]
-                        print(f"   📎 Chapters {parent_actual_num} + {child_nums} will be merged into one request")
+                    child_nums = [g[2] for g in group[1:]]
+                    merge_plan_entries.append(f"{parent_actual_num}+{child_nums}")
+            
+            # Only log merge planning if not in graceful stop
+            if not graceful_stop_active and merge_plan_entries:
+                print(f"   📎 {len(merge_plan_entries)} merge groups: {', '.join(merge_plan_entries)}")
             
             if not graceful_stop_active:
                 print(f"   📊 Created {len(merge_groups)} merge groups from {len(chapters_needing_translation)} chapters")
@@ -11782,13 +11785,6 @@ def main(log_callback=None, stop_callback=None):
             
             # Skip if this chapter was merged into another
             if idx in merged_children:
-                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
-                    actual_num = c['num']
-                else:
-                    actual_num = c.get('actual_chapter_num', c['num'])
-                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                terminology = "Section" if is_text_source else "Chapter"
-                print(f"\n⏭️ Skipping {terminology} {actual_num} (merged into parent)")
                 chapters_completed += 1
                 continue
             
