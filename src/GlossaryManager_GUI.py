@@ -1879,7 +1879,7 @@ CRITICAL EXTRACTION RULES:
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_mode_combo.setFixedWidth(150)
+        self.auto_glossary_mode_combo.setFixedWidth(120)
         from PySide6.QtCore import QSize
         self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_mode_combo.setStyleSheet("""
