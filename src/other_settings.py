@@ -2244,10 +2244,15 @@ def _create_context_management_section(self, parent):
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     if os.path.exists(_icon_path):
         from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QApplication
         _pixmap = QPixmap(_icon_path)
         if not _pixmap.isNull():
-            _scaled = _pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+            _target = int(150 * _dpr)
+            _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _scaled.setDevicePixelRatio(_dpr)
             _icon_label.setPixmap(_scaled)
+            _icon_label.setFixedSize(150, 150)
             _icon_label.setAlignment(Qt.AlignCenter)
             section_v.addWidget(_icon_label)
 
@@ -6522,10 +6527,15 @@ def _create_processing_options_section(self, parent):
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     if os.path.exists(_icon_path):
         from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QApplication
         _pixmap = QPixmap(_icon_path)
         if not _pixmap.isNull():
-            _scaled = _pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+            _target = int(150 * _dpr)
+            _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _scaled.setDevicePixelRatio(_dpr)
             halgakos_label.setPixmap(_scaled)
+            halgakos_label.setFixedSize(150, 150)
             halgakos_label.setAlignment(Qt.AlignCenter)
     bs_opts_v.addWidget(halgakos_label)
     
