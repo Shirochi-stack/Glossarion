@@ -14680,6 +14680,7 @@ Important rules:
                 tl.setFont(QFont("Segoe UI", title_pt, QFont.Bold))
                 tl.setWordWrap(True)
                 tl.setAlignment(Qt.AlignCenter)
+                tl.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 tl.setStyleSheet("background:transparent; color:white; border:none;")
                 cl.addWidget(tl)
                 
@@ -14943,7 +14944,7 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
-                ("💬", "poe/", "Poe", "Quora Poe chatbots", "#181e28", "#70b8d8"),
+                ("💬", "poe/", "Poe", "Quora Poe chatbots (Broken - No longer works)", "#181e28", "#70b8d8"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
             ]
@@ -14972,20 +14973,21 @@ Important rules:
                 el.setStyleSheet("background:transparent; border:none;")
                 h.addWidget(el)
                 pl = QLabel(f"<code>{prefix}</code>")
-                pl.setFont(QFont("Arial", 10, QFont.Bold))
+                pl.setFont(QFont("Arial", 12, QFont.Bold))
                 pl.setTextFormat(Qt.RichText)
+                pl.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 pl.setStyleSheet(f"background:transparent; color:{accent}; border:none;")
                 h.addWidget(pl)
                 h.addStretch()
                 cl.addLayout(h)
                 
                 nl = QLabel(name)
-                nl.setFont(QFont("Arial", 9, QFont.Bold))
+                nl.setFont(QFont("Arial", 11, QFont.Bold))
                 nl.setStyleSheet("background:transparent; color:white; border:none;")
                 cl.addWidget(nl)
                 
                 dl = QLabel(desc)
-                dl.setFont(QFont("Arial", 8))
+                dl.setFont(QFont("Arial", 10))
                 dl.setWordWrap(True)
                 dl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                 cl.addWidget(dl)
