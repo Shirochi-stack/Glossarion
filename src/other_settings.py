@@ -6522,23 +6522,32 @@ def _create_processing_options_section(self, parent):
     halgakos_label.setAlignment(Qt.AlignCenter)
     halgakos_label.setContentsMargins(0, 10, 0, 10)
     try:
-        from PySide6.QtGui import QPixmap
+        from PySide6.QtGui import QPixmap, QIcon
         base_dir = getattr(self, 'base_dir', os.getcwd())
+        screen = QApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        target = int(150 * dpr)
+        pixmap = None
+        
+        # Try PNG first (QPixmap handles PNG much better than ICO)
+        png_path = os.path.join(base_dir, 'Halgakos.png')
         ico_path = os.path.join(base_dir, 'Halgakos.ico')
-        if os.path.isfile(ico_path):
-            pixmap = QPixmap(ico_path)
-            if not pixmap.isNull():
-                screen = QApplication.primaryScreen()
-                dpr = screen.devicePixelRatio() if screen else 1.0
-                target = int(150 * dpr)
-                scaled = pixmap.scaled(
-                    target, target,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                scaled.setDevicePixelRatio(dpr)
-                halgakos_label.setPixmap(scaled)
-                halgakos_label.setFixedSize(150, 150)
+        if os.path.isfile(png_path):
+            pixmap = QPixmap(png_path)
+        elif os.path.isfile(ico_path):
+            # Use QIcon to load ICO (handles multi-resolution properly)
+            icon = QIcon(ico_path)
+            pixmap = icon.pixmap(target, target)
+        
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                target, target,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            scaled.setDevicePixelRatio(dpr)
+            halgakos_label.setPixmap(scaled)
+            halgakos_label.setFixedSize(150, 150)
     except Exception:
         pass
     bs_opts_v.addWidget(halgakos_label)
@@ -7591,8 +7600,19 @@ def _create_processing_options_section(self, parent):
     
     safety_note = QLabel("Does NOT affect ElectronHub Gemini models (eh/gemini-*) or Together AI")
     safety_note.setStyleSheet("color: gray; font-size: 8pt;")
-    safety_note.setContentsMargins(20, 0, 0, 8)
+    safety_note.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(safety_note)
+    
+    safety_checks_desc = QLabel(
+        "Even with filters disabled, providers may still refuse content.\n"
+        "Client-side detection: #1 explicit finish_reason, #2 safety keywords in response metadata,\n"
+        "#3 refusal phrases (toggle in Manage Refusal Patterns), #4 empty response = block\n"
+        "(toggle in QA section: 'Disable empty response = safety filter check')."
+    )
+    safety_checks_desc.setStyleSheet("color: #e6c95c; font-size: 8pt;")
+    safety_checks_desc.setContentsMargins(20, 0, 0, 8)
+    safety_checks_desc.setWordWrap(True)
+    section_v.addWidget(safety_checks_desc)
     
     # OpenRouter Transport Preference
     if not hasattr(self, 'openrouter_http_only_var'):

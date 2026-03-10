@@ -840,36 +840,6 @@ class RefusalPatternsDialog(QDialog):
             pass
         controls_h.addWidget(self.disable_refusal_checks_cb)
         
-        # Info button explaining safety filter checks
-        info_btn = QPushButton("ℹ️")
-        info_btn.setFixedSize(24, 24)
-        info_btn.setCursor(Qt.PointingHandCursor)
-        info_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                font-size: 14px;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background-color: #3a3a3a;
-                border-radius: 12px;
-            }
-        """)
-        info_btn.setToolTip(
-            "Why you may still receive prohibited/blocked content:\n\n"
-            "The safety filter has 4 detection checks:\n"
-            "  #1  Server says 'content_filter' / 'blocked' → always detected\n"
-            "  #2  Safety keywords in raw response metadata → always detected\n"
-            "  #3  Refusal phrases in response text (this dialog's patterns)\n"
-            "        → Controlled by 'Disable refusal pattern checks' toggle above\n"
-            "  #4  Empty response assumed as safety block\n"
-            "        → Controlled by 'Disable empty response = safety filter check'\n"
-            "           toggle in Other Settings\n\n"
-            "If checks #3 and #4 are both disabled, only explicit server signals\n"
-            "(checks #1-#2) will trigger safety filter detection."
-        )
-        controls_h.addWidget(info_btn)
         
         controls_h.addSpacing(12)
         controls_h.addWidget(QLabel("Length limit:"))
