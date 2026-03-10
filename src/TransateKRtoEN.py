@@ -13657,6 +13657,40 @@ def main(log_callback=None, stop_callback=None):
             # Handle both integer and float chapter numbers (e.g., 1.0, 1.1, etc.)
             translated_chapters.sort(key=lambda x: float(x['num']))
             
+            # Skip redundant combining when there's only 1 non-chunked section
+            if len(translated_chapters) == 1 and not translated_chapters[0].get('is_chunk'):
+                single = translated_chapters[0]
+                ext = '.pdf' if input_path.lower().endswith('.pdf') else '.txt'
+                combined_path = os.path.join(out, f"{txt_processor.file_base}_translated{ext}")
+                
+                if ext == '.pdf':
+                    from pdf_extractor import create_pdf_from_text
+                    if not create_pdf_from_text(single['content'], combined_path):
+                        combined_path = combined_path.replace('.pdf', '.txt')
+                        with open(combined_path, 'w', encoding='utf-8') as f:
+                            f.write(single['content'])
+                else:
+                    import shutil
+                    src_file = os.path.join(out, single['filename'])
+                    shutil.copy2(src_file, combined_path)
+                
+                print(f"   • Output: {combined_path}")
+                
+                total_time = time.time() - translation_start_time
+                hours = int(total_time // 3600)
+                minutes = int((total_time % 3600) // 60)
+                seconds = int(total_time % 60)
+                
+                print(f"\n⏱️ Total translation time: {hours}h {minutes}m {seconds}s")
+                print(f"📊 Chapters completed: {chapters_completed}")
+                print(f"✅ Text file translation complete!")
+                
+                if log_callback:
+                    log_callback(f"✅ Text file translation complete! Created {combined_path}")
+                
+                print("TRANSLATION_COMPLETE_SIGNAL")
+                return
+            
             print(f"✅ Translation complete! {len(translated_chapters)} section files created:")
             for chapter_data in translated_chapters:
                 print(f"   • Section {chapter_data['num']}: {chapter_data['title']} (from {chapter_data.get('filename', 'unknown')})")  
