@@ -2800,10 +2800,16 @@ CRITICAL EXTRACTION RULES:
             if enabled and hasattr(self, 'append_glossary_checkbox'):
                 if not self.append_glossary_checkbox.isChecked():
                     self.append_glossary_checkbox.setChecked(True)
+                    self.append_glossary_checkbox.style().unpolish(self.append_glossary_checkbox)
+                    self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
+                    self.append_glossary_checkbox.update()
             # Auto-enable auto map when balanced/full is selected
             if mode in ('balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if not self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(True)
+                    self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
+                    self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
+                    self.append_glossary_auto_load_checkbox.update()
         
         def update_append_prompt_state(checked=None):
             enabled = self.append_glossary_checkbox.isChecked()

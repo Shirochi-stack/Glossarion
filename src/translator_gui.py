@@ -4831,6 +4831,9 @@ Recent translations to summarize:
                     self.append_glossary_checkbox.blockSignals(True)
                     self.append_glossary_checkbox.setChecked(True)
                     self.append_glossary_checkbox.blockSignals(False)
+                    self.append_glossary_checkbox.style().unpolish(self.append_glossary_checkbox)
+                    self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
+                    self.append_glossary_checkbox.update()
             # Auto-enable auto map when balanced/full is selected
             if new_mode in ('balanced', 'full'):
                 self.config['append_glossary_auto_load'] = True
@@ -4839,6 +4842,9 @@ Recent translations to summarize:
                     self.append_glossary_auto_load_checkbox.blockSignals(True)
                     self.append_glossary_auto_load_checkbox.setChecked(True)
                     self.append_glossary_auto_load_checkbox.blockSignals(False)
+                    self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
+                    self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
+                    self.append_glossary_auto_load_checkbox.update()
             if hasattr(self, 'auto_glossary_mode_combo'):
                 self.auto_glossary_mode_combo.blockSignals(True)
                 self.auto_glossary_mode_combo.setCurrentIndex(index)
