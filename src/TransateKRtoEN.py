@@ -10554,7 +10554,7 @@ def main(log_callback=None, stop_callback=None):
         
         # Extract the raw chapter number from the file
         raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-        print(f"[DEBUG] Chapter idx={idx}, num={chap_num}, raw_num={raw_num}, filename={c.get('filename','?')}, original_basename={c.get('original_basename', '?')}, is_chunk={c.get('is_chunk', False)}")
+        #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
         # Spine position (reading order) fallback
         spine_pos = c.get('spine_order')
         if spine_pos is None:
@@ -10632,7 +10632,6 @@ def main(log_callback=None, stop_callback=None):
         )
         
         if not needs_translation:
-            print(f"[DEBUG] Skipping chapter {actual_num} (idx={idx}): {skip_reason}")
             chunks_per_chapter[idx] = 0
             continue
         

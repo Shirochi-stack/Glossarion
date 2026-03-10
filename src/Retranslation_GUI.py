@@ -430,6 +430,7 @@ class RetranslationMixin:
                     and not f.lower().endswith("_translated.txt")
                     and f != "translation_progress.json"
                     and not f.lower().endswith(".epub")
+                    and not f.lower().endswith(".cache")
                 ]
                 for fname in files:
                     base = os.path.basename(fname)
@@ -2706,6 +2707,7 @@ class RetranslationMixin:
                             and not f.lower().endswith("_translated.txt")
                             and f != "translation_progress.json"
                             and not f.lower().endswith(".epub")
+                            and not f.lower().endswith(".cache")
                         ]
                         for fname in files:
                             base = os.path.basename(fname)

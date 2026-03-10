@@ -154,6 +154,20 @@ class TextFileProcessor:
         word_count_dir = os.path.join(self.output_dir, 'word_count')
         os.makedirs(word_count_dir, exist_ok=True)
         
+        # ── Split cache ──────────────────────────────────────────────
+        # Cache the split result so that changing token limits or
+        # compression factor mid-progress doesn't alter chunk counts.
+        cache_path = os.path.join(self.output_dir, 'split.cache')
+        source_hash = self._generate_hash(
+            ''.join(ch.get('content', '') for ch in raw_chapters)
+        )
+        
+        cached = self._load_split_cache(cache_path, source_hash, word_count_dir)
+        if cached is not None:
+            print(f"📊 Loaded split cache ({len(cached)} chunks) — token limit changes won't alter chunk count")
+            return cached
+        # ─────────────────────────────────────────────────────────────
+        
         # Calculate based on OUTPUT token limits
         max_output_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         compression_factor = float(os.getenv("COMPRESSION_FACTOR", "0.8"))
@@ -331,12 +345,102 @@ class TextFileProcessor:
                 shutil.copytree(images_src, word_count_images)
                 print(f"📁 Copied images folder to word_count directory")
         
+        # Save split cache for future runs
+        self._save_split_cache(cache_path, source_hash, final_chapters)
+        
         return final_chapters
     
     
     def _generate_hash(self, content: str) -> str:
         """Generate hash for content"""
         return hashlib.sha256(content.encode('utf-8')).hexdigest()
+    
+    def _load_split_cache(self, cache_path: str, source_hash: str, word_count_dir: str):
+        """Load cached split results. Returns list of chapter dicts or None."""
+        try:
+            if not os.path.exists(cache_path):
+                return None
+            
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+            
+            if cache.get('source_hash') != source_hash:
+                print("📊 Source file changed — invalidating split cache")
+                return None
+            
+            chapters_meta = cache.get('chapters', [])
+            if not chapters_meta:
+                return None
+            
+            # Reconstruct chapters by reading body from word_count files
+            restored = []
+            for meta in chapters_meta:
+                filename = meta.get('filename', '')
+                body_path = os.path.join(word_count_dir, filename)
+                
+                if not os.path.exists(body_path):
+                    # word_count file missing — cache is stale
+                    print(f"📊 Split cache stale — missing {filename}")
+                    return None
+                
+                with open(body_path, 'r', encoding='utf-8') as f:
+                    body = f.read()
+                
+                # For HTML word_count files, extract just the <body> content
+                # (they were wrapped in full HTML document during save)
+                if filename.endswith('.html') and '<body>' in body:
+                    try:
+                        start_idx = body.index('<body>') + len('<body>')
+                        end_idx = body.index('</body>')
+                        body = body[start_idx:end_idx].strip('\n')
+                    except ValueError:
+                        pass  # Malformed HTML, use as-is
+                
+                chapter = dict(meta)  # Copy metadata
+                chapter['body'] = body
+                chapter['content_hash'] = self._generate_hash(body)
+                chapter['file_size'] = len(body)
+                restored.append(chapter)
+            
+            return restored
+            
+        except Exception as e:
+            print(f"⚠️ Could not load split cache: {e}")
+            return None
+    
+    def _save_split_cache(self, cache_path: str, source_hash: str, chapters: List[Dict]):
+        """Save split results to cache (metadata only, no body content)."""
+        try:
+            cache_data = {
+                'source_hash': source_hash,
+                'source_file': os.path.basename(self.file_path),
+                'chapter_count': len(chapters),
+                'chapters': []
+            }
+            
+            for ch in chapters:
+                meta = {
+                    'num': ch['num'],
+                    'title': ch.get('title', ''),
+                    'filename': ch.get('filename', ''),
+                    'is_chunk': ch.get('is_chunk', False),
+                    'has_images': ch.get('has_images', False),
+                    'image_count': ch.get('image_count', 0),
+                }
+                if ch.get('original_basename'):
+                    meta['original_basename'] = ch['original_basename']
+                if ch.get('source_file'):
+                    meta['source_file'] = ch['source_file']
+                if ch.get('chunk_info'):
+                    meta['chunk_info'] = ch['chunk_info']
+                cache_data['chapters'].append(meta)
+            
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"📊 Saved split cache ({len(chapters)} chunks)")
+        except Exception as e:
+            print(f"⚠️ Could not save split cache: {e}")
     
     def save_original_structure(self):
         """Save original text file structure info"""
