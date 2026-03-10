@@ -1912,6 +1912,7 @@ CRITICAL EXTRACTION RULES:
                 background-color: #2a4a70;
             }
         """)
+        self.auto_glossary_mode_combo.wheelEvent = lambda event: None
         master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
         
         # Keep old attribute for backward compatibility

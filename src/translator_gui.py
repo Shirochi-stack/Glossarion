@@ -4829,6 +4829,7 @@ Recent translations to summarize:
             self.save_config(show_message=False)
         
         self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_on_auto_glossary_shortcut_changed)
+        self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
         batch_right_layout.addStretch()
         
