@@ -7044,7 +7044,30 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                 chapter_images = [f for f in existing_images 
                                  if os.path.splitext(f)[0].startswith(html_stem + '_img_')]
                 
-                if chapter_images and len(chapter_images) == len(img_refs):
+                # For merged chapters, the HTML may reference images from multiple
+                # source chapters (e.g., chapter1058_img_*, chapter1062_img_*,
+                # chapter1063_img_*). Collect all stems referenced in img tags.
+                if len(chapter_images) < len(img_refs):
+                    referenced_stems = set()
+                    for _, _, rv in img_refs:
+                        ref_basename = os.path.basename(rv.split('?')[0])
+                        ref_name = os.path.splitext(ref_basename)[0]
+                        # Extract stem: "chapter1063_img_5" -> "chapter1063"
+                        stem_match = re.match(r'^(.+?)_img_\d+', ref_name)
+                        if stem_match:
+                            referenced_stems.add(stem_match.group(1))
+                    
+                    if referenced_stems:
+                        # Collect images from ALL referenced chapter stems
+                        chapter_images = []
+                        for f in existing_images:
+                            f_name = os.path.splitext(f)[0]
+                            for stem in referenced_stems:
+                                if f_name.startswith(stem + '_img_'):
+                                    chapter_images.append(f)
+                                    break
+                
+                if chapter_images:
                     # Sort by _img_N number — position N maps to _img_N
                     def _img_num(fname):
                         m = re.search(r'_img_(\d+)', fname)
@@ -7059,8 +7082,10 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                             default_dir = d
                             break
                     
-                    # Enforce: position N -> chapter_images[N]
-                    for i, (tag, attr, ref_value) in enumerate(img_refs):
+                    # Assign images positionally (fix as many as we can)
+                    assign_count = min(len(chapter_images), len(img_refs))
+                    for i in range(assign_count):
+                        tag, attr, ref_value = img_refs[i]
                         expected = chapter_images[i]
                         clean_ref = ref_value.split('?')[0]
                         current_basename = os.path.basename(clean_ref)
@@ -7071,10 +7096,6 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                             modified = True
                             repaired_refs += 1
                             print(f"   🔧 Repaired: '{current_basename}' → {expected}")
-                else:
-                    for _, _, _, basename, _ in broken_refs:
-                        count = len(chapter_images) if chapter_images else 0
-                        print(f"   ❌ Broken reference in {html_file}: '{basename}' ({count} chapter images for {len(img_refs)} img tags)")
             
             if modified:
                 with open(file_path, 'w', encoding='utf-8') as f:
