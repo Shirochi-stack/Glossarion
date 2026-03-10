@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple, Optional, Callable
 from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from metadata_batch_translator import enhance_epub_compiler
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 try:
     from unified_api_client import UnifiedClient
 except ImportError:
@@ -76,6 +76,84 @@ def log(message: str):
         _global_log_callback(message)
     else:
         print(message)
+
+def _compress_single_image(images_dir, original_name, safe_name, quality, is_gif):
+    """Module-level worker for compressing a single image (ProcessPoolExecutor-compatible).
+    
+    Returns dict with: original_name, safe_name, new_safe_name, status, 
+                       original_size, compressed_size, error
+    """
+    try:
+        from PIL import Image
+        img_path = os.path.join(images_dir, original_name)
+        
+        if not os.path.isfile(img_path):
+            return {
+                'original_name': original_name, 'safe_name': safe_name,
+                'new_safe_name': safe_name, 'status': 'missing',
+                'original_size': 0, 'compressed_size': 0, 'error': None
+            }
+        
+        original_size = os.path.getsize(img_path)
+        
+        if is_gif:
+            # Compress GIF in place
+            im = Image.open(img_path)
+            if hasattr(im, 'n_frames') and im.n_frames > 1:
+                frames = []
+                try:
+                    while True:
+                        frames.append(im.copy())
+                        im.seek(im.tell() + 1)
+                except EOFError:
+                    pass
+                if frames:
+                    frames[0].save(
+                        img_path, save_all=True, append_images=frames[1:],
+                        optimize=True, loop=im.info.get('loop', 0)
+                    )
+            else:
+                im.save(img_path, optimize=True)
+            im.close()
+            compressed_size = os.path.getsize(img_path)
+            return {
+                'original_name': original_name, 'safe_name': safe_name,
+                'new_safe_name': safe_name, 'status': 'compressed',
+                'original_size': original_size, 'compressed_size': compressed_size, 'error': None
+            }
+        else:
+            # Convert to .webp
+            webp_name = os.path.splitext(safe_name)[0] + '.webp'
+            webp_path = os.path.join(images_dir, os.path.splitext(original_name)[0] + '.webp')
+            
+            im = Image.open(img_path)
+            if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+                im = im.convert('RGBA')
+            elif im.mode != 'RGB':
+                im = im.convert('RGB')
+            
+            im.save(webp_path, 'WEBP', quality=quality, method=4)
+            im.close()
+            
+            # Remove original if webp was created successfully and is different file
+            if os.path.exists(webp_path) and webp_path != img_path:
+                try:
+                    os.remove(img_path)
+                except Exception:
+                    pass
+            
+            compressed_size = os.path.getsize(webp_path) if os.path.exists(webp_path) else 0
+            return {
+                'original_name': original_name, 'safe_name': safe_name,
+                'new_safe_name': webp_name, 'status': 'compressed',
+                'original_size': original_size, 'compressed_size': compressed_size, 'error': None
+            }
+    except Exception as e:
+        return {
+            'original_name': original_name, 'safe_name': safe_name,
+            'new_safe_name': safe_name, 'status': 'failed',
+            'original_size': 0, 'compressed_size': 0, 'error': str(e)
+        }
 
 
 class HTMLEntityDecoder:
@@ -5300,12 +5378,14 @@ img {
 
 
     def _compress_images(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> Tuple[Dict[str, str], Optional[str]]:
-        """Compress images: convert to .webp, with configurable cover/GIF exclusion and quality"""
+        """Compress images in parallel: convert to .webp, with configurable cover/GIF exclusion and quality"""
         try:
             from PIL import Image
         except ImportError:
             self.log("⚠️ Pillow not installed - image compression disabled. Install with: pip install Pillow")
             return processed_images, cover_file
+        
+        import time as _time
         
         # Read compression settings
         quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
@@ -5313,16 +5393,18 @@ img {
         exclude_gif = os.environ.get('EXCLUDE_GIF_COMPRESSION', '1') == '1'
         
         self.log(f"\n🗜️ Compressing images (quality: {quality}%, exclude cover: {exclude_cover}, exclude GIF: {exclude_gif})...")
+        
         new_processed = {}
         new_cover = cover_file
         compressed_count = 0
         skipped_count = 0
+        total_original_bytes = 0
+        total_compressed_bytes = 0
+        
+        # Separate items into compressible and skippable
+        compress_jobs = []  # (original_name, safe_name, is_gif)
         
         for original_name, safe_name in processed_images.items():
-            if self.is_stopped():
-                self.log("🛑 Image compression stopped by user")
-                break
-            
             img_path = os.path.join(self.images_dir, original_name)
             if not os.path.isfile(img_path):
                 new_processed[original_name] = safe_name
@@ -5346,68 +5428,92 @@ img {
                 skipped_count += 1
                 continue
             
-            try:
-                if is_gif:
-                    # Compress GIF in place - optimize without changing format
-                    im = Image.open(img_path)
-                    if hasattr(im, 'n_frames') and im.n_frames > 1:
-                        # Animated GIF: save with optimization
-                        frames = []
-                        try:
-                            while True:
-                                frames.append(im.copy())
-                                im.seek(im.tell() + 1)
-                        except EOFError:
-                            pass
-                        if frames:
-                            frames[0].save(
-                                img_path, save_all=True, append_images=frames[1:],
-                                optimize=True, loop=im.info.get('loop', 0)
-                            )
-                    else:
-                        # Static GIF: optimize
-                        im.save(img_path, optimize=True)
-                    im.close()
-                    new_processed[original_name] = safe_name
-                    compressed_count += 1
-                else:
-                    # Convert to .webp
-                    webp_name = os.path.splitext(safe_name)[0] + '.webp'
-                    webp_path = os.path.join(self.images_dir, os.path.splitext(original_name)[0] + '.webp')
-                    
-                    im = Image.open(img_path)
-                    # Convert RGBA/P modes for webp compatibility
-                    if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
-                        im = im.convert('RGBA')
-                    elif im.mode != 'RGB':
-                        im = im.convert('RGB')
-                    
-                    im.save(webp_path, 'WEBP', quality=quality, method=4)
-                    im.close()
-                    
-                    # Remove original if webp was created successfully and is different file
-                    if os.path.exists(webp_path) and webp_path != img_path:
-                        try:
-                            os.remove(img_path)
-                        except Exception:
-                            pass
-                    
-                    # Keep original key so HTML image references still resolve correctly.
-                    # _add_images_to_book and _create_cover_page have fallback logic to
-                    # find the compressed .webp file on disk when the original is gone.
-                    new_processed[original_name] = webp_name
-                    compressed_count += 1
-                    
-                    # Update cover reference if this image was the cover
-                    if is_cover:
-                        new_cover = webp_name
-                    
-            except Exception as e:
-                self.log(f"  ⚠️ Failed to compress {original_name}: {e}")
-                new_processed[original_name] = safe_name
-                skipped_count += 1
+            compress_jobs.append((original_name, safe_name, is_gif, is_cover))
         
-        self.log(f"✅ Image compression complete: {compressed_count} compressed, {skipped_count} skipped")
+        if not compress_jobs:
+            self.log(f"✅ Image compression complete: 0 to compress, {skipped_count} skipped")
+            return new_processed, new_cover
+        
+        # Use ProcessPoolExecutor for true parallel compression
+        _env_workers = os.environ.get('EXTRACTION_WORKERS', '')
+        if _env_workers and _env_workers.isdigit() and int(_env_workers) >= 1:
+            num_workers = int(_env_workers)
+        else:
+            num_workers = max(2, (os.cpu_count() or 4) - 1)
+        self.log(f"  🔧 Compressing {len(compress_jobs)} images with {num_workers} workers...")
+        start_time = _time.time()
+        
+        def _fmt_size(b):
+            if b >= 1024 * 1024:
+                return f"{b / 1024 / 1024:.1f}MB"
+            elif b >= 1024:
+                return f"{b / 1024:.0f}KB"
+            return f"{b}B"
+        
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            future_to_info = {}
+            for original_name, safe_name, is_gif, is_cover in compress_jobs:
+                future = executor.submit(
+                    _compress_single_image,
+                    self.images_dir, original_name, safe_name, quality, is_gif
+                )
+                future_to_info[future] = (original_name, safe_name, is_cover)
+            
+            for future in as_completed(future_to_info):
+                if self.is_stopped():
+                    self.log("🛑 Image compression stopped by user")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    # Add remaining unfinished as-is
+                    for f, (on, sn, _) in future_to_info.items():
+                        if not f.done() or f.cancelled():
+                            new_processed[on] = sn
+                    break
+                
+                original_name, safe_name, is_cover = future_to_info[future]
+                
+                try:
+                    result = future.result()
+                except Exception as e:
+                    self.log(f"  ⚠️ Failed to compress {original_name}: {e}")
+                    new_processed[original_name] = safe_name
+                    skipped_count += 1
+                    continue
+                
+                if result['status'] == 'compressed':
+                    new_processed[original_name] = result['new_safe_name']
+                    compressed_count += 1
+                    orig_sz = result['original_size']
+                    comp_sz = result['compressed_size']
+                    total_original_bytes += orig_sz
+                    total_compressed_bytes += comp_sz
+                    
+                    if orig_sz > 0:
+                        saved_pct = (1 - comp_sz / orig_sz) * 100
+                        self.log(f"  🗜️ {original_name} → {result['new_safe_name']} "
+                                f"{_fmt_size(orig_sz)} → {_fmt_size(comp_sz)} ({saved_pct:.0f}% saved)")
+                    
+                    # Update cover reference if this was the cover
+                    if is_cover:
+                        new_cover = result['new_safe_name']
+                    
+                elif result['status'] == 'failed':
+                    self.log(f"  ⚠️ Failed to compress {original_name}: {result['error']}")
+                    new_processed[original_name] = safe_name
+                    skipped_count += 1
+                else:
+                    # missing
+                    new_processed[original_name] = safe_name
+        
+        elapsed = _time.time() - start_time
+        
+        # Summary log
+        if total_original_bytes > 0:
+            total_saved_pct = (1 - total_compressed_bytes / total_original_bytes) * 100
+            self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
+            self.log(f"   📊 Total: {_fmt_size(total_original_bytes)} → {_fmt_size(total_compressed_bytes)} ({total_saved_pct:.0f}% saved)")
+        else:
+            self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
+        
         return new_processed, new_cover
 
     def _generate_pdf(self, html_files: List[str], chapter_titles_info: Dict[int, Tuple[str, float, str]],
