@@ -4734,51 +4734,105 @@ Recent translations to summarize:
         
         batch_layout.addWidget(self.batch_icon)
         batch_layout.addWidget(self.batch_checkbox)
-        
-        # Spacer between batch checkbox and auto glossary toggle
-        batch_layout.addSpacing(16)
-        
-        # Duplicate Auto Glossary toggle (synced with main auto_glossary_mode_combo)
-        self.auto_glossary_shortcut_checkbox = self._create_styled_checkbox("Auto Glossary")
-        self.auto_glossary_shortcut_checkbox.setToolTip(
-            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "Quick toggle for Automatic Glossary Generation. "
-            "Synced with the mode selector in Glossary Settings.<br><br>"
-            "Checked = Minimal mode (lightweight in-process extraction)<br>"
-            "Unchecked = Off</p></qt>"
-        )
-        # Initialize from config
-        _auto_mode = self.config.get('auto_glossary_mode', None)
-        if _auto_mode is None:
-            _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        self.auto_glossary_shortcut_checkbox.setChecked(_auto_mode.lower() != 'off')
-        
-        def _on_auto_glossary_shortcut_toggled(checked):
-            """Sync shortcut checkbox → main auto_glossary_mode_combo."""
-            new_mode = 'minimal' if checked else 'off'
-            self.config['auto_glossary_mode'] = new_mode
-            self.config['enable_auto_glossary'] = checked
-            self.enable_auto_glossary_var = checked
-            self.auto_glossary_mode_var = new_mode
-            if hasattr(self, 'auto_glossary_mode_combo'):
-                idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(new_mode, 0)
-                self.auto_glossary_mode_combo.blockSignals(True)
-                self.auto_glossary_mode_combo.setCurrentIndex(idx)
-                self.auto_glossary_mode_combo.blockSignals(False)
-            self.save_config(show_message=False)
-        
-        self.auto_glossary_shortcut_checkbox.toggled.connect(_on_auto_glossary_shortcut_toggled)
-        batch_layout.addWidget(self.auto_glossary_shortcut_checkbox)
-        
         batch_layout.addStretch()
         
         self.frame.addWidget(batch_container, 7, 2, Qt.AlignLeft)
+        
+        # Container for batch size + auto glossary dropdown side by side
+        batch_right_container = QWidget()
+        batch_right_layout = QHBoxLayout(batch_right_container)
+        batch_right_layout.setContentsMargins(0, 0, 0, 0)
+        batch_right_layout.setSpacing(12)
         
         self.batch_size_entry = QLineEdit()
         self.batch_size_entry.setText(str(self.batch_size_var))
         self.batch_size_entry.setMaximumWidth(60)
         self.batch_size_entry.textChanged.connect(lambda: setattr(self, 'batch_size_var', self.batch_size_entry.text()))
-        self.frame.addWidget(self.batch_size_entry, 7, 3, Qt.AlignLeft)
+        batch_right_layout.addWidget(self.batch_size_entry)
+        
+        # Duplicate Auto Glossary dropdown (synced with main auto_glossary_mode_combo)
+        from PySide6.QtWidgets import QComboBox
+        from PySide6.QtCore import QSize
+        auto_glossary_label = QLabel("Auto Glossary:")
+        auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
+        batch_right_layout.addWidget(auto_glossary_label)
+        self.auto_glossary_shortcut_combo = QComboBox()
+        self.auto_glossary_shortcut_combo.addItems(["Off", "Minimal", "Balanced", "Full"])
+        # Add Halgakos icon to each item
+        try:
+            _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(_ico_path):
+                from PySide6.QtGui import QIcon
+                _combo_icon = QIcon(_ico_path)
+                for i in range(self.auto_glossary_shortcut_combo.count()):
+                    self.auto_glossary_shortcut_combo.setItemIcon(i, _combo_icon)
+        except Exception:
+            pass
+        # Read saved mode
+        _auto_mode = self.config.get('auto_glossary_mode', None)
+        if _auto_mode is None:
+            _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+        _mode_idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(_auto_mode.lower(), 0)
+        self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
+        self.auto_glossary_shortcut_combo.setToolTip(
+            "Off: No automatic glossary extraction\n"
+            "Minimal: Lightweight extraction during translation (in-process)\n"
+            "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
+            "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
+        )
+        self.auto_glossary_shortcut_combo.setFixedWidth(130)
+        self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
+        self.auto_glossary_shortcut_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1a2a44;
+                color: #e8f0ff;
+                padding: 5px 10px;
+                border: 2px solid #4a8fd4;
+                border-radius: 4px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QComboBox:hover { border-color: #70b8ff; background-color: #223a58; }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 6px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #162848;
+                color: #e8f0ff;
+                selection-background-color: #4080d0;
+                selection-color: #ffffff;
+                border: 1px solid #4a8fd4;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #2a4a70;
+            }
+        """)
+        
+        def _on_auto_glossary_shortcut_changed(index):
+            """Sync shortcut dropdown → main auto_glossary_mode_combo."""
+            mode_map = {0: 'off', 1: 'minimal', 2: 'balanced', 3: 'full'}
+            new_mode = mode_map.get(index, 'off')
+            is_on = new_mode != 'off'
+            self.config['auto_glossary_mode'] = new_mode
+            self.config['enable_auto_glossary'] = is_on
+            self.enable_auto_glossary_var = is_on
+            self.auto_glossary_mode_var = new_mode
+            if hasattr(self, 'auto_glossary_mode_combo'):
+                self.auto_glossary_mode_combo.blockSignals(True)
+                self.auto_glossary_mode_combo.setCurrentIndex(index)
+                self.auto_glossary_mode_combo.blockSignals(False)
+            self.save_config(show_message=False)
+        
+        self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_on_auto_glossary_shortcut_changed)
+        batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
+        batch_right_layout.addStretch()
+        
+        self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
 
         # Output Token Limit tooltip (main output)
         try:
@@ -15301,10 +15355,11 @@ Important rules:
                     if hasattr(self, 'auto_glossary_mode_combo'):
                         idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 2)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
-                    if hasattr(self, 'auto_glossary_shortcut_checkbox'):
-                        self.auto_glossary_shortcut_checkbox.blockSignals(True)
-                        self.auto_glossary_shortcut_checkbox.setChecked(mode_val != 'off')
-                        self.auto_glossary_shortcut_checkbox.blockSignals(False)
+                    if hasattr(self, 'auto_glossary_shortcut_combo'):
+                        _shortcut_idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 0)
+                        self.auto_glossary_shortcut_combo.blockSignals(True)
+                        self.auto_glossary_shortcut_combo.setCurrentIndex(_shortcut_idx)
+                        self.auto_glossary_shortcut_combo.blockSignals(False)
                     if mode_val != 'off':
                         self.config['append_glossary'] = True
                         setattr(self, 'append_glossary_var', True)

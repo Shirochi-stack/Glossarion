@@ -2807,13 +2807,13 @@ CRITICAL EXTRACTION RULES:
         self.auto_glossary_mode_combo.currentIndexChanged.connect(update_auto_glossary_state)
         self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
         
-        # Sync main combo → shortcut checkbox on the main UI
+        # Sync main combo → shortcut dropdown on the main UI
         def _sync_shortcut_from_combo(*_args):
-            if hasattr(self, 'auto_glossary_shortcut_checkbox'):
-                mode = self.auto_glossary_mode_combo.currentText().lower()
-                self.auto_glossary_shortcut_checkbox.blockSignals(True)
-                self.auto_glossary_shortcut_checkbox.setChecked(mode != 'off')
-                self.auto_glossary_shortcut_checkbox.blockSignals(False)
+            if hasattr(self, 'auto_glossary_shortcut_combo'):
+                idx = self.auto_glossary_mode_combo.currentIndex()
+                self.auto_glossary_shortcut_combo.blockSignals(True)
+                self.auto_glossary_shortcut_combo.setCurrentIndex(idx)
+                self.auto_glossary_shortcut_combo.blockSignals(False)
         self.auto_glossary_mode_combo.currentIndexChanged.connect(_sync_shortcut_from_combo)
 
     def _open_glossary_anti_duplicate_dialog(self, parent):

@@ -15090,9 +15090,13 @@ class UnifiedClient:
 
                 # API key rejected — fatal, don't retry
                 if "api key rejected" in error_str.lower() or "api key" in error_str.lower():
+                    _config_path = os.path.join(
+                        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                    )
                     raise UnifiedClientError(
                         f"Antigravity: {error_str}\n"
-                        f"Open http://localhost:8080 → Settings and check/remove the API Key.",
+                        f"Fix: edit the apiKey in {_config_path}\n"
+                        f"or open http://localhost:8080 → Settings and remove/change the API Key.",
                         error_type="config_error"
                     )
 
