@@ -1855,7 +1855,7 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'auto_glossary_mode_combo'):
             from PySide6.QtWidgets import QComboBox
             self.auto_glossary_mode_combo = QComboBox()
-            self.auto_glossary_mode_combo.addItems(["Off", "Minimal", "Balanced", "Full"])
+            self.auto_glossary_mode_combo.addItems(["Off", "No Glossary", "Minimal", "Balanced", "Full"])
             # Add Halgakos icon to each item
             try:
                 _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -1871,15 +1871,16 @@ CRITICAL EXTRACTION RULES:
                 # Migrate from old boolean
                 old_enabled = self.config.get('enable_auto_glossary', False)
                 saved_mode = 'minimal' if old_enabled else 'off'
-            mode_index = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(saved_mode.lower(), 2)
+            mode_index = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(saved_mode.lower(), 3)
             self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
         self.auto_glossary_mode_combo.setToolTip(
             "Off: No automatic glossary extraction\n"
+            "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_mode_combo.setFixedWidth(120)
+        self.auto_glossary_mode_combo.setFixedWidth(150)
         from PySide6.QtCore import QSize
         self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_mode_combo.setStyleSheet("""
@@ -2774,8 +2775,8 @@ CRITICAL EXTRACTION RULES:
         
         # Update states function with proper error handling - converted to use signals
         def update_auto_glossary_state(*_args):
-            mode = self.auto_glossary_mode_combo.currentText().lower() if hasattr(self, 'auto_glossary_mode_combo') else 'off'
-            enabled = mode != 'off'
+            mode = self.auto_glossary_mode_combo.currentText().lower().replace(' ', '_') if hasattr(self, 'auto_glossary_mode_combo') else 'off'
+            enabled = mode not in ('off', 'no_glossary')
             # Targeted Extraction Settings only apply to Minimal mode
             extraction_enabled = mode == 'minimal'
             
@@ -2795,6 +2796,14 @@ CRITICAL EXTRACTION RULES:
             
             # Enable/disable text widgets (prompt still relevant for all non-off modes)
             self.auto_prompt_text.setEnabled(enabled)
+            # Auto-enable append glossary when an active extraction mode is selected
+            if enabled and hasattr(self, 'append_glossary_checkbox'):
+                if not self.append_glossary_checkbox.isChecked():
+                    self.append_glossary_checkbox.setChecked(True)
+            # Auto-enable auto map when balanced/full is selected
+            if mode in ('balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
+                if not self.append_glossary_auto_load_checkbox.isChecked():
+                    self.append_glossary_auto_load_checkbox.setChecked(True)
         
         def update_append_prompt_state(checked=None):
             enabled = self.append_glossary_checkbox.isChecked()

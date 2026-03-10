@@ -4757,7 +4757,7 @@ Recent translations to summarize:
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = QComboBox()
-        self.auto_glossary_shortcut_combo.addItems(["Off", "Minimal", "Balanced", "Full"])
+        self.auto_glossary_shortcut_combo.addItems(["Off", "No Glossary", "Minimal", "Balanced", "Full"])
         # Add Halgakos icon to each item
         try:
             _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -4772,15 +4772,16 @@ Recent translations to summarize:
         _auto_mode = self.config.get('auto_glossary_mode', None)
         if _auto_mode is None:
             _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        _mode_idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(_auto_mode.lower(), 0)
+        _mode_idx = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(_auto_mode.lower(), 0)
         self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
         self.auto_glossary_shortcut_combo.setToolTip(
             "Off: No automatic glossary extraction\n"
+            "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_shortcut_combo.setFixedWidth(130)
+        self.auto_glossary_shortcut_combo.setFixedWidth(150)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
@@ -4815,13 +4816,29 @@ Recent translations to summarize:
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
-            mode_map = {0: 'off', 1: 'minimal', 2: 'balanced', 3: 'full'}
+            mode_map = {0: 'off', 1: 'no_glossary', 2: 'minimal', 3: 'balanced', 4: 'full'}
             new_mode = mode_map.get(index, 'off')
-            is_on = new_mode != 'off'
+            is_on = new_mode not in ('off', 'no_glossary')
             self.config['auto_glossary_mode'] = new_mode
             self.config['enable_auto_glossary'] = is_on
             self.enable_auto_glossary_var = is_on
             self.auto_glossary_mode_var = new_mode
+            # Auto-enable append glossary when an active mode is selected
+            if is_on:
+                self.config['append_glossary'] = True
+                self.append_glossary_var = True
+                if hasattr(self, 'append_glossary_checkbox'):
+                    self.append_glossary_checkbox.blockSignals(True)
+                    self.append_glossary_checkbox.setChecked(True)
+                    self.append_glossary_checkbox.blockSignals(False)
+            # Auto-enable auto map when balanced/full is selected
+            if new_mode in ('balanced', 'full'):
+                self.config['append_glossary_auto_load'] = True
+                self.append_glossary_auto_load_var = True
+                if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                    self.append_glossary_auto_load_checkbox.blockSignals(True)
+                    self.append_glossary_auto_load_checkbox.setChecked(True)
+                    self.append_glossary_auto_load_checkbox.blockSignals(False)
             if hasattr(self, 'auto_glossary_mode_combo'):
                 self.auto_glossary_mode_combo.blockSignals(True)
                 self.auto_glossary_mode_combo.setCurrentIndex(index)
@@ -10009,7 +10026,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'EPUB_OUTPUT_DIR': os.getcwd(),
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
-            'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
+            'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
@@ -11339,7 +11356,7 @@ Important rules:
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
-                    'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
+                    'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
                     'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
@@ -15354,10 +15371,10 @@ Important rules:
                     setattr(self, 'auto_glossary_mode_var', mode_val)
                     setattr(self, 'enable_auto_glossary_var', (mode_val != 'off'))
                     if hasattr(self, 'auto_glossary_mode_combo'):
-                        idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 2)
+                        idx = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(mode_val, 3)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
                     if hasattr(self, 'auto_glossary_shortcut_combo'):
-                        _shortcut_idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 0)
+                        _shortcut_idx = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(mode_val, 0)
                         self.auto_glossary_shortcut_combo.blockSignals(True)
                         self.auto_glossary_shortcut_combo.setCurrentIndex(_shortcut_idx)
                         self.auto_glossary_shortcut_combo.blockSignals(False)
