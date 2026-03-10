@@ -14405,10 +14405,10 @@ Important rules:
                 ui_s = min(1.0, max(0.75, min(sw / 1600.0, sh / 900.0)))
             except Exception:
                 ui_s = 1.0
-            emoji_px = max(28, int(38 * ui_s))
-            title_pt = max(12, int(16 * ui_s))
-            sub_pt = max(8, int(10 * ui_s))
-            feat_pt = max(7, int(9 * ui_s))
+            emoji_px = max(32, int(42 * ui_s))
+            title_pt = max(14, int(18 * ui_s))
+            sub_pt = max(9, int(11 * ui_s))
+            feat_pt = max(9, int(10 * ui_s))
             
             # ── Layout ──
             main_layout = QVBoxLayout(dialog)
@@ -14467,11 +14467,11 @@ Important rules:
                 },
                 {
                     "value": "minimal", "emoji": "⚡", "title": "MINIMAL",
-                    "subtitle": "Inline extraction",
-                    "features": ["✓ Extracts terms during translation",
-                                 "✓ No separate extraction pass",
-                                 "✓ No extra API calls needed",
-                                 "✓ Lowest overhead possible",
+                    "subtitle": "Compact batch extraction",
+                    "features": ["✓ Filters all names & terms from text",
+                                 "✓ Sends into as few API calls as possible",
+                                 "✓ Lightweight and cost-efficient",
+                                 "✓ Good for straightforward novels",
                                  "⚠ May miss uncommon terms"],
                     "bg": "#162820", "hover": "#3e7858", "border": "#40e8b0", "accent": "#70ffd8",
                     "rec": None,
@@ -14507,7 +14507,7 @@ Important rules:
             modes_w.setStyleSheet("background: transparent;")
             modes_lay = QGridLayout(modes_w)
             modes_lay.setSpacing(8)
-            for c in range(4):
+            for c in range(2):
                 modes_lay.setColumnStretch(c, 1)
             
             def update_selection(val):
@@ -14523,7 +14523,8 @@ Important rules:
                 card.setFrameShape(QFrame.StyledPanel)
                 card.setCursor(Qt.PointingHandCursor)
                 card_frames[mi["value"]] = (card, mi)
-                modes_lay.addWidget(card, 0, idx)
+                row, col = divmod(idx, 2)
+                modes_lay.addWidget(card, row, col)
                 
                 is_sel = mi["value"] == "balanced"
                 if is_sel:
