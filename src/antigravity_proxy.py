@@ -533,16 +533,43 @@ def send_message(
             error_detail = resp.text[:200]
 
         if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
-            # API key mismatch — clear cache & fail fast with a helpful message
+            # API key mismatch — clear cache & retry once with a fresh key
             invalidate_api_key_cache()
-            config_path = os.path.join(
-                os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-            )
-            raise RuntimeError(
-                f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                f"Fix: edit the apiKey in {config_path}\n"
-                f"or open {proxy_url} → Settings and remove/change the API Key."
-            )
+            fresh_key = _get_proxy_api_key()
+            if fresh_key:
+                headers["x-api-key"] = fresh_key
+                try:
+                    retry_resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                    if retry_resp.status_code not in (401, 403):
+                        resp = retry_resp
+                    else:
+                        # Still failing — raise with helpful message
+                        config_path = os.path.join(
+                            os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                        )
+                        raise RuntimeError(
+                            f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                            f"Fix: edit the apiKey in {config_path}\n"
+                            f"or open {proxy_url} → Settings and remove/change the API Key."
+                        )
+                except requests.RequestException:
+                    config_path = os.path.join(
+                        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                    )
+                    raise RuntimeError(
+                        f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                        f"Fix: edit the apiKey in {config_path}\n"
+                        f"or open {proxy_url} → Settings and remove/change the API Key."
+                    )
+            else:
+                config_path = os.path.join(
+                    os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                )
+                raise RuntimeError(
+                    f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                    f"Fix: edit the apiKey in {config_path}\n"
+                    f"or open {proxy_url} → Settings and remove/change the API Key."
+                )
 
         # Otherwise it's likely a Google account auth issue → open browser
         auth_resp = _wait_for_auth(
@@ -729,15 +756,43 @@ def send_message_stream(
                 error_detail = ""
 
         if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
+            # API key mismatch — clear cache & retry once with a fresh key
             invalidate_api_key_cache()
-            config_path = os.path.join(
-                os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-            )
-            raise RuntimeError(
-                f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                f"Fix: edit the apiKey in {config_path}\n"
-                f"or open {proxy_url} → Settings and remove/change the API Key."
-            )
+            fresh_key = _get_proxy_api_key()
+            if fresh_key:
+                headers["x-api-key"] = fresh_key
+                try:
+                    retry_resp = requests.post(url, json=payload, headers=headers, timeout=timeout, stream=True)
+                    if retry_resp.status_code not in (401, 403):
+                        resp = retry_resp
+                        use_httpx = False  # switched to requests for retry
+                    else:
+                        config_path = os.path.join(
+                            os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                        )
+                        raise RuntimeError(
+                            f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                            f"Fix: edit the apiKey in {config_path}\n"
+                            f"or open {proxy_url} → Settings and remove/change the API Key."
+                        )
+                except requests.RequestException:
+                    config_path = os.path.join(
+                        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                    )
+                    raise RuntimeError(
+                        f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                        f"Fix: edit the apiKey in {config_path}\n"
+                        f"or open {proxy_url} → Settings and remove/change the API Key."
+                    )
+            else:
+                config_path = os.path.join(
+                    os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+                )
+                raise RuntimeError(
+                    f"Antigravity: API key rejected by proxy ({error_detail}).\n"
+                    f"Fix: edit the apiKey in {config_path}\n"
+                    f"or open {proxy_url} → Settings and remove/change the API Key."
+                )
 
         auth_resp = _wait_for_auth(
             url, payload, headers, proxy_url, log_fn, stream=True

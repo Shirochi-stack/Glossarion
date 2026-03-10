@@ -9753,11 +9753,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if hasattr(self, 'assistant_prompt') and self.assistant_prompt and self.assistant_prompt.strip():
                     self.append_log(f"🤖 Assistant Prompt: {self.assistant_prompt}")
                 
-                # Check if glossary info is in the system prompt
-                if "glossary" in system_prompt.lower() or "character entry" in system_prompt.lower():
-                    self.append_log(f"📚 ✅ Glossary appears to be included in system prompt")
-                else:
-                    self.append_log(f"📚 ⚠️ No glossary detected in system prompt")
+                
                 
                 # Log glossary status
                 if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
@@ -16952,7 +16948,7 @@ Important rules:
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt3', '')),
                     ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '') or '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
-                    ('APPEND_GLOSSARY', '1' if self.config.get('append_glossary') else '0'),
+                    ('APPEND_GLOSSARY', '0' if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ('1' if self.config.get('append_glossary') else '0')),
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
