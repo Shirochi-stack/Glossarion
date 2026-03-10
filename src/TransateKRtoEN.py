@@ -10554,7 +10554,7 @@ def main(log_callback=None, stop_callback=None):
         
         # Extract the raw chapter number from the file
         raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-        #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+        print(f"[DEBUG] Chapter idx={idx}, num={chap_num}, raw_num={raw_num}, filename={c.get('filename','?')}, original_basename={c.get('original_basename', '?')}, is_chunk={c.get('is_chunk', False)}")
         # Spine position (reading order) fallback
         spine_pos = c.get('spine_order')
         if spine_pos is None:
@@ -10632,6 +10632,7 @@ def main(log_callback=None, stop_callback=None):
         )
         
         if not needs_translation:
+            print(f"[DEBUG] Skipping chapter {actual_num} (idx={idx}): {skip_reason}")
             chunks_per_chapter[idx] = 0
             continue
         
@@ -10830,7 +10831,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Skip special files (chapter 0) if translation is disabled
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-            if not translate_special and raw_num == 0:
+            if not translate_special and raw_num == 0 and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                 name_noext = os.path.splitext(name)[0] if name else ''
                 has_digits_in_name = bool(re.search(r'\d', name_noext))
@@ -11668,7 +11669,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Skip special files (chapter 0) if translation is disabled
                 raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-                if not translate_special and raw_num == 0:
+                if not translate_special and raw_num == 0 and not is_text_file:
                     name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                     name_noext = os.path.splitext(name)[0] if name else ''
                     has_digits_in_name = bool(re.search(r'\d', name_noext))
@@ -11800,7 +11801,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Skip special files (chapter 0) if translation is disabled
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-            if not translate_special and raw_num == 0:
+            if not translate_special and raw_num == 0 and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                 name_noext = os.path.splitext(name)[0] if name else ''
                 has_digits_in_name = bool(re.search(r'\d', name_noext))
