@@ -2171,7 +2171,7 @@ Text to analyze:
 
         if not epub_path:
             try:
-                print("[DEBUG] No EPUB path found from any source")
+                pass
             except Exception:
                 pass
 
@@ -14312,9 +14312,8 @@ Important rules:
     # No need to define it here - it's injected dynamically
 
     def _show_glossary_mode_welcome(self):
-        """Show a one-time welcome dialog explaining glossary modes and program usage.
-        Page 1: Clickable flash cards matching QA Scanner theme.
-        Page 2: Tips and program guide.
+        """Show a one-time welcome dialog explaining glossary modes, extraction formats,
+        model prefixes, and program guide across 4 pages with Halgakos.ico mascot.
         """
         try:
             if self.config.get('glossary_mode_dialog_shown', False):
@@ -14323,370 +14322,564 @@ Important rules:
             from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                            QPushButton, QFrame, QWidget, QStackedWidget,
                                            QGridLayout, QApplication)
-            from PySide6.QtCore import Qt
-            from PySide6.QtGui import QFont, QIcon
+            from PySide6.QtCore import Qt, QSize, QTimer
+            from PySide6.QtGui import QFont, QIcon, QPixmap
             
-            # Calculate proportional sizing like QA Scanner
+            # ── Proportional sizing ──
             screen = QApplication.primaryScreen().geometry()
-            screen_width = screen.width()
-            screen_height = screen.height()
-            dialog_width = int(screen_width * 0.50)
-            dialog_height = int(screen_height * 0.50)
-            
+            sw, sh = screen.width(), screen.height()
             dialog = QDialog(self)
             dialog.setWindowTitle("Welcome to Glossarion")
-            dialog.resize(dialog_width, dialog_height)
-            dialog.setMinimumSize(int(screen_width * 0.40), int(screen_height * 0.38))
+            dialog.resize(int(sw * 0.52), int(sh * 0.55))
+            dialog.setMinimumSize(int(sw * 0.42), int(sh * 0.42))
             
-            # QA Scanner gradient background
+            # ── Brighter gradient ──
             dialog.setStyleSheet("""
                 QDialog {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #1a1a2e, stop:1 #16213e);
+                        stop:0 #1e2040, stop:1 #1a2845);
                 }
                 QPushButton {
-                    border: 1px solid #4a5568;
-                    border-radius: 4px;
-                    padding: 8px 16px;
+                    border: 1px solid #5a6a80;
+                    border-radius: 5px;
+                    padding: 10px 32px;
                     background-color: #2d3748;
                     color: white;
                     font-weight: bold;
+                    font-size: 12pt;
                 }
                 QPushButton:hover {
-                    background-color: #4a5568;
-                    border-color: #718096;
+                    background-color: #4a5a70;
+                    border-color: #8090a8;
                 }
                 QPushButton:pressed {
                     background-color: #1a202c;
                 }
+                QPushButton:disabled {
+                    background-color: #1a1a2a;
+                    color: #555;
+                    border-color: #333;
+                }
             """)
             
-            # Set window icon
-            try:
-                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-                if os.path.isfile(ico_path):
-                    dialog.setWindowIcon(QIcon(ico_path))
-            except Exception:
-                pass
+            # ── Window icon ──
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                dialog.setWindowIcon(QIcon(ico_path))
             
+            # ── HiDPI mascot helper ──
+            def _make_mascot(logical_size=48):
+                """Return a QLabel with Halgakos.ico rendered at HiDPI quality."""
+                lbl = QLabel()
+                lbl.setStyleSheet("background: transparent; border: none;")
+                lbl.setAlignment(Qt.AlignCenter)
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                icon = QIcon(ico_path)
+                dev_px = int(logical_size * max(1.0, dpr))
+                avail = icon.availableSizes()
+                if avail:
+                    best = max(avail, key=lambda s: s.width() * s.height())
+                    pm = icon.pixmap(best)
+                else:
+                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    pm = QPixmap(ico_path)
+                if not pm.isNull():
+                    fitted = pm.scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    try:
+                        fitted.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    lbl.setPixmap(fitted)
+                    lbl.setFixedSize(logical_size, logical_size)
+                else:
+                    lbl.setText("🐱")
+                    lbl.setFont(QFont("Arial", logical_size // 2))
+                return lbl
+            
+            # ── Scale factors ──
+            try:
+                ui_s = min(1.0, max(0.75, min(sw / 1600.0, sh / 900.0)))
+            except Exception:
+                ui_s = 1.0
+            emoji_px = max(28, int(38 * ui_s))
+            title_pt = max(12, int(16 * ui_s))
+            sub_pt = max(8, int(10 * ui_s))
+            feat_pt = max(7, int(9 * ui_s))
+            
+            # ── Layout ──
             main_layout = QVBoxLayout(dialog)
             main_layout.setContentsMargins(15, 10, 15, 10)
             main_layout.setSpacing(6)
             
-            # Title
-            title = QLabel("Choose Your Glossary Mode")
-            title.setFont(QFont("Arial", 20, QFont.Bold))
-            title.setStyleSheet("color: #f0f0f0;")
-            title.setAlignment(Qt.AlignCenter)
-            main_layout.addWidget(title)
+            # Header row: mascot + title + subtitle
+            header = QHBoxLayout()
+            header.addStretch()
+            header.addWidget(_make_mascot(40))
+            title_col = QVBoxLayout()
+            title_lbl = QLabel("Choose Your Glossary Mode")
+            title_lbl.setFont(QFont("Arial", 20, QFont.Bold))
+            title_lbl.setStyleSheet("color: #f0f0f0;")
+            title_lbl.setAlignment(Qt.AlignCenter)
+            title_col.addWidget(title_lbl)
+            subtitle_lbl = QLabel("Select how glossary extraction runs when you translate")
+            subtitle_lbl.setFont(QFont("Arial", 11))
+            subtitle_lbl.setStyleSheet("color: #d0d0d0;")
+            subtitle_lbl.setAlignment(Qt.AlignCenter)
+            title_col.addWidget(subtitle_lbl)
+            header.addLayout(title_col)
+            header.addWidget(_make_mascot(40))
+            header.addStretch()
+            main_layout.addLayout(header)
             
-            subtitle = QLabel("Select how glossary extraction runs when you translate")
-            subtitle.setFont(QFont("Arial", 11))
-            subtitle.setStyleSheet("color: #d0d0d0;")
-            subtitle.setAlignment(Qt.AlignCenter)
-            main_layout.addWidget(subtitle)
+            # Page indicator
+            page_indicator = QLabel("Page 1 of 4")
+            page_indicator.setFont(QFont("Arial", 9))
+            page_indicator.setStyleSheet("color: #8090a8;")
+            page_indicator.setAlignment(Qt.AlignCenter)
+            main_layout.addWidget(page_indicator)
             
-            # Stacked widget for pages
             stack = QStackedWidget()
             main_layout.addWidget(stack, 1)
             
-            # ==================== PAGE 1: Flash Cards ====================
+            # ════════════════════════════════════════════
+            # PAGE 1: Glossary Mode Selection
+            # ════════════════════════════════════════════
             page1 = QWidget()
             page1.setStyleSheet("background: transparent;")
-            page1_layout = QVBoxLayout(page1)
-            page1_layout.setContentsMargins(0, 8, 0, 0)
-            page1_layout.setSpacing(6)
+            p1_lay = QVBoxLayout(page1)
+            p1_lay.setContentsMargins(0, 6, 0, 0)
+            p1_lay.setSpacing(6)
             
-            # Scale factor
-            try:
-                ui_scale = min(1.0, max(0.75, min(screen_width / 1600.0, screen_height / 900.0)))
-            except Exception:
-                ui_scale = 1.0
-            
-            emoji_px = max(28, int(38 * ui_scale))
-            title_pt = max(12, int(16 * ui_scale))
-            subtitle_pt = max(8, int(10 * ui_scale))
-            feature_pt = max(7, int(9 * ui_scale))
-            
-            # Card data matching QA Scanner style
             mode_data = [
                 {
-                    "value": "off",
-                    "emoji": "🚫",
-                    "title": "OFF",
+                    "value": "off", "emoji": "🚫", "title": "OFF",
                     "subtitle": "Manual control",
-                    "features": [
-                        "✓ No automatic extraction",
-                        "✓ Full manual glossary control",
-                        "✓ Use pre-made glossary files",
-                        "✓ Best for advanced users",
-                    ],
-                    "bg_color": "#1f2937",
-                    "hover_color": "#374151",
-                    "border_color": "#6b7280",
-                    "accent_color": "#9ca3af",
-                    "recommendation": None,
+                    "features": ["✓ No automatic extraction", "✓ Full manual glossary control",
+                                 "✓ Use pre-made glossary files", "✓ Best for advanced users"],
+                    "bg": "#181e28", "hover": "#4a6080", "border": "#8090a8", "accent": "#b0c0d8",
+                    "rec": None,
                 },
                 {
-                    "value": "minimal",
-                    "emoji": "⚡",
-                    "title": "MINIMAL",
+                    "value": "minimal", "emoji": "⚡", "title": "MINIMAL",
                     "subtitle": "In-process extraction",
-                    "features": [
-                        "✓ Runs during translation",
-                        "✓ Lowest overhead",
-                        "✓ No extra API calls",
-                        "⚠ May miss some terms",
-                    ],
-                    "bg_color": "#1a3a2e",
-                    "hover_color": "#2a5a3e",
-                    "border_color": "#059669",
-                    "accent_color": "#10b981",
-                    "recommendation": None,
+                    "features": ["✓ Runs during translation", "✓ Lowest overhead",
+                                 "✓ No extra API calls", "⚠ May miss some terms"],
+                    "bg": "#122018", "hover": "#387050", "border": "#2dd4a0", "accent": "#5eedc0",
+                    "rec": None,
                 },
                 {
-                    "value": "balanced",
-                    "emoji": "⭐",
-                    "title": "BALANCED",
+                    "value": "balanced", "emoji": "⭐", "title": "BALANCED",
                     "subtitle": "Merging + splitting",
-                    "features": [
-                        "✓ Request merging (99 chapters)",
-                        "✓ Chapter splitting enabled",
-                        "✓ Best quality-to-cost ratio",
-                        "✓ Runs before translation",
-                    ],
-                    "bg_color": "#1e3a5f",
-                    "hover_color": "#2c5aa0",
-                    "border_color": "#3b82f6",
-                    "accent_color": "#60a5fa",
-                    "recommendation": "✅ Recommended for most users",
+                    "features": ["✓ Request merging (99 chapters)", "✓ Chapter splitting enabled",
+                                 "✓ Best quality-to-cost ratio", "✓ Runs before translation"],
+                    "bg": "#122040", "hover": "#3868c0", "border": "#5b9df6", "accent": "#80b8ff",
+                    "rec": "✅ Recommended for most users",
                 },
                 {
-                    "value": "full",
-                    "emoji": "🔬",
-                    "title": "FULL",
+                    "value": "full", "emoji": "🔬", "title": "FULL",
                     "subtitle": "Per-chapter extraction",
-                    "features": [
-                        "✓ Every chapter individually",
-                        "✓ Maximum term capture",
-                        "✓ Most thorough analysis",
-                        "💰 Higher API cost",
-                    ],
-                    "bg_color": "#3a2a1a",
-                    "hover_color": "#5a4a2a",
-                    "border_color": "#f59e0b",
-                    "accent_color": "#fbbf24",
-                    "recommendation": "⚡ Best for important novels",
+                    "features": ["✓ Every chapter individually", "✓ Maximum term capture",
+                                 "✓ Most thorough analysis", "💰 Higher API cost"],
+                    "bg": "#241c0c", "hover": "#6a5a30", "border": "#f5b820", "accent": "#ffd050",
+                    "rec": "⚡ Best for important novels",
                 },
             ]
             
-            # Track selected mode
-            selected_mode = ['balanced']  # mutable container for closure
+            selected_mode = ['balanced']
             card_frames = {}
             
-            # Grid layout for cards
-            modes_widget = QWidget()
-            modes_widget.setStyleSheet("background: transparent;")
-            modes_layout = QGridLayout(modes_widget)
-            modes_layout.setSpacing(8)
+            modes_w = QWidget()
+            modes_w.setStyleSheet("background: transparent;")
+            modes_lay = QGridLayout(modes_w)
+            modes_lay.setSpacing(8)
+            for c in range(4):
+                modes_lay.setColumnStretch(c, 1)
             
-            for col in range(len(mode_data)):
-                modes_layout.setColumnStretch(col, 1)
-            
-            def update_card_selection(selected_value):
-                """Update card borders to show selection state."""
-                selected_mode[0] = selected_value
-                for val, (card, mi) in card_frames.items():
-                    if val == selected_value:
-                        card.setStyleSheet(f"""
-                            QFrame {{
-                                background-color: {mi['hover_color']};
-                                border: 3px solid {mi['accent_color']};
-                                border-radius: 5px;
-                            }}
-                        """)
+            def update_selection(val):
+                selected_mode[0] = val
+                for v, (card, mi) in card_frames.items():
+                    if v == val:
+                        card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 3px solid {mi['accent']}; border-radius: 5px; }}")
                     else:
-                        card.setStyleSheet(f"""
-                            QFrame {{
-                                background-color: {mi['bg_color']};
-                                border: 2px solid {mi['border_color']};
-                                border-radius: 5px;
-                            }}
-                            QFrame:hover {{
-                                background-color: {mi['hover_color']};
-                            }}
-                        """)
+                        card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 2px solid {mi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
             
             for idx, mi in enumerate(mode_data):
                 card = QFrame()
                 card.setFrameShape(QFrame.StyledPanel)
-                is_selected = (mi["value"] == "balanced")
-                if is_selected:
-                    card.setStyleSheet(f"""
-                        QFrame {{
-                            background-color: {mi['hover_color']};
-                            border: 3px solid {mi['accent_color']};
-                            border-radius: 5px;
-                        }}
-                    """)
-                else:
-                    card.setStyleSheet(f"""
-                        QFrame {{
-                            background-color: {mi['bg_color']};
-                            border: 2px solid {mi['border_color']};
-                            border-radius: 5px;
-                        }}
-                        QFrame:hover {{
-                            background-color: {mi['hover_color']};
-                        }}
-                    """)
                 card.setCursor(Qt.PointingHandCursor)
                 card_frames[mi["value"]] = (card, mi)
-                modes_layout.addWidget(card, 0, idx)
+                modes_lay.addWidget(card, 0, idx)
                 
-                card_layout = QVBoxLayout(card)
-                m = max(6, int(10 * ui_scale))
-                card_layout.setContentsMargins(m, m, m, max(3, int(5 * ui_scale)))
+                is_sel = mi["value"] == "balanced"
+                if is_sel:
+                    card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 3px solid {mi['accent']}; border-radius: 5px; }}")
+                else:
+                    card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 2px solid {mi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
                 
-                # Emoji
-                emoji_label = QLabel(mi["emoji"])
-                emoji_label.setFont(QFont("Arial", emoji_px))
-                emoji_label.setAlignment(Qt.AlignCenter)
-                emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
-                card_layout.addWidget(emoji_label)
+                cl = QVBoxLayout(card)
+                m = max(6, int(10 * ui_s))
+                cl.setContentsMargins(m, m, m, max(3, int(5 * ui_s)))
                 
-                # Title
-                t_label = QLabel(mi["title"])
-                t_label.setFont(QFont("Arial", title_pt, QFont.Bold))
-                t_label.setWordWrap(True)
-                t_label.setAlignment(Qt.AlignCenter)
-                t_label.setStyleSheet("background-color: transparent; color: white; border: none;")
-                card_layout.addWidget(t_label)
+                el = QLabel(mi["emoji"])
+                el.setFont(QFont("Arial", emoji_px))
+                el.setAlignment(Qt.AlignCenter)
+                el.setStyleSheet("background:transparent; color:white; border:none;")
+                cl.addWidget(el)
                 
-                # Subtitle
-                s_label = QLabel(mi["subtitle"])
-                s_label.setFont(QFont("Arial", subtitle_pt))
-                s_label.setWordWrap(True)
-                s_label.setAlignment(Qt.AlignCenter)
-                s_label.setStyleSheet(f"background-color: transparent; color: {mi['accent_color']}; border: none;")
-                card_layout.addWidget(s_label)
-                card_layout.addSpacing(6)
+                tl = QLabel(mi["title"])
+                tl.setFont(QFont("Arial", title_pt, QFont.Bold))
+                tl.setWordWrap(True)
+                tl.setAlignment(Qt.AlignCenter)
+                tl.setStyleSheet("background:transparent; color:white; border:none;")
+                cl.addWidget(tl)
                 
-                # Features
-                for feature in mi["features"]:
-                    f_label = QLabel(feature)
-                    f_label.setFont(QFont("Arial", feature_pt))
-                    f_label.setWordWrap(True)
-                    f_label.setStyleSheet("background-color: transparent; color: #e0e0e0; border: none;")
-                    card_layout.addWidget(f_label)
+                sl = QLabel(mi["subtitle"])
+                sl.setFont(QFont("Arial", sub_pt))
+                sl.setWordWrap(True)
+                sl.setAlignment(Qt.AlignCenter)
+                sl.setStyleSheet(f"background:transparent; color:{mi['accent']}; border:none;")
+                cl.addWidget(sl)
+                cl.addSpacing(6)
                 
-                # Recommendation badge
-                if mi["recommendation"]:
-                    card_layout.addSpacing(6)
-                    rec_label = QLabel(mi["recommendation"])
-                    rec_label.setFont(QFont("Arial", feature_pt, QFont.Bold))
-                    rec_label.setWordWrap(True)
-                    rec_label.setStyleSheet(f"""
-                        background-color: {mi['accent_color']};
-                        color: white;
-                        padding: 3px 6px;
-                        border-radius: 3px;
-                    """)
-                    rec_label.setAlignment(Qt.AlignCenter)
-                    card_layout.addWidget(rec_label)
+                for feat in mi["features"]:
+                    fl = QLabel(feat)
+                    fl.setFont(QFont("Arial", feat_pt))
+                    fl.setWordWrap(True)
+                    fl.setStyleSheet("background:transparent; color:#e0e0e0; border:none;")
+                    cl.addWidget(fl)
                 
-                card_layout.addStretch()
+                if mi["rec"]:
+                    cl.addSpacing(6)
+                    rl = QLabel(mi["rec"])
+                    rl.setFont(QFont("Arial", feat_pt, QFont.Bold))
+                    rl.setWordWrap(True)
+                    rl.setStyleSheet(f"background-color:{mi['accent']}; color:white; padding:3px 6px; border-radius:3px;")
+                    rl.setAlignment(Qt.AlignCenter)
+                    cl.addWidget(rl)
                 
-                # Click handler
-                def make_click_handler(mode_value):
-                    def handler(event=None):
-                        update_card_selection(mode_value)
-                    return handler
+                cl.addStretch()
                 
-                card.mousePressEvent = make_click_handler(mi["value"])
+                def _click(v=mi["value"]):
+                    def h(event=None):
+                        update_selection(v)
+                    return h
+                card.mousePressEvent = _click()
             
-            page1_layout.addWidget(modes_widget, 1)
+            p1_lay.addWidget(modes_w, 1)
             
-            # Warning note
-            note = QLabel("⚠️ AI models may produce smaller glossaries due to training biases. "
-                         "Full mode captures the most terms but costs more.")
-            note.setWordWrap(True)
-            note.setAlignment(Qt.AlignCenter)
-            note.setFont(QFont("Arial", 9))
-            note.setStyleSheet("color: #9ca3af;")
-            page1_layout.addWidget(note)
-            
+            note1 = QLabel("⚠️ AI models may produce smaller glossaries due to training biases. Full mode captures the most terms but costs more.")
+            note1.setWordWrap(True)
+            note1.setAlignment(Qt.AlignCenter)
+            note1.setFont(QFont("Arial", 9))
+            note1.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
+            p1_lay.addWidget(note1)
             stack.addWidget(page1)
             
-            # ==================== PAGE 2: Guide & Tips ====================
+            # ════════════════════════════════════════════
+            # PAGE 2: Text Extraction Modes
+            # ════════════════════════════════════════════
             page2 = QWidget()
             page2.setStyleSheet("background: transparent;")
-            page2_layout = QVBoxLayout(page2)
-            page2_layout.setContentsMargins(20, 10, 20, 0)
-            page2_layout.setSpacing(12)
+            p2_lay = QVBoxLayout(page2)
+            p2_lay.setContentsMargins(10, 10, 10, 0)
+            p2_lay.setSpacing(10)
             
-            # Flow visualization
+            # Mascot row
+            m2_row = QHBoxLayout()
+            m2_row.addStretch()
+            m2_row.addWidget(_make_mascot(48))
+            m2_row.addStretch()
+            p2_lay.addLayout(m2_row)
+            
+            format_data = [
+                {
+                    "emoji": "📝", "title": "STANDARD MODE",
+                    "subtitle": "html2text extraction",
+                    "features": [
+                        "✓ Uses html2text to convert HTML",
+                        "✓ Fast and lightweight processing",
+                        "✓ Good for simple EPUB structures",
+                        "✓ Compatible with all file types",
+                        "⚠ May include unwanted formatting",
+                    ],
+                    "bg": "#122040", "hover": "#3868c0", "border": "#5b9df6", "accent": "#80b8ff",
+                    "rec": None,
+                },
+                {
+                    "emoji": "🔬", "title": "ENHANCED MODE",
+                    "subtitle": "BeautifulSoup extraction",
+                    "features": [
+                        "✓ Deep HTML parsing with BeautifulSoup",
+                        "✓ Smart filtering of noise & boilerplate",
+                        "✓ Better paragraph detection",
+                        "✓ Cleaner output for complex EPUBs",
+                        "✓ Auto-selects per-language profiles",
+                    ],
+                    "bg": "#122018", "hover": "#387050", "border": "#2dd4a0", "accent": "#5eedc0",
+                    "rec": "✅ Recommended for most novels",
+                },
+            ]
+            
+            fmt_w = QWidget()
+            fmt_w.setStyleSheet("background: transparent;")
+            fmt_lay = QGridLayout(fmt_w)
+            fmt_lay.setSpacing(12)
+            for c in range(2):
+                fmt_lay.setColumnStretch(c, 1)
+            
+            for idx, fi in enumerate(format_data):
+                card = QFrame()
+                card.setFrameShape(QFrame.StyledPanel)
+                card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 2px solid {fi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+                fmt_lay.addWidget(card, 0, idx)
+                
+                cl = QVBoxLayout(card)
+                cl.setContentsMargins(12, 12, 12, 8)
+                
+                el = QLabel(fi["emoji"])
+                el.setFont(QFont("Arial", emoji_px))
+                el.setAlignment(Qt.AlignCenter)
+                el.setStyleSheet("background:transparent; color:white; border:none;")
+                cl.addWidget(el)
+                
+                tl = QLabel(fi["title"])
+                tl.setFont(QFont("Arial", title_pt, QFont.Bold))
+                tl.setWordWrap(True)
+                tl.setAlignment(Qt.AlignCenter)
+                tl.setStyleSheet("background:transparent; color:white; border:none;")
+                cl.addWidget(tl)
+                
+                sl = QLabel(fi["subtitle"])
+                sl.setFont(QFont("Arial", sub_pt))
+                sl.setWordWrap(True)
+                sl.setAlignment(Qt.AlignCenter)
+                sl.setStyleSheet(f"background:transparent; color:{fi['accent']}; border:none;")
+                cl.addWidget(sl)
+                cl.addSpacing(8)
+                
+                for feat in fi["features"]:
+                    fl = QLabel(feat)
+                    fl.setFont(QFont("Arial", feat_pt))
+                    fl.setWordWrap(True)
+                    fl.setStyleSheet("background:transparent; color:#e0e0e0; border:none;")
+                    cl.addWidget(fl)
+                
+                if fi["rec"]:
+                    cl.addSpacing(6)
+                    rl = QLabel(fi["rec"])
+                    rl.setFont(QFont("Arial", feat_pt, QFont.Bold))
+                    rl.setWordWrap(True)
+                    rl.setStyleSheet(f"background-color:{fi['accent']}; color:white; padding:3px 6px; border-radius:3px;")
+                    rl.setAlignment(Qt.AlignCenter)
+                    cl.addWidget(rl)
+                
+                cl.addStretch()
+            
+            p2_lay.addWidget(fmt_w, 1)
+            
+            # Profile suffix info section
+            suffix_frame = QFrame()
+            suffix_frame.setStyleSheet("background-color: rgba(30, 58, 95, 120); border-radius: 6px; padding: 10px;")
+            suffix_lay = QVBoxLayout(suffix_frame)
+            suffix_lay.setSpacing(4)
+            suffix_title = QLabel("🏷️ Profile Name Tags")
+            suffix_title.setFont(QFont("Arial", 10, QFont.Bold))
+            suffix_title.setStyleSheet("color: #80b8ff;")
+            suffix_lay.addWidget(suffix_title)
+            suffix_desc = QLabel("Add these suffixes to any profile name to control extraction behavior:")
+            suffix_desc.setFont(QFont("Arial", 8))
+            suffix_desc.setStyleSheet("color: #b0b8c8;")
+            suffix_desc.setWordWrap(True)
+            suffix_lay.addWidget(suffix_desc)
+            for sfx, sdesc, scolor in [
+                ("_beautifulsoup", "BeautifulSoup extraction (image translation off)", "#5eedc0"),
+                ("_html2text", "html2text extraction (image translation off)", "#80b8ff"),
+                ("_ocr", "Image translation ON", "#ffd050"),
+            ]:
+                sl = QLabel(f"<code style='color:{scolor}; font-weight:bold;'>{sfx}</code> — {sdesc}")
+                sl.setTextFormat(Qt.RichText)
+                sl.setFont(QFont("Arial", 9))
+                sl.setWordWrap(True)
+                sl.setStyleSheet("color: #e0e0e0;")
+                suffix_lay.addWidget(sl)
+            suffix_note = QLabel("Example: Korean_BeautifulSoup, Japanese_html2text, Custom_ocr")
+            suffix_note.setFont(QFont("Arial", 8))
+            suffix_note.setStyleSheet("color: #8090a8; font-style: italic;")
+            suffix_lay.addWidget(suffix_note)
+            p2_lay.addWidget(suffix_frame)
+            
+            fmt_note = QLabel("💡 Built-in profiles are protected and restore on restart. "
+                             "Use Manage Profiles to create custom combinations.")
+            fmt_note.setWordWrap(True)
+            fmt_note.setAlignment(Qt.AlignCenter)
+            fmt_note.setFont(QFont("Arial", 9))
+            fmt_note.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
+            p2_lay.addWidget(fmt_note)
+            stack.addWidget(page2)
+
+
+            
+            # ════════════════════════════════════════════
+            # PAGE 3: Model Provider Prefixes
+            # ════════════════════════════════════════════
+            page3 = QWidget()
+            page3.setStyleSheet("background: transparent;")
+            p3_lay = QVBoxLayout(page3)
+            p3_lay.setContentsMargins(10, 10, 10, 0)
+            p3_lay.setSpacing(8)
+            
+            # Mascot row
+            m3_row = QHBoxLayout()
+            m3_row.addStretch()
+            m3_row.addWidget(_make_mascot(48))
+            m3_row.addStretch()
+            p3_lay.addLayout(m3_row)
+            
+            prefix_data = [
+                ("🌐", "or/", "OpenRouter", "Any model via OpenRouter", "#122040", "#5b9df6"),
+                ("⚡", "eh/", "ElectronHub", "Affordable AI proxy", "#122018", "#2dd4a0"),
+                ("🚀", "chutes/", "Chute AI", "Open-source model hosting", "#1e1828", "#a878d8"),
+                ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
+                ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
+                ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
+                ("💬", "poe/", "Poe", "Quora Poe chatbots", "#181e28", "#70b8d8"),
+                ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
+                ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
+            ]
+            
+            pfx_w = QWidget()
+            pfx_w.setStyleSheet("background: transparent;")
+            pfx_lay = QGridLayout(pfx_w)
+            pfx_lay.setSpacing(6)
+            for c in range(3):
+                pfx_lay.setColumnStretch(c, 1)
+            
+            for idx, (emoji, prefix, name, desc, bg, accent) in enumerate(prefix_data):
+                row, col = divmod(idx, 3)
+                card = QFrame()
+                card.setFrameShape(QFrame.StyledPanel)
+                card.setStyleSheet(f"QFrame {{ background-color: {bg}; border: 1px solid {accent}; border-radius: 5px; }} QFrame:hover {{ border: 2px solid {accent}; }}")
+                pfx_lay.addWidget(card, row, col)
+                
+                cl = QVBoxLayout(card)
+                cl.setContentsMargins(8, 6, 8, 6)
+                cl.setSpacing(2)
+                
+                h = QHBoxLayout()
+                el = QLabel(emoji)
+                el.setFont(QFont("Arial", 14))
+                el.setStyleSheet("background:transparent; border:none;")
+                h.addWidget(el)
+                pl = QLabel(f"<code>{prefix}</code>")
+                pl.setFont(QFont("Arial", 10, QFont.Bold))
+                pl.setTextFormat(Qt.RichText)
+                pl.setStyleSheet(f"background:transparent; color:{accent}; border:none;")
+                h.addWidget(pl)
+                h.addStretch()
+                cl.addLayout(h)
+                
+                nl = QLabel(name)
+                nl.setFont(QFont("Arial", 9, QFont.Bold))
+                nl.setStyleSheet("background:transparent; color:white; border:none;")
+                cl.addWidget(nl)
+                
+                dl = QLabel(desc)
+                dl.setFont(QFont("Arial", 8))
+                dl.setWordWrap(True)
+                dl.setStyleSheet("background:transparent; color:#c0c8d0; border:none;")
+                cl.addWidget(dl)
+            
+            p3_lay.addWidget(pfx_w, 1)
+            
+            pfx_note = QLabel("💡 Type any model name in the Model field. Add the provider prefix to route through a specific service.\n"
+                             "Example: eh/gpt-5.4 routes GPT-5.4 through ElectronHub. No prefix = direct API call.")
+            pfx_note.setWordWrap(True)
+            pfx_note.setAlignment(Qt.AlignCenter)
+            pfx_note.setFont(QFont("Arial", 9))
+            pfx_note.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
+            p3_lay.addWidget(pfx_note)
+            stack.addWidget(page3)
+            
+            # ════════════════════════════════════════════
+            # PAGE 4: Quick Guide
+            # ════════════════════════════════════════════
+            page4 = QWidget()
+            page4.setStyleSheet("background: transparent;")
+            p4_lay = QVBoxLayout(page4)
+            p4_lay.setContentsMargins(20, 10, 20, 0)
+            p4_lay.setSpacing(12)
+            
+            # Mascot
+            m4_row = QHBoxLayout()
+            m4_row.addStretch()
+            m4_row.addWidget(_make_mascot(56))
+            m4_row.addStretch()
+            p4_lay.addLayout(m4_row)
+            
             flow = QLabel("📂 Select EPUB  →  ⚙️ Settings  →  📑 Extract  →  ▶ Translate  →  ✅ Done!")
             flow.setAlignment(Qt.AlignCenter)
             flow.setFont(QFont("Arial", 11, QFont.Bold))
-            flow.setStyleSheet("color: #60a5fa; padding: 10px; "
-                              "background-color: rgba(30, 58, 95, 180); border-radius: 6px;")
-            page2_layout.addWidget(flow)
+            flow.setStyleSheet("color: #80b8ff; padding: 10px; background-color: rgba(30, 58, 95, 180); border-radius: 6px;")
+            p4_lay.addWidget(flow)
             
-            # Steps
             steps = [
                 ("1️⃣", "Select EPUB", "Click 'Browse' or drag & drop your EPUB file."),
                 ("2️⃣", "Settings (optional)", "Open ⚙️ Glossary Settings to tweak extraction."),
                 ("3️⃣", "Translate", "Click ▶ Run Translation. In Balanced/Full mode, glossary extraction runs automatically first."),
                 ("4️⃣", "Review", "Check output folder. Edit glossary in the Glossary Editor tab."),
             ]
+            for icon, st, sd in steps:
+                rl = QHBoxLayout()
+                il = QLabel(icon)
+                il.setFixedWidth(30)
+                il.setFont(QFont("Arial", 14))
+                il.setStyleSheet("color: white;")
+                rl.addWidget(il)
+                tl = QLabel(f"<b>{st}</b> — {sd}")
+                tl.setWordWrap(True)
+                tl.setTextFormat(Qt.RichText)
+                tl.setFont(QFont("Arial", 10))
+                tl.setStyleSheet("color: #e0e0e0;")
+                rl.addWidget(tl, 1)
+                p4_lay.addLayout(rl)
             
-            for icon, step_title, step_desc in steps:
-                row_layout = QHBoxLayout()
-                icon_label = QLabel(icon)
-                icon_label.setFixedWidth(30)
-                icon_label.setFont(QFont("Arial", 14))
-                icon_label.setStyleSheet("color: white;")
-                row_layout.addWidget(icon_label)
-                
-                text = QLabel(f"<b>{step_title}</b> — {step_desc}")
-                text.setWordWrap(True)
-                text.setTextFormat(Qt.RichText)
-                text.setFont(QFont("Arial", 10))
-                text.setStyleSheet("color: #e0e0e0;")
-                row_layout.addWidget(text, 1)
-                page2_layout.addLayout(row_layout)
-            
-            # Tips section
             tips_frame = QFrame()
             tips_frame.setStyleSheet("background-color: rgba(30, 58, 95, 120); border-radius: 6px; padding: 10px;")
-            tips_layout = QVBoxLayout(tips_frame)
-            tips_layout.setSpacing(6)
-            
+            tips_lay = QVBoxLayout(tips_frame)
+            tips_lay.setSpacing(6)
             tips_title = QLabel("💡 Tips")
             tips_title.setFont(QFont("Arial", 11, QFont.Bold))
-            tips_title.setStyleSheet("color: #60a5fa;")
-            tips_layout.addWidget(tips_title)
-            
-            tips = [
+            tips_title.setStyleSheet("color: #80b8ff;")
+            tips_lay.addWidget(tips_title)
+            for tip in [
                 "• Enable <b>Auto-Mapping</b> in Glossary Settings to auto-load previously generated glossaries.",
                 "• You can change the glossary mode anytime in <b>Glossary Settings → Automatic Glossary Generation</b>.",
                 "• <b>Balanced</b> mode forces request merging (99) and chapter splitting for optimal quality.",
+            ]:
+                tl = QLabel(tip)
+                tl.setWordWrap(True)
+                tl.setTextFormat(Qt.RichText)
+                tl.setFont(QFont("Arial", 9))
+                tl.setStyleSheet("color: #d0d0d0;")
+                tips_lay.addWidget(tl)
+            p4_lay.addWidget(tips_frame)
+            p4_lay.addStretch()
+            stack.addWidget(page4)
+            
+            # ════════════════════════════════════════════
+            # Navigation Buttons
+            # ════════════════════════════════════════════
+            page_titles = [
+                ("Choose Your Glossary Mode", "Select how glossary extraction runs when you translate"),
+                ("🔬 Text Extraction Modes", "How text is extracted from your EPUB files for translation"),
+                ("🌐 Model Provider Prefixes", "Route API calls through different providers using prefixes"),
+                ("🗺️ Quick Guide", "How to use Glossarion with your selected mode"),
             ]
-            for tip in tips:
-                t = QLabel(tip)
-                t.setWordWrap(True)
-                t.setTextFormat(Qt.RichText)
-                t.setFont(QFont("Arial", 9))
-                t.setStyleSheet("color: #d0d0d0;")
-                tips_layout.addWidget(t)
             
-            page2_layout.addWidget(tips_frame)
-            page2_layout.addStretch()
-            
-            stack.addWidget(page2)
-            
-            # ==================== Navigation Buttons ====================
             nav_layout = QHBoxLayout()
             nav_layout.addStretch()
             
@@ -14696,43 +14889,65 @@ Important rules:
             
             next_btn = QPushButton("Next →")
             next_btn.setStyleSheet("""
-                QPushButton { background-color: #3b82f6; color: white; padding: 8px 24px;
-                              border-radius: 4px; font-weight: bold; font-size: 11pt;
-                              border: 1px solid #60a5fa; }
-                QPushButton:hover { background-color: #2563eb; }
-                QPushButton:pressed { background-color: #1d4ed8; }
+                QPushButton { background-color: #5b9df6; color: white; padding: 10px 32px;
+                              border-radius: 5px; font-weight: bold; font-size: 12pt;
+                              border: 1px solid #80b8ff; }
+                QPushButton:hover { background-color: #3b82f6; }
+                QPushButton:pressed { background-color: #2563eb; }
+                QPushButton:disabled { background-color: #1a1a2a; color: #555; border-color: #333; }
             """)
             nav_layout.addWidget(next_btn)
             nav_layout.addStretch()
             main_layout.addLayout(nav_layout)
             
-            def go_next():
-                if stack.currentIndex() == 0:
-                    stack.setCurrentIndex(1)
-                    title.setText("🗺️ Quick Guide")
-                    subtitle.setText("How to use Glossarion with your selected mode")
-                    back_btn.setVisible(True)
+            # Double-click protection
+            _nav_locked = [False]
+            def _lock_nav():
+                _nav_locked[0] = True
+                next_btn.setEnabled(False)
+                back_btn.setEnabled(False)
+                QTimer.singleShot(500, _unlock_nav)
+            def _unlock_nav():
+                _nav_locked[0] = False
+                next_btn.setEnabled(True)
+                back_btn.setEnabled(True)
+            
+            def _update_nav():
+                ci = stack.currentIndex()
+                total = stack.count()
+                back_btn.setVisible(ci > 0)
+                title_lbl.setText(page_titles[ci][0])
+                subtitle_lbl.setText(page_titles[ci][1])
+                page_indicator.setText(f"Page {ci + 1} of {total}")
+                if ci == total - 1:
                     next_btn.setText("✅ Get Started")
                 else:
-                    # Final confirm — apply the selected mode
+                    next_btn.setText("Next →")
+            
+            def go_next():
+                if _nav_locked[0]:
+                    return
+                _lock_nav()
+                ci = stack.currentIndex()
+                if ci < stack.count() - 1:
+                    stack.setCurrentIndex(ci + 1)
+                    _update_nav()
+                else:
+                    # Final: save config
                     mode_val = selected_mode[0]
                     self.config['auto_glossary_mode'] = mode_val
                     self.config['enable_auto_glossary'] = (mode_val != 'off')
                     setattr(self, 'auto_glossary_mode_var', mode_val)
                     setattr(self, 'enable_auto_glossary_var', (mode_val != 'off'))
-                    
                     if hasattr(self, 'auto_glossary_mode_combo'):
                         idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 2)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
-                    
                     if mode_val != 'off':
                         self.config['append_glossary'] = True
                         setattr(self, 'append_glossary_var', True)
                         self.config['append_glossary_auto_load'] = True
                         setattr(self, 'append_glossary_auto_load_var', True)
-                    
                     self.append_log(f"📑 Glossary mode set to: {mode_val.capitalize()}")
-                    
                     self.config['glossary_mode_dialog_shown'] = True
                     try:
                         self.save_config(show_message=False)
@@ -14741,11 +14956,13 @@ Important rules:
                     dialog.accept()
             
             def go_back():
-                stack.setCurrentIndex(0)
-                title.setText("Choose Your Glossary Mode")
-                subtitle.setText("Select how glossary extraction runs when you translate")
-                back_btn.setVisible(False)
-                next_btn.setText("Next →")
+                if _nav_locked[0]:
+                    return
+                _lock_nav()
+                ci = stack.currentIndex()
+                if ci > 0:
+                    stack.setCurrentIndex(ci - 1)
+                    _update_nav()
             
             next_btn.clicked.connect(go_next)
             back_btn.clicked.connect(go_back)
@@ -14756,7 +14973,7 @@ Important rules:
             print(f"[WELCOME_DIALOG] Error showing glossary mode welcome: {e}")
             import traceback
             traceback.print_exc()
-            
+
     def _auto_load_glossary_after_extraction(self):
         """Auto-load the most recently generated glossary after extraction.
         
