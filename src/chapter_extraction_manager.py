@@ -230,7 +230,7 @@ class ChapterExtractionManager:
                             self._log(formatted_message)
                     else:
                         # Not a progress message with numbers
-                        self._log(f"📊 {message}")
+                        self._log(message)
                     
                 elif line.startswith("[INFO]"):
                     # Information message

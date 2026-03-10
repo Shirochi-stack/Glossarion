@@ -2595,7 +2595,7 @@ Recent translations to summarize:
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
             ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
             ('break_split_count_var', 'break_split_count', ''),
-            ('auto_glossary_mode_var', 'auto_glossary_mode', 'off'),
+            ('auto_glossary_mode_var', 'auto_glossary_mode', 'balanced'),
         ]
         
         for var_name, key, default in str_vars:
@@ -7881,6 +7881,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Reset stop flags
         self.stop_requested = False
+        self._glossary_stop_was_requested = False  # Reset glossary stop flag from previous run
         self.graceful_stop_active = False  # Reset graceful stop state
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag

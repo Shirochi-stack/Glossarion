@@ -1280,7 +1280,8 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                 msg = f"⏱️ Spawning workers... elapsed {elapsed:.0f}s"
                 if progress_callback:
                     progress_callback(msg)
-                print(msg, flush=True)
+                else:
+                    print(msg, flush=True)
 
         _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
         _hb_thread.start()
@@ -1310,19 +1311,18 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                 ): (file_path, idx)
                 for idx, file_path in enumerate(files_to_process)
             }
-            
-            # Stop heartbeat once submissions are done and results start flowing
-            _heartbeat_stop.set()
-            _startup_elapsed = time.time() - _startup_start
-            if _startup_elapsed >= 2.0:
-                msg = f"✅ Workers ready ({_startup_elapsed:.1f}s)"
-                print(msg)
-                if progress_callback:
-                    progress_callback(msg)
-
             # Collect results as they complete with progress tracking
             processed_count = 0
             for future in as_completed(future_to_file):
+                # Stop heartbeat on first result (workers are now active)
+                if not _heartbeat_stop.is_set():
+                    _heartbeat_stop.set()
+                    _startup_elapsed = time.time() - _startup_start
+                    if _startup_elapsed >= 2.0:
+                        msg = f"✅ Workers ready ({_startup_elapsed:.1f}s)"
+                        print(msg, flush=True)
+                        if progress_callback:
+                            progress_callback(msg)
                 if is_stop_requested():
                     print("❌ Chapter processing stopped by user")
                     executor.shutdown(wait=False)
