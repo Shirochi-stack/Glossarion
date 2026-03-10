@@ -5450,6 +5450,22 @@ img {
                 return f"{b / 1024:.0f}KB"
             return f"{b}B"
         
+        import threading
+        _heartbeat_stop = threading.Event()
+        _completed_count = [0]  # mutable for closure
+        total_jobs = len(compress_jobs)
+        
+        def _heartbeat():
+            while not _heartbeat_stop.is_set():
+                if _heartbeat_stop.wait(3.0):
+                    break
+                elapsed = _time.time() - start_time
+                done = _completed_count[0]
+                self.log(f"  ⏳ Compressing... {done}/{total_jobs} ({elapsed:.1f}s elapsed)")
+        
+        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+        
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             future_to_info = {}
             for original_name, safe_name, is_gif, is_cover in compress_jobs:
@@ -5477,7 +5493,10 @@ img {
                     self.log(f"  ⚠️ Failed to compress {original_name}: {e}")
                     new_processed[original_name] = safe_name
                     skipped_count += 1
+                    _completed_count[0] += 1
                     continue
+                
+                _completed_count[0] += 1
                 
                 if result['status'] == 'compressed':
                     new_processed[original_name] = result['new_safe_name']
@@ -5504,15 +5523,19 @@ img {
                     # missing
                     new_processed[original_name] = safe_name
         
+        _heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1)
+        
         elapsed = _time.time() - start_time
         
-        # Summary log
-        if total_original_bytes > 0:
-            total_saved_pct = (1 - total_compressed_bytes / total_original_bytes) * 100
-            self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
-            self.log(f"   📊 Total: {_fmt_size(total_original_bytes)} → {_fmt_size(total_compressed_bytes)} ({total_saved_pct:.0f}% saved)")
-        else:
-            self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
+        # Summary log (skip if stopped — the 🛑 message already covered it)
+        if not self.is_stopped():
+            if total_original_bytes > 0:
+                total_saved_pct = (1 - total_compressed_bytes / total_original_bytes) * 100
+                self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
+                self.log(f"   📊 Total: {_fmt_size(total_original_bytes)} → {_fmt_size(total_compressed_bytes)} ({total_saved_pct:.0f}% saved)")
+            else:
+                self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
         
         return new_processed, new_cover
 
