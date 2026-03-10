@@ -6519,37 +6519,14 @@ def _create_processing_options_section(self, parent):
     
     # Halgakos icon for BeautifulSoup mode
     halgakos_label = QLabel()
-    halgakos_label.setAlignment(Qt.AlignCenter)
-    halgakos_label.setContentsMargins(0, 10, 0, 10)
-    try:
-        from PySide6.QtGui import QPixmap, QIcon
-        base_dir = getattr(self, 'base_dir', os.getcwd())
-        screen = QApplication.primaryScreen()
-        dpr = screen.devicePixelRatio() if screen else 1.0
-        target = int(150 * dpr)
-        pixmap = None
-        
-        # Try PNG first (QPixmap handles PNG much better than ICO)
-        png_path = os.path.join(base_dir, 'Halgakos.png')
-        ico_path = os.path.join(base_dir, 'Halgakos.ico')
-        if os.path.isfile(png_path):
-            pixmap = QPixmap(png_path)
-        elif os.path.isfile(ico_path):
-            # Use QIcon to load ICO (handles multi-resolution properly)
-            icon = QIcon(ico_path)
-            pixmap = icon.pixmap(target, target)
-        
-        if pixmap and not pixmap.isNull():
-            scaled = pixmap.scaled(
-                target, target,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            scaled.setDevicePixelRatio(dpr)
-            halgakos_label.setPixmap(scaled)
-            halgakos_label.setFixedSize(150, 150)
-    except Exception:
-        pass
+    _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(_icon_path):
+        from PySide6.QtGui import QPixmap
+        _pixmap = QPixmap(_icon_path)
+        if not _pixmap.isNull():
+            _scaled = _pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            halgakos_label.setPixmap(_scaled)
+            halgakos_label.setAlignment(Qt.AlignCenter)
     bs_opts_v.addWidget(halgakos_label)
     
     extraction_v.addWidget(self.bs_options_frame)
