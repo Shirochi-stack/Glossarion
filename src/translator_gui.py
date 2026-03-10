@@ -110,15 +110,23 @@ if '--run-chapter-extraction' in sys.argv:
     try:
         # Ensure UTF-8 I/O in worker mode
         os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
-        # Remove the flag so worker's argv aligns: argv[1]=epub, argv[2]=out, argv[3]=mode
+        # Check for daemon mode
+        _is_daemon = '--daemon' in sys.argv
+        # Remove the flags so worker's argv aligns
         try:
-            _flag_idx = sys.argv.index('--run-chapter-extraction')
-            sys.argv = [sys.argv[0]] + sys.argv[_flag_idx + 1:]
-        except ValueError:
-            # Shouldn't happen, but continue with current argv
+            _new_argv = [sys.argv[0]]
+            for _a in sys.argv[1:]:
+                if _a not in ('--run-chapter-extraction', '--daemon'):
+                    _new_argv.append(_a)
+            sys.argv = _new_argv
+        except Exception:
             pass
-        from chapter_extraction_worker import main as _ce_main
-        _ce_main()
+        if _is_daemon:
+            from chapter_extraction_worker import daemon_main as _ce_daemon
+            _ce_daemon()
+        else:
+            from chapter_extraction_worker import main as _ce_main
+            _ce_main()
     except Exception as _e:
         try:
             print(f"[ERROR] Worker failed: {_e}")
@@ -945,7 +953,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "7.9.3"
+        __version__ = "7.9.4"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1020,7 +1028,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.3')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.4')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1200,6 +1208,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.extraction_workers_var = self.config.get('extraction_workers', 2)
         # GUI yield toggle - disabled by default for maximum speed
         self.enable_gui_yield_var = self.config.get('enable_gui_yield', True)
+        # Thread pool extraction toggle - faster on Windows
+        self.use_thread_pool_extraction_var = self.config.get('use_thread_pool_extraction', False)
 
         # Set initial environment variable and ensure executor
         if self.enable_parallel_extraction_var:
@@ -1209,6 +1219,14 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             # Also enable glossary parallel processing explicitly
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "1"
             print(f"✅ Parallel extraction enabled with {workers} workers")
+            # Pre-warm the extraction daemon subprocess in the background
+            # so it's ready instantly when the user first triggers chapter extraction.
+            try:
+                from chapter_extraction_manager import prewarm_daemon
+                prewarm_daemon()
+                print(f"🔥 Extraction daemon pre-warming in background...")
+            except Exception as e:
+                print(f"⚠️ Could not pre-warm extraction daemon: {e}")
         else:
             os.environ["EXTRACTION_WORKERS"] = "1"
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "0"
@@ -1216,6 +1234,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Set GUI yield environment variable (disabled by default for maximum speed)
         os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var else '0'
         print(f"⚡ GUI yield: {'ENABLED (responsive)' if self.enable_gui_yield_var else 'DISABLED (maximum speed)'}")
+        # Set thread pool extraction env var
+        os.environ['USE_THREAD_POOL_EXTRACTION'] = '1' if self.use_thread_pool_extraction_var else '0'
+        if self.use_thread_pool_extraction_var:
+            print(f"⚡ Thread pool extraction: ENABLED (fast I/O mode)")
         # Sync ENABLE_THOUGHTS env with config on startup
         os.environ['ENABLE_THOUGHTS'] = '1' if self.enable_thoughts_var else '0'
         
@@ -1874,6 +1896,14 @@ Text to analyze:
         """Stop all background operations and threads"""
         try:
             print("[CLEANUP] Stopping all background operations...")
+
+            # Shut down the persistent extraction daemon
+            try:
+                from chapter_extraction_manager import shutdown_daemon
+                shutdown_daemon()
+                print("[CLEANUP] Extraction daemon shut down")
+            except Exception:
+                pass
 
             # Helper: force-close dialogs that override closeEvent to hide instead of close
             def _force_close_dialog(dlg):
@@ -2787,7 +2817,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.9.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.9.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -16553,6 +16583,7 @@ Important rules:
                 # Environment-backed settings
                 ('retain_source_extension', ['retain_source_extension_var'], False, bool),
                 ('enable_gui_yield', ['enable_gui_yield_var'], True, bool),
+                ('use_thread_pool_extraction', ['use_thread_pool_extraction_var'], False, bool),
                 
                 # File selection settings
                 ('deep_scan', ['deep_scan_check', 'deep_scan_var'], False, bool),
@@ -16720,6 +16751,7 @@ Important rules:
             # Extraction workers env var
             new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
             env_vars_set.append(_update_env('EXTRACTION_WORKERS', new_workers))
+            env_vars_set.append(_update_env('USE_THREAD_POOL_EXTRACTION', self.config.get('use_thread_pool_extraction'), is_bool=True))
 
             # Wire debug payload saving to GUI debug mode
             os.environ['DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE'] = '1' if debug_enabled else '0'
@@ -17649,7 +17681,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.9.3...")
+    print("🚀 Starting Glossarion v7.9.4...")
     
     # Initialize splash screen
     splash_manager = None

@@ -1351,10 +1351,85 @@ class UnifiedClient:
                     return True
         return False
 
+    def _dump_raw_response(self, response, context, finish_reason, provider, request_type):
+        """Dump the raw server response to disk for debugging safety filter detection."""
+        try:
+            dump_dir = "Payloads/raw_safety_dumps"
+            os.makedirs(dump_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            
+            raw_dump = {
+                'timestamp': timestamp,
+                'context': context,
+                'finish_reason': finish_reason,
+                'provider': provider,
+                'model': getattr(self, 'model', None),
+                'request_type': request_type,
+                'response_type': str(type(response)),
+            }
+            
+            if response is not None:
+                # Capture all accessible attributes from the response object
+                raw_dump['response_str'] = str(response)[:10000]
+                raw_dump['response_repr'] = repr(response)[:10000]
+                raw_dump['response_dir'] = [a for a in dir(response) if not a.startswith('__')]
+                
+                # Try to extract every useful attribute
+                for attr in ['content', 'text', 'choices', 'candidates', 'finish_reason',
+                             'error_details', 'raw_response', 'usage', 'status_code',
+                             'headers', 'data', 'message', 'output', 'result', 'body']:
+                    if hasattr(response, attr):
+                        try:
+                            val = getattr(response, attr)
+                            if val is not None:
+                                raw_dump[f'attr_{attr}'] = str(val)[:5000]
+                        except Exception as e:
+                            raw_dump[f'attr_{attr}_error'] = str(e)
+                
+                # Try model_dump / to_dict for Pydantic / SDK objects
+                for method_name in ['model_dump', 'to_dict', 'dict', 'json']:
+                    if hasattr(response, method_name):
+                        try:
+                            method = getattr(response, method_name)
+                            if callable(method):
+                                dumped = method()
+                                if isinstance(dumped, str):
+                                    raw_dump[f'method_{method_name}'] = dumped[:10000]
+                                else:
+                                    raw_dump[f'method_{method_name}'] = str(dumped)[:10000]
+                        except Exception as e:
+                            raw_dump[f'method_{method_name}_error'] = str(e)
+                
+                # If UnifiedResponse, also dump the nested raw_response
+                if hasattr(response, 'raw_response') and response.raw_response is not None:
+                    nested = response.raw_response
+                    raw_dump['nested_raw_type'] = str(type(nested))
+                    raw_dump['nested_raw_str'] = str(nested)[:10000]
+                    raw_dump['nested_raw_repr'] = repr(nested)[:10000]
+                    for attr in ['content', 'text', 'choices', 'candidates', 'status_code', 'body']:
+                        if hasattr(nested, attr):
+                            try:
+                                val = getattr(nested, attr)
+                                if val is not None:
+                                    raw_dump[f'nested_attr_{attr}'] = str(val)[:5000]
+                            except Exception as e:
+                                raw_dump[f'nested_attr_{attr}_error'] = str(e)
+            else:
+                raw_dump['response'] = None
+            
+            filename = f"{dump_dir}/raw_{provider}_{context}_{timestamp}.json"
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(raw_dump, f, indent=2, ensure_ascii=False, default=str)
+            print(f"🔍 Raw response dumped to: {filename}")
+        except Exception as e:
+            print(f"⚠️ Failed to dump raw response: {e}")
+
     def _finalize_empty_response(self, messages, context, response, extracted_content: str, finish_reason: Optional[str], provider: str, request_type: str, start_time: float) -> Tuple[str, str]:
         is_safety = self._detect_safety_filter(messages, extracted_content, finish_reason, response, provider)
         # Always save failure snapshot and log truncation details
         self._save_failed_request(messages, f"Empty {request_type} response from {getattr(self, 'client_type', 'unknown')}", context, response)
+        # Dump the raw server response for debugging (always on empty, so we can verify if content was truly missing)
+        self._dump_raw_response(response, context, finish_reason, provider, request_type)
         error_details = getattr(response, 'error_details', None)
         if is_safety:
             error_details = {
