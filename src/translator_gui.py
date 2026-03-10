@@ -2935,7 +2935,7 @@ Recent translations to summarize:
         self.frame.addWidget(self.entry_epub, 0, 1, 1, 3)  # row, col, rowspan, colspan
         
         # Create browse menu button with dropdown
-        self.btn_browse_menu = QPushButton("Browse ▼")
+        self.btn_browse_menu = QPushButton("🔍 Browse ▼")
         self.btn_browse_menu.setMinimumWidth(100)
         self.btn_browse_menu.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")  # primary
         
@@ -14367,30 +14367,30 @@ Important rules:
             if os.path.isfile(ico_path):
                 dialog.setWindowIcon(QIcon(ico_path))
             
-            # ── HiDPI mascot helper ──
+            # ── HiDPI mascot helper (cached) ──
+            try:
+                _mascot_dpr = self.devicePixelRatioF()
+            except Exception:
+                _mascot_dpr = 1.0
+            _mascot_icon = QIcon(ico_path)
+            _mascot_avail = _mascot_icon.availableSizes()
+            if _mascot_avail:
+                _mascot_src = _mascot_icon.pixmap(max(_mascot_avail, key=lambda s: s.width() * s.height()))
+            else:
+                _mascot_src = _mascot_icon.pixmap(QSize(256, 256))
+            if _mascot_src.isNull():
+                _mascot_src = QPixmap(ico_path)
+            
             def _make_mascot(logical_size=48):
-                """Return a QLabel with Halgakos.ico rendered at HiDPI quality."""
+                """Return a QLabel with cached Halgakos pixmap at HiDPI quality."""
                 lbl = QLabel()
                 lbl.setStyleSheet("background: transparent; border: none;")
                 lbl.setAlignment(Qt.AlignCenter)
-                try:
-                    dpr = self.devicePixelRatioF()
-                except Exception:
-                    dpr = 1.0
-                icon = QIcon(ico_path)
-                dev_px = int(logical_size * max(1.0, dpr))
-                avail = icon.availableSizes()
-                if avail:
-                    best = max(avail, key=lambda s: s.width() * s.height())
-                    pm = icon.pixmap(best)
-                else:
-                    pm = icon.pixmap(QSize(dev_px, dev_px))
-                if pm.isNull():
-                    pm = QPixmap(ico_path)
-                if not pm.isNull():
-                    fitted = pm.scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if not _mascot_src.isNull():
+                    dev_px = int(logical_size * max(1.0, _mascot_dpr))
+                    fitted = _mascot_src.scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     try:
-                        fitted.setDevicePixelRatio(dpr)
+                        fitted.setDevicePixelRatio(_mascot_dpr)
                     except Exception:
                         pass
                     lbl.setPixmap(fitted)
@@ -14457,33 +14457,44 @@ Important rules:
             mode_data = [
                 {
                     "value": "off", "emoji": "🚫", "title": "OFF",
-                    "subtitle": "Manual control",
+                    "subtitle": "Manual control only",
                     "features": ["✓ No automatic extraction", "✓ Full manual glossary control",
-                                 "✓ Use pre-made glossary files", "✓ Best for advanced users"],
+                                 "✓ Load your own glossary CSV",
+                                 "✓ Best for pre-made glossaries",
+                                 "✓ Zero extra API cost"],
                     "bg": "#181e28", "hover": "#4a6080", "border": "#8090a8", "accent": "#b0c0d8",
                     "rec": None,
                 },
                 {
                     "value": "minimal", "emoji": "⚡", "title": "MINIMAL",
-                    "subtitle": "In-process extraction",
-                    "features": ["✓ Runs during translation", "✓ Lowest overhead",
-                                 "✓ No extra API calls", "⚠ May miss some terms"],
+                    "subtitle": "Inline extraction",
+                    "features": ["✓ Extracts terms during translation",
+                                 "✓ No separate extraction pass",
+                                 "✓ No extra API calls needed",
+                                 "✓ Lowest overhead possible",
+                                 "⚠ May miss uncommon terms"],
                     "bg": "#122018", "hover": "#387050", "border": "#2dd4a0", "accent": "#5eedc0",
                     "rec": None,
                 },
                 {
                     "value": "balanced", "emoji": "⭐", "title": "BALANCED",
-                    "subtitle": "Merging + splitting",
-                    "features": ["✓ Request merging (99 chapters)", "✓ Chapter splitting enabled",
-                                 "✓ Best quality-to-cost ratio", "✓ Runs before translation"],
+                    "subtitle": "Glossary merging + splitting",
+                    "features": ["✓ Merges up to 99 chapters per request",
+                                 "✓ Splits long chapters automatically",
+                                 "✓ Runs extraction before translation",
+                                 "✓ Best quality-to-cost ratio",
+                                 "✓ Smart deduplication"],
                     "bg": "#122040", "hover": "#3868c0", "border": "#5b9df6", "accent": "#80b8ff",
                     "rec": "✅ Recommended for most users",
                 },
                 {
                     "value": "full", "emoji": "🔬", "title": "FULL",
                     "subtitle": "Per-chapter extraction",
-                    "features": ["✓ Every chapter individually", "✓ Maximum term capture",
-                                 "✓ Most thorough analysis", "💰 Higher API cost"],
+                    "features": ["✓ Processes every chapter individually",
+                                 "✓ Maximum term capture rate",
+                                 "✓ Most thorough analysis possible",
+                                 "✓ Catches rare names & terms",
+                                 "💰 Higher API cost"],
                     "bg": "#241c0c", "hover": "#6a5a30", "border": "#f5b820", "accent": "#ffd050",
                     "rec": "⚡ Best for important novels",
                 },
@@ -14555,9 +14566,9 @@ Important rules:
                 if mi["rec"]:
                     cl.addSpacing(6)
                     rl = QLabel(mi["rec"])
-                    rl.setFont(QFont("Arial", feat_pt, QFont.Bold))
+                    rl.setFont(QFont("Segoe UI Semibold", feat_pt))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color:{mi['accent']}; color:white; padding:3px 6px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color:{mi['accent']}; color:#1a1a2e; padding:4px 8px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
@@ -14597,21 +14608,21 @@ Important rules:
             
             format_data = [
                 {
-                    "emoji": "📝", "title": "STANDARD MODE",
-                    "subtitle": "html2text extraction",
+                    "value": "standard", "emoji": "📝", "title": "html2text",
+                    "subtitle": "Best for token efficiency",
                     "features": [
-                        "✓ Uses html2text to convert HTML",
+                        "✓ Converts HTML to clean plaintext",
                         "✓ Fast and lightweight processing",
                         "✓ Good for simple EPUB structures",
                         "✓ Compatible with all file types",
-                        "⚠ May include unwanted formatting",
+                        "⚠ May lose some formatting",
                     ],
                     "bg": "#122040", "hover": "#3868c0", "border": "#5b9df6", "accent": "#80b8ff",
                     "rec": None,
                 },
                 {
-                    "emoji": "🔬", "title": "ENHANCED MODE",
-                    "subtitle": "BeautifulSoup extraction",
+                    "value": "enhanced", "emoji": "🔬", "title": "BeautifulSoup",
+                    "subtitle": "Best for format preservation",
                     "features": [
                         "✓ Deep HTML parsing with BeautifulSoup",
                         "✓ Smart filtering of noise & boilerplate",
@@ -14624,6 +14635,9 @@ Important rules:
                 },
             ]
             
+            selected_ext = [getattr(self, 'text_extraction_method_var', 'enhanced')]
+            ext_card_frames = {}
+            
             fmt_w = QWidget()
             fmt_w.setStyleSheet("background: transparent;")
             fmt_lay = QGridLayout(fmt_w)
@@ -14631,10 +14645,25 @@ Important rules:
             for c in range(2):
                 fmt_lay.setColumnStretch(c, 1)
             
+            def update_ext_selection(val):
+                selected_ext[0] = val
+                for v, (card, fi) in ext_card_frames.items():
+                    if v == val:
+                        card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 3px solid {fi['accent']}; border-radius: 5px; }}")
+                    else:
+                        card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 2px solid {fi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+            
             for idx, fi in enumerate(format_data):
                 card = QFrame()
                 card.setFrameShape(QFrame.StyledPanel)
-                card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 2px solid {fi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+                card.setCursor(Qt.PointingHandCursor)
+                ext_card_frames[fi["value"]] = (card, fi)
+                
+                is_sel = fi["value"] == selected_ext[0]
+                if is_sel:
+                    card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 3px solid {fi['accent']}; border-radius: 5px; }}")
+                else:
+                    card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 2px solid {fi['border']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
                 fmt_lay.addWidget(card, 0, idx)
                 
                 cl = QVBoxLayout(card)
@@ -14647,7 +14676,7 @@ Important rules:
                 cl.addWidget(el)
                 
                 tl = QLabel(fi["title"])
-                tl.setFont(QFont("Arial", title_pt, QFont.Bold))
+                tl.setFont(QFont("Segoe UI", title_pt, QFont.Bold))
                 tl.setWordWrap(True)
                 tl.setAlignment(Qt.AlignCenter)
                 tl.setStyleSheet("background:transparent; color:white; border:none;")
@@ -14671,15 +14700,22 @@ Important rules:
                 if fi["rec"]:
                     cl.addSpacing(6)
                     rl = QLabel(fi["rec"])
-                    rl.setFont(QFont("Arial", feat_pt, QFont.Bold))
+                    rl.setFont(QFont("Segoe UI Semibold", feat_pt))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color:{fi['accent']}; color:white; padding:3px 6px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color:{fi['accent']}; color:#1a1a2e; padding:4px 8px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
                 cl.addStretch()
+                
+                def _ext_click(v=fi["value"]):
+                    def h(event=None):
+                        update_ext_selection(v)
+                    return h
+                card.mousePressEvent = _ext_click()
             
             p2_lay.addWidget(fmt_w, 1)
+
             
             # Profile suffix info section
             suffix_frame = QFrame()
@@ -14762,7 +14798,7 @@ Important rules:
                 row, col = divmod(idx, 3)
                 card = QFrame()
                 card.setFrameShape(QFrame.StyledPanel)
-                card.setStyleSheet(f"QFrame {{ background-color: {bg}; border: 1px solid {accent}; border-radius: 5px; }} QFrame:hover {{ border: 2px solid {accent}; }}")
+                card.setStyleSheet(f"QFrame {{ background-color: {bg}; border: 1px solid {accent}; border-radius: 5px; }}")
                 pfx_lay.addWidget(card, row, col)
                 
                 cl = QVBoxLayout(card)
@@ -14820,14 +14856,14 @@ Important rules:
             m4_row.addStretch()
             p4_lay.addLayout(m4_row)
             
-            flow = QLabel("📂 Select EPUB  →  ⚙️ Settings  →  📑 Extract  →  ▶ Translate  →  ✅ Done!")
+            flow = QLabel("🔍 Browse  →  ⚙️ Settings  →  📑 Extract  →  ▶ Translate  →  ✅ Done!")
             flow.setAlignment(Qt.AlignCenter)
             flow.setFont(QFont("Arial", 11, QFont.Bold))
             flow.setStyleSheet("color: #80b8ff; padding: 10px; background-color: rgba(30, 58, 95, 180); border-radius: 6px;")
             p4_lay.addWidget(flow)
             
             steps = [
-                ("1️⃣", "Select EPUB", "Click 'Browse' or drag & drop your EPUB file."),
+                ("1️⃣", "Browse", "Click '🔍 Browse' or drag & drop your file."),
                 ("2️⃣", "Settings (optional)", "Open ⚙️ Glossary Settings to tweak extraction."),
                 ("3️⃣", "Translate", "Click ▶ Run Translation. In Balanced/Full mode, glossary extraction runs automatically first."),
                 ("4️⃣", "Review", "Check output folder. Edit glossary in the Glossary Editor tab."),
@@ -14948,6 +14984,13 @@ Important rules:
                         self.config['append_glossary_auto_load'] = True
                         setattr(self, 'append_glossary_auto_load_var', True)
                     self.append_log(f"📑 Glossary mode set to: {mode_val.capitalize()}")
+                    # Save extraction mode selection from page 2
+                    ext_val = selected_ext[0]
+                    self.config['text_extraction_method'] = ext_val
+                    if hasattr(self, 'text_extraction_method_var'):
+                        self.text_extraction_method_var = ext_val
+                    ext_label = 'BeautifulSoup' if ext_val == 'enhanced' else 'html2text'
+                    self.append_log(f"🔬 Text extraction mode set to: {ext_label}")
                     self.config['glossary_mode_dialog_shown'] = True
                     try:
                         self.save_config(show_message=False)
@@ -15480,7 +15523,7 @@ Important rules:
             if gp:
                 le.setText(gp)
 
-            browse_btn = QPushButton("Browse")
+            browse_btn = QPushButton("📂 Select File")
             browse_btn.clicked.connect(lambda _=False, _le=le: _browse_for_line(_le))
 
             clear_btn = QPushButton("Clear")
