@@ -1280,7 +1280,7 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                 msg = f"⏱️ Spawning workers... elapsed {elapsed:.0f}s"
                 if progress_callback:
                     progress_callback(msg)
-                print(msg)
+                print(msg, flush=True)
 
         _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
         _hb_thread.start()

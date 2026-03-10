@@ -2594,7 +2594,8 @@ Recent translations to summarize:
             ('compression_factor_var', 'compression_factor', '3.0'),
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
             ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
-            ('break_split_count_var', 'break_split_count', '')
+            ('break_split_count_var', 'break_split_count', ''),
+            ('auto_glossary_mode_var', 'auto_glossary_mode', 'off'),
         ]
         
         for var_name, key, default in str_vars:
