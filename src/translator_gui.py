@@ -4891,52 +4891,35 @@ Recent translations to summarize:
              QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
 
     def _show_output_folder_picker(self, files, override_dir):
-        """Show a non-modal stay-on-top dialog to pick which output folder to open."""
+        """Show a dropdown menu to pick which output folder to open."""
         import subprocess
         
-        # Close previous picker if still open
-        if hasattr(self, '_folder_picker_dialog') and self._folder_picker_dialog is not None:
-            try:
-                self._folder_picker_dialog.close()
-            except Exception:
-                pass
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Open Output Folder")
-        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
-        
-        # Scale relative to main window size (40% width, 50% height)
-        main_size = self.size()
-        dialog.resize(int(main_size.width() * 0.4), int(main_size.height() * 0.5))
-        dialog.setStyleSheet("""
-            QDialog {
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
                 background-color: #1e1e1e;
                 color: #e0e0e0;
+                border: 1px solid #4a5568;
+                padding: 4px;
             }
-            QLabel {
-                color: #e0e0e0;
+            QMenu::item {
+                padding: 6px 16px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #3d4f6a;
+            }
+            QMenu::item:disabled {
+                color: #555;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #4a5568;
+                margin: 4px 8px;
             }
         """)
         
-        layout = QVBoxLayout(dialog)
-        layout.setSpacing(6)
-        layout.setContentsMargins(12, 12, 12, 12)
-        
-        header = QLabel(f"📁 Select output folder to open ({len(files)} files)")
-        header.setStyleSheet("font-size: 11pt; font-weight: bold; color: #5a9fd4; margin-bottom: 6px;")
-        layout.addWidget(header)
-        
-        # Scrollable area for the folder list
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background-color: #1e1e1e; }")
-        
-        scroll_widget = QWidget()
-        scroll_widget.setObjectName("folderPickerScrollContent")
-        scroll_widget.setStyleSheet("#folderPickerScrollContent { background-color: #1e1e1e; }")
-        scroll_layout = QVBoxLayout(scroll_widget)
-        scroll_layout.setSpacing(4)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        existing_paths = []
         
         for file_path in files:
             base_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -4946,82 +4929,24 @@ Recent translations to summarize:
                 output_path = os.path.join(os.getcwd(), base_name)
             
             exists = os.path.exists(output_path)
-            
-            btn = QPushButton()
-            # Show filename + existence status
             icon = "📂" if exists else "📁"
-            status = "" if exists else "  (not yet created)"
-            btn.setText(f"{icon}  {base_name}{status}")
-            btn.setToolTip(output_path)
-            btn.setCursor(Qt.PointingHandCursor)
+            suffix = "" if exists else "  (not created)"
             
-            # Style based on whether the folder exists
+            action = menu.addAction(f"{icon}  {base_name}{suffix}")
+            action.setToolTip(output_path)
+            
             if exists:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #2d3748;
-                        color: #e0e0e0;
-                        border: 1px solid #4a5568;
-                        border-radius: 4px;
-                        padding: 8px 12px;
-                        text-align: left;
-                        font-size: 10pt;
-                    }
-                    QPushButton:hover {
-                        background-color: #3d4f6a;
-                        border-color: #5a9fd4;
-                    }
-                """)
+                existing_paths.append(output_path)
+                action.triggered.connect(lambda checked=False, p=output_path: self._open_single_output_folder(p))
             else:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #2a2a2a;
-                        color: #777;
-                        border: 1px solid #3a3a3a;
-                        border-radius: 4px;
-                        padding: 8px 12px;
-                        text-align: left;
-                        font-size: 10pt;
-                    }
-                    QPushButton:hover {
-                        background-color: #333;
-                        border-color: #555;
-                    }
-                """)
+                action.setEnabled(False)
+        
+        if existing_paths:
+            menu.addSeparator()
+            open_all_action = menu.addAction(f"📂  Open All ({len(existing_paths)} folders)")
             
-            # Capture output_path in lambda closure
-            btn.clicked.connect(lambda checked=False, p=output_path: self._open_single_output_folder(p))
-            scroll_layout.addWidget(btn)
-        
-        scroll_layout.addStretch()
-        scroll.setWidget(scroll_widget)
-        layout.addWidget(scroll)
-        
-        # Open All button
-        open_all_btn = QPushButton("Open All Existing Folders")
-        open_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #28a745;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px;
-                font-weight: bold;
-                font-size: 10pt;
-            }
-            QPushButton:hover {
-                background-color: #218838;
-            }
-        """)
-        
-        def open_all():
-            for file_path in files:
-                base_name = os.path.splitext(os.path.basename(file_path))[0]
-                if override_dir:
-                    p = os.path.join(override_dir, base_name)
-                else:
-                    p = os.path.join(os.getcwd(), base_name)
-                if os.path.exists(p):
+            def open_all():
+                for p in existing_paths:
                     try:
                         if platform.system() == 'Windows':
                             os.startfile(p)
@@ -5031,14 +4956,15 @@ Recent translations to summarize:
                             subprocess.call(['xdg-open', p])
                     except Exception:
                         pass
+            
+            open_all_action.triggered.connect(open_all)
         
-        open_all_btn.clicked.connect(open_all)
-        layout.addWidget(open_all_btn)
-        
-        self._folder_picker_dialog = dialog
-        dialog.setAttribute(Qt.WA_DeleteOnClose)
-        dialog.destroyed.connect(lambda: setattr(self, '_folder_picker_dialog', None))
-        dialog.show()  # Non-modal
+        # Show the menu at the button's position
+        btn = self.open_folder_btn if hasattr(self, 'open_folder_btn') else None
+        if btn:
+            menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+        else:
+            menu.exec(self.mapToGlobal(self.rect().center()))
 
     def _create_api_section(self):
         """Create API key section"""
