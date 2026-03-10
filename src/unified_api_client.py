@@ -347,6 +347,10 @@ def _api_watchdog_external_write(state: dict) -> None:
     except Exception:
         pass
 
+def _chapter_term():
+    """Return 'Section' for text file translations, 'Chapter' otherwise."""
+    return "Section" if os.environ.get("IS_TEXT_FILE_TRANSLATION") == "1" else "Chapter"
+
 def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = None,
                           request_id: Optional[str] = None,
                           chapter: Optional[Any] = None,
@@ -386,9 +390,9 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     label = merged_label
             elif chap is not None:
                 if ch and total:
-                    label = f"Chapter {chap} (chunk {ch}/{total})"
+                    label = f"{_chapter_term()} {chap} (chunk {ch}/{total})"
                 else:
-                    label = f"Chapter {chap}"
+                    label = f"{_chapter_term()} {chap}"
             elif context:
                 label = str(context)
         with _api_watchdog_lock:
@@ -4049,9 +4053,9 @@ class UnifiedClient:
             if not label and chapter is not None:
                 try:
                     if chunk and total_chunks:
-                        label = f"Chapter {chapter} (chunk {chunk}/{total_chunks})"
+                        label = f"{_chapter_term()} {chapter} (chunk {chunk}/{total_chunks})"
                     else:
-                        label = f"Chapter {chapter}"
+                        label = f"{_chapter_term()} {chapter}"
                 except Exception:
                     pass
             if not label and watchdog_context:
@@ -10317,9 +10321,9 @@ class UnifiedClient:
                             pass
                     
                     if chap is not None and chunk and total and not (str(chunk) == '1' and str(total) == '1'):
-                        return f"Chapter {chap} (chunk {chunk}/{total})"
+                        return f"{_chapter_term()} {chap} (chunk {chunk}/{total})"
                     if chap is not None:
-                        return f"Chapter {chap}"
+                        return f"{_chapter_term()} {chap}"
                 if hasattr(tls, "current_request_label") and tls.current_request_label:
                     return tls.current_request_label
             except Exception:
@@ -10330,7 +10334,7 @@ class UnifiedClient:
             chap = None
             m = re.search(r'Chapter\s+(\d+)', s)
             if m:
-                chap = f"Chapter {m.group(1)}"
+                chap = f"{_chapter_term()} {m.group(1)}"
             chunk = None
             mc = re.search(r'Chunk\s+(\d+)/(\d+)', s)
             if mc:
@@ -10372,9 +10376,9 @@ class UnifiedClient:
                     pass
             elif chapter is not None:
                 if chunk and total_chunks:
-                    tls.current_request_label = f"Chapter {chapter} (chunk {chunk}/{total_chunks})"
+                    tls.current_request_label = f"{_chapter_term()} {chapter} (chunk {chunk}/{total_chunks})"
                 else:
-                    tls.current_request_label = f"Chapter {chapter}"
+                    tls.current_request_label = f"{_chapter_term()} {chapter}"
         except Exception:
             pass
 

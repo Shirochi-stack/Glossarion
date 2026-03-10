@@ -4734,15 +4734,16 @@ class BatchTranslationProcessor:
                         assistant_tokens += tokens
                 non_assistant_tokens = total_tokens - assistant_tokens
 
+                _term = "Section" if self.is_text_file else "Chapter"
                 if self.config.CONTEXTUAL and assistant_tokens > 0:
                     print(
-                        f"💬 Chapter {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"💬 {_term} {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
                         f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {file_ref}]"
                     )
                 else:
                     print(
-                        f"💬 Chapter {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"💬 {_term} {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]"
                     )
                 
