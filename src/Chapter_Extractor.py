@@ -1320,9 +1320,10 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     _startup_elapsed = time.time() - _startup_start
                     if _startup_elapsed >= 2.0:
                         msg = f"✅ Workers ready ({_startup_elapsed:.1f}s)"
-                        print(msg, flush=True)
                         if progress_callback:
                             progress_callback(msg)
+                        else:
+                            print(msg, flush=True)
                 if is_stop_requested():
                     print("❌ Chapter processing stopped by user")
                     executor.shutdown(wait=False)

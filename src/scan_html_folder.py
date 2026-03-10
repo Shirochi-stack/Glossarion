@@ -1334,7 +1334,7 @@ def extract_epub_image_info(epub_path, log=print):
 
 def detect_missing_images(translated_html, chapter_num, original_image_info):
     """
-    Detect missing images by comparing translated HTML with original EPUB image info.
+    Detect missing or extra images by comparing translated HTML with original EPUB image info.
     
     Args:
         translated_html: The translated HTML content (string)
@@ -1342,7 +1342,7 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
         original_image_info: Dict from extract_epub_image_info()
     
     Returns:
-        tuple: (has_missing_images, details)
+        tuple: (has_issues, details)
     """
     try:
         from bs4 import BeautifulSoup
@@ -1363,6 +1363,8 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
         trans_images = soup_trans.find_all('img')
         trans_img_count = len(trans_images)
         
+        details = []
+        
         # Check if translated has fewer images than original
         if trans_img_count < orig_img_count:
             missing_count = orig_img_count - trans_img_count
@@ -1374,7 +1376,7 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
                 if src and src not in trans_srcs:
                     missing_srcs.append(src)
             
-            details = [{
+            details.append({
                 'type': 'missing_images',
                 'severity': 'high',
                 'count': missing_count,
@@ -1382,11 +1384,22 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
                 'translated_count': trans_img_count,
                 'missing_srcs': missing_srcs[:5],  # First 5 missing images
                 'description': f'Translation has {missing_count} fewer images than original ({trans_img_count}/{orig_img_count})'
-            }]
-            
-            return True, details
+            })
         
-        return False, []
+        # Check if translated has more images than original
+        elif trans_img_count > orig_img_count:
+            extra_count = trans_img_count - orig_img_count
+            
+            details.append({
+                'type': 'extra_images',
+                'severity': 'medium',
+                'count': extra_count,
+                'original_count': orig_img_count,
+                'translated_count': trans_img_count,
+                'description': f'Translation has {extra_count} extra images compared to original ({trans_img_count}/{orig_img_count})'
+            })
+        
+        return len(details) > 0, details
         
     except Exception as e:
         # Silent failure - if we can't check, don't report false positives
@@ -5744,21 +5757,27 @@ def process_html_file_batch(args):
                         print(f"[IMAGE DEBUG]   Original has {orig_info.get('image_count', 0)} images")
                 
                 if has_missing_imgs:
-                    print(f"[IMAGE DEBUG] Found missing images! Issues: {img_issues}")
+                    print(f"[IMAGE DEBUG] Found image issues! Issues: {img_issues}")
                     # Add to translation artifacts
                     for img_issue in img_issues:
+                        issue_type = img_issue.get('type', 'missing_images')
                         artifacts.append({
-                            'type': 'missing_images',
+                            'type': issue_type,
                             'count': img_issue.get('count', 0),
                             'examples': img_issue.get('missing_srcs', []),
                             'severity': img_issue.get('severity', 'high')
                         })
                     
                     # Add to issues list for reporting
-                    missing_count = img_issues[0].get('count', 0) if img_issues else 0
-                    orig_count = img_issues[0].get('original_count', 0) if img_issues else 0
-                    trans_count = img_issues[0].get('translated_count', 0) if img_issues else 0
-                    issues.append(f"missing_images_{missing_count}_lost_({trans_count}/{orig_count})")
+                    for img_issue in img_issues:
+                        issue_type = img_issue.get('type', 'missing_images')
+                        issue_count = img_issue.get('count', 0)
+                        orig_count = img_issue.get('original_count', 0)
+                        trans_count = img_issue.get('translated_count', 0)
+                        if issue_type == 'extra_images':
+                            issues.append(f"extra_images_{issue_count}_added_({trans_count}/{orig_count})")
+                        else:
+                            issues.append(f"missing_images_{issue_count}_lost_({trans_count}/{orig_count})")
                 else:
                     print(f"[IMAGE DEBUG] No missing images detected for chapter {chapter_num}")
             except Exception as e:

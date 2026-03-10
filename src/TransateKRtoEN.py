@@ -7031,8 +7031,8 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                 # Still broken — collect for batch repair
                 broken_refs.append((idx, tag, attr, basename, dir_part))
             
-            # Pass 2: Position-based repair using chapter stem from filename
-            # The Nth <img> tag should reference {chapter_stem}_img_{N}
+            # Pass 2: Rename image files + references to match the output HTML filename
+            # e.g., response_chapter1064.html → images become chapter1064_img_1.webp, etc.
             if broken_refs:
                 # Derive chapter stem from the HTML filename
                 # e.g., "response_chapter_notice0002.html" -> "chapter_notice0002"
@@ -7040,41 +7040,42 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                 if html_stem.startswith('response_'):
                     html_stem = html_stem[len('response_'):]
                 
-                # Find all images belonging to this chapter
+                # Find images already matching this stem
                 chapter_images = [f for f in existing_images 
                                  if os.path.splitext(f)[0].startswith(html_stem + '_img_')]
                 
-                # For merged chapters, the HTML may reference images from multiple
-                # source chapters (e.g., chapter1058_img_*, chapter1062_img_*,
-                # chapter1063_img_*). Collect all stems referenced in img tags.
+                # Collect images from other stems referenced in img tags
+                mismatched_images = []  # images whose stem != html_stem
                 if len(chapter_images) < len(img_refs):
                     referenced_stems = set()
                     for _, _, rv in img_refs:
                         ref_basename = os.path.basename(rv.split('?')[0])
                         ref_name = os.path.splitext(ref_basename)[0]
-                        # Extract stem: "chapter1063_img_5" -> "chapter1063"
                         stem_match = re.match(r'^(.+?)_img_\d+', ref_name)
                         if stem_match:
-                            referenced_stems.add(stem_match.group(1))
+                            stem = stem_match.group(1)
+                            if stem != html_stem:
+                                referenced_stems.add(stem)
                     
                     if referenced_stems:
-                        # Collect images from ALL referenced chapter stems
-                        chapter_images = []
                         for f in existing_images:
                             f_name = os.path.splitext(f)[0]
                             for stem in referenced_stems:
                                 if f_name.startswith(stem + '_img_'):
-                                    chapter_images.append(f)
+                                    mismatched_images.append(f)
                                     break
                 
-                if chapter_images:
-                    # Sort by _img_N number — position N maps to _img_N
+                # Combine: matching images first, then mismatched ones
+                all_images = chapter_images + mismatched_images
+                
+                if all_images:
+                    # Sort ALL images by their _img_N number for correct ordering
                     def _img_num(fname):
                         m = re.search(r'_img_(\d+)', fname)
                         return int(m.group(1)) if m else 0
-                    chapter_images.sort(key=_img_num)
+                    all_images.sort(key=_img_num)
                     
-                    # Get a dir_part from any existing reference
+                    # Get dir_part from any existing reference
                     default_dir = ''
                     for _, _, rv in img_refs:
                         d = os.path.dirname(rv.split('?')[0])
@@ -7082,20 +7083,44 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                             default_dir = d
                             break
                     
-                    # Assign images positionally (fix as many as we can)
-                    assign_count = min(len(chapter_images), len(img_refs))
+                    # Physically rename mismatched images + update references
+                    assign_count = min(len(all_images), len(img_refs))
                     for i in range(assign_count):
                         tag, attr, ref_value = img_refs[i]
-                        expected = chapter_images[i]
+                        old_file = all_images[i]
+                        old_name_no_ext = os.path.splitext(old_file)[0]
+                        ext = os.path.splitext(old_file)[1]
+                        
+                        # Determine correct name for this position
+                        new_file = f"{html_stem}_img_{i + 1}{ext}"
+                        
+                        # Physically rename if the file has the wrong stem
+                        if old_file != new_file and old_file in existing_images:
+                            old_path = os.path.join(images_dir, old_file)
+                            new_path = os.path.join(images_dir, new_file)
+                            if os.path.isfile(old_path) and not os.path.exists(new_path):
+                                try:
+                                    os.rename(old_path, new_path)
+                                    existing_images.discard(old_file)
+                                    existing_images.add(new_file)
+                                    # Update the rename_map to track this
+                                    rename_map[old_file] = new_file
+                                    actual_renames[old_file] = new_file
+                                    print(f"   📁 Renamed: {old_file} → {new_file}")
+                                except Exception as e:
+                                    print(f"   ⚠️ Could not rename {old_file}: {e}")
+                                    new_file = old_file  # Keep old name if rename fails
+                        
+                        # Update HTML reference
                         clean_ref = ref_value.split('?')[0]
                         current_basename = os.path.basename(clean_ref)
                         dir_part = os.path.dirname(clean_ref) or default_dir
                         
-                        if current_basename != expected:
-                            tag[attr] = f"{dir_part}/{expected}" if dir_part else expected
+                        if current_basename != new_file:
+                            tag[attr] = f"{dir_part}/{new_file}" if dir_part else new_file
                             modified = True
                             repaired_refs += 1
-                            print(f"   🔧 Repaired: '{current_basename}' → {expected}")
+                            print(f"   🔧 Repaired ref: '{current_basename}' → {new_file}")
             
             if modified:
                 with open(file_path, 'w', encoding='utf-8') as f:
@@ -7106,6 +7131,15 @@ def retroactive_update_image_references(output_dir, source_dir=None):
     
     if updated_files > 0 or repaired_refs > 0:
         print(f"✅ Updated {updated_files} translated files ({total_replacements} renames, {repaired_refs} repairs)")
+        
+        # Save updated rename map if any physical renames happened
+        if rename_map:
+            try:
+                with open(rename_map_path, 'w', encoding='utf-8') as f:
+                    json.dump(rename_map, f, ensure_ascii=False, indent=2)
+                print(f"   💾 Updated image_rename_map.json")
+            except Exception as e:
+                print(f"   ⚠️ Could not save rename map: {e}")
     else:
         print(f"✅ All translated files already use the new image format")
 
