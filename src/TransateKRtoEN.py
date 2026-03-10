@@ -6997,8 +6997,19 @@ def retroactive_update_image_references(output_dir, source_dir=None):
                     all_referenced.add(new_name)
                     continue
                 
-                # If the referenced file exists, it's fine
+                # If the referenced file exists, check if its stem matches the HTML filename
                 if basename in existing_images:
+                    # Derive HTML stem for comparison
+                    _html_stem_check = os.path.splitext(html_file)[0]
+                    if _html_stem_check.startswith('response_'):
+                        _html_stem_check = _html_stem_check[len('response_'):]
+                    # Check if image stem matches HTML stem
+                    img_name_no_ext = os.path.splitext(basename)[0]
+                    stem_match = re.match(r'^(.+?)_img_\d+', img_name_no_ext)
+                    if stem_match and stem_match.group(1) != _html_stem_check:
+                        # Image exists but belongs to wrong chapter — needs repair
+                        broken_refs.append((idx, tag, attr, basename, dir_part))
+                        continue
                     continue
                 
                 # Check reverse rename map
