@@ -8034,11 +8034,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
                 
                 if auto_glossary_mode in ('balanced', 'full'):
-                    # Check if a glossary is already loaded for this file
-                    has_existing_glossary = bool(getattr(self, 'manual_glossary_path', None) and 
-                                                os.path.exists(getattr(self, 'manual_glossary_path', '')))
+                    # Check if a glossary was MANUALLY loaded by the user for this file
+                    # Auto-loaded glossaries (from autofill) could be incomplete from a stopped extraction
+                    has_existing_glossary = bool(
+                        getattr(self, 'manual_glossary_path', None) and 
+                        os.path.exists(getattr(self, 'manual_glossary_path', '')) and
+                        getattr(self, 'manual_glossary_manually_loaded', False)
+                    )
                     
                     if not has_existing_glossary:
+                        # Clear any auto-loaded glossary before re-extraction
+                        # (it may be incomplete from a previous stopped extraction)
+                        if (getattr(self, 'manual_glossary_path', None) and 
+                            not getattr(self, 'manual_glossary_manually_loaded', False)):
+                            self.append_log(f"📑 Clearing auto-loaded glossary for fresh extraction")
+                            self.manual_glossary_path = None
+                            os.environ.pop('MANUAL_GLOSSARY', None)
+                        
                         mode_display = auto_glossary_mode.capitalize()
                         self.append_log(f"\n{'='*60}")
                         self.append_log(f"📑 Auto Glossary Mode: {mode_display}")
@@ -8070,6 +8082,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             # Check saved stop flag (run_glossary_extraction_direct resets self.stop_requested in finally)
                             if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
                                 self.append_log("⏹️ Translation cancelled during glossary extraction")
+                                # Clear auto-loaded glossary so next run re-extracts
+                                if not getattr(self, 'manual_glossary_manually_loaded', False):
+                                    self.manual_glossary_path = None
+                                    os.environ.pop('MANUAL_GLOSSARY', None)
                                 return
                             
                             # Auto-load the generated glossary (only if extraction completed fully)
