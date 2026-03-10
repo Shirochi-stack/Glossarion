@@ -81,10 +81,9 @@ def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
 def _get_proxy_api_key() -> str:
     """Auto-fetch the proxy's API key so requests are authenticated.
 
-    Resolution order:
-      1. Try the live proxy's /api/config endpoint (most reliable — the proxy
-         knows its own key in memory).
-      2. Fall back to the config file on disk.
+    Only reads from the live proxy's /api/config endpoint (most reliable).
+    We do NOT read from the config file on disk because Glossarion settings
+    are merged into the same file and can contain a stale apiKey.
 
     Returns the key string, or empty string if no key is configured.
     """
@@ -95,7 +94,7 @@ def _get_proxy_api_key() -> str:
 
         key = ""
 
-        # 1. Try live proxy endpoint first (always up-to-date)
+        # Try live proxy endpoint (always up-to-date)
         try:
             proxy_url = get_proxy_url()
             resp = requests.get(
@@ -109,19 +108,6 @@ def _get_proxy_api_key() -> str:
                     logger.info("Antigravity: API key fetched from live proxy.")
         except Exception:
             pass
-
-        # 2. Fall back to config file on disk
-        if not key:
-            config_path = os.path.join(
-                os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-            )
-            if os.path.isfile(config_path):
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        data = json.loads(f.read())
-                    key = data.get("apiKey", "") or ""
-                except Exception:
-                    pass
 
         _cached_api_key = key
         return key
@@ -410,6 +396,103 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
         }
 
 
+def _kill_proxy_by_port(port: int = 8080):
+    """Kill any process listening on the proxy port (Windows & Unix)."""
+    try:
+        if sys.platform == "win32":
+            # Find PID using netstat
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "TCP"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = int(parts[-1])
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                   capture_output=True, timeout=5)
+        else:
+            subprocess.run(["fuser", "-k", f"{port}/tcp"],
+                           capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def restart_proxy(log_fn=None) -> Dict[str, Any]:
+    """Kill the running proxy and relaunch it.
+    
+    Used when persistent auth failures indicate a stale API key.
+    """
+    global _proxy_process
+    _log = log_fn or (lambda msg: None)
+    _log("🔄 Antigravity: Restarting proxy to refresh API key...")
+
+    # Kill tracked process
+    if _proxy_process is not None:
+        try:
+            _proxy_process.terminate()
+            _proxy_process.wait(timeout=5)
+        except Exception:
+            try:
+                _proxy_process.kill()
+            except Exception:
+                pass
+        _proxy_process = None
+
+    # Also kill anything on port 8080 (the proxy might have been started
+    # outside of Glossarion, e.g. via the Antigravity desktop app)
+    proxy_url = get_proxy_url()
+    try:
+        port = int(proxy_url.rsplit(":", 1)[1].split("/")[0])
+    except Exception:
+        port = 8080
+    _kill_proxy_by_port(port)
+
+    # Clear apiKey from the proxy's own config file so it restarts
+    # without requiring API key auth (fixes stale key after OAuth refresh)
+    config_path = os.path.join(
+        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
+    )
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                proxy_cfg = json.load(f)
+            if proxy_cfg.get("apiKey"):
+                _log(f"🔑 Clearing stale API key from {config_path}")
+                proxy_cfg["apiKey"] = ""
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(proxy_cfg, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        _log(f"⚠️ Could not clear proxy API key: {exc}")
+
+    # Also clear ANTHROPIC_AUTH_TOKEN from ~/.claude/settings.json
+    # (Antigravity IDE stores its auth token here; stale values cause 401s)
+    claude_settings_path = os.path.join(
+        os.path.expanduser("~"), ".claude", "settings.json"
+    )
+    try:
+        if os.path.isfile(claude_settings_path):
+            with open(claude_settings_path, "r", encoding="utf-8") as f:
+                claude_cfg = json.load(f)
+            env_block = claude_cfg.get("env", {})
+            if env_block.get("ANTHROPIC_AUTH_TOKEN"):
+                _log(f"🔑 Clearing stale ANTHROPIC_AUTH_TOKEN from {claude_settings_path}")
+                env_block["ANTHROPIC_AUTH_TOKEN"] = ""
+                with open(claude_settings_path, "w", encoding="utf-8") as f:
+                    json.dump(claude_cfg, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        _log(f"⚠️ Could not clear ANTHROPIC_AUTH_TOKEN: {exc}")
+
+    # Wait for port to free up
+    time.sleep(2)
+
+    # Clear API key cache so we fetch a fresh one
+    invalidate_api_key_cache()
+
+    # Relaunch
+    return ensure_proxy_running(log_fn=log_fn)
+
+
 # ---------------------------------------------------------------------------
 # Message format conversion
 # ---------------------------------------------------------------------------
@@ -534,8 +617,23 @@ def send_message(
         time.sleep(wait)
         invalidate_api_key_cache()
         headers = _build_headers()  # refresh key
+        # On last retry, also try without API key (localhost may accept)
+        if _auth_attempt == 2:
+            headers.pop("x-api-key", None)
 
-    # Handle auth failure
+    # All retries failed — restart the proxy as last resort
+    if resp.status_code in (401, 403):
+        restart_result = restart_proxy(log_fn=log_fn)
+        if restart_result.get("running"):
+            # Proxy restarted — rebuild headers with fresh key and retry once
+            invalidate_api_key_cache()
+            headers = _build_headers()
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            except Exception:
+                pass  # fall through to existing error handling
+
+    # Handle auth failure (after all retry/restart attempts)
     if resp.status_code in (401, 403):
         # Parse error to distinguish API key rejection from Google auth
         error_detail = ""
@@ -759,9 +857,30 @@ def send_message_stream(
         time.sleep(wait)
         invalidate_api_key_cache()
         headers = _build_headers()  # refresh key
+        # On last retry, also try without API key (localhost may accept)
+        if _auth_attempt == 2:
+            headers.pop("x-api-key", None)
         resp = None
 
-    # Handle auth failure
+    # All retries failed — restart the proxy as last resort
+    if resp.status_code in (401, 403):
+        if use_httpx and _httpx_ctx:
+            try:
+                _httpx_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+            _httpx_ctx = None
+        restart_result = restart_proxy(log_fn=log_fn)
+        if restart_result.get("running"):
+            invalidate_api_key_cache()
+            headers = _build_headers()
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=timeout, stream=True)
+                use_httpx = False  # switched to requests for restart retry
+            except Exception:
+                pass
+
+    # Handle auth failure (after all retry/restart attempts)
     if resp.status_code in (401, 403):
         if use_httpx and _httpx_ctx:
             try:
