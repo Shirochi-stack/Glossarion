@@ -807,6 +807,18 @@ class RefusalPatternsDialog(QDialog):
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
         
+        # Safety filter checks explanation
+        checks_label = QLabel(
+            "Safety filter detection checks (in order):\n"
+            "  #1  Explicit finish_reason: content_filter / prohibited_content / blocked\n"
+            "  #2  Safety keywords in raw response (e.g. 'harm_category', 'content policy')\n"
+            "  #3  Refusal phrases in extracted text (e.g. 'I cannot assist', 'nsfw')\n"
+            "  #4  Empty response from known provider = assumed safety block (toggle in Settings)"
+        )
+        checks_label.setStyleSheet("color: #808080; font-size: 9pt; padding: 0px 0px 5px 0px; font-family: Consolas, monospace;")
+        checks_label.setWordWrap(True)
+        main_layout.addWidget(checks_label)
+
         # Controls row: disable toggle + length limit
         controls_row = QWidget()
         controls_h = QHBoxLayout(controls_row)

@@ -2542,6 +2542,7 @@ Recent translations to summarize:
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             ('save_partial_results_var', 'save_partial_results', False),
             ('save_prohibited_results_var', 'save_prohibited_results', False),
+            ('disable_empty_safety_heuristic_var', 'disable_empty_safety_heuristic', False),
             ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', False),
             ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
             ('disable_refusal_checks_var', 'disable_refusal_checks', False),
@@ -16404,6 +16405,7 @@ Important rules:
                 ('refusal_pattern_length_limit', ['refusal_pattern_length_limit_var'], 1000, lambda v: safe_int(v, 1000)),
                 ('save_partial_results', ['save_partial_results_var'], False, bool),
                 ('save_prohibited_results', ['save_prohibited_results_var'], False, bool),
+                ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_var'], False, bool),
 
                 # Prompts and text fields
                 ('summary_role', ['summary_role_var'], '', str),
@@ -16507,6 +16509,7 @@ Important rules:
                 ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
                 ('save_partial_results', ['save_partial_results_checkbox', 'save_partial_results_var'], False, bool),
                 ('save_prohibited_results', ['save_prohibited_results_checkbox', 'save_prohibited_results_var'], False, bool),
+                ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_checkbox', 'disable_empty_safety_heuristic_var'], False, bool),
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 1800, lambda v: safe_int(v, 1800)),
@@ -16723,6 +16726,7 @@ Important rules:
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
             self.config.setdefault('save_partial_results', False)
             self.config.setdefault('save_prohibited_results', False)
+            self.config.setdefault('disable_empty_safety_heuristic', False)
             # Image compression defaults
             compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
             for key, val in compression_defaults.items():
@@ -17317,6 +17321,7 @@ Important rules:
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
                 ('SAVE_PARTIAL_RESULTS', '1' if getattr(self, 'save_partial_results_var', False) else '0'),
                 ('SAVE_PROHIBITED_RESULTS', '1' if getattr(self, 'save_prohibited_results_var', False) else '0'),
+                ('DISABLE_EMPTY_SAFETY_HEURISTIC', '1' if getattr(self, 'disable_empty_safety_heuristic_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
                 ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
                 # Char-ratio truncation (silent truncation detector)

@@ -3863,6 +3863,38 @@ def _create_response_handling_section(self, parent):
     save_prohibited_desc.setContentsMargins(20, 2, 0, 10)
     section_v.addWidget(save_prohibited_desc)
 
+    # Disable empty response = safety filter heuristic
+    if not hasattr(self, 'disable_empty_safety_heuristic_var'):
+        self.disable_empty_safety_heuristic_var = self.config.get('disable_empty_safety_heuristic', False)
+
+    self.disable_empty_safety_heuristic_checkbox = self._create_styled_checkbox("Disable empty response = safety filter check")
+    self.disable_empty_safety_heuristic_checkbox.setContentsMargins(20, 0, 0, 0)
+    self.disable_empty_safety_heuristic_checkbox.setToolTip(
+        "When enabled, empty API responses will NOT be automatically\n"
+        "classified as safety filter blocks (Check #4 heuristic).\n"
+        "Useful when empty responses are caused by parsing failures,\n"
+        "not actual content filtering."
+    )
+    try:
+        self.disable_empty_safety_heuristic_checkbox.setChecked(bool(self.disable_empty_safety_heuristic_var))
+    except Exception:
+        pass
+    def _on_disable_empty_safety_heuristic_toggle(checked):
+        try:
+            self.disable_empty_safety_heuristic_var = bool(checked)
+        except Exception:
+            pass
+    self.disable_empty_safety_heuristic_checkbox.toggled.connect(_on_disable_empty_safety_heuristic_toggle)
+    section_v.addWidget(self.disable_empty_safety_heuristic_checkbox)
+
+    disable_empty_safety_desc = QLabel(
+        "Stops the client from guessing that empty responses are safety-filtered.\n"
+        "Raw server responses are still dumped to Payloads/raw_safety_dumps/ for inspection."
+    )
+    disable_empty_safety_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    disable_empty_safety_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(disable_empty_safety_desc)
+
     # Preserve Original Text on Failure
     preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
     preserve_cb.setToolTip(
@@ -3928,6 +3960,51 @@ def _create_response_handling_section(self, parent):
     disable_qa_markers_desc.setContentsMargins(20, 5, 0, 10)
     section_v.addWidget(disable_qa_markers_desc)
     
+    # Manage Refusal Patterns shortcut button
+    refusal_patterns_btn = QPushButton("🚫 Manage Refusal Patterns...")
+    refusal_patterns_btn.setFixedWidth(250)
+    refusal_patterns_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #5c2e5b;
+            color: #ffffff;
+            font-size: 10pt;
+            padding: 6px 15px;
+            border: 1px solid #42213f;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #733d71;
+            border-color: #5c2e5b;
+        }
+        QPushButton:pressed {
+            background-color: #3d1d3c;
+        }
+    """)
+    refusal_patterns_btn.setToolTip(
+        "Open the refusal pattern editor to add, edit, or remove\n"
+        "patterns used to detect AI refusal responses."
+    )
+    def _open_refusal_patterns():
+        try:
+            from multi_api_key_manager import RefusalPatternsDialog
+            if not hasattr(self, '_refusal_patterns_dialog') or self._refusal_patterns_dialog is None:
+                self._refusal_patterns_dialog = RefusalPatternsDialog(None, self)
+                self._refusal_patterns_dialog.setWindowModality(Qt.NonModal)
+            else:
+                try:
+                    self._refusal_patterns_dialog._reload_from_config()
+                except Exception:
+                    pass
+            self._refusal_patterns_dialog.show()
+            self._refusal_patterns_dialog.raise_()
+            self._refusal_patterns_dialog.activateWindow()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Error", f"Failed to open Refusal Patterns: {e}")
+    refusal_patterns_btn.clicked.connect(_open_refusal_patterns)
+    section_v.addWidget(refusal_patterns_btn)
+
     # Place the section at row 1, column 0 to match the original grid
     try:
         grid = parent.layout()

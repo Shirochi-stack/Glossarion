@@ -1208,9 +1208,45 @@ class UnifiedClient:
 
     def _detect_safety_filter(self, messages, extracted_content: str, finish_reason: Optional[str], response: Any, provider: str) -> bool:
         # Heuristic patterns consolidated from previous branches
-        # 1) Suspicious finish reasons with empty content
-        if not extracted_content and finish_reason in ['length', 'stop', 'max_tokens', None]:
+        # 1) Suspicious finish reasons that explicitly indicate content filtering
+        if finish_reason in ['content_filter', 'prohibited_content', 'blocked']:
             return True
+        # 2) Safety indicators in raw response/error details
+        response_str = ""
+        if response is not None:
+            if hasattr(response, 'raw_response') and response.raw_response is not None:
+                response_str = str(response.raw_response).lower()
+            elif hasattr(response, 'error_details') and response.error_details is not None:
+                response_str = str(response.error_details).lower()
+            else:
+                response_str = str(response).lower()
+        safety_indicators = [
+            'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
+            'refused', 'content_filter', 'content policy', 'violation',
+            'cannot assist', 'unable to process', 'against guidelines',
+            'ethical', 'responsible ai', 'harm_category', 'nsfw',
+            'adult content', 'explicit', 'violence', 'disturbing'
+        ]
+        if any(ind in response_str for ind in safety_indicators):
+            return True
+        # 3) Safety phrases in extracted content
+        if extracted_content:
+            content_lower = extracted_content.lower()
+            safety_phrases = [
+                'blocked', 'safety', 'cannot', 'unable', 'prohibited',
+                'content filter', 'refused', 'inappropriate', 'i cannot',
+                "i can't", "i'm not able", "not able to", "against my",
+                'content policy', 'guidelines', 'ethical',
+                'analyze this image', 'process this image', 'describe this image', 'nsfw'
+            ]
+            if any(p in content_lower for p in safety_phrases):
+                return True
+        # 4) Provider-specific empty behavior (can be disabled via toggle)
+        if os.getenv('DISABLE_EMPTY_SAFETY_HEURISTIC', '0') != '1':
+            if provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
+                if not extracted_content and finish_reason != 'error':
+                    return True
+        return False
     def _build_gemini3_model_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert an assistant/model message to Gemini 3 parts format using assistant role
@@ -1302,54 +1338,7 @@ class UnifiedClient:
                 msg.pop("content", None)
             cleaned.append(msg)
         return cleaned
-        # 2) Safety indicators in raw response/error details
-        response_str = ""
-        if response is not None:
-            if hasattr(response, 'raw_response') and response.raw_response is not None:
-                response_str = str(response.raw_response).lower()
-            elif hasattr(response, 'error_details') and response.error_details is not None:
-                response_str = str(response.error_details).lower()
-            else:
-                response_str = str(response).lower()
-        safety_indicators = [
-            'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
-            'refused', 'content_filter', 'content policy', 'violation',
-            'cannot assist', 'unable to process', 'against guidelines',
-            'ethical', 'responsible ai', 'harm_category', 'nsfw',
-            'adult content', 'explicit', 'violence', 'disturbing'
-        ]
-        if any(ind in response_str for ind in safety_indicators):
-            return True
-        # 3) Safety phrases in extracted content
-        if extracted_content:
-            content_lower = extracted_content.lower()
-            safety_phrases = [
-                'blocked', 'safety', 'cannot', 'unable', 'prohibited',
-                'content filter', 'refused', 'inappropriate', 'i cannot',
-                "i can't", "i'm not able", "not able to", "against my",
-                'content policy', 'guidelines', 'ethical',
-                'analyze this image', 'process this image', 'describe this image', 'nsfw'
-            ]
-            if any(p in content_lower for p in safety_phrases):
-                return True
-        # 4) Provider-specific empty behavior
-        if provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
-            if not extracted_content and finish_reason != 'error':
-                return True
-        # 5) Suspiciously short output vs long input - FIX: Add None checks
-        if extracted_content and len(extracted_content) < 50:
-            # FIX: Add None check for messages
-            if messages is not None:
-                input_length = 0
-                for m in messages:
-                    if m is not None and m.get('role') == 'user':
-                        content = m.get('content', '')
-                        # FIX: Add None check for content
-                        if content is not None:
-                            input_length += len(str(content))
-                if input_length > 200 and any(w in extracted_content.lower() for w in ['cannot', 'unable', 'sorry', 'assist']):
-                    return True
-        return False
+
 
     def _dump_raw_response(self, response, context, finish_reason, provider, request_type):
         """Dump the raw server response to disk for debugging safety filter detection."""
