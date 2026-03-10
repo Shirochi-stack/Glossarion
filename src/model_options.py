@@ -2,24 +2,34 @@
 """
 Centralized model catalog for Glossarion UIs.
 Returned list should mirror the main GUI model dropdown.
+Updated: 2026-03-10
 """
 from typing import List
 
 def get_model_options() -> List[str]:
     return [
     
-        # OpenAI Models
-        "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano",
-        "gpt-3.5-turbo", "gpt-5.2", "gpt-5.2-pro", "gpt-5.2-chat-latest",
+        # OpenAI Models (as of March 2026)
+        # - GPT-4o/4o-mini/4-turbo/4.1/3.5-turbo retired from ChatGPT Feb 13 2026; 4o still on API but legacy
+        # - GPT-5.1 retiring March 11 2026, removed
+        # - GPT-5.4 released March 5 2026, GPT-5.3 Instant released March 3 2026
+        "gpt-5.4", "gpt-5.4-pro",
+        "gpt-5.3-chat-latest", "gpt-5.3-codex", "gpt-5.3-codex-spark",
+        "gpt-5.2", "gpt-5.2-pro", "gpt-5.2-chat-latest",
         "gpt-5-mini","gpt-5","gpt-5-nano", "gpt-5-chat-latest", "gpt-5-codex", "gpt-5-pro", "gpt-5-pro-2025-10-06",
-        "gpt-5.1", "gpt-5.1-chat-latest", "gpt-5.1-codex", "gpt-5.1-codex-mini",
-        "o1-preview", "o1-mini", "o3",
+        "gpt-4.1-nano",
+        "gpt-4o-mini",  # Still on API, legacy
+        "o3",
         
-        # Google Gemini Models
-        "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
-        "gemini-2.0-flash","gemini-2.0-flash-lite", "gemini-pro", "gemini-pro-vision",
-        "gemini-3-pro-preview","gemini-3-flash-preview", "gemini-3.1-pro-preview","gemini-3.1-flash-lite-preview", "gemini-3-pro-image-preview",
+        # Google Gemini Models (as of March 2026)
+        # - gemini-3-pro-preview shut down March 9 2026, removed
+        # - gemini-pro / gemini-pro-vision are legacy 1.0 models, removed
+        # - gemini-2.0-flash/lite scheduled shutdown June 1 2026, still available
+        "gemini-3.1-pro-preview","gemini-3.1-flash-lite-preview",
         "gemini-3.1-flash-image-preview",
+        "gemini-3-flash-preview", "gemini-3-pro-image-preview",
+        "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
+        "gemini-2.0-flash","gemini-2.0-flash-lite",
         
         # Anthropic Claude Models
         "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
@@ -40,7 +50,7 @@ def get_model_options() -> List[str]:
         "vertex/gemini-2.5-pro",
         "vertex/gemini-2.5-flash",
         "vertex/gemini-2.5-flash-lite",
-        "vertex/gemini-3-pro-preview",
+        "vertex/gemini-3.1-pro-preview",
         "vertex/gemini-3-flash-preview",
         "vertex/gemini-3-pro-image-preview",
 
@@ -112,7 +122,7 @@ def get_model_options() -> List[str]:
         "poe/claude", "poe/Assistant",
         "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
         
-        # For OR, prevfix with 'or/'
+        # For OR, prefix with 'or/'
         "or/openrouter/free",
         "or/google/gemini-2.5-pro",
         "or/google/gemini-2.5-flash",
@@ -149,10 +159,11 @@ def get_model_options() -> List[str]:
 
         # AuthGPT – ChatGPT subscription via OAuth (Codex Responses endpoint)
         # Only models supported by /backend-api/codex/responses are listed.
-        # 'auto' and 'gpt-5.2-chat-latest' are NOT supported on this endpoint.
-        "authgpt/gpt-5.4", "authgpt/gpt-5.2", "authgpt/gpt-5.1", "authgpt/gpt-5", 
-        "authgpt/gpt-5.1-codex", "authgpt/gpt-5.1-codex-max",
-        "authgpt/gpt-5.2-codex", "authgpt/gpt-5.3-codex",
+        # GPT-5.1 retiring March 11 2026, removed. GPT-5.4 released March 5 2026.
+        "authgpt/gpt-5.4", "authgpt/gpt-5.4-pro",
+        "authgpt/gpt-5.3-codex", "authgpt/gpt-5.3-codex-spark",
+        "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
+        "authgpt/gpt-5",
 
         # Antigravity Cloud Code proxy (localhost:8080, no API key needed)
         # Claude models via Cloud Code (must match Cloud Code's available model IDs exactly)
