@@ -1502,6 +1502,10 @@ Text to analyze:
                 QTimer.singleShot(5000, self._check_updates_on_startup)
             else:
                 print("[DEBUG] Auto-update check is disabled")
+            
+            # Show first-time glossary mode selection dialog
+            if not self.config.get('glossary_mode_dialog_shown', False):
+                QTimer.singleShot(2000, self._show_glossary_mode_welcome)
         except ImportError as e:
             self.update_manager = None
             print(f"[DEBUG] Update manager not available: {e}")
@@ -8023,6 +8027,69 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
+                # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
+                auto_glossary_mode = self.config.get('auto_glossary_mode', None)
+                if auto_glossary_mode is None:
+                    # Backward compat: derive from old boolean
+                    auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+                
+                if auto_glossary_mode in ('balanced', 'full'):
+                    # Check if a glossary is already loaded for this file
+                    has_existing_glossary = bool(getattr(self, 'manual_glossary_path', None) and 
+                                                os.path.exists(getattr(self, 'manual_glossary_path', '')))
+                    
+                    if not has_existing_glossary:
+                        mode_display = auto_glossary_mode.capitalize()
+                        self.append_log(f"\n{'='*60}")
+                        self.append_log(f"📑 Auto Glossary Mode: {mode_display}")
+                        
+                        # Apply invisible hardcoded overrides for Balanced mode
+                        saved_env = {}
+                        if auto_glossary_mode == 'balanced':
+                            self.append_log(f"📑 Balanced mode: request merging enabled (99), chapter splitting enabled")
+                            self.append_log(f"📑 These values are hardcoded for optimal glossary quality")
+                            saved_env = {
+                                'GLOSSARY_REQUEST_MERGING_ENABLED': os.environ.get('GLOSSARY_REQUEST_MERGING_ENABLED'),
+                                'GLOSSARY_REQUEST_MERGE_COUNT': os.environ.get('GLOSSARY_REQUEST_MERGE_COUNT'),
+                                'GLOSSARY_ENABLE_CHAPTER_SPLIT': os.environ.get('GLOSSARY_ENABLE_CHAPTER_SPLIT'),
+                            }
+                            os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1'
+                            os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = '99'
+                            os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1'
+                        else:  # full
+                            self.append_log(f"📑 Full mode: chapter-by-chapter extraction (most thorough)")
+                        
+                        self.append_log(f"📑 Running glossary extraction before translation...")
+                        self.append_log(f"{'='*60}")
+                        
+                        try:
+                            # Reuse the exact same Extract Glossary flow
+                            self.run_glossary_extraction_direct()
+                            
+                            # Check if stopped by user during extraction
+                            if self.stop_requested:
+                                self.append_log("⏹️ Translation cancelled during glossary extraction")
+                                return
+                            
+                            # Auto-load the generated glossary
+                            self._auto_load_glossary_after_extraction()
+                            
+                            self.append_log(f"\n📑 Glossary extraction complete, proceeding to translation...")
+                        except Exception as e:
+                            self.append_log(f"⚠️ Glossary extraction failed: {e}")
+                            self.append_log(f"📑 Continuing translation without auto-generated glossary")
+                        finally:
+                            # Restore env vars for Balanced mode
+                            if saved_env:
+                                for key, val in saved_env.items():
+                                    if val is None:
+                                        os.environ.pop(key, None)
+                                    else:
+                                        os.environ[key] = val
+                    else:
+                        self.append_log(f"📑 Glossary already loaded, skipping auto-extraction")
+                # ===== END PRE-TRANSLATION GLOSSARY EXTRACTION =====
+                
                 # Call the direct function
                 self.append_log("🚀 Starting translation...")
                 translation_completed = self.run_translation_direct()
@@ -8842,10 +8909,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if hasattr(self, 'append_glossary_var'):
                 append_glossary = self.append_glossary_var
             
-            # Check if automatic glossary is enabled
-            enable_auto_glossary = self.config.get('enable_auto_glossary', False)
-            if hasattr(self, 'enable_auto_glossary_var'):
-                enable_auto_glossary = self.enable_auto_glossary_var
+            # Check if automatic glossary is enabled (only minimal mode uses the subprocess path)
+            auto_glossary_mode = self.config.get('auto_glossary_mode', None)
+            if auto_glossary_mode is None:
+                auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+            enable_auto_glossary_subprocess = (auto_glossary_mode == 'minimal')
             
             if append_glossary:
                 # Check for manual glossary
@@ -8866,9 +8934,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                 
-                # If automatic glossary is enabled and no manual glossary exists, defer appending
-                if enable_auto_glossary and (not manual_glossary_path or not os.path.exists(manual_glossary_path)):
-                    self.append_log(f"📑 Automatic glossary enabled - glossary will be appended after generation")
+                # If minimal mode automatic glossary is enabled and no manual glossary exists, defer appending
+                if enable_auto_glossary_subprocess and (not manual_glossary_path or not os.path.exists(manual_glossary_path)):
+                    self.append_log(f"📑 Automatic glossary enabled (minimal mode) - glossary will be appended after generation")
                     # Set a flag to indicate deferred glossary appending
                     os.environ['DEFER_GLOSSARY_APPEND'] = '1'
                     # Store the append prompt for later use
@@ -9772,7 +9840,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_SKIP_FREQUENCY_CHECK': "1" if self.config.get('glossary_skip_frequency_check', False) else "0",
             'GLOSSARY_INCLUDE_BOOK_TITLE': "1" if getattr(self, 'include_book_title_glossary_var', False) else "0",
             'GLOSSARY_AUTO_INJECT_BOOK_TITLE': "1" if auto_inject_book_title else "0",
-            'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
+            'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
+            'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
@@ -11067,7 +11136,8 @@ Important rules:
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
-                    'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
+                    'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
+                    'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
@@ -14236,7 +14306,523 @@ Important rules:
 
     # Note: open_other_settings method is bound from other_settings.py during __init__
     # No need to define it here - it's injected dynamically
+
+    def _show_glossary_mode_welcome(self):
+        """Show a one-time welcome dialog explaining glossary modes and program usage.
+        Page 1: Clickable flash cards matching QA Scanner theme.
+        Page 2: Tips and program guide.
+        """
+        try:
+            if self.config.get('glossary_mode_dialog_shown', False):
+                return
             
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+                                           QPushButton, QFrame, QWidget, QStackedWidget,
+                                           QGridLayout, QApplication)
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QFont, QIcon
+            
+            # Calculate proportional sizing like QA Scanner
+            screen = QApplication.primaryScreen().geometry()
+            screen_width = screen.width()
+            screen_height = screen.height()
+            dialog_width = int(screen_width * 0.50)
+            dialog_height = int(screen_height * 0.50)
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Welcome to Glossarion")
+            dialog.resize(dialog_width, dialog_height)
+            dialog.setMinimumSize(int(screen_width * 0.40), int(screen_height * 0.38))
+            
+            # QA Scanner gradient background
+            dialog.setStyleSheet("""
+                QDialog {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #1a1a2e, stop:1 #16213e);
+                }
+                QPushButton {
+                    border: 1px solid #4a5568;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    background-color: #2d3748;
+                    color: white;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #4a5568;
+                    border-color: #718096;
+                }
+                QPushButton:pressed {
+                    background-color: #1a202c;
+                }
+            """)
+            
+            # Set window icon
+            try:
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    dialog.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
+            
+            main_layout = QVBoxLayout(dialog)
+            main_layout.setContentsMargins(15, 10, 15, 10)
+            main_layout.setSpacing(6)
+            
+            # Title
+            title = QLabel("Choose Your Glossary Mode")
+            title.setFont(QFont("Arial", 20, QFont.Bold))
+            title.setStyleSheet("color: #f0f0f0;")
+            title.setAlignment(Qt.AlignCenter)
+            main_layout.addWidget(title)
+            
+            subtitle = QLabel("Select how glossary extraction runs when you translate")
+            subtitle.setFont(QFont("Arial", 11))
+            subtitle.setStyleSheet("color: #d0d0d0;")
+            subtitle.setAlignment(Qt.AlignCenter)
+            main_layout.addWidget(subtitle)
+            
+            # Stacked widget for pages
+            stack = QStackedWidget()
+            main_layout.addWidget(stack, 1)
+            
+            # ==================== PAGE 1: Flash Cards ====================
+            page1 = QWidget()
+            page1.setStyleSheet("background: transparent;")
+            page1_layout = QVBoxLayout(page1)
+            page1_layout.setContentsMargins(0, 8, 0, 0)
+            page1_layout.setSpacing(6)
+            
+            # Scale factor
+            try:
+                ui_scale = min(1.0, max(0.75, min(screen_width / 1600.0, screen_height / 900.0)))
+            except Exception:
+                ui_scale = 1.0
+            
+            emoji_px = max(28, int(38 * ui_scale))
+            title_pt = max(12, int(16 * ui_scale))
+            subtitle_pt = max(8, int(10 * ui_scale))
+            feature_pt = max(7, int(9 * ui_scale))
+            
+            # Card data matching QA Scanner style
+            mode_data = [
+                {
+                    "value": "off",
+                    "emoji": "🚫",
+                    "title": "OFF",
+                    "subtitle": "Manual control",
+                    "features": [
+                        "✓ No automatic extraction",
+                        "✓ Full manual glossary control",
+                        "✓ Use pre-made glossary files",
+                        "✓ Best for advanced users",
+                    ],
+                    "bg_color": "#1f2937",
+                    "hover_color": "#374151",
+                    "border_color": "#6b7280",
+                    "accent_color": "#9ca3af",
+                    "recommendation": None,
+                },
+                {
+                    "value": "minimal",
+                    "emoji": "⚡",
+                    "title": "MINIMAL",
+                    "subtitle": "In-process extraction",
+                    "features": [
+                        "✓ Runs during translation",
+                        "✓ Lowest overhead",
+                        "✓ No extra API calls",
+                        "⚠ May miss some terms",
+                    ],
+                    "bg_color": "#1a3a2e",
+                    "hover_color": "#2a5a3e",
+                    "border_color": "#059669",
+                    "accent_color": "#10b981",
+                    "recommendation": None,
+                },
+                {
+                    "value": "balanced",
+                    "emoji": "⭐",
+                    "title": "BALANCED",
+                    "subtitle": "Merging + splitting",
+                    "features": [
+                        "✓ Request merging (99 chapters)",
+                        "✓ Chapter splitting enabled",
+                        "✓ Best quality-to-cost ratio",
+                        "✓ Runs before translation",
+                    ],
+                    "bg_color": "#1e3a5f",
+                    "hover_color": "#2c5aa0",
+                    "border_color": "#3b82f6",
+                    "accent_color": "#60a5fa",
+                    "recommendation": "✅ Recommended for most users",
+                },
+                {
+                    "value": "full",
+                    "emoji": "🔬",
+                    "title": "FULL",
+                    "subtitle": "Per-chapter extraction",
+                    "features": [
+                        "✓ Every chapter individually",
+                        "✓ Maximum term capture",
+                        "✓ Most thorough analysis",
+                        "💰 Higher API cost",
+                    ],
+                    "bg_color": "#3a2a1a",
+                    "hover_color": "#5a4a2a",
+                    "border_color": "#f59e0b",
+                    "accent_color": "#fbbf24",
+                    "recommendation": "⚡ Best for important novels",
+                },
+            ]
+            
+            # Track selected mode
+            selected_mode = ['balanced']  # mutable container for closure
+            card_frames = {}
+            
+            # Grid layout for cards
+            modes_widget = QWidget()
+            modes_widget.setStyleSheet("background: transparent;")
+            modes_layout = QGridLayout(modes_widget)
+            modes_layout.setSpacing(8)
+            
+            for col in range(len(mode_data)):
+                modes_layout.setColumnStretch(col, 1)
+            
+            def update_card_selection(selected_value):
+                """Update card borders to show selection state."""
+                selected_mode[0] = selected_value
+                for val, (card, mi) in card_frames.items():
+                    if val == selected_value:
+                        card.setStyleSheet(f"""
+                            QFrame {{
+                                background-color: {mi['hover_color']};
+                                border: 3px solid {mi['accent_color']};
+                                border-radius: 5px;
+                            }}
+                        """)
+                    else:
+                        card.setStyleSheet(f"""
+                            QFrame {{
+                                background-color: {mi['bg_color']};
+                                border: 2px solid {mi['border_color']};
+                                border-radius: 5px;
+                            }}
+                            QFrame:hover {{
+                                background-color: {mi['hover_color']};
+                            }}
+                        """)
+            
+            for idx, mi in enumerate(mode_data):
+                card = QFrame()
+                card.setFrameShape(QFrame.StyledPanel)
+                is_selected = (mi["value"] == "balanced")
+                if is_selected:
+                    card.setStyleSheet(f"""
+                        QFrame {{
+                            background-color: {mi['hover_color']};
+                            border: 3px solid {mi['accent_color']};
+                            border-radius: 5px;
+                        }}
+                    """)
+                else:
+                    card.setStyleSheet(f"""
+                        QFrame {{
+                            background-color: {mi['bg_color']};
+                            border: 2px solid {mi['border_color']};
+                            border-radius: 5px;
+                        }}
+                        QFrame:hover {{
+                            background-color: {mi['hover_color']};
+                        }}
+                    """)
+                card.setCursor(Qt.PointingHandCursor)
+                card_frames[mi["value"]] = (card, mi)
+                modes_layout.addWidget(card, 0, idx)
+                
+                card_layout = QVBoxLayout(card)
+                m = max(6, int(10 * ui_scale))
+                card_layout.setContentsMargins(m, m, m, max(3, int(5 * ui_scale)))
+                
+                # Emoji
+                emoji_label = QLabel(mi["emoji"])
+                emoji_label.setFont(QFont("Arial", emoji_px))
+                emoji_label.setAlignment(Qt.AlignCenter)
+                emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
+                card_layout.addWidget(emoji_label)
+                
+                # Title
+                t_label = QLabel(mi["title"])
+                t_label.setFont(QFont("Arial", title_pt, QFont.Bold))
+                t_label.setWordWrap(True)
+                t_label.setAlignment(Qt.AlignCenter)
+                t_label.setStyleSheet("background-color: transparent; color: white; border: none;")
+                card_layout.addWidget(t_label)
+                
+                # Subtitle
+                s_label = QLabel(mi["subtitle"])
+                s_label.setFont(QFont("Arial", subtitle_pt))
+                s_label.setWordWrap(True)
+                s_label.setAlignment(Qt.AlignCenter)
+                s_label.setStyleSheet(f"background-color: transparent; color: {mi['accent_color']}; border: none;")
+                card_layout.addWidget(s_label)
+                card_layout.addSpacing(6)
+                
+                # Features
+                for feature in mi["features"]:
+                    f_label = QLabel(feature)
+                    f_label.setFont(QFont("Arial", feature_pt))
+                    f_label.setWordWrap(True)
+                    f_label.setStyleSheet("background-color: transparent; color: #e0e0e0; border: none;")
+                    card_layout.addWidget(f_label)
+                
+                # Recommendation badge
+                if mi["recommendation"]:
+                    card_layout.addSpacing(6)
+                    rec_label = QLabel(mi["recommendation"])
+                    rec_label.setFont(QFont("Arial", feature_pt, QFont.Bold))
+                    rec_label.setWordWrap(True)
+                    rec_label.setStyleSheet(f"""
+                        background-color: {mi['accent_color']};
+                        color: white;
+                        padding: 3px 6px;
+                        border-radius: 3px;
+                    """)
+                    rec_label.setAlignment(Qt.AlignCenter)
+                    card_layout.addWidget(rec_label)
+                
+                card_layout.addStretch()
+                
+                # Click handler
+                def make_click_handler(mode_value):
+                    def handler(event=None):
+                        update_card_selection(mode_value)
+                    return handler
+                
+                card.mousePressEvent = make_click_handler(mi["value"])
+            
+            page1_layout.addWidget(modes_widget, 1)
+            
+            # Warning note
+            note = QLabel("⚠️ AI models may produce smaller glossaries due to training biases. "
+                         "Full mode captures the most terms but costs more.")
+            note.setWordWrap(True)
+            note.setAlignment(Qt.AlignCenter)
+            note.setFont(QFont("Arial", 9))
+            note.setStyleSheet("color: #9ca3af;")
+            page1_layout.addWidget(note)
+            
+            stack.addWidget(page1)
+            
+            # ==================== PAGE 2: Guide & Tips ====================
+            page2 = QWidget()
+            page2.setStyleSheet("background: transparent;")
+            page2_layout = QVBoxLayout(page2)
+            page2_layout.setContentsMargins(20, 10, 20, 0)
+            page2_layout.setSpacing(12)
+            
+            # Flow visualization
+            flow = QLabel("📂 Select EPUB  →  ⚙️ Settings  →  📑 Extract  →  ▶ Translate  →  ✅ Done!")
+            flow.setAlignment(Qt.AlignCenter)
+            flow.setFont(QFont("Arial", 11, QFont.Bold))
+            flow.setStyleSheet("color: #60a5fa; padding: 10px; "
+                              "background-color: rgba(30, 58, 95, 180); border-radius: 6px;")
+            page2_layout.addWidget(flow)
+            
+            # Steps
+            steps = [
+                ("1️⃣", "Select EPUB", "Click 'Browse' or drag & drop your EPUB file."),
+                ("2️⃣", "Settings (optional)", "Open ⚙️ Glossary Settings to tweak extraction."),
+                ("3️⃣", "Translate", "Click ▶ Run Translation. In Balanced/Full mode, glossary extraction runs automatically first."),
+                ("4️⃣", "Review", "Check output folder. Edit glossary in the Glossary Editor tab."),
+            ]
+            
+            for icon, step_title, step_desc in steps:
+                row_layout = QHBoxLayout()
+                icon_label = QLabel(icon)
+                icon_label.setFixedWidth(30)
+                icon_label.setFont(QFont("Arial", 14))
+                icon_label.setStyleSheet("color: white;")
+                row_layout.addWidget(icon_label)
+                
+                text = QLabel(f"<b>{step_title}</b> — {step_desc}")
+                text.setWordWrap(True)
+                text.setTextFormat(Qt.RichText)
+                text.setFont(QFont("Arial", 10))
+                text.setStyleSheet("color: #e0e0e0;")
+                row_layout.addWidget(text, 1)
+                page2_layout.addLayout(row_layout)
+            
+            # Tips section
+            tips_frame = QFrame()
+            tips_frame.setStyleSheet("background-color: rgba(30, 58, 95, 120); border-radius: 6px; padding: 10px;")
+            tips_layout = QVBoxLayout(tips_frame)
+            tips_layout.setSpacing(6)
+            
+            tips_title = QLabel("💡 Tips")
+            tips_title.setFont(QFont("Arial", 11, QFont.Bold))
+            tips_title.setStyleSheet("color: #60a5fa;")
+            tips_layout.addWidget(tips_title)
+            
+            tips = [
+                "• Enable <b>Auto-Mapping</b> in Glossary Settings to auto-load previously generated glossaries.",
+                "• You can change the glossary mode anytime in <b>Glossary Settings → Automatic Glossary Generation</b>.",
+                "• <b>Balanced</b> mode forces request merging (99) and chapter splitting for optimal quality.",
+            ]
+            for tip in tips:
+                t = QLabel(tip)
+                t.setWordWrap(True)
+                t.setTextFormat(Qt.RichText)
+                t.setFont(QFont("Arial", 9))
+                t.setStyleSheet("color: #d0d0d0;")
+                tips_layout.addWidget(t)
+            
+            page2_layout.addWidget(tips_frame)
+            page2_layout.addStretch()
+            
+            stack.addWidget(page2)
+            
+            # ==================== Navigation Buttons ====================
+            nav_layout = QHBoxLayout()
+            nav_layout.addStretch()
+            
+            back_btn = QPushButton("← Back")
+            back_btn.setVisible(False)
+            nav_layout.addWidget(back_btn)
+            
+            next_btn = QPushButton("Next →")
+            next_btn.setStyleSheet("""
+                QPushButton { background-color: #3b82f6; color: white; padding: 8px 24px;
+                              border-radius: 4px; font-weight: bold; font-size: 11pt;
+                              border: 1px solid #60a5fa; }
+                QPushButton:hover { background-color: #2563eb; }
+                QPushButton:pressed { background-color: #1d4ed8; }
+            """)
+            nav_layout.addWidget(next_btn)
+            nav_layout.addStretch()
+            main_layout.addLayout(nav_layout)
+            
+            def go_next():
+                if stack.currentIndex() == 0:
+                    stack.setCurrentIndex(1)
+                    title.setText("🗺️ Quick Guide")
+                    subtitle.setText("How to use Glossarion with your selected mode")
+                    back_btn.setVisible(True)
+                    next_btn.setText("✅ Get Started")
+                else:
+                    # Final confirm — apply the selected mode
+                    mode_val = selected_mode[0]
+                    self.config['auto_glossary_mode'] = mode_val
+                    self.config['enable_auto_glossary'] = (mode_val != 'off')
+                    setattr(self, 'auto_glossary_mode_var', mode_val)
+                    setattr(self, 'enable_auto_glossary_var', (mode_val != 'off'))
+                    
+                    if hasattr(self, 'auto_glossary_mode_combo'):
+                        idx = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(mode_val, 2)
+                        self.auto_glossary_mode_combo.setCurrentIndex(idx)
+                    
+                    if mode_val != 'off':
+                        self.config['append_glossary'] = True
+                        setattr(self, 'append_glossary_var', True)
+                        self.config['append_glossary_auto_load'] = True
+                        setattr(self, 'append_glossary_auto_load_var', True)
+                    
+                    self.append_log(f"📑 Glossary mode set to: {mode_val.capitalize()}")
+                    
+                    self.config['glossary_mode_dialog_shown'] = True
+                    try:
+                        self.save_config(show_message=False)
+                    except Exception:
+                        pass
+                    dialog.accept()
+            
+            def go_back():
+                stack.setCurrentIndex(0)
+                title.setText("Choose Your Glossary Mode")
+                subtitle.setText("Select how glossary extraction runs when you translate")
+                back_btn.setVisible(False)
+                next_btn.setText("Next →")
+            
+            next_btn.clicked.connect(go_next)
+            back_btn.clicked.connect(go_back)
+            
+            dialog.exec()
+            
+        except Exception as e:
+            print(f"[WELCOME_DIALOG] Error showing glossary mode welcome: {e}")
+            import traceback
+            traceback.print_exc()
+            
+    def _auto_load_glossary_after_extraction(self):
+        """Auto-load the most recently generated glossary after extraction.
+        
+        Searches the Glossary/ folder for CSV/JSON files matching the current
+        selected file(s) and sets manual_glossary_path + MANUAL_GLOSSARY env var.
+        """
+        try:
+            files = list(getattr(self, 'selected_files', []) or [])
+            if not files:
+                return
+            
+            # Determine glossary base dir
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            if override_dir:
+                glossary_base_dir = os.path.join(override_dir, "Glossary")
+            else:
+                glossary_base_dir = "Glossary"
+            
+            if not os.path.isdir(glossary_base_dir):
+                self.append_log(f"📑 No Glossary folder found after extraction")
+                return
+            
+            # For each selected file, try to find a matching glossary
+            for file_path in files:
+                base = os.path.splitext(os.path.basename(file_path))[0]
+                base_cf = base.casefold()
+                
+                # Look for glossary files matching this input
+                best_match = None
+                best_mtime = 0
+                
+                try:
+                    for fn in os.listdir(glossary_base_dir):
+                        full = os.path.join(glossary_base_dir, fn)
+                        if not os.path.isfile(full):
+                            continue
+                        
+                        stem, ext = os.path.splitext(fn)
+                        ext_l = ext.lower()
+                        if ext_l not in ('.csv', '.json'):
+                            continue
+                        
+                        # Skip progress files
+                        if '_progress' in stem.lower():
+                            continue
+                        
+                        # Match by name
+                        stem_cf = stem.casefold()
+                        if base_cf in stem_cf or stem_cf in base_cf or f"{base_cf}_glossary" == stem_cf:
+                            mtime = os.path.getmtime(full)
+                            # Prefer most recent, and CSV over JSON
+                            priority = (1 if ext_l == '.csv' else 0)
+                            if mtime > best_mtime or (mtime == best_mtime and priority > 0):
+                                best_match = full
+                                best_mtime = mtime
+                except Exception:
+                    pass
+                
+                if best_match and os.path.exists(best_match):
+                    self.manual_glossary_path = best_match
+                    self.manual_glossary_manually_loaded = False
+                    self.config['manual_glossary_path'] = best_match
+                    os.environ['MANUAL_GLOSSARY'] = best_match
+                    self.append_log(f"📑 Auto-loaded generated glossary: {os.path.basename(best_match)}")
+                    return  # Loaded successfully
+            
+            self.append_log(f"📑 No matching glossary found in {glossary_base_dir}")
+        except Exception as e:
+            self.append_log(f"⚠️ Failed to auto-load glossary: {e}")
+    
     def _autofill_glossary_for_current_selection(self) -> int:
         """Auto-fill glossary selection/mapping for the currently selected input files.
 
@@ -15356,6 +15942,7 @@ Important rules:
                 ('manual_context_limit', ['manual_context_entry', 'manual_context_var'], 5, lambda v: safe_int(v, 5)),
                 ('glossary_history_rolling', ['glossary_history_rolling_checkbox', 'glossary_history_rolling_var'], False, bool),
                 ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
+                ('auto_glossary_mode', ['auto_glossary_mode_var'], 'off', str),
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
                 ('glossary_output_legacy_json', ['glossary_output_legacy_json_var'], False, bool),
                 ('glossary_include_all_characters', ['glossary_include_all_characters_var'], False, bool),
@@ -15646,7 +16233,8 @@ Important rules:
                     ('APPEND_GLOSSARY', '1' if self.config.get('append_glossary') else '0'),
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
-                    ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('enable_auto_glossary') else '0'),
+                    ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
+                    ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),

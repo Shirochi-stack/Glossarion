@@ -13670,7 +13670,6 @@ def main(log_callback=None, stop_callback=None):
                         with open(combined_path, 'w', encoding='utf-8') as f:
                             f.write(single['content'])
                 else:
-                    import shutil
                     src_file = os.path.join(out, single['filename'])
                     shutil.copy2(src_file, combined_path)
                 

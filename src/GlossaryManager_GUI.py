@@ -487,7 +487,7 @@ class GlossaryManagerMixin:
                 checkbox_to_var_mapping = [
                     ('append_glossary_checkbox', 'append_glossary_var'),
                     ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load_var'),
-                    ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
+                    # auto_glossary_mode_combo is handled separately below (it's a QComboBox, not a checkbox)
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
@@ -524,8 +524,7 @@ class GlossaryManagerMixin:
                             self.config['append_glossary'] = bool(checked)
                         elif checkbox_name == 'append_glossary_auto_load_checkbox':
                             self.config['append_glossary_auto_load'] = bool(checked)
-                        elif checkbox_name == 'enable_auto_glossary_checkbox':
-                            self.config['enable_auto_glossary'] = bool(checked)
+                        # enable_auto_glossary_checkbox replaced by auto_glossary_mode_combo (handled below)
                         elif checkbox_name == 'add_additional_glossary_checkbox':
                             self.config['add_additional_glossary'] = bool(checked)
                         elif checkbox_name == 'compress_glossary_checkbox':
@@ -561,6 +560,15 @@ class GlossaryManagerMixin:
                             self._autofill_glossary_for_current_selection()
                 except Exception:
                     pass
+                
+                # Save auto glossary mode from combo box
+                if hasattr(self, 'auto_glossary_mode_combo'):
+                    mode = self.auto_glossary_mode_combo.currentText().lower()
+                    self.config['auto_glossary_mode'] = mode
+                    setattr(self, 'auto_glossary_mode_var', mode)
+                    # Backward compat: derive old boolean
+                    self.config['enable_auto_glossary'] = (mode != 'off')
+                    setattr(self, 'enable_auto_glossary_var', (mode != 'off'))
                 
                 # Update glossary request merging checkbox
                 if hasattr(self, 'glossary_request_merging_checkbox'):
@@ -1834,24 +1842,63 @@ CRITICAL EXTRACTION RULES:
         auto_layout = QVBoxLayout(parent)
         auto_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Master toggle
+        # Master mode selector (replaces old checkbox toggle)
         master_toggle_widget = QWidget()
         master_toggle_layout = QHBoxLayout(master_toggle_widget)
         master_toggle_layout.setContentsMargins(0, 0, 0, 15)
         auto_layout.addWidget(master_toggle_widget)
         
-        if not hasattr(self, 'enable_auto_glossary_checkbox'):
-            self.enable_auto_glossary_checkbox = self._create_styled_checkbox("Enable Automatic Glossary Generation")
-            self.enable_auto_glossary_checkbox.setChecked(self.config.get('enable_auto_glossary', False))
-        self.enable_auto_glossary_checkbox.setToolTip(
-            "Run glossary extraction during translation.\n"
-            "Finds names/terms per chunk and keeps them consistent."
-        )
-        master_toggle_layout.addWidget(self.enable_auto_glossary_checkbox)
+        mode_label = QLabel("Automatic Glossary Generation:")
+        mode_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        master_toggle_layout.addWidget(mode_label)
         
-        label = QLabel("(Automatic extraction and translation of character names/Terms)")
-        # label.setStyleSheet("color: gray; font-size: 9pt;")
-        master_toggle_layout.addWidget(label)
+        if not hasattr(self, 'auto_glossary_mode_combo'):
+            from PySide6.QtWidgets import QComboBox
+            self.auto_glossary_mode_combo = QComboBox()
+            self.auto_glossary_mode_combo.addItems(["Off", "Minimal", "Balanced", "Full"])
+            # Read saved mode with backward compat
+            saved_mode = self.config.get('auto_glossary_mode', None)
+            if saved_mode is None:
+                # Migrate from old boolean
+                old_enabled = self.config.get('enable_auto_glossary', False)
+                saved_mode = 'minimal' if old_enabled else 'off'
+            mode_index = {'off': 0, 'minimal': 1, 'balanced': 2, 'full': 3}.get(saved_mode.lower(), 2)
+            self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
+        self.auto_glossary_mode_combo.setToolTip(
+            "Off: No automatic glossary extraction\n"
+            "Minimal: Lightweight extraction during translation (in-process)\n"
+            "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
+            "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
+        )
+        self.auto_glossary_mode_combo.setFixedWidth(120)
+        self.auto_glossary_mode_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #3a3a3a;
+                color: white;
+                padding: 4px 8px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                font-size: 10pt;
+            }
+            QComboBox:hover { border-color: #5a9fd4; }
+            QComboBox QAbstractItemView {
+                background-color: #2a2a2a;
+                color: white;
+                selection-background-color: #5a9fd4;
+            }
+        """)
+        master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
+        
+        # Keep old attribute for backward compatibility
+        # Other code checks enable_auto_glossary_checkbox — provide a shim
+        self.enable_auto_glossary_checkbox = type('_Shim', (), {
+            'isChecked': lambda s: self.auto_glossary_mode_combo.currentText().lower() != 'off',
+            'setChecked': lambda s, v: None,
+            'stateChanged': type('_Sig', (), {'connect': lambda s, f: None, 'disconnect': lambda s, f: None})()
+        })()
+        
+        desc_label = QLabel("(Automatic extraction and translation of character names/Terms)")
+        master_toggle_layout.addWidget(desc_label)
         master_toggle_layout.addStretch()
         
         # Append glossary toggle
@@ -2700,8 +2747,9 @@ CRITICAL EXTRACTION RULES:
         # Format Instructions removed - now hardcoded to just append {text_sample}
         
         # Update states function with proper error handling - converted to use signals
-        def update_auto_glossary_state(checked=None):
-            enabled = self.enable_auto_glossary_checkbox.isChecked()
+        def update_auto_glossary_state(*_args):
+            mode = self.auto_glossary_mode_combo.currentText().lower() if hasattr(self, 'auto_glossary_mode_combo') else 'off'
+            enabled = mode != 'off'
             
             # Enable/disable the entire Targeted Extraction Settings group box
             settings_label_frame.setEnabled(enabled)
@@ -2729,7 +2777,7 @@ CRITICAL EXTRACTION RULES:
         update_append_prompt_state()
         
         # Connect signals
-        self.enable_auto_glossary_checkbox.stateChanged.connect(update_auto_glossary_state)
+        self.auto_glossary_mode_combo.currentIndexChanged.connect(update_auto_glossary_state)
         self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
 
     def _open_glossary_anti_duplicate_dialog(self, parent):
