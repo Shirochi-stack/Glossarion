@@ -193,15 +193,12 @@ def run_pdf_generation(config_path):
 
     num_images = len(_unique_images)
     if num_images > 0:
-        # Count how many webp images need conversion
-        _webp_count = sum(1 for _, (ct, _) in _unique_images.items() if ct == 'image/webp') if _fast_rendering else 0
-
-        if _fast_rendering and _webp_count > 0:
+        if _fast_rendering:
             _target_fmt = 'JPEG' if compression_enabled else 'PNG'
-            log(f"  🖼️ Fast Rendering: converting {_webp_count} webp → {_target_fmt} ({num_images} total images)...")
+            log(f"  🖼️ Fast Rendering: converting {num_images} images → {_target_fmt}...")
             os.makedirs(_pdf_images_dir, exist_ok=True)
             num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
-            num_workers = max(1, min(num_workers, _webp_count))
+            num_workers = max(1, min(num_workers, num_images))
 
             _img_done = [0]
             _img_lock = threading.Lock()
@@ -215,44 +212,48 @@ def run_pdf_generation(config_path):
                     with _img_lock:
                         done = _img_done[0]
                     elapsed = time.time() - _img_start
-                    log(f"  🖼️ Converting images... {done}/{_webp_count} ({elapsed:.0f}s elapsed)")
+                    log(f"  🖼️ Converting images... {done}/{num_images} ({elapsed:.0f}s elapsed)")
 
             _img_hb = threading.Thread(target=_img_heartbeat, daemon=True)
             _img_hb.start()
 
-            def _convert_webp(fpath, ctype, keys):
+            def _convert_image(fpath, ctype, keys):
                 try:
-                    if ctype == 'image/webp':
-                        from PIL import Image
-                        from io import BytesIO
+                    from PIL import Image
+                    base_name = os.path.splitext(os.path.basename(fpath))[0]
+                    is_webp = ctype == 'image/webp'
+
+                    if compression_enabled:
+                        # Everything → JPEG
+                        quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
                         with Image.open(fpath) as img:
-                            if compression_enabled:
-                                # Convert to JPEG
-                                quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
-                                if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                                    bg = Image.new('RGB', img.size, (255, 255, 255))
-                                    if img.mode != 'RGBA':
-                                        img = img.convert('RGBA')
-                                    bg.paste(img, mask=img.split()[3])
-                                    img = bg
-                                elif img.mode != 'RGB':
-                                    img = img.convert('RGB')
-                                ext = '.jpg'
-                                out_name = os.path.splitext(os.path.basename(fpath))[0] + ext
-                                out_path = os.path.join(_pdf_images_dir, out_name)
-                                img.save(out_path, format='JPEG', quality=quality, optimize=True)
-                            else:
-                                # Convert to PNG (lossless)
-                                if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                                bg = Image.new('RGB', img.size, (255, 255, 255))
+                                if img.mode != 'RGBA':
                                     img = img.convert('RGBA')
-                                ext = '.png'
-                                out_name = os.path.splitext(os.path.basename(fpath))[0] + ext
-                                out_path = os.path.join(_pdf_images_dir, out_name)
-                                img.save(out_path, format='PNG')
-                            rel_path = f"_pdf_images/{out_name}"
+                                bg.paste(img, mask=img.split()[3])
+                                img = bg
+                            elif img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            out_name = base_name + '.jpg'
+                            out_path = os.path.join(_pdf_images_dir, out_name)
+                            img.save(out_path, format='JPEG', quality=quality, optimize=True)
+                    elif is_webp:
+                        # WebP → PNG (lossless, faster decode)
+                        with Image.open(fpath) as img:
+                            if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                img = img.convert('RGBA')
+                            out_name = base_name + '.png'
+                            out_path = os.path.join(_pdf_images_dir, out_name)
+                            img.save(out_path, format='PNG')
                     else:
-                        # Non-webp: use original path
-                        rel_path = f"images/{os.path.basename(fpath)}"
+                        # PNG/JPEG — copy as-is (already fast decode)
+                        import shutil
+                        out_name = os.path.basename(fpath)
+                        out_path = os.path.join(_pdf_images_dir, out_name)
+                        shutil.copy2(fpath, out_path)
+
+                    rel_path = f"_pdf_images/{out_name}"
                     for k in keys:
                         with _img_lock:
                             _img_path_cache[k] = rel_path
@@ -261,21 +262,20 @@ def run_pdf_generation(config_path):
                     for k in keys:
                         with _img_lock:
                             _img_path_cache[k] = f"images/{os.path.basename(fpath)}"
-                if ctype == 'image/webp':
-                    with _img_lock:
-                        _img_done[0] += 1
+                with _img_lock:
+                    _img_done[0] += 1
 
             with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
                 futures = []
                 for fpath, (ctype, keys) in _unique_images.items():
-                    futures.append(img_executor.submit(_convert_webp, fpath, ctype, keys))
+                    futures.append(img_executor.submit(_convert_image, fpath, ctype, keys))
                 for f in futures:
                     f.result()
 
             _img_stop.set()
             _img_hb.join(timeout=1)
             _img_elapsed = time.time() - _img_start
-            log(f"  ✅ Fast Rendering conversion complete ({_webp_count} images, {_img_elapsed:.1f}s)")
+            log(f"  ✅ Fast Rendering conversion complete ({num_images} images, {_img_elapsed:.1f}s)")
         else:
             # Direct mapping — WeasyPrint handles all formats natively
             log(f"  🖼️ Mapping {num_images} images...")
@@ -616,7 +616,7 @@ def run_pdf_generation(config_path):
             _pdf_write_kwargs['image_quality'] = _pdf_quality
             log(f"  PDF image quality: {_pdf_quality}%")
         else:
-            log("  PDF images: lossless (deflate compression, no JPEG re-encoding)")
+            log("  PDF images: no re-encoding (fast rendering handles conversion)")
         _write_stop = threading.Event()
         _write_start = time.time()
         def _write_heartbeat():
