@@ -1916,7 +1916,7 @@ CRITICAL EXTRACTION RULES:
         def _auto_resize_glossary_combo(*_args):
             fm = self.auto_glossary_mode_combo.fontMetrics()
             text_w = fm.horizontalAdvance(self.auto_glossary_mode_combo.currentText())
-            self.auto_glossary_mode_combo.setFixedWidth(max(120, text_w + 60))
+            self.auto_glossary_mode_combo.setFixedWidth(max(120, text_w + 70))
         self.auto_glossary_mode_combo.currentIndexChanged.connect(_auto_resize_glossary_combo)
         QTimer.singleShot(0, _auto_resize_glossary_combo)
         self.auto_glossary_mode_combo.wheelEvent = lambda event: None
