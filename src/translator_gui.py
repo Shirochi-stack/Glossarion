@@ -4922,13 +4922,6 @@ Recent translations to summarize:
                 background-color: #2a4a70;
             }
         """)
-        def _auto_resize_shortcut_combo(*_args):
-            fm = self.auto_glossary_shortcut_combo.fontMetrics()
-            text_w = fm.horizontalAdvance(self.auto_glossary_shortcut_combo.currentText())
-            self.auto_glossary_shortcut_combo.setFixedWidth(max(120, text_w + 80))
-        self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_auto_resize_shortcut_combo)
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, _auto_resize_shortcut_combo)
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
