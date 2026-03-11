@@ -5847,7 +5847,7 @@ img {
                 for f in futures:
                     f.result()  # propagate exceptions if any
             
-            self.log(f"  ✅ Image pre-conversion complete ({len(_data_uri_cache)} cached)")
+            self.log(f"  ✅ Image pre-conversion complete ({len(_data_uri_cache)} cache entries)")
         
         def _data_uri_for_src(src_value):
             """Convert image src to data URI using pre-built cache"""
