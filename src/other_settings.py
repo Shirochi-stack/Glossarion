@@ -1416,6 +1416,7 @@ def _create_output_settings_section(self, parent):
     pdf_controls.append(batch_label)
     
     batch_combo = QComboBox()
+    batch_combo.setEditable(True)
     batch_combo.addItems(["25", "50", "100", "150", "200"])
     batch_combo.setCurrentText(str(self.config.get('pdf_render_batch_size', 50)))
     batch_combo.setFixedWidth(80)
@@ -1464,7 +1465,7 @@ def _create_output_settings_section(self, parent):
     )
     fast_render_cb.setContentsMargins(20, 0, 0, 0)
     try:
-        fast_render_cb.setChecked(self.config.get('pdf_fast_rendering', False))
+        fast_render_cb.setChecked(self.config.get('pdf_fast_rendering', True))
     except Exception:
         pass
     def _on_fast_render_toggle(checked):
@@ -1477,7 +1478,7 @@ def _create_output_settings_section(self, parent):
     section_v.addWidget(fast_render_cb)
     pdf_controls.append(fast_render_cb)
     
-    os.environ['PDF_FAST_RENDERING'] = '1' if self.config.get('pdf_fast_rendering', False) else '0'
+    os.environ['PDF_FAST_RENDERING'] = '1' if self.config.get('pdf_fast_rendering', True) else '0'
     
     # ── Quality Settings ──────────────────────────────────────
     sep_quality = QFrame()
