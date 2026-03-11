@@ -4890,7 +4890,6 @@ Recent translations to summarize:
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_shortcut_combo.setFixedWidth(200)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
@@ -4922,6 +4921,13 @@ Recent translations to summarize:
                 background-color: #2a4a70;
             }
         """)
+        def _auto_resize_shortcut_combo(*_args):
+            fm = self.auto_glossary_shortcut_combo.fontMetrics()
+            text_w = fm.horizontalAdvance(self.auto_glossary_shortcut_combo.currentText())
+            self.auto_glossary_shortcut_combo.setFixedWidth(max(120, text_w + 60))
+        self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_auto_resize_shortcut_combo)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _auto_resize_shortcut_combo)
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
@@ -14666,8 +14672,8 @@ Important rules:
             sw, sh = screen.width(), screen.height()
             dialog = QDialog(self)
             dialog.setWindowTitle("Welcome to Glossarion")
-            dialog.resize(int(sw * 0.52), int(sh * 0.55))
-            dialog.setMinimumSize(int(sw * 0.42), int(sh * 0.42))
+            dialog.resize(int(sw * 0.52), int(sh * 0.85))
+            dialog.setMinimumSize(int(sw * 0.42), int(sh * 0.65))
             
             # ── Brighter gradient ──
             dialog.setStyleSheet("""
@@ -14804,7 +14810,7 @@ Important rules:
                 {
                     "value": "off_no_automap", "emoji": "🔒", "title": "OFF (No Auto-Mapping)",
                     "subtitle": "Off + disables auto-mapping",
-                    "features": ["✓ No automatic extraction", "✓ Disables Auto-Mapping toggle",
+                    "features": ["✓ No automatic extraction", "✓ Disables Glossary subfolder → Output Automapping",
                                  "✓ No glossary auto-fill on file select",
                                  "✓ Fully manual glossary workflow",
                                  "✓ Zero extra API cost"],
@@ -15601,6 +15607,11 @@ Important rules:
             
             next_btn.clicked.connect(go_next)
             back_btn.clicked.connect(go_back)
+            
+            # Center dialog on screen
+            dialog_geo = dialog.frameGeometry()
+            dialog_geo.moveCenter(screen.center())
+            dialog.move(dialog_geo.topLeft())
             
             dialog.exec()
             
