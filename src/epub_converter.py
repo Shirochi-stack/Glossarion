@@ -5542,89 +5542,113 @@ img {
         
         self.log(f"  ✅ {len(workers)} compression workers ready")
         
-        # Dispatch jobs round-robin and collect results
+        # Dispatch jobs using per-worker threads to avoid pipe deadlocks.
+        # Each thread: send job → read result → send next → read next → ...
         import json as _json
+        import threading
         
-        # Track which worker got which job
-        worker_jobs = {i: [] for i in range(len(workers))}  # worker_idx -> [(original_name, safe_name, is_cover), ...]
+        # Split jobs round-robin across workers
+        worker_job_lists = [[] for _ in range(len(workers))]
+        for job_idx, job in enumerate(compress_jobs):
+            worker_job_lists[job_idx % len(workers)].append(job)
         
-        for job_idx, (original_name, safe_name, is_gif, is_cover) in enumerate(compress_jobs):
-            if self.is_stopped():
-                break
-            w_idx = job_idx % len(workers)
-            job_data = _json.dumps({
-                'images_dir': self.images_dir,
-                'original_name': original_name,
-                'safe_name': safe_name,
-                'quality': quality,
-                'is_gif': is_gif
-            }) + '\n'
-            try:
-                workers[w_idx].stdin.write(job_data.encode('utf-8'))
-                workers[w_idx].stdin.flush()
-                worker_jobs[w_idx].append((original_name, safe_name, is_cover))
-            except Exception as e:
-                self.log(f"  ⚠️ Failed to send job to worker: {e}")
-                new_processed[original_name] = safe_name
-                skipped_count += 1
-                _completed_count[0] += 1
+        # Shared state for results (protected by lock)
+        _results_lock = threading.Lock()
         
-        # Close stdin to signal EOF, then read all results
-        for p in workers:
-            try:
-                p.stdin.close()
-            except Exception:
-                pass
-        
-        # Collect results from all workers
-        for w_idx, p in enumerate(workers):
-            for original_name, safe_name, is_cover in worker_jobs[w_idx]:
+        def _worker_thread(w_idx, proc, jobs):
+            """Send jobs one at a time and read result after each, avoiding pipe buffer buildup."""
+            nonlocal compressed_count, skipped_count, total_original_bytes, total_compressed_bytes, new_cover
+            for original_name, safe_name, is_gif, is_cover in jobs:
                 if self.is_stopped():
-                    new_processed[original_name] = safe_name
+                    with _results_lock:
+                        new_processed[original_name] = safe_name
                     continue
+                
+                # Send one job
+                job_data = _json.dumps({
+                    'images_dir': self.images_dir,
+                    'original_name': original_name,
+                    'safe_name': safe_name,
+                    'quality': quality,
+                    'is_gif': is_gif
+                }) + '\n'
                 try:
-                    line = p.stdout.readline().decode('utf-8', errors='replace').strip()
-                    if not line:
+                    proc.stdin.write(job_data.encode('utf-8'))
+                    proc.stdin.flush()
+                except Exception as e:
+                    with _results_lock:
+                        self.log(f"  ⚠️ Failed to send job to worker: {e}")
                         new_processed[original_name] = safe_name
                         skipped_count += 1
                         _completed_count[0] += 1
+                    continue
+                
+                # Read the result immediately
+                try:
+                    line = proc.stdout.readline().decode('utf-8', errors='replace').strip()
+                    if not line:
+                        with _results_lock:
+                            new_processed[original_name] = safe_name
+                            skipped_count += 1
+                            _completed_count[0] += 1
                         continue
                     result = _json.loads(line)
                 except Exception as e:
-                    self.log(f"  ⚠️ Failed to read result for {original_name}: {e}")
-                    new_processed[original_name] = safe_name
-                    skipped_count += 1
-                    _completed_count[0] += 1
+                    with _results_lock:
+                        self.log(f"  ⚠️ Failed to read result for {original_name}: {e}")
+                        new_processed[original_name] = safe_name
+                        skipped_count += 1
+                        _completed_count[0] += 1
                     continue
                 
-                _completed_count[0] += 1
-                
-                if result['status'] == 'compressed':
-                    new_processed[original_name] = result['new_safe_name']
-                    compressed_count += 1
-                    orig_sz = result['original_size']
-                    comp_sz = result['compressed_size']
-                    total_original_bytes += orig_sz
-                    total_compressed_bytes += comp_sz
+                with _results_lock:
+                    _completed_count[0] += 1
                     
-                    if orig_sz > 0:
-                        saved_pct = (1 - comp_sz / orig_sz) * 100
-                        self.log(f"  🗜️ {original_name} → {result['new_safe_name']} "
-                                f"{_fmt_size(orig_sz)} → {_fmt_size(comp_sz)} ({saved_pct:.0f}% saved)")
-                    
-                    # Update cover reference if this was the cover
-                    if is_cover:
-                        new_cover = result['new_safe_name']
-                    
-                elif result['status'] == 'failed':
-                    self.log(f"  ⚠️ Failed to compress {original_name}: {result['error']}")
-                    new_processed[original_name] = safe_name
-                    skipped_count += 1
-                else:
-                    # missing
-                    new_processed[original_name] = safe_name
+                    if result['status'] == 'compressed':
+                        new_processed[original_name] = result['new_safe_name']
+                        compressed_count += 1
+                        orig_sz = result['original_size']
+                        comp_sz = result['compressed_size']
+                        total_original_bytes += orig_sz
+                        total_compressed_bytes += comp_sz
+                        
+                        if orig_sz > 0:
+                            saved_pct = (1 - comp_sz / orig_sz) * 100
+                            self.log(f"  🗜️ {original_name} → {result['new_safe_name']} "
+                                    f"{_fmt_size(orig_sz)} → {_fmt_size(comp_sz)} ({saved_pct:.0f}% saved)")
+                        
+                        if is_cover:
+                            new_cover = result['new_safe_name']
+                        
+                    elif result['status'] == 'failed':
+                        self.log(f"  ⚠️ Failed to compress {original_name}: {result['error']}")
+                        new_processed[original_name] = safe_name
+                        skipped_count += 1
+                    else:
+                        new_processed[original_name] = safe_name
+            
+            # Signal this worker is done — close stdin
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
         
-        # Clean up workers
+        # Launch a thread per worker
+        threads = []
+        for w_idx in range(len(workers)):
+            t = threading.Thread(
+                target=_worker_thread,
+                args=(w_idx, workers[w_idx], worker_job_lists[w_idx]),
+                daemon=True
+            )
+            t.start()
+            threads.append(t)
+        
+        # Wait for all threads to finish
+        for t in threads:
+            t.join()
+        
+        # Clean up worker processes
         for p in workers:
             try:
                 p.wait(timeout=5)
