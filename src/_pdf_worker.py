@@ -442,7 +442,7 @@ def run_pdf_generation(config_path):
 
 
     # --- Render in batches ---
-    BATCH_SIZE = 100
+    BATCH_SIZE = 50
     if all_chapters_parts:
         num_batches = (len(all_chapters_parts) + BATCH_SIZE - 1) // BATCH_SIZE
         log(f"  Rendering {len(all_chapters_parts)} chapters in {num_batches} batches (batch size={BATCH_SIZE})...")
