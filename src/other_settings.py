@@ -1453,33 +1453,6 @@ def _create_output_settings_section(self, parent):
     
     os.environ['PDF_RENDER_BATCH_SIZE'] = str(self.config.get('pdf_render_batch_size', 50))
     
-    # Fast Rendering toggle
-    fast_render_cb = self._create_styled_checkbox("Fast Rendering")
-    fast_render_cb.setToolTip(
-        "Pre-converts .webp images to faster-decoding formats before PDF rendering.\n"
-        "• If compression is disabled: webp → PNG (lossless, ~2-3x faster decode)\n"
-        "• If compression is enabled: webp → JPEG (uses quality setting, fastest decode)\n"
-        "• PNG and JPEG source images are left untouched.\n\n"
-        "Adds a pre-conversion step but significantly speeds up the rendering phase\n"
-        "for documents with many .webp images."
-    )
-    fast_render_cb.setContentsMargins(20, 0, 0, 0)
-    try:
-        fast_render_cb.setChecked(self.config.get('pdf_fast_rendering', True))
-    except Exception:
-        pass
-    def _on_fast_render_toggle(checked):
-        try:
-            self.config['pdf_fast_rendering'] = bool(checked)
-            os.environ['PDF_FAST_RENDERING'] = '1' if checked else '0'
-        except Exception:
-            pass
-    fast_render_cb.toggled.connect(_on_fast_render_toggle)
-    section_v.addWidget(fast_render_cb)
-    pdf_controls.append(fast_render_cb)
-    
-    os.environ['PDF_FAST_RENDERING'] = '1' if self.config.get('pdf_fast_rendering', True) else '0'
-    
     # ── Quality Settings ──────────────────────────────────────
     sep_quality = QFrame()
     sep_quality.setFrameShape(QFrame.HLine)
