@@ -19,6 +19,11 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from metadata_batch_translator import enhance_epub_compiler
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+# Import the lightweight compression worker for ProcessPoolExecutor.
+# Workers will import _compress_worker (~90 lines, only os+PIL) instead of
+# epub_converter.py (6096 lines + ebooklib, bs4, etc.), cutting spawn time from ~22s to ~0.1s.
+from _compress_worker import _compress_single_image as _lightweight_compress
 try:
     from unified_api_client import UnifiedClient
 except ImportError:
@@ -5473,7 +5478,7 @@ img {
             future_to_info = {}
             for original_name, safe_name, is_gif, is_cover in compress_jobs:
                 future = executor.submit(
-                    _compress_single_image,
+                    _lightweight_compress,
                     self.images_dir, original_name, safe_name, quality, is_gif
                 )
                 future_to_info[future] = (original_name, safe_name, is_cover)

@@ -79,6 +79,7 @@ app_files = [
     ('extract_glossary_from_txt.py', '.'),
     ('glossary_process_worker.py', '.'),
     ('chapter_extraction_worker.py', '.'),
+    ('_compress_worker.py', '.'),  # Lightweight image compression worker
     ('chapter_extraction_manager.py', '.'),
     
     # Utilities
@@ -159,6 +160,7 @@ app_modules = [
     'extract_glossary_from_txt',
     'glossary_process_worker',
     'chapter_extraction_worker',
+    '_compress_worker',  # Lightweight image compression worker
     'chapter_extraction_manager',
     'GlossaryManager',
     'GlossaryManager_GUI',
