@@ -120,6 +120,9 @@ class PdfGenerationManager:
                 if self.stop_requested:
                     continue
 
+                # Stop startup heartbeat once we get real output
+                _got_first_output.set()
+
                 if line.startswith("[PROGRESS]"):
                     message = line[10:].strip()
                     self._log(message)
