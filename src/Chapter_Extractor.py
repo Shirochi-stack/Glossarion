@@ -18,7 +18,7 @@ def _get_pattern_manager():
     """Lazy initialization of PatternManager to avoid slow imports in worker processes"""
     global _PatternManager, _PM
     if _PatternManager is None:
-        from TransateKRtoEN import PatternManager as PM_Class
+        pass  # TransateKRtoEN import removed (patterns inlined)
         _PatternManager = PM_Class
         _PM = PM_Class()
     return _PM
@@ -38,6 +38,63 @@ except ImportError:
     pass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
+
+# ---------------------------------------------------------------------------
+# Inlined pattern constants for chapter extraction.
+# These MUST NOT trigger TransateKRtoEN import (which takes ~18s).
+# PPE worker functions use these instead of PM.* to avoid that import.
+# ---------------------------------------------------------------------------
+_CHAPTER_PATTERNS = [
+    (r'chapter[\s_-]*(\d+)', re.IGNORECASE, 'english_chapter'),
+    (r'\bch\.?\s*(\d+)\b', re.IGNORECASE, 'english_ch'),
+    (r'part[\s_-]*(\d+)', re.IGNORECASE, 'english_part'),
+    (r'episode[\s_-]*(\d+)', re.IGNORECASE, 'english_episode'),
+    (r'第\s*(\d+)\s*[章节話话回]', 0, 'chinese_chapter'),
+    (r'第\s*([一二三四五六七八九十百千万]+)\s*[章节話话回]', 0, 'chinese_chapter_cn'),
+    (r'(\d+)[章节話话回]', 0, 'chinese_short'),
+    (r'第\s*(\d+)\s*話', 0, 'japanese_wa'),
+    (r'第\s*(\d+)\s*章', 0, 'japanese_chapter'),
+    (r'その\s*(\d+)', 0, 'japanese_sono'),
+    (r'(\d+)話目', 0, 'japanese_wame'),
+    (r'제\s*(\d+)\s*[장화권부편]', 0, 'korean_chapter'),
+    (r'(\d+)\s*[장화권부편]', 0, 'korean_short'),
+    (r'에피소드\s*(\d+)', 0, 'korean_episode'),
+    (r'^\s*(\d+)\s*[-–—.\:]', re.MULTILINE, 'generic_numbered'),
+    (r'_(\d+)\.x?html?$', re.IGNORECASE, 'filename_number'),
+    (r'/(\d+)\.x?html?$', re.IGNORECASE, 'path_number'),
+    (r'(\d+)', 0, 'any_number'),
+]
+
+_CHINESE_NUMS = {
+    '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+    '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
+    '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
+    '二十一': 21, '二十二': 22, '二十三': 23, '二十四': 24, '二十五': 25,
+    '三十': 30, '四十': 40, '五十': 50, '六十': 60, '七十': 70, '八十': 80, '九十': 90, '百': 100,
+    '壹': 1, '贰': 2, '叁': 3, '肆': 4, '伍': 5, '陆': 6, '柒': 7, '捌': 8, '玖': 9, '拾': 10,
+    '佰': 100, '仟': 1000, '萬': 10000, '万': 10000,
+    '第一': 1, '第二': 2, '第三': 3, '第四': 4, '第五': 5,
+    '首': 1, '次': 2, '初': 1, '末': -1,
+}
+
+_FILENAME_EXTRACT_PATTERNS = [
+    r'^\d{3}(\d)_(\d{2})_\.x?html?$',
+    r'^\d{4}_(\d+)\.x?html?$',
+    r'^\d+_(\d+)[_\.]',
+    r'^(\d+)[_\.]',
+    r'response_(\d+)_',
+    r'response_(\d+)\.',
+    r'(\d{3,5})[_\.]',
+    r'[Cc]hapter[_\s]*(\d+)',
+    r'[Cc]h[_\s]*(\d+)',
+    r'No(\d+)Chapter',
+    r'No(\d+)Section',
+    r'No(\d+)(?=\.|_|$)',
+    r'第(\d+)[章话回]',
+    r'_(\d+)(?:_|\.|$)',
+    r'^(\d+)(?:_|\.|$)',
+    r'(\d+)',
+]
 
 # Stop request function (can be overridden)
 def is_stop_requested():
@@ -1684,7 +1741,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
     # If not handled by special logic, continue with normal extraction
     if not chapter_num:
         # Try filename first - use parallel pattern matching for better performance
-        chapter_patterns = [(pattern, flags, method) for pattern, flags, method in PM.CHAPTER_PATTERNS 
+        chapter_patterns = [(pattern, flags, method) for pattern, flags, method in _CHAPTER_PATTERNS 
                           if method.endswith('_number')]
         
         if len(chapter_patterns) > 3:  # Only parallelize if we have enough patterns
@@ -1699,7 +1756,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                             if num_str.isdigit():
                                 return int(num_str), f"filename_{method}"
                             elif method == 'chinese_chapter_cn':
-                                from TransateKRtoEN import PatternManager
+                                pass  # TransateKRtoEN import removed (patterns inlined)
                                 pm = None  # No longer needed
                                 converted = _convert_chinese_number(num_str, pm)
                                 if converted:
@@ -1736,7 +1793,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                             detection_method = f"filename_{method}"
                             break
                         elif method == 'chinese_chapter_cn':
-                            from TransateKRtoEN import PatternManager
+                            pass  # TransateKRtoEN import removed (patterns inlined)
                             pm = None  # No longer needed
                             converted = _convert_chinese_number(num_str, pm)
                             if converted:
@@ -1819,8 +1876,8 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
         if not chapter_num:
             filename_base = os.path.basename(file_path)
             # Parallel pattern matching for filename extraction
-            if len(PM.FILENAME_EXTRACT_PATTERNS) > 3:
-                with ThreadPoolExecutor(max_workers=min(4, len(PM.FILENAME_EXTRACT_PATTERNS))) as executor:
+            if len(_FILENAME_EXTRACT_PATTERNS) > 3:
+                with ThreadPoolExecutor(max_workers=min(4, len(_FILENAME_EXTRACT_PATTERNS))) as executor:
                     def try_filename_pattern(pattern):
                         match = re.search(pattern, filename_base, re.IGNORECASE)
                         if match:
@@ -1831,7 +1888,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                         return None
                     
                     futures = [executor.submit(try_filename_pattern, pattern) 
-                             for pattern in PM.FILENAME_EXTRACT_PATTERNS]
+                             for pattern in _FILENAME_EXTRACT_PATTERNS]
                     
                     for future in as_completed(futures):
                         try:
@@ -1846,7 +1903,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                             continue
             else:
                 # Sequential for small pattern sets
-                for pattern in PM.FILENAME_EXTRACT_PATTERNS:
+                for pattern in _FILENAME_EXTRACT_PATTERNS:
                     match = re.search(pattern, filename_base, re.IGNORECASE)
                     if match:
                         chapter_num = int(match.group(1))
@@ -1884,7 +1941,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
 def _extract_from_text(text, source_type, pattern_manager):
     """Extract chapter number from text using patterns with parallel matching for large pattern sets"""
     # Get patterns that don't end with '_number'
-    text_patterns = [(pattern, flags, method) for pattern, flags, method in PM.CHAPTER_PATTERNS
+    text_patterns = [(pattern, flags, method) for pattern, flags, method in _CHAPTER_PATTERNS
                     if not method.endswith('_number')]
     
     # Only use parallel processing if we have many patterns
@@ -1899,7 +1956,7 @@ def _extract_from_text(text, source_type, pattern_manager):
                         if num_str.isdigit():
                             return int(num_str), f"{source_type}_{method}"
                         elif method == 'chinese_chapter_cn':
-                            from TransateKRtoEN import PatternManager
+                            pass  # TransateKRtoEN import removed (patterns inlined)
                             pm = None  # No longer needed
                             converted = _convert_chinese_number(num_str, pm)
                             if converted:
@@ -1932,7 +1989,7 @@ def _extract_from_text(text, source_type, pattern_manager):
                     if num_str.isdigit():
                         return int(num_str), f"{source_type}_{method}"
                     elif method == 'chinese_chapter_cn':
-                        from TransateKRtoEN import PatternManager
+                        pass  # TransateKRtoEN import removed (patterns inlined)
                         pm = None  # No longer needed
                         converted = _convert_chinese_number(num_str, pm)
                         if converted:
@@ -1944,14 +2001,14 @@ def _extract_from_text(text, source_type, pattern_manager):
 
 def _convert_chinese_number(cn_num, pattern_manager):
     """Convert Chinese number to integer"""
-    if cn_num in PM.CHINESE_NUMS:
-        return PM.CHINESE_NUMS[cn_num]
+    if cn_num in _CHINESE_NUMS:
+        return _CHINESE_NUMS[cn_num]
     
     if '十' in cn_num:
         parts = cn_num.split('十')
         if len(parts) == 2:
-            tens = PM.CHINESE_NUMS.get(parts[0], 1) if parts[0] else 1
-            ones = PM.CHINESE_NUMS.get(parts[1], 0) if parts[1] else 0
+            tens = _CHINESE_NUMS.get(parts[0], 1) if parts[0] else 1
+            ones = _CHINESE_NUMS.get(parts[1], 0) if parts[1] else 0
             return tens * 10 + ones
     
     return None
