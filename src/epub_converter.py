@@ -4393,6 +4393,13 @@ img {
                 else:
                     # Try rename map: old name -> new chapter-based name
                     renamed_basename = image_rename_map.get(basename)
+                    if not renamed_basename:
+                        # Extension mismatch fallback: AI may change .webp -> .jpg in src
+                        name_without_ext = os.path.splitext(basename)[0]
+                        for map_key, map_val in image_rename_map.items():
+                            if os.path.splitext(map_key)[0] == name_without_ext:
+                                renamed_basename = map_val
+                                break
                     if renamed_basename and renamed_basename in processed_images:
                         safe_name = processed_images[renamed_basename]
                         img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
