@@ -1446,21 +1446,34 @@ def _create_output_settings_section(self, parent):
     quality_h.addWidget(quality_label)
     compress_sub_controls.append(quality_label)
     
-    quality_spin = QSpinBox()
-    quality_spin.setMinimum(1)
-    quality_spin.setMaximum(100)
-    quality_spin.setValue(self.config.get('image_compression_quality', 80))
-    quality_spin.setSuffix("%")
+    quality_spin = QComboBox()
+    quality_spin.setEditable(True)
+    quality_spin.addItems(["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"])
+    quality_spin.setCurrentText(str(self.config.get('image_compression_quality', 80)))
     quality_spin.setFixedWidth(80)
     quality_spin.setToolTip("Compression quality (1-100). Lower = smaller file, higher = better quality")
-    def _on_quality_changed(value):
+    quality_spin.setStyleSheet("""
+        QComboBox {
+            font-size: 9pt;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(quality_spin)
+    self._disable_combobox_mousewheel(quality_spin)
+    def _on_quality_changed(text):
         try:
+            value = int(text)
+            value = max(1, min(100, value))
             self.config['image_compression_quality'] = value
             os.environ['IMAGE_COMPRESSION_QUALITY'] = str(value)
-        except Exception:
+        except (ValueError, TypeError):
             pass
-    quality_spin.valueChanged.connect(_on_quality_changed)
-    self._disable_spinbox_mousewheel(quality_spin)
+    quality_spin.currentTextChanged.connect(_on_quality_changed)
     quality_h.addWidget(quality_spin)
     compress_sub_controls.append(quality_spin)
     
@@ -1620,7 +1633,7 @@ def _create_output_settings_section(self, parent):
     section_v.addWidget(compress_desc)
     
     # Set initial env vars for compression sub-settings
-    os.environ['IMAGE_COMPRESSION_QUALITY'] = str(quality_spin.value())
+    os.environ['IMAGE_COMPRESSION_QUALITY'] = str(quality_spin.currentText())
     os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if exclude_cover_cb.isChecked() else '0'
     os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if exclude_gif_cb.isChecked() else '0'
     os.environ['PDF_IMAGE_FORMAT'] = self.config.get('pdf_image_format', 'jpeg')

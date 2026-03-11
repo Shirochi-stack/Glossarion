@@ -5461,7 +5461,10 @@ img {
                     break
                 elapsed = _time.time() - start_time
                 done = _completed_count[0]
-                self.log(f"  ⏳ Compressing... {done}/{total_jobs} ({elapsed:.1f}s elapsed)")
+                if done == 0:
+                    self.log(f"  ⏳ Waiting for compression workers... ({elapsed:.1f}s elapsed)")
+                else:
+                    self.log(f"  ⏳ Compressing... {done}/{total_jobs} ({elapsed:.1f}s elapsed)")
         
         heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
         heartbeat_thread.start()

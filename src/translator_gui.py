@@ -953,7 +953,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "7.9.5"
+        __version__ = "7.9.6"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1028,7 +1028,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.5')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.6')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2819,7 +2819,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.9.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.9.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -11901,9 +11901,11 @@ Important rules:
                }
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
-           # Add delay to prevent accidental clicks after triple-click stop
+           # Add delay to prevent accidental clicks after stop
+           # Button stays disabled for 2s so a lingering double-click can't restart
            if hasattr(self, '_translation_main') and self._translation_main and not any_process_running:
-               QTimer.singleShot(500, lambda: self.run_button.setEnabled(True) if not self._is_any_process_running() else None)
+               self.run_button.setEnabled(False)
+               QTimer.singleShot(1000, lambda: self.run_button.setEnabled(True) if not self._is_any_process_running() else None)
            elif not any_process_running:
                self.run_button.setEnabled(True)
            else:
@@ -17865,7 +17867,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.9.5...")
+    print("🚀 Starting Glossarion v7.9.6...")
     
     # Initialize splash screen
     splash_manager = None
