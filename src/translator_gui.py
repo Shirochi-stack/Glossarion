@@ -1034,7 +1034,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "7.9.6"
+        __version__ = "7.9.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1109,7 +1109,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.6')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.7')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2926,7 +2926,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.9.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.9.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -4865,7 +4865,7 @@ Recent translations to summarize:
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = QComboBox()
-        self.auto_glossary_shortcut_combo.addItems(["Off", "No Glossary", "Minimal", "Balanced", "Full"])
+        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
         # Add Halgakos icon to each item
         try:
             _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -4880,16 +4880,17 @@ Recent translations to summarize:
         _auto_mode = self.config.get('auto_glossary_mode', None)
         if _auto_mode is None:
             _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        _mode_idx = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(_auto_mode.lower(), 0)
+        _mode_idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(_auto_mode.lower(), 0)
         self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
         self.auto_glossary_shortcut_combo.setToolTip(
             "Off: No automatic glossary extraction\n"
+            "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
             "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_shortcut_combo.setFixedWidth(150)
+        self.auto_glossary_shortcut_combo.setFixedWidth(200)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
@@ -4924,9 +4925,9 @@ Recent translations to summarize:
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
-            mode_map = {0: 'off', 1: 'no_glossary', 2: 'minimal', 3: 'balanced', 4: 'full'}
+            mode_map = {0: 'off', 1: 'off_no_automap', 2: 'no_glossary', 3: 'minimal', 4: 'balanced', 5: 'full'}
             new_mode = mode_map.get(index, 'off')
-            is_on = new_mode not in ('off', 'no_glossary')
+            is_on = new_mode not in ('off', 'off_no_automap', 'no_glossary')
             self.config['auto_glossary_mode'] = new_mode
             self.config['enable_auto_glossary'] = is_on
             self.enable_auto_glossary_var = is_on
@@ -4949,6 +4950,17 @@ Recent translations to summarize:
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):
                     self.append_glossary_auto_load_checkbox.blockSignals(True)
                     self.append_glossary_auto_load_checkbox.setChecked(True)
+                    self.append_glossary_auto_load_checkbox.blockSignals(False)
+                    self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
+                    self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
+                    self.append_glossary_auto_load_checkbox.update()
+            # Physically disable auto-mapping when "Off (No Auto-Mapping)" is selected
+            if new_mode == 'off_no_automap':
+                self.config['append_glossary_auto_load'] = False
+                self.append_glossary_auto_load_var = False
+                if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                    self.append_glossary_auto_load_checkbox.blockSignals(True)
+                    self.append_glossary_auto_load_checkbox.setChecked(False)
                     self.append_glossary_auto_load_checkbox.blockSignals(False)
                     self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
@@ -14790,6 +14802,26 @@ Important rules:
                     "rec": None,
                 },
                 {
+                    "value": "off_no_automap", "emoji": "🔒", "title": "OFF (No Auto-Mapping)",
+                    "subtitle": "Off + disables auto-mapping",
+                    "features": ["✓ No automatic extraction", "✓ Disables Auto-Mapping toggle",
+                                 "✓ No glossary auto-fill on file select",
+                                 "✓ Fully manual glossary workflow",
+                                 "✓ Zero extra API cost"],
+                    "bg": "#261e2e", "hover": "#684888", "border": "#b090c8", "accent": "#d8c0f0",
+                    "rec": None,
+                },
+                {
+                    "value": "no_glossary", "emoji": "📭", "title": "NO GLOSSARY",
+                    "subtitle": "Translate without any glossary",
+                    "features": ["✓ Skips glossary entirely", "✓ Doesn't change Append toggle",
+                                 "✓ Fastest possible translation",
+                                 "✓ Good for simple/short texts",
+                                 "✓ Zero extra API cost"],
+                    "bg": "#262020", "hover": "#885050", "border": "#c89090", "accent": "#f0c8c8",
+                    "rec": None,
+                },
+                {
                     "value": "minimal", "emoji": "⚡", "title": "MINIMAL",
                     "subtitle": "Compact batch extraction",
                     "features": ["✓ Filters all names & terms from text",
@@ -15473,22 +15505,29 @@ Important rules:
                     # Final: save config
                     mode_val = selected_mode[0]
                     self.config['auto_glossary_mode'] = mode_val
-                    self.config['enable_auto_glossary'] = (mode_val != 'off')
+                    self.config['enable_auto_glossary'] = (mode_val not in ('off', 'off_no_automap'))
                     setattr(self, 'auto_glossary_mode_var', mode_val)
-                    setattr(self, 'enable_auto_glossary_var', (mode_val != 'off'))
+                    setattr(self, 'enable_auto_glossary_var', (mode_val not in ('off', 'off_no_automap')))
                     if hasattr(self, 'auto_glossary_mode_combo'):
-                        idx = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(mode_val, 3)
+                        idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(mode_val, 4)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
                     if hasattr(self, 'auto_glossary_shortcut_combo'):
-                        _shortcut_idx = {'off': 0, 'no_glossary': 1, 'minimal': 2, 'balanced': 3, 'full': 4}.get(mode_val, 0)
+                        _shortcut_idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(mode_val, 0)
                         self.auto_glossary_shortcut_combo.blockSignals(True)
                         self.auto_glossary_shortcut_combo.setCurrentIndex(_shortcut_idx)
                         self.auto_glossary_shortcut_combo.blockSignals(False)
-                    if mode_val != 'off':
+                    if mode_val not in ('off', 'off_no_automap', 'no_glossary'):
                         self.config['append_glossary'] = True
                         setattr(self, 'append_glossary_var', True)
                         self.config['append_glossary_auto_load'] = True
                         setattr(self, 'append_glossary_auto_load_var', True)
+                    if mode_val == 'off_no_automap':
+                        self.config['append_glossary_auto_load'] = False
+                        setattr(self, 'append_glossary_auto_load_var', False)
+                        if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                            self.append_glossary_auto_load_checkbox.blockSignals(True)
+                            self.append_glossary_auto_load_checkbox.setChecked(False)
+                            self.append_glossary_auto_load_checkbox.blockSignals(False)
                     self.append_log(f"📑 Glossary mode set to: {mode_val.capitalize()}")
                     # Save extraction mode selection from page 2
                     ext_val = selected_ext[0]
@@ -17966,7 +18005,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.9.6...")
+    print("🚀 Starting Glossarion v7.9.7...")
     
     # Initialize splash screen
     splash_manager = None
