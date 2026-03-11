@@ -479,7 +479,7 @@ def run_pdf_generation(config_path):
 
     # --- Build combined chapter HTML ---
     log(f"  Building combined chapter document ({len(html_files)} chapters)...")
-    all_chapters_html = ""
+    all_chapters_parts = []
     chapters_order = []
 
     for i, html_file in enumerate(html_files):
@@ -513,7 +513,7 @@ def run_pdf_generation(config_path):
             else:
                 body_content = f'<div id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
 
-            all_chapters_html += body_content
+            all_chapters_parts.append(body_content)
             chapters_order.append((html_file, chap_num))
 
             if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
@@ -521,6 +521,8 @@ def run_pdf_generation(config_path):
 
         except Exception as e:
             log(f"  ⚠️ Failed to process {html_file}: {e}")
+
+    all_chapters_html = ''.join(all_chapters_parts)
 
     # --- Render ---
     if all_chapters_html:
