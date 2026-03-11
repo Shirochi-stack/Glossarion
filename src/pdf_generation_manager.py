@@ -83,6 +83,21 @@ class PdfGenerationManager:
                 cwd=os.path.dirname(os.path.abspath(__file__))
             )
 
+            # Heartbeat while waiting for subprocess (covers WeasyPrint import delay)
+            _hb_stop = threading.Event()
+            _hb_start = time.time()
+            _got_first_output = threading.Event()
+            def _startup_heartbeat():
+                while not _hb_stop.is_set():
+                    if _hb_stop.wait(3.0):
+                        break
+                    if _got_first_output.is_set():
+                        break
+                    elapsed = time.time() - _hb_start
+                    self._log(f"  ⏳ PDF subprocess starting... ({elapsed:.0f}s elapsed)")
+            _hb_thread = threading.Thread(target=_startup_heartbeat, daemon=True)
+            _hb_thread.start()
+
             # Read output in real-time
             while True:
                 if self.stop_requested:
