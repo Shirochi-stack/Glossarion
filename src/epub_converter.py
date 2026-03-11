@@ -5474,31 +5474,124 @@ img {
         heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
         heartbeat_thread.start()
         
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            future_to_info = {}
-            for original_name, safe_name, is_gif, is_cover in compress_jobs:
-                future = executor.submit(
-                    _lightweight_compress,
-                    self.images_dir, original_name, safe_name, quality, is_gif
+        # ── Spawn lightweight subprocess workers ────────────────────────────
+        # Using subprocess.Popen instead of ProcessPoolExecutor because PPE
+        # re-imports __main__ (the heavy GUI) in every worker on Windows (~30s).
+        # Subprocess workers run _compress_worker.py as __main__ (~1s).
+        import subprocess as _sp
+        
+        # Build command for frozen exe vs dev mode
+        if getattr(sys, 'frozen', False):
+            _worker_cmd = [sys.executable, '--run-compress-worker']
+        else:
+            _worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_compress_worker.py')
+            _worker_cmd = [sys.executable, _worker_script]
+        
+        _env = os.environ.copy()
+        _env['PYTHONIOENCODING'] = 'utf-8'
+        
+        # Spawn worker processes
+        workers = []
+        for _ in range(num_workers):
+            try:
+                p = _sp.Popen(
+                    _worker_cmd, stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
+                    env=_env, bufsize=0,
+                    creationflags=_sp.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
-                future_to_info[future] = (original_name, safe_name, is_cover)
-            
-            for future in as_completed(future_to_info):
-                if self.is_stopped():
-                    self.log("🛑 Image compression stopped by user")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    # Add remaining unfinished as-is
-                    for f, (on, sn, _) in future_to_info.items():
-                        if not f.done() or f.cancelled():
-                            new_processed[on] = sn
-                    break
-                
-                original_name, safe_name, is_cover = future_to_info[future]
-                
+                workers.append(p)
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to spawn compression worker: {e}")
+        
+        if not workers:
+            self.log("  ⚠️ No compression workers could be started, falling back to sequential")
+            for original_name, safe_name, is_gif, is_cover in compress_jobs:
+                result = _compress_single_image(self.images_dir, original_name, safe_name, quality, is_gif)
+                new_processed[original_name] = result.get('new_safe_name', safe_name)
+                _completed_count[0] += 1
+            _heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
+            return new_processed, new_cover
+        
+        # Wait for all workers to signal READY
+        import select
+        ready_workers = []
+        for p in workers:
+            try:
+                line = p.stdout.readline().decode('utf-8', errors='replace').strip()
+                if line == 'READY':
+                    ready_workers.append(p)
+                else:
+                    p.terminate()
+            except Exception:
                 try:
-                    result = future.result()
+                    p.terminate()
+                except Exception:
+                    pass
+        workers = ready_workers
+        
+        if not workers:
+            self.log("  ⚠️ No workers became ready, falling back to sequential")
+            for original_name, safe_name, is_gif, is_cover in compress_jobs:
+                result = _compress_single_image(self.images_dir, original_name, safe_name, quality, is_gif)
+                new_processed[original_name] = result.get('new_safe_name', safe_name)
+                _completed_count[0] += 1
+            _heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
+            return new_processed, new_cover
+        
+        self.log(f"  ✅ {len(workers)} compression workers ready")
+        
+        # Dispatch jobs round-robin and collect results
+        import json as _json
+        
+        # Track which worker got which job
+        worker_jobs = {i: [] for i in range(len(workers))}  # worker_idx -> [(original_name, safe_name, is_cover), ...]
+        
+        for job_idx, (original_name, safe_name, is_gif, is_cover) in enumerate(compress_jobs):
+            if self.is_stopped():
+                break
+            w_idx = job_idx % len(workers)
+            job_data = _json.dumps({
+                'images_dir': self.images_dir,
+                'original_name': original_name,
+                'safe_name': safe_name,
+                'quality': quality,
+                'is_gif': is_gif
+            }) + '\n'
+            try:
+                workers[w_idx].stdin.write(job_data.encode('utf-8'))
+                workers[w_idx].stdin.flush()
+                worker_jobs[w_idx].append((original_name, safe_name, is_cover))
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to send job to worker: {e}")
+                new_processed[original_name] = safe_name
+                skipped_count += 1
+                _completed_count[0] += 1
+        
+        # Close stdin to signal EOF, then read all results
+        for p in workers:
+            try:
+                p.stdin.close()
+            except Exception:
+                pass
+        
+        # Collect results from all workers
+        for w_idx, p in enumerate(workers):
+            for original_name, safe_name, is_cover in worker_jobs[w_idx]:
+                if self.is_stopped():
+                    new_processed[original_name] = safe_name
+                    continue
+                try:
+                    line = p.stdout.readline().decode('utf-8', errors='replace').strip()
+                    if not line:
+                        new_processed[original_name] = safe_name
+                        skipped_count += 1
+                        _completed_count[0] += 1
+                        continue
+                    result = _json.loads(line)
                 except Exception as e:
-                    self.log(f"  ⚠️ Failed to compress {original_name}: {e}")
+                    self.log(f"  ⚠️ Failed to read result for {original_name}: {e}")
                     new_processed[original_name] = safe_name
                     skipped_count += 1
                     _completed_count[0] += 1
@@ -5530,6 +5623,16 @@ img {
                 else:
                     # missing
                     new_processed[original_name] = safe_name
+        
+        # Clean up workers
+        for p in workers:
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
         
         _heartbeat_stop.set()
         heartbeat_thread.join(timeout=1)

@@ -136,6 +136,64 @@ if '--run-chapter-extraction' in sys.argv:
         # Make sure we exit without initializing the GUI when in worker mode
         sys.exit(0)
 
+# Support worker-mode dispatch for image compression subprocess workers
+if '--run-compress-worker' in sys.argv:
+    try:
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        # Run the compression worker main loop (reads JSON from stdin, writes JSON to stdout)
+        from _compress_worker import _compress_single_image  # noqa: F401
+        import _compress_worker
+        # Execute the __main__ block manually
+        if hasattr(sys.stdin, 'reconfigure'):
+            try:
+                sys.stdin.reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass
+        if hasattr(sys.stdout, 'reconfigure'):
+            try:
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass
+        # Pre-import PIL
+        try:
+            from PIL import Image  # noqa: F401
+        except Exception:
+            pass
+        # Signal readiness
+        sys.stdout.write('READY\n')
+        sys.stdout.flush()
+        # Process work items
+        import json as _cw_json
+        for _cw_line in sys.stdin:
+            _cw_line = _cw_line.strip()
+            if not _cw_line:
+                break
+            try:
+                _cw_job = _cw_json.loads(_cw_line)
+                _cw_result = _compress_worker._compress_single_image(
+                    _cw_job['images_dir'], _cw_job['original_name'],
+                    _cw_job['safe_name'], _cw_job['quality'], _cw_job['is_gif']
+                )
+                sys.stdout.write(_cw_json.dumps(_cw_result) + '\n')
+                sys.stdout.flush()
+            except Exception as _cw_e:
+                _cw_err = {
+                    'original_name': _cw_job.get('original_name', '?'),
+                    'safe_name': _cw_job.get('safe_name', '?'),
+                    'new_safe_name': _cw_job.get('safe_name', '?'),
+                    'status': 'failed', 'original_size': 0, 'compressed_size': 0,
+                    'error': str(_cw_e)
+                }
+                sys.stdout.write(_cw_json.dumps(_cw_err) + '\n')
+                sys.stdout.flush()
+    except Exception as _e:
+        try:
+            print(f"[ERROR] Compress worker failed: {_e}")
+        except Exception:
+            pass
+    finally:
+        sys.exit(0)
+
 # The frozen check can stay here for other purposes
 if getattr(sys, 'frozen', False):
     # Any other frozen-specific setup
