@@ -11982,15 +11982,7 @@ Important rules:
                }
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
-           # Add delay to prevent accidental clicks after stop
-           # Button stays disabled for 2s so a lingering double-click can't restart
-           if hasattr(self, '_translation_main') and self._translation_main and not any_process_running:
-               self.run_button.setEnabled(False)
-               QTimer.singleShot(1000, lambda: self.run_button.setEnabled(True) if not self._is_any_process_running() else None)
-           elif not any_process_running:
-               self.run_button.setEnabled(True)
-           else:
-               self.run_button.setEnabled(False)
+           self.run_button.setEnabled(not any_process_running)
            # Stop spinning animation gracefully with deceleration
            if hasattr(self, 'icon_spin_animation') and hasattr(self, 'run_button_icon') and hasattr(self, 'icon_stop_animation'):
                if self.icon_spin_animation.state() == QPropertyAnimation.Running:
