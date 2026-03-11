@@ -439,52 +439,66 @@ def run_pdf_generation(config_path):
         except Exception as e:
             log(f"  ⚠️ Failed to process {html_file}: {e}")
 
-    all_chapters_html = ''.join(all_chapters_parts)
 
-    # --- Render ---
-    if all_chapters_html:
-        log("  Rendering combined chapter document...")
-        combined_html = f"<html><head><style>{styles}</style></head><body>{all_chapters_html}</body></html>"
-        try:
-            _render_stop = threading.Event()
-            _render_start = time.time()
-            def _render_heartbeat():
-                while not _render_stop.is_set():
-                    if _render_stop.wait(3.0):
-                        break
-                    elapsed = time.time() - _render_start
-                    log(f"  ⏳ Rendering... ({elapsed:.0f}s elapsed)")
-            _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
-            _render_hb.start()
-            chapters_doc = WeasyHTML(string=combined_html, base_url=output_dir).render()
-            _render_stop.set()
-            _render_hb.join(timeout=1)
-            _render_elapsed = time.time() - _render_start
-            log(f"  ✅ Rendering complete ({_render_elapsed:.1f}s)")
-            documents.append(chapters_doc)
 
-            # Resolve page numbers
-            _anchor_to_page = {}
-            for _pidx, _pg in enumerate(chapters_doc.pages):
-                for _aid in _pg.anchors:
-                    if _aid not in _anchor_to_page:
-                        _anchor_to_page[_aid] = _pidx + 1
-            _fallback_page = 1
-            for _html_file, _chap_num in chapters_order:
-                _pg_num = _anchor_to_page.get(f'chapter-{_chap_num}')
-                if _pg_num is not None:
-                    chapter_page_map[_html_file] = _pg_num
-                    chapter_page_map[_chap_num] = _pg_num
-                    _fallback_page = _pg_num + 1
-                else:
-                    chapter_page_map[_html_file] = _fallback_page
-                    chapter_page_map[_chap_num] = _fallback_page
-                    _fallback_page += 1
+    # --- Render in batches ---
+    BATCH_SIZE = 100
+    if all_chapters_parts:
+        num_batches = (len(all_chapters_parts) + BATCH_SIZE - 1) // BATCH_SIZE
+        log(f"  Rendering {len(all_chapters_parts)} chapters in {num_batches} batches (batch size={BATCH_SIZE})...")
+        _render_start = time.time()
+        _render_stop = threading.Event()
 
-            current_page += len(chapters_doc.pages)
-            log(f"  Combined document: {len(chapters_doc.pages)} pages")
-        except Exception as e:
-            log(f"  ⚠️ Failed to render combined document: {e}")
+        def _render_heartbeat():
+            while not _render_stop.is_set():
+                if _render_stop.wait(3.0):
+                    break
+                elapsed = time.time() - _render_start
+                log(f"  ⏳ Rendering... ({elapsed:.0f}s elapsed)")
+        _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
+        _render_hb.start()
+
+        _page_offset = 0  # cumulative page count across batches
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * BATCH_SIZE
+            batch_end = min(batch_start + BATCH_SIZE, len(all_chapters_parts))
+            batch_parts = all_chapters_parts[batch_start:batch_end]
+            batch_order = chapters_order[batch_start:batch_end]
+
+            batch_html = f"<html><head><style>{styles}</style></head><body>{''.join(batch_parts)}</body></html>"
+            try:
+                batch_doc = WeasyHTML(string=batch_html, base_url=output_dir).render()
+                documents.append(batch_doc)
+
+                # Resolve page numbers for this batch
+                for _pidx, _pg in enumerate(batch_doc.pages):
+                    for _aid in _pg.anchors:
+                        if _aid not in chapter_page_map:
+                            pass  # just track anchors below
+                for _html_file, _chap_num in batch_order:
+                    _found = False
+                    for _pidx, _pg in enumerate(batch_doc.pages):
+                        if f'chapter-{_chap_num}' in _pg.anchors:
+                            _pg_num = _page_offset + _pidx + 1
+                            chapter_page_map[_html_file] = _pg_num
+                            chapter_page_map[_chap_num] = _pg_num
+                            _found = True
+                            break
+                    if not _found:
+                        chapter_page_map[_html_file] = _page_offset + 1
+                        chapter_page_map[_chap_num] = _page_offset + 1
+
+                _page_offset += len(batch_doc.pages)
+                current_page += len(batch_doc.pages)
+                elapsed = time.time() - _render_start
+                log(f"  ✅ Batch {batch_idx+1}/{num_batches}: {len(batch_doc.pages)} pages ({elapsed:.0f}s)")
+            except Exception as e:
+                log(f"  ⚠️ Failed to render batch {batch_idx+1}: {e}")
+
+        _render_stop.set()
+        _render_hb.join(timeout=1)
+        _render_elapsed = time.time() - _render_start
+        log(f"  ✅ All rendering complete: {current_page} pages ({_render_elapsed:.1f}s)")
 
     if not documents:
         log("⚠️ No chapters rendered for PDF")
