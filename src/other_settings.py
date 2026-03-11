@@ -3795,7 +3795,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep_preserve)
     # Save interrupted chapters
     if not hasattr(self, 'save_partial_results_var'):
-        self.save_partial_results_var = self.config.get('save_partial_results', False)
+        self.save_partial_results_var = self.config.get('save_partial_results', True)
     
     self.save_partial_results_checkbox = self._create_styled_checkbox("Save interrupted chapters")
     self.save_partial_results_checkbox.setContentsMargins(20, 5, 0, 0)

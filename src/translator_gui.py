@@ -10125,7 +10125,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SPLIT_FAILED_RETRY_ATTEMPTS': str(max(1, int(str(getattr(self, 'split_failed_retry_attempts_var', self.config.get('split_failed_retry_attempts', '1'))).strip() or "1"))),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
-            'DISABLE_QA_MARKER_CHECKS': "1" if getattr(self, 'disable_qa_marker_checks_var', False) else "0",
+            'DISABLE_QA_MARKER_CHECKS': "1" if getattr(self, 'disable_qa_marker_checks_var', True) else "0",
             'QA_MARKER_LENGTH_LIMIT': str(getattr(self, 'qa_marker_length_limit_var', '500')),
             'DISABLE_REFUSAL_CHECKS': "1" if getattr(self, 'disable_refusal_checks_var', False) else "0",
             'REFUSAL_PATTERN_LENGTH_LIMIT': str(getattr(self, 'refusal_pattern_length_limit_var', '1000')),
@@ -16660,7 +16660,7 @@ Important rules:
                 ('ignore_header', ['ignore_header_var'], False, bool),
                 ('use_title', ['use_title_var'], False, bool),
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
-                ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], False, bool),
+                ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], True, bool),
                 ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
                 ('disable_refusal_checks', ['disable_refusal_checks_var'], False, bool),
                 ('refusal_pattern_length_limit', ['refusal_pattern_length_limit_var'], 1000, lambda v: safe_int(v, 1000)),
@@ -16768,7 +16768,7 @@ Important rules:
                 # Stop behavior
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
                 ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
-                ('save_partial_results', ['save_partial_results_checkbox', 'save_partial_results_var'], False, bool),
+                ('save_partial_results', ['save_partial_results_checkbox', 'save_partial_results_var'], True, bool),
                 ('save_prohibited_results', ['save_prohibited_results_checkbox', 'save_prohibited_results_var'], False, bool),
                 ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_checkbox', 'disable_empty_safety_heuristic_var'], False, bool),
                 
@@ -16985,7 +16985,7 @@ Important rules:
             default_qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': False, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
-            self.config.setdefault('save_partial_results', False)
+            self.config.setdefault('save_partial_results', True)
             self.config.setdefault('save_prohibited_results', False)
             self.config.setdefault('disable_empty_safety_heuristic', False)
             # Image compression defaults
@@ -17580,7 +17580,7 @@ Important rules:
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
-                ('SAVE_PARTIAL_RESULTS', '1' if getattr(self, 'save_partial_results_var', False) else '0'),
+                ('SAVE_PARTIAL_RESULTS', '1' if getattr(self, 'save_partial_results_var', True) else '0'),
                 ('SAVE_PROHIBITED_RESULTS', '1' if getattr(self, 'save_prohibited_results_var', False) else '0'),
                 ('DISABLE_EMPTY_SAFETY_HEURISTIC', '1' if getattr(self, 'disable_empty_safety_heuristic_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
@@ -17594,7 +17594,7 @@ Important rules:
                 ('SPLIT_FAILED_RETRY_ATTEMPTS', str(getattr(self, 'split_failed_retry_attempts_var', '1'))),
                 ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),
                 ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
-                ('DISABLE_QA_MARKER_CHECKS', '1' if getattr(self, 'disable_qa_marker_checks_var', False) else '0'),
+                ('DISABLE_QA_MARKER_CHECKS', '1' if getattr(self, 'disable_qa_marker_checks_var', True) else '0'),
                 ('QA_MARKER_LENGTH_LIMIT', str(getattr(self, 'qa_marker_length_limit_var', '500'))),
                 ('DISABLE_REFUSAL_CHECKS', '1' if getattr(self, 'disable_refusal_checks_var', False) else '0'),
                 ('REFUSAL_PATTERN_LENGTH_LIMIT', str(getattr(self, 'refusal_pattern_length_limit_var', '1000'))),
