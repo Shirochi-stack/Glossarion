@@ -1955,7 +1955,62 @@ class EPUBCompiler:
                     self.log("🛑 PDF generation skipped - stop requested")
                 else:
                     try:
-                        self._generate_pdf(html_files, chapter_titles_info, processed_images, cover_file, metadata)
+                        import threading
+                        # Build JSON config for the PDF worker subprocess
+                        _pdf_config = {
+                            'output_dir': self.output_dir,
+                            'images_dir': self.images_dir,
+                            'css_dir': self.css_dir,
+                            'html_files': html_files,
+                            'chapter_titles_info': {str(k): list(v) for k, v in chapter_titles_info.items()},
+                            'processed_images': processed_images,
+                            'cover_file': cover_file,
+                            'metadata': metadata,
+                            'env_vars': {
+                                k: os.environ.get(k, '') for k in [
+                                    'ENABLE_IMAGE_COMPRESSION', 'PDF_IMAGE_FORMAT',
+                                    'IMAGE_COMPRESSION_QUALITY', 'PDF_PNG_OPTIMIZE',
+                                    'PDF_PNG_COMPRESS_LEVEL', 'EXTRACTION_WORKERS',
+                                    'PDF_PAGE_NUMBERS', 'PDF_PAGE_NUMBER_ALIGNMENT',
+                                    'PDF_GENERATE_TOC', 'PDF_TOC_PAGE_NUMBERS',
+                                    'DEDUPLICATE_TOC', 'DEDUPLICATE_TOC_USE_TRANSLATED',
+                                    'EPUB_PATH',
+                                ] if os.environ.get(k) is not None
+                            },
+                        }
+                        _pdf_config_path = os.path.join(self.output_dir, '_pdf_config.json')
+                        with open(_pdf_config_path, 'w', encoding='utf-8') as _pcf:
+                            json.dump(_pdf_config, _pcf, ensure_ascii=False)
+
+                        from pdf_generation_manager import PdfGenerationManager
+                        _pdf_done = threading.Event()
+                        _pdf_result = [None]
+
+                        def _pdf_completion(success, result):
+                            _pdf_result[0] = result
+                            _pdf_done.set()
+
+                        _pdf_mgr = PdfGenerationManager(log_callback=self.log)
+                        _pdf_mgr.generate_pdf_async(_pdf_config_path, completion_callback=_pdf_completion)
+
+                        # Wait for subprocess to finish, checking for stop every second
+                        while not _pdf_done.is_set():
+                            if self.is_stopped():
+                                _pdf_mgr.stop()
+                                self.log("🛑 PDF generation stopped by user")
+                                break
+                            _pdf_done.wait(timeout=1.0)
+
+                        # Clean up config file
+                        try:
+                            os.remove(_pdf_config_path)
+                        except Exception:
+                            pass
+
+                        if _pdf_result[0] and not _pdf_result[0].get('success', False):
+                            err = _pdf_result[0].get('error', 'Unknown error')
+                            if not self.is_stopped():
+                                self.log(f"⚠️ PDF generation failed: {err}")
                     except BaseException as e:
                         import traceback
                         self.log(f"⚠️ PDF generation failed: {type(e).__name__}: {e}")

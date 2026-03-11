@@ -80,6 +80,8 @@ app_files = [
     ('glossary_process_worker.py', '.'),
     ('chapter_extraction_worker.py', '.'),
     ('_compress_worker.py', '.'),  # Lightweight image compression worker
+    ('_pdf_worker.py', '.'),  # PDF generation subprocess worker
+    ('pdf_generation_manager.py', '.'),  # PDF generation manager
     ('chapter_extraction_manager.py', '.'),
     
     # Utilities
@@ -161,6 +163,8 @@ app_modules = [
     'glossary_process_worker',
     'chapter_extraction_worker',
     '_compress_worker',  # Lightweight image compression worker
+    '_pdf_worker',  # PDF generation subprocess worker
+    'pdf_generation_manager',  # PDF generation manager
     'chapter_extraction_manager',
     'GlossaryManager',
     'GlossaryManager_GUI',
