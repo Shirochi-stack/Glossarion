@@ -5692,7 +5692,7 @@ img {
             return None
         
         def _embed_images_in_html(content):
-            """Replace image src attributes with data URIs"""
+            """Replace image src attributes AND CSS url() references with data URIs"""
             def replace_attr(match):
                 attr = match.group(1)
                 quote = match.group(2)
@@ -5701,10 +5701,25 @@ img {
                 if data_uri:
                     return f'{attr}={quote}{data_uri}{quote}'
                 return match.group(0)
-            return re.sub(
+            content = re.sub(
                 r'(\b(?:src|href|xlink:href)\b)\s*=\s*([\'"])([^\'"]+)\2',
                 replace_attr, content, flags=re.IGNORECASE
             )
+            # Also replace CSS url() references (inline styles, <style> blocks)
+            def replace_css_url(match):
+                quote = match.group(1) or ''
+                url_value = match.group(2)
+                if url_value.startswith('data:'):
+                    return match.group(0)
+                data_uri = _data_uri_for_src(url_value)
+                if data_uri:
+                    return f'url("{data_uri}")'
+                return match.group(0)
+            content = re.sub(
+                r'url\(\s*([\'"]?)([^\'")\s]+)\1\s*\)',
+                replace_css_url, content, flags=re.IGNORECASE
+            )
+            return content
         
         def _extract_body_content(html_content):
             """Extract just the <body> inner content from a full HTML document to avoid nested HTML."""
@@ -5772,6 +5787,10 @@ img {
         _dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
         _dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
         _seen_bm_titles = set()
+
+        # Embed any image url() references in collected CSS (e.g. background-image)
+        # so WeasyPrint doesn't try to resolve renamed .jpg -> .webp paths
+        styles = _embed_images_in_html(styles)
 
         # Process chapters
         documents = []
