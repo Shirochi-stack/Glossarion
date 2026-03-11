@@ -1399,6 +1399,86 @@ def _create_output_settings_section(self, parent):
     page_num_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(page_num_desc)
     
+    # Separator before render batch size
+    sep_batch = QFrame()
+    sep_batch.setFrameShape(QFrame.HLine)
+    sep_batch.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_batch)
+    pdf_controls.append(sep_batch)
+    
+    # Render Batch Size
+    batch_row = QWidget()
+    batch_h = QHBoxLayout(batch_row)
+    batch_h.setContentsMargins(20, 2, 0, 0)
+    
+    batch_label = QLabel("Render Batch Size:")
+    batch_h.addWidget(batch_label)
+    pdf_controls.append(batch_label)
+    
+    batch_combo = QComboBox()
+    batch_combo.addItems(["25", "50", "100", "150", "200"])
+    batch_combo.setCurrentText(str(self.config.get('pdf_render_batch_size', 50)))
+    batch_combo.setFixedWidth(80)
+    batch_combo.setToolTip(
+        "Number of chapters rendered per batch during PDF generation.\n"
+        "Smaller = faster per batch but more overhead.\n"
+        "Larger = slower per batch but fewer batches.\n"
+        "50 is recommended for most documents."
+    )
+    batch_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(batch_combo)
+    self._disable_combobox_mousewheel(batch_combo)
+    def _on_batch_size_changed(text):
+        try:
+            val = int(text)
+            self.config['pdf_render_batch_size'] = val
+            os.environ['PDF_RENDER_BATCH_SIZE'] = str(val)
+        except (ValueError, TypeError):
+            pass
+    batch_combo.currentTextChanged.connect(_on_batch_size_changed)
+    batch_h.addWidget(batch_combo)
+    pdf_controls.append(batch_combo)
+    
+    batch_h.addStretch()
+    section_v.addWidget(batch_row)
+    pdf_controls.append(batch_row)
+    
+    os.environ['PDF_RENDER_BATCH_SIZE'] = str(self.config.get('pdf_render_batch_size', 50))
+    
+    # Fast Rendering toggle
+    fast_render_cb = self._create_styled_checkbox("Fast Rendering")
+    fast_render_cb.setToolTip(
+        "Pre-converts .webp images to faster-decoding formats before PDF rendering.\n"
+        "• If compression is disabled: webp → PNG (lossless, ~2-3x faster decode)\n"
+        "• If compression is enabled: webp → JPEG (uses quality setting, fastest decode)\n"
+        "• PNG and JPEG source images are left untouched.\n\n"
+        "Adds a pre-conversion step but significantly speeds up the rendering phase\n"
+        "for documents with many .webp images."
+    )
+    fast_render_cb.setContentsMargins(20, 0, 0, 0)
+    try:
+        fast_render_cb.setChecked(self.config.get('pdf_fast_rendering', False))
+    except Exception:
+        pass
+    def _on_fast_render_toggle(checked):
+        try:
+            self.config['pdf_fast_rendering'] = bool(checked)
+            os.environ['PDF_FAST_RENDERING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    fast_render_cb.toggled.connect(_on_fast_render_toggle)
+    section_v.addWidget(fast_render_cb)
+    pdf_controls.append(fast_render_cb)
+    
+    os.environ['PDF_FAST_RENDERING'] = '1' if self.config.get('pdf_fast_rendering', False) else '0'
+    
     # ── Quality Settings ──────────────────────────────────────
     sep_quality = QFrame()
     sep_quality.setFrameShape(QFrame.HLine)

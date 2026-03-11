@@ -181,7 +181,9 @@ def run_pdf_generation(config_path):
                     base = os.path.splitext(fname)[0]
                     images_by_name[base] = (fpath, ctype)
 
-    # --- Map image paths for WeasyPrint (handles all formats natively via Pillow) ---
+    # --- Map / pre-convert images for WeasyPrint ---
+    _fast_rendering = os.environ.get('PDF_FAST_RENDERING', '0') == '1'
+    _pdf_images_dir = os.path.join(output_dir, '_pdf_images')
     _img_path_cache = {}  # maps lookup key -> relative path from output_dir
     _unique_images = {}
     for key, (fpath, ctype) in images_by_name.items():
@@ -191,12 +193,97 @@ def run_pdf_generation(config_path):
 
     num_images = len(_unique_images)
     if num_images > 0:
-        log(f"  🖼️ Mapping {num_images} images...")
-        for fpath, (ctype, keys) in _unique_images.items():
-            rel_path = f"images/{os.path.basename(fpath)}"
-            for k in keys:
-                _img_path_cache[k] = rel_path
-        log(f"  ✅ Image mapping complete ({len(_img_path_cache)} entries)")
+        # Count how many webp images need conversion
+        _webp_count = sum(1 for _, (ct, _) in _unique_images.items() if ct == 'image/webp') if _fast_rendering else 0
+
+        if _fast_rendering and _webp_count > 0:
+            _target_fmt = 'JPEG' if compression_enabled else 'PNG'
+            log(f"  🖼️ Fast Rendering: converting {_webp_count} webp → {_target_fmt} ({num_images} total images)...")
+            os.makedirs(_pdf_images_dir, exist_ok=True)
+            num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
+            num_workers = max(1, min(num_workers, _webp_count))
+
+            _img_done = [0]
+            _img_lock = threading.Lock()
+            _img_stop = threading.Event()
+            _img_start = time.time()
+
+            def _img_heartbeat():
+                while not _img_stop.is_set():
+                    if _img_stop.wait(3.0):
+                        break
+                    with _img_lock:
+                        done = _img_done[0]
+                    elapsed = time.time() - _img_start
+                    log(f"  🖼️ Converting images... {done}/{_webp_count} ({elapsed:.0f}s elapsed)")
+
+            _img_hb = threading.Thread(target=_img_heartbeat, daemon=True)
+            _img_hb.start()
+
+            def _convert_webp(fpath, ctype, keys):
+                try:
+                    if ctype == 'image/webp':
+                        from PIL import Image
+                        from io import BytesIO
+                        with Image.open(fpath) as img:
+                            if compression_enabled:
+                                # Convert to JPEG
+                                quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                                if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                                    bg = Image.new('RGB', img.size, (255, 255, 255))
+                                    if img.mode != 'RGBA':
+                                        img = img.convert('RGBA')
+                                    bg.paste(img, mask=img.split()[3])
+                                    img = bg
+                                elif img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                                ext = '.jpg'
+                                out_name = os.path.splitext(os.path.basename(fpath))[0] + ext
+                                out_path = os.path.join(_pdf_images_dir, out_name)
+                                img.save(out_path, format='JPEG', quality=quality, optimize=True)
+                            else:
+                                # Convert to PNG (lossless)
+                                if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                    img = img.convert('RGBA')
+                                ext = '.png'
+                                out_name = os.path.splitext(os.path.basename(fpath))[0] + ext
+                                out_path = os.path.join(_pdf_images_dir, out_name)
+                                img.save(out_path, format='PNG')
+                            rel_path = f"_pdf_images/{out_name}"
+                    else:
+                        # Non-webp: use original path
+                        rel_path = f"images/{os.path.basename(fpath)}"
+                    for k in keys:
+                        with _img_lock:
+                            _img_path_cache[k] = rel_path
+                except Exception:
+                    # Fallback to original
+                    for k in keys:
+                        with _img_lock:
+                            _img_path_cache[k] = f"images/{os.path.basename(fpath)}"
+                if ctype == 'image/webp':
+                    with _img_lock:
+                        _img_done[0] += 1
+
+            with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
+                futures = []
+                for fpath, (ctype, keys) in _unique_images.items():
+                    futures.append(img_executor.submit(_convert_webp, fpath, ctype, keys))
+                for f in futures:
+                    f.result()
+
+            _img_stop.set()
+            _img_hb.join(timeout=1)
+            _img_elapsed = time.time() - _img_start
+            log(f"  ✅ Fast Rendering conversion complete ({_webp_count} images, {_img_elapsed:.1f}s)")
+        else:
+            # Direct mapping — WeasyPrint handles all formats natively
+            log(f"  🖼️ Mapping {num_images} images...")
+            for fpath, (ctype, keys) in _unique_images.items():
+                rel_path = f"images/{os.path.basename(fpath)}"
+                for k in keys:
+                    _img_path_cache[k] = rel_path
+            log(f"  ✅ Image mapping complete ({len(_img_path_cache)} entries)")
 
     def _file_path_for_src(src_value):
         if not src_value or src_value.startswith('data:'):
@@ -442,7 +529,7 @@ def run_pdf_generation(config_path):
 
 
     # --- Render in batches ---
-    BATCH_SIZE = 50
+    BATCH_SIZE = int(os.environ.get('PDF_RENDER_BATCH_SIZE', '50'))
     if all_chapters_parts:
         num_batches = (len(all_chapters_parts) + BATCH_SIZE - 1) // BATCH_SIZE
         log(f"  Rendering {len(all_chapters_parts)} chapters in {num_batches} batches (batch size={BATCH_SIZE})...")
