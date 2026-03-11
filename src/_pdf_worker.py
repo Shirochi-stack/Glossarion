@@ -12,8 +12,8 @@ import sys
 import os
 import io
 
-# Force UTF-8 encoding for stdout/stderr on Windows (only when not piped)
-if hasattr(sys.stdout, 'buffer') and sys.stdout.isatty():
+# Force UTF-8 encoding for stdout/stderr on Windows (including when piped as subprocess)
+if hasattr(sys.stdout, 'buffer'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
