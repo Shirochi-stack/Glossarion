@@ -173,10 +173,9 @@ class PdfGenerationManager:
                             self._log(line)
 
                 if remaining_error and not self.stop_requested:
-                    # Only log non-trivial stderr
                     for line in remaining_error.strip().split('\n'):
-                        if line and 'WARNING' not in line.upper():
-                            self._log(f"⚠️ {line}")
+                        if line.strip():
+                            self._log(f"⚠️ [stderr] {line.strip()}")
 
                 if self.process.returncode != 0 and not self.stop_requested:
                     self._log(f"⚠️ PDF subprocess exited with code {self.process.returncode}")

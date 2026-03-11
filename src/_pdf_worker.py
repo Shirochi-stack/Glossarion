@@ -223,8 +223,10 @@ def run_pdf_generation(config_path):
                     base = os.path.splitext(fname)[0]
                     images_by_name[base] = (fpath, ctype)
 
-    # --- Pre-build ALL data URIs in parallel ---
-    _data_uri_cache = {}
+    # --- Pre-convert images to PDF-compatible formats on disk ---
+    _pdf_images_dir = os.path.join(output_dir, '_pdf_images')
+    os.makedirs(_pdf_images_dir, exist_ok=True)
+    _img_path_cache = {}  # maps lookup key -> relative path from output_dir
     _unique_images = {}
     for key, (fpath, ctype) in images_by_name.items():
         if fpath not in _unique_images:
@@ -257,10 +259,15 @@ def run_pdf_generation(config_path):
         def _convert_one_image(fpath, ctype, keys):
             try:
                 img_bytes, final_ctype = _read_image_as_pdf_compatible(fpath, ctype)
-                b64 = base64.b64encode(img_bytes).decode('utf-8')
-                data_uri = f"data:{final_ctype};base64,{b64}"
+                # Determine extension from content type
+                ext = '.jpg' if 'jpeg' in final_ctype else '.png' if 'png' in final_ctype else '.jpg'
+                out_name = os.path.splitext(os.path.basename(fpath))[0] + ext
+                out_path = os.path.join(_pdf_images_dir, out_name)
+                with open(out_path, 'wb') as wf:
+                    wf.write(img_bytes)
+                rel_path = f"_pdf_images/{out_name}"
                 for k in keys:
-                    _data_uri_cache[k] = data_uri
+                    _img_path_cache[k] = rel_path
             except Exception:
                 pass
             with _img_lock:
@@ -277,17 +284,17 @@ def run_pdf_generation(config_path):
         _img_hb.join(timeout=1)
         _img_elapsed = time.time() - _img_start
 
-        log(f"  ✅ Image pre-conversion complete ({len(_data_uri_cache)} cache entries)")
+        log(f"  ✅ Image pre-conversion complete ({len(_img_path_cache)} cache entries)")
 
-    def _data_uri_for_src(src_value):
+    def _file_path_for_src(src_value):
         if not src_value or src_value.startswith('data:'):
             return None
         from urllib.parse import unquote
         raw = unquote(src_value).replace('\\', '/')
         filename = os.path.basename(raw)
         for key in [raw, filename, os.path.splitext(filename)[0]]:
-            if key in _data_uri_cache:
-                return _data_uri_cache[key]
+            if key in _img_path_cache:
+                return _img_path_cache[key]
         return None
 
     def _embed_images_in_html(content):
@@ -295,9 +302,9 @@ def run_pdf_generation(config_path):
             attr = match.group(1)
             quote = match.group(2)
             src_value = match.group(3)
-            data_uri = _data_uri_for_src(src_value)
-            if data_uri:
-                return f'{attr}={quote}{data_uri}{quote}'
+            file_path = _file_path_for_src(src_value)
+            if file_path:
+                return f'{attr}={quote}{file_path}{quote}'
             return match.group(0)
         content = re.sub(
             r'(\b(?:src|href|xlink:href)\b)\s*=\s*([\'"])([^\'"]+)\2',
@@ -308,9 +315,9 @@ def run_pdf_generation(config_path):
             url_value = match.group(2)
             if url_value.startswith('data:'):
                 return match.group(0)
-            data_uri = _data_uri_for_src(url_value)
-            if data_uri:
-                return f'url("{data_uri}")'
+            file_path = _file_path_for_src(url_value)
+            if file_path:
+                return f'url("{file_path}")'
             return match.group(0)
         content = re.sub(
             r'url\(\s*([\'"]?)([^\'")\s]+)\1\s*\)',
@@ -620,6 +627,13 @@ def run_pdf_generation(config_path):
         log(f"  [DEBUG] {traceback.format_exc()}")
         print(f'[RESULT] {json.dumps({"success": False, "error": str(e)})}', flush=True)
         return
+    finally:
+        # Clean up temp pre-converted images
+        import shutil
+        try:
+            shutil.rmtree(_pdf_images_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     elapsed = time.time() - start_time
     if os.path.exists(pdf_path):
@@ -647,8 +661,10 @@ def main():
     try:
         run_pdf_generation(config_path)
     except Exception as e:
+        tb = traceback.format_exc()
         print(f"[ERROR] PDF generation failed: {e}", flush=True)
-        print(f'[RESULT] {json.dumps({"success": False, "error": str(e), "traceback": traceback.format_exc()})}', flush=True)
+        print(f"[ERROR] {tb}", flush=True)
+        print(f'[RESULT] {json.dumps({"success": False, "error": str(e), "traceback": tb})}', flush=True)
         sys.exit(1)
 
 
