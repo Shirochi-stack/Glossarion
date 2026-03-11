@@ -5708,6 +5708,7 @@ img {
         
         import base64
         import re
+        import threading
         
         # Build image lookup from images directory
         _mime_fallback = {
@@ -5774,24 +5775,68 @@ img {
             with open(fpath, 'rb') as f:
                 return f.read(), ctype
         
+        # ── Pre-build ALL data URIs in parallel ────────────────────────────
+        # Instead of converting each image on-the-fly during the chapter loop,
+        # we pre-convert all images using a thread pool. This parallelizes the
+        # I/O + PIL conversion + base64 encoding across all cores.
+        _data_uri_cache = {}  # key (fname or base) -> data URI string
+        
+        # Deduplicate: only process each unique (fpath, ctype) once
+        _unique_images = {}  # fpath -> (ctype, [keys])
+        for key, (fpath, ctype) in images_by_name.items():
+            if fpath not in _unique_images:
+                _unique_images[fpath] = (ctype, [])
+            _unique_images[fpath][1].append(key)
+        
+        num_images = len(_unique_images)
+        if num_images > 0:
+            num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
+            num_workers = max(1, min(num_workers, num_images))
+            self.log(f"  🖼️ Pre-converting {num_images} images for PDF with {num_workers} threads...")
+            
+            _img_done = [0]
+            _img_lock = threading.Lock()
+            
+            def _convert_one_image(fpath, ctype, keys):
+                """Convert a single image to data URI and cache it under all its keys."""
+                try:
+                    img_bytes, final_ctype = _read_image_as_pdf_compatible(fpath, ctype)
+                    b64 = base64.b64encode(img_bytes).decode('utf-8')
+                    data_uri = f"data:{final_ctype};base64,{b64}"
+                    for k in keys:
+                        _data_uri_cache[k] = data_uri
+                except Exception:
+                    pass
+                with _img_lock:
+                    _img_done[0] += 1
+                    done = _img_done[0]
+                if done % 500 == 0 or done == num_images:
+                    self.log(f"  🖼️ Pre-converted {done}/{num_images} images")
+            
+            with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
+                futures = []
+                for fpath, (ctype, keys) in _unique_images.items():
+                    if self.is_stopped():
+                        break
+                    futures.append(img_executor.submit(_convert_one_image, fpath, ctype, keys))
+                # Wait for all to complete
+                for f in futures:
+                    f.result()  # propagate exceptions if any
+            
+            self.log(f"  ✅ Image pre-conversion complete ({len(_data_uri_cache)} cached)")
+        
         def _data_uri_for_src(src_value):
-            """Convert image src to data URI"""
+            """Convert image src to data URI using pre-built cache"""
             if not src_value or src_value.startswith('data:'):
                 return None
             from urllib.parse import unquote
             raw = unquote(src_value).replace('\\', '/')
             filename = os.path.basename(raw)
             
-            # Try exact match, then basename
+            # Try exact match, then basename, then basename without extension
             for key in [raw, filename, os.path.splitext(filename)[0]]:
-                if key in images_by_name:
-                    fpath, ctype = images_by_name[key]
-                    try:
-                        img_bytes, final_ctype = _read_image_as_pdf_compatible(fpath, ctype)
-                        b64 = base64.b64encode(img_bytes).decode('utf-8')
-                        return f"data:{final_ctype};base64,{b64}"
-                    except Exception:
-                        pass
+                if key in _data_uri_cache:
+                    return _data_uri_cache[key]
             return None
         
         def _embed_images_in_html(content):
