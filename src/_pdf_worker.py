@@ -673,8 +673,9 @@ def run_pdf_generation(config_path):
         _pdf_write_kwargs = {}
         if compression_enabled:
             _pdf_quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
-            _pdf_write_kwargs['image_quality'] = _pdf_quality
-            log(f"  PDF image quality: {_pdf_quality}%")
+            _pdf_write_kwargs['jpeg_quality'] = _pdf_quality
+            _pdf_write_kwargs['optimize_images'] = True
+            log(f"  PDF jpeg_quality: {_pdf_quality}%, optimize_images: True")
         else:
             log("  PDF images: default encoding (no lossy re-compression)")
         _write_stop = threading.Event()

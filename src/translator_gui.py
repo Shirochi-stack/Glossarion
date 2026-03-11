@@ -2026,6 +2026,20 @@ Text to analyze:
                 except:
                     pass
             
+            # Stop PDF worker subprocess if running
+            if hasattr(self, 'epub_converter') and hasattr(self.epub_converter, '_active_pdf_mgr'):
+                try:
+                    pdf_mgr = self.epub_converter._active_pdf_mgr
+                    if pdf_mgr and pdf_mgr.is_running:
+                        print("[CLEANUP] Stopping PDF worker subprocess...")
+                        pdf_mgr.stop()
+                        # Force kill the process if still alive
+                        if pdf_mgr.process and pdf_mgr.process.poll() is None:
+                            pdf_mgr.process.kill()
+                except Exception:
+                    pass
+
+            
             # Set any stop flags that might exist
             if hasattr(self, 'stop_flag'):
                 self.stop_flag.set()

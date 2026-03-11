@@ -1991,6 +1991,7 @@ class EPUBCompiler:
                             _pdf_done.set()
 
                         _pdf_mgr = PdfGenerationManager(log_callback=self.log)
+                        self._active_pdf_mgr = _pdf_mgr  # Store for cleanup on shutdown
                         _pdf_mgr.generate_pdf_async(_pdf_config_path, completion_callback=_pdf_completion)
 
                         # Wait for subprocess to finish, checking for stop every second
