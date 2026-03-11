@@ -6124,7 +6124,22 @@ img {
             self.log("  Rendering combined chapter document...")
             combined_html = f"<html><head><style>{styles}</style></head><body>{all_chapters_html}</body></html>"
             try:
+                # Heartbeat while WeasyPrint renders (can take minutes for large docs)
+                _render_stop = threading.Event()
+                _render_start = _time.time()
+                def _render_heartbeat():
+                    while not _render_stop.is_set():
+                        if _render_stop.wait(3.0):
+                            break
+                        elapsed = _time.time() - _render_start
+                        self.log(f"  ⏳ Rendering... ({elapsed:.0f}s elapsed)")
+                _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
+                _render_hb.start()
                 chapters_doc = WeasyHTML(string=combined_html, base_url=self.output_dir).render()
+                _render_stop.set()
+                _render_hb.join(timeout=1)
+                _render_elapsed = _time.time() - _render_start
+                self.log(f"  ✅ Rendering complete ({_render_elapsed:.1f}s)")
                 documents.append(chapters_doc)
                 
                 # Resolve accurate page numbers using WeasyPrint's Page.anchors.
@@ -6187,7 +6202,21 @@ img {
             else:
                 _pdf_write_kwargs['uncompressed_pdf'] = True
                 self.log("  PDF images: uncompressed (preserving original quality)")
+            _write_stop = threading.Event()
+            _write_start = _time.time()
+            def _write_heartbeat():
+                while not _write_stop.is_set():
+                    if _write_stop.wait(3.0):
+                        break
+                    elapsed = _time.time() - _write_start
+                    self.log(f"  ⏳ Writing PDF... ({elapsed:.0f}s elapsed)")
+            _write_hb = threading.Thread(target=_write_heartbeat, daemon=True)
+            _write_hb.start()
             documents[0].copy(all_pages).write_pdf(pdf_path, **_pdf_write_kwargs)
+            _write_stop.set()
+            _write_hb.join(timeout=1)
+            _write_elapsed = _time.time() - _write_start
+            self.log(f"  ✅ PDF written ({_write_elapsed:.1f}s)")
         except BaseException as e:
             import traceback
             self.log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")
