@@ -4430,6 +4430,7 @@ img {
                             # Also remove parent <p> if it's now empty
                             if parent and parent.name == 'p' and not parent.get_text(strip=True) and not parent.find_all(True):
                                 parent.decompose()
+                            continue
                 
                 # Ensure alt attribute exists (required for XHTML)
                 if not img.get('alt'):
