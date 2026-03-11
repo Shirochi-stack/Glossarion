@@ -239,6 +239,20 @@ def run_pdf_generation(config_path):
 
         _img_done = [0]
         _img_lock = threading.Lock()
+        _img_stop = threading.Event()
+        _img_start = time.time()
+
+        def _img_heartbeat():
+            while not _img_stop.is_set():
+                if _img_stop.wait(3.0):
+                    break
+                with _img_lock:
+                    done = _img_done[0]
+                elapsed = time.time() - _img_start
+                log(f"  🖼️ Pre-converting images... {done}/{num_images} ({elapsed:.0f}s elapsed)")
+
+        _img_hb = threading.Thread(target=_img_heartbeat, daemon=True)
+        _img_hb.start()
 
         def _convert_one_image(fpath, ctype, keys):
             try:
@@ -251,9 +265,6 @@ def run_pdf_generation(config_path):
                 pass
             with _img_lock:
                 _img_done[0] += 1
-                done = _img_done[0]
-            if done % 500 == 0 or done == num_images:
-                log(f"  🖼️ Pre-converted {done}/{num_images} images")
 
         with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
             futures = []
@@ -261,6 +272,10 @@ def run_pdf_generation(config_path):
                 futures.append(img_executor.submit(_convert_one_image, fpath, ctype, keys))
             for f in futures:
                 f.result()
+
+        _img_stop.set()
+        _img_hb.join(timeout=1)
+        _img_elapsed = time.time() - _img_start
 
         log(f"  ✅ Image pre-conversion complete ({len(_data_uri_cache)} cache entries)")
 

@@ -2442,7 +2442,28 @@ class EPUBCompiler:
                         self.log(f"[DEBUG] XHTML first 300 chars: {xhtml_content[:300]}")
                 
                 # Process images
-                xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
+                xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
+                # Write back: remove broken img tags from source HTML file
+                if _missing_imgs and os.path.exists(path):
+                    try:
+                        _missing_set = set(_missing_imgs)
+                        from bs4 import BeautifulSoup as _BS_wb
+                        _soup_wb = _BS_wb(raw_content, 'html.parser')
+                        _wb_changed = False
+                        for _wb_img in list(_soup_wb.find_all('img')):
+                            _wb_src = _wb_img.get('src', '')
+                            _wb_base = os.path.basename(_wb_src.split('?')[0])
+                            if _wb_base in _missing_set:
+                                _wb_parent = _wb_img.parent
+                                _wb_img.decompose()
+                                _wb_changed = True
+                                if _wb_parent and _wb_parent.name == 'p' and not _wb_parent.get_text(strip=True) and not _wb_parent.find_all(True):
+                                    _wb_parent.decompose()
+                        if _wb_changed:
+                            with open(path, 'w', encoding='utf-8') as _wf:
+                                _wf.write(str(_soup_wb))
+                    except Exception:
+                        pass
                 
                 # Validate
                 if is_problem_chapter:
@@ -3183,7 +3204,28 @@ class EPUBCompiler:
             if is_problem_chapter:
                 self.log(f"[DEBUG] Processing chapter images...")
             
-            xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
+            xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
+            # Write back: remove broken img tags from source HTML file
+            if _missing_imgs and os.path.exists(path):
+                try:
+                    _missing_set = set(_missing_imgs)
+                    from bs4 import BeautifulSoup as _BS_wb
+                    _soup_wb = _BS_wb(raw_content, 'html.parser')
+                    _wb_changed = False
+                    for _wb_img in list(_soup_wb.find_all('img')):
+                        _wb_src = _wb_img.get('src', '')
+                        _wb_base = os.path.basename(_wb_src.split('?')[0])
+                        if _wb_base in _missing_set:
+                            _wb_parent = _wb_img.parent
+                            _wb_img.decompose()
+                            _wb_changed = True
+                            if _wb_parent and _wb_parent.name == 'p' and not _wb_parent.get_text(strip=True) and not _wb_parent.find_all(True):
+                                _wb_parent.decompose()
+                    if _wb_changed:
+                        with open(path, 'w', encoding='utf-8') as _wf:
+                            _wf.write(str(_soup_wb))
+                except Exception:
+                    pass
             
             # Validate final content
             if is_problem_chapter:
@@ -4501,14 +4543,13 @@ img {
                 self.log(f"[WARNING] Chapter images: {found_images}/{total_images} found. Missing: {missing_images[:5]}{'...' if len(missing_images) > 5 else ''}")
             
             if changed:
-                # Return the modified content
-                return str(soup)
+                return str(soup), missing_images
             
-            return xhtml_content
+            return xhtml_content, missing_images
             
         except Exception as e:
             self.log(f"[WARNING] Failed to process images in chapter: {e}")
-            return xhtml_content
+            return xhtml_content, []
     
     def _create_gallery_page(self, book: epub.EpubBook, images: List[str],
                             css_items: List[epub.EpubItem], metadata: dict) -> epub.EpubHtml:
