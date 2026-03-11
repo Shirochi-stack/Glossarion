@@ -616,8 +616,7 @@ def run_pdf_generation(config_path):
             _pdf_write_kwargs['image_quality'] = _pdf_quality
             log(f"  PDF image quality: {_pdf_quality}%")
         else:
-            _pdf_write_kwargs['uncompressed_pdf'] = True
-            log("  PDF images: uncompressed (preserving original quality)")
+            log("  PDF images: lossless (deflate compression, no JPEG re-encoding)")
         _write_stop = threading.Event()
         _write_start = time.time()
         def _write_heartbeat():
