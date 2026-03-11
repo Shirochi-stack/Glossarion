@@ -1522,6 +1522,9 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     else:
         progress_callback(f"Chapter processing complete: {len(candidate_chapters) + len(chapters_direct)} chapters")
     
+    import time as _post_time
+    _post_start = _post_time.time()
+    
     # Print skip summary if any files were skipped
     if skipped_files:
         print(f"\n📊 Skipped {len(skipped_files)} files during processing:")
@@ -1536,6 +1539,14 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     
     # Sort direct chapters by file index to maintain order
     chapters_direct.sort(key=lambda x: x["file_index"])
+    
+    _sort_elapsed = _post_time.time() - _post_start
+    if _sort_elapsed > 1.0:
+        msg = f"  ⏱️ Post-processing: sorting ({_sort_elapsed:.1f}s)"
+        if progress_callback:
+            progress_callback(msg)
+        else:
+            print(msg)
     
     # Post-process smart mode candidates (only when merging is enabled)
     effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
@@ -1692,6 +1703,14 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     # Language detection
     combined_sample = ' '.join(sample_texts) if effective_mode == "smart" else ''
     detected_language = _detect_content_language(combined_sample) if combined_sample else 'unknown'
+    
+    _total_post = _post_time.time() - _post_start
+    if _total_post > 1.0:
+        msg = f"  ⏱️ Post-processing complete ({_total_post:.1f}s)"
+        if progress_callback:
+            progress_callback(msg)
+        else:
+            print(msg)
     
     if chapters:
         _print_extraction_summary(chapters, detected_language, extraction_mode, 
