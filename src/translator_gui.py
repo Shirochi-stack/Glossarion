@@ -4890,6 +4890,7 @@ Recent translations to summarize:
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
+        self.auto_glossary_shortcut_combo.setFixedWidth(220)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {

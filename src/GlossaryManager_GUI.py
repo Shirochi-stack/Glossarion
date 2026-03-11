@@ -1881,7 +1881,8 @@ CRITICAL EXTRACTION RULES:
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        from PySide6.QtCore import QSize, QTimer
+        from PySide6.QtCore import QSize
+        self.auto_glossary_mode_combo.setFixedWidth(220)
         self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_mode_combo.setStyleSheet("""
             QComboBox {
@@ -1913,12 +1914,6 @@ CRITICAL EXTRACTION RULES:
                 background-color: #2a4a70;
             }
         """)
-        def _auto_resize_glossary_combo(*_args):
-            fm = self.auto_glossary_mode_combo.fontMetrics()
-            text_w = fm.horizontalAdvance(self.auto_glossary_mode_combo.currentText())
-            self.auto_glossary_mode_combo.setFixedWidth(max(120, text_w + 80))
-        self.auto_glossary_mode_combo.currentIndexChanged.connect(_auto_resize_glossary_combo)
-        QTimer.singleShot(0, _auto_resize_glossary_combo)
         self.auto_glossary_mode_combo.wheelEvent = lambda event: None
         master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
         
