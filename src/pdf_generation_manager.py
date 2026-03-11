@@ -141,6 +141,10 @@ class PdfGenerationManager:
                 elif not line.startswith("["):
                     self._log(line)
 
+            # Stop startup heartbeat
+            _hb_stop.set()
+            _hb_thread.join(timeout=1)
+
             # Read any remaining output
             if not self.stop_requested:
                 try:
