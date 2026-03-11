@@ -2039,6 +2039,18 @@ Text to analyze:
                 except Exception:
                     pass
 
+            # Stop compression worker subprocesses if running
+            if hasattr(self, 'epub_converter') and hasattr(self.epub_converter, '_active_compress_workers'):
+                try:
+                    for p in (self.epub_converter._active_compress_workers or []):
+                        if p and p.poll() is None:
+                            try:
+                                p.kill()
+                            except Exception:
+                                pass
+                    print("[CLEANUP] Compression workers killed")
+                except Exception:
+                    pass
             
             # Set any stop flags that might exist
             if hasattr(self, 'stop_flag'):

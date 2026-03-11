@@ -5602,6 +5602,7 @@ img {
                 workers.append(p)
             except Exception as e:
                 self.log(f"  ⚠️ Failed to spawn compression worker: {e}")
+        self._active_compress_workers = workers  # Store for cleanup on shutdown
         
         if not workers:
             self.log("  ⚠️ No compression workers could be started, falling back to sequential")
