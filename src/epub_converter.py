@@ -1968,9 +1968,8 @@ class EPUBCompiler:
                             'metadata': metadata,
                             'env_vars': {
                                 k: os.environ.get(k, '') for k in [
-                                    'ENABLE_IMAGE_COMPRESSION', 'PDF_IMAGE_FORMAT',
-                                    'IMAGE_COMPRESSION_QUALITY', 'PDF_PNG_OPTIMIZE',
-                                    'PDF_PNG_COMPRESS_LEVEL', 'EXTRACTION_WORKERS',
+                                    'ENABLE_IMAGE_COMPRESSION',
+                                    'IMAGE_COMPRESSION_QUALITY', 'EXTRACTION_WORKERS',
                                     'PDF_PAGE_NUMBERS', 'PDF_PAGE_NUMBER_ALIGNMENT',
                                     'PDF_GENERATE_TOC', 'PDF_TOC_PAGE_NUMBERS',
                                     'DEDUPLICATE_TOC', 'DEDUPLICATE_TOC_USE_TRANSLATED',

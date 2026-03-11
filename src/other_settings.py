@@ -1521,124 +1521,13 @@ def _create_output_settings_section(self, parent):
     section_v.addWidget(exclude_gif_cb)
     compress_sub_controls.append(exclude_gif_cb)
     
-    # PDF Image Format
-    pdf_format_row = QWidget()
-    pdf_format_h = QHBoxLayout(pdf_format_row)
-    pdf_format_h.setContentsMargins(20, 2, 0, 0)
-    
-    pdf_format_label = QLabel("PDF Image Format:")
-    pdf_format_h.addWidget(pdf_format_label)
-    compress_sub_controls.append(pdf_format_label)
-    
-    pdf_format_combo = QComboBox()
-    pdf_format_combo.addItems(["JPEG", "PNG"])
-    pdf_format_combo.setFixedWidth(100)
-    pdf_format_combo.setToolTip(
-        "Image format used inside the PDF.\n"
-        "• JPEG: Lossy, smaller files, respects quality setting, no transparency\n"
-        "• PNG: Lossless, larger files, preserves transparency"
-    )
-    try:
-        current_pdf_fmt = self.config.get('pdf_image_format', 'jpeg').upper()
-        idx = pdf_format_combo.findText(current_pdf_fmt)
-        if idx >= 0:
-            pdf_format_combo.setCurrentIndex(idx)
-    except Exception:
-        pass
-    self._disable_combobox_mousewheel(pdf_format_combo)
-    
-    # PNG optimize checkbox (sub-control of PDF format)
-    png_optimize_cb = self._create_styled_checkbox("Optimize PNG")
-    png_optimize_cb.setToolTip("Apply lossless optimization to reduce PNG file size")
-    try:
-        png_optimize_cb.setChecked(self.config.get('pdf_png_optimize', True))
-    except Exception:
-        png_optimize_cb.setChecked(True)
-    
-    def _on_pdf_format_changed(text):
-        try:
-            fmt = text.lower()
-            self.config['pdf_image_format'] = fmt
-            os.environ['PDF_IMAGE_FORMAT'] = fmt
-        except Exception:
-            pass
-    pdf_format_combo.currentTextChanged.connect(_on_pdf_format_changed)
-    pdf_format_h.addWidget(pdf_format_combo)
-    compress_sub_controls.append(pdf_format_combo)
-    
-    pdf_format_h.addStretch()
-    section_v.addWidget(pdf_format_row)
-    
-    # PNG optimize row
-    png_optimize_cb.setContentsMargins(20, 0, 0, 0)
-    def _on_png_optimize_toggle(checked):
-        try:
-            self.config['pdf_png_optimize'] = bool(checked)
-            os.environ['PDF_PNG_OPTIMIZE'] = '1' if checked else '0'
-        except Exception:
-            pass
-    png_optimize_cb.toggled.connect(_on_png_optimize_toggle)
-    section_v.addWidget(png_optimize_cb)
-    compress_sub_controls.append(png_optimize_cb)
-    
-    # PNG Compression Level (0-9)
-    png_level_row = QWidget()
-    png_level_h = QHBoxLayout(png_level_row)
-    png_level_h.setContentsMargins(20, 2, 0, 0)
-    
-    png_level_label = QLabel("PNG Compression Level:")
-    png_level_h.addWidget(png_level_label)
-    compress_sub_controls.append(png_level_label)
-    
-    png_level_spin = QSpinBox()
-    png_level_spin.setRange(0, 9)
-    png_level_spin.setFixedWidth(60)
-    png_level_spin.setToolTip(
-        "Zlib deflate compression level for PNG (0-9).\n"
-        "0 = no compression (fastest, largest)\n"
-        "6 = default balance\n"
-        "9 = max compression (slowest, smallest)\n"
-        "This is lossless — no quality loss at any level."
-    )
-    try:
-        png_level_spin.setValue(int(self.config.get('pdf_png_compress_level', 6)))
-    except Exception:
-        png_level_spin.setValue(6)
-    
-    def _on_png_level_changed(val):
-        try:
-            self.config['pdf_png_compress_level'] = val
-            os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(val)
-        except Exception:
-            pass
-    png_level_spin.valueChanged.connect(_on_png_level_changed)
-    self._disable_spinbox_mousewheel(png_level_spin)
-    png_level_h.addWidget(png_level_spin)
-    compress_sub_controls.append(png_level_spin)
-    
-    png_level_range_label = QLabel("0 – 9")
-    png_level_range_label.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 9pt;")
-    png_level_h.addWidget(png_level_range_label)
-    compress_sub_controls.append(png_level_range_label)
-    
-    png_level_h.addStretch()
-    section_v.addWidget(png_level_row)
-    
-    compress_desc = QLabel(
-        "EPUB always uses .webp. PDF uses the format selected above\n"
-        "(JPEG for quality control, PNG for transparency)."
-    )
-    compress_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    compress_desc.setContentsMargins(20, 0, 0, 5)
-    section_v.addWidget(compress_desc)
     
     # Set initial env vars for compression sub-settings
     os.environ['IMAGE_COMPRESSION_QUALITY'] = str(quality_spin.currentText())
     os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if exclude_cover_cb.isChecked() else '0'
     os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if exclude_gif_cb.isChecked() else '0'
-    os.environ['PDF_IMAGE_FORMAT'] = self.config.get('pdf_image_format', 'jpeg')
-    os.environ['PDF_PNG_OPTIMIZE'] = '1' if png_optimize_cb.isChecked() else '0'
-    os.environ['PDF_PNG_COMPRESS_LEVEL'] = str(png_level_spin.value())
+
+
     
     # Apply initial enabled state for compression sub-controls
     initial_compress = compress_cb.isChecked()

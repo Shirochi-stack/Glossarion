@@ -41,44 +41,7 @@ def info(msg):
     print(f"[INFO] {msg}", flush=True)
 
 
-def _read_image_as_pdf_compatible(fpath, ctype):
-    """Read image bytes, converting webp to JPEG/PNG since WeasyPrint does not support webp."""
-    if ctype == 'image/webp':
-        try:
-            from PIL import Image
-            from io import BytesIO
-            _compression_on = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
-            with Image.open(fpath) as img:
-                buf = BytesIO()
-                if not _compression_on:
-                    if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
-                        img = img.convert('RGBA')
-                    img.save(buf, format='PNG')
-                    return buf.getvalue(), 'image/png'
-                pdf_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').lower()
-                if pdf_fmt == 'png':
-                    optimize = os.environ.get('PDF_PNG_OPTIMIZE', '1') == '1'
-                    compress_level = int(os.environ.get('PDF_PNG_COMPRESS_LEVEL', '6'))
-                    if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
-                        img = img.convert('RGBA')
-                    img.save(buf, format='PNG', optimize=optimize, compress_level=compress_level)
-                    return buf.getvalue(), 'image/png'
-                else:
-                    quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
-                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                        background = Image.new('RGB', img.size, (255, 255, 255))
-                        if img.mode != 'RGBA':
-                            img = img.convert('RGBA')
-                        background.paste(img, mask=img.split()[3])
-                        img = background
-                    elif img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    img.save(buf, format='JPEG', quality=quality, optimize=True)
-                    return buf.getvalue(), 'image/jpeg'
-        except Exception:
-            pass
-    with open(fpath, 'rb') as f:
-        return f.read(), ctype
+
 
 
 def _build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map):
@@ -194,13 +157,8 @@ def run_pdf_generation(config_path):
         f"toc_numbers={settings['toc_numbers']}, alignment={settings['page_number_alignment']}")
     compression_enabled = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
     if compression_enabled:
-        pdf_img_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').upper()
-        if pdf_img_fmt == 'PNG':
-            img_detail = "format=PNG"
-        else:
-            img_quality = os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
-            img_detail = f"format=JPEG, quality={img_quality}"
-        log(f"  Image: compression=enabled, {img_detail}")
+        img_quality = os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+        log(f"  Image: compression=enabled, quality={img_quality}")
     else:
         log("  Image: compression=disabled")
 
@@ -223,9 +181,7 @@ def run_pdf_generation(config_path):
                     base = os.path.splitext(fname)[0]
                     images_by_name[base] = (fpath, ctype)
 
-    # --- Pre-convert images to PDF-compatible formats on disk ---
-    _pdf_images_dir = os.path.join(output_dir, '_pdf_images')
-    os.makedirs(_pdf_images_dir, exist_ok=True)
+    # --- Map image paths for WeasyPrint (handles all formats natively via Pillow) ---
     _img_path_cache = {}  # maps lookup key -> relative path from output_dir
     _unique_images = {}
     for key, (fpath, ctype) in images_by_name.items():
@@ -235,56 +191,12 @@ def run_pdf_generation(config_path):
 
     num_images = len(_unique_images)
     if num_images > 0:
-        num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
-        num_workers = max(1, min(num_workers, num_images))
-        log(f"  🖼️ Pre-converting {num_images} images for PDF with {num_workers} threads...")
-
-        _img_done = [0]
-        _img_lock = threading.Lock()
-        _img_stop = threading.Event()
-        _img_start = time.time()
-
-        def _img_heartbeat():
-            while not _img_stop.is_set():
-                if _img_stop.wait(3.0):
-                    break
-                with _img_lock:
-                    done = _img_done[0]
-                elapsed = time.time() - _img_start
-                log(f"  🖼️ Pre-converting images... {done}/{num_images} ({elapsed:.0f}s elapsed)")
-
-        _img_hb = threading.Thread(target=_img_heartbeat, daemon=True)
-        _img_hb.start()
-
-        def _convert_one_image(fpath, ctype, keys):
-            try:
-                img_bytes, final_ctype = _read_image_as_pdf_compatible(fpath, ctype)
-                # Determine extension from content type
-                ext = '.jpg' if 'jpeg' in final_ctype else '.png' if 'png' in final_ctype else '.jpg'
-                out_name = os.path.splitext(os.path.basename(fpath))[0] + ext
-                out_path = os.path.join(_pdf_images_dir, out_name)
-                with open(out_path, 'wb') as wf:
-                    wf.write(img_bytes)
-                rel_path = f"_pdf_images/{out_name}"
-                for k in keys:
-                    _img_path_cache[k] = rel_path
-            except Exception:
-                pass
-            with _img_lock:
-                _img_done[0] += 1
-
-        with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
-            futures = []
-            for fpath, (ctype, keys) in _unique_images.items():
-                futures.append(img_executor.submit(_convert_one_image, fpath, ctype, keys))
-            for f in futures:
-                f.result()
-
-        _img_stop.set()
-        _img_hb.join(timeout=1)
-        _img_elapsed = time.time() - _img_start
-
-        log(f"  ✅ Image pre-conversion complete ({len(_img_path_cache)} cache entries)")
+        log(f"  🖼️ Mapping {num_images} images...")
+        for fpath, (ctype, keys) in _unique_images.items():
+            rel_path = f"images/{os.path.basename(fpath)}"
+            for k in keys:
+                _img_path_cache[k] = rel_path
+        log(f"  ✅ Image mapping complete ({len(_img_path_cache)} entries)")
 
     def _file_path_for_src(src_value):
         if not src_value or src_value.startswith('data:'):
@@ -404,9 +316,7 @@ def run_pdf_generation(config_path):
                 if not ctype:
                     ctype = _mime_fallback.get(os.path.splitext(cover_path)[1].lower())
                 if ctype and ctype.startswith('image/'):
-                    cover_bytes, cover_ctype = _read_image_as_pdf_compatible(cover_path, ctype)
-                    b64 = base64.b64encode(cover_bytes).decode('utf-8')
-                    cover_data_uri = f"data:{cover_ctype};base64,{b64}"
+                    cover_rel_path = f"images/{os.path.basename(cover_path)}"
                     cover_html = (
                         f'<html><head><style>'
                         f'@page {{ margin: 0; }}'
@@ -414,7 +324,7 @@ def run_pdf_generation(config_path):
                         f'body {{ margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }}'
                         f'img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}'
                         f'</style></head><body>'
-                        f'<img src="{cover_data_uri}" alt="Cover" />'
+                        f'<img src="{cover_rel_path}" alt="Cover" />'
                         f'</body></html>'
                     )
                     cover_doc = WeasyHTML(string=cover_html, base_url=output_dir).render()
