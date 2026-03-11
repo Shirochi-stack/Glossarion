@@ -1456,12 +1456,12 @@ def _create_output_settings_section(self, parent):
     # Fast Rendering toggle
     fast_render_cb = self._create_styled_checkbox("Fast Rendering")
     fast_render_cb.setToolTip(
-        "Pre-converts .webp images to faster-decoding formats before PDF rendering.\n"
-        "• If compression is disabled: webp → PNG (lossless, ~2-3x faster decode)\n"
-        "• If compression is enabled: webp → JPEG (uses quality setting, fastest decode)\n"
-        "• PNG and JPEG source images are left untouched.\n\n"
-        "Adds a pre-conversion step but significantly speeds up the rendering phase\n"
-        "for documents with many .webp images."
+        "Converts images to faster-decoding formats before PDF rendering.\n"
+        "Only affects PDF output — WeasyPrint decodes webp very slowly.\n\n"
+        "• If compression is enabled: ALL images → JPEG (uses quality setting)\n"
+        "• If compression is disabled: webp → PNG (lossless), other formats untouched\n\n"
+        "Note: When compression is enabled without Fast Rendering,\n"
+        "images are converted to WebP instead of JPEG."
     )
     fast_render_cb.setContentsMargins(20, 0, 0, 0)
     try:
