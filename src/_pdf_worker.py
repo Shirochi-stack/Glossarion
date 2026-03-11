@@ -410,13 +410,26 @@ def run_pdf_generation(config_path):
         toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
         dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
         try:
+            _toc_stop = threading.Event()
+            _toc_start = time.time()
+            def _toc_heartbeat():
+                while not _toc_stop.is_set():
+                    if _toc_stop.wait(3.0):
+                        break
+                    elapsed = time.time() - _toc_start
+                    log(f"  ⏳ Calculating TOC... ({elapsed:.0f}s elapsed)")
+            _toc_hb = threading.Thread(target=_toc_heartbeat, daemon=True)
+            _toc_hb.start()
             toc_doc = WeasyHTML(string=dummy_toc_html, base_url=output_dir).render()
+            _toc_stop.set()
+            _toc_hb.join(timeout=1)
             toc_page_count = len(toc_doc.pages)
         except Exception as e:
             log(f"  ⚠️ TOC size estimation failed: {e}")
             toc_page_count = 1
         current_page += toc_page_count
-        log(f"  Estimated TOC: {toc_page_count} pages")
+        _toc_elapsed = time.time() - _toc_start
+        log(f"  Estimated TOC: {toc_page_count} pages ({_toc_elapsed:.1f}s)")
 
     # --- Build EPUB href map ---
     epub_file_map = {}
