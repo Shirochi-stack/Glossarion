@@ -2276,6 +2276,24 @@ class RetranslationMixin:
         if data.get('dialog'):
             setattr(data['dialog'], '_refresh_func', animated_refresh)
 
+        # Auto-refresh every 3 seconds (silent, no animation)
+        def _silent_refresh():
+            try:
+                # Skip if a manual refresh is already in progress
+                if not btn_refresh.isEnabled():
+                    return
+                dlg = data.get('dialog')
+                if dlg and dlg.isVisible():
+                    self._refresh_retranslation_data(data)
+            except Exception:
+                pass
+
+        _auto_refresh_timer = QTimer(data.get('dialog') or self)
+        _auto_refresh_timer.setInterval(3000)
+        _auto_refresh_timer.timeout.connect(_silent_refresh)
+        _auto_refresh_timer.start()
+        data['_auto_refresh_timer'] = _auto_refresh_timer
+
         # ==== Context menu on listbox ====
         listbox = data['listbox']
         listbox.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -5061,6 +5079,23 @@ class RetranslationMixin:
         button_layout.addWidget(btn_refresh, 1, 1, 1, 1)
         # Store for reuse-trigger
         dialog._refresh_button = btn_refresh
+
+        # Auto-refresh every 3 seconds (silent, no animation)
+        def _silent_refresh_images():
+            try:
+                # Skip if a manual refresh is already in progress
+                if not btn_refresh.isEnabled():
+                    return
+                if dialog.isVisible():
+                    self._refresh_image_folder_data(refresh_data)
+            except Exception:
+                pass
+
+        _auto_refresh_timer = QTimer(dialog)
+        _auto_refresh_timer.setInterval(3000)
+        _auto_refresh_timer.timeout.connect(_silent_refresh_images)
+        _auto_refresh_timer.start()
+        dialog._auto_refresh_timer = _auto_refresh_timer
         
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
