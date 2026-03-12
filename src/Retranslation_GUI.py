@@ -2289,7 +2289,7 @@ class RetranslationMixin:
                 pass
 
         _auto_refresh_timer = QTimer(data.get('dialog') or self)
-        _auto_refresh_timer.setInterval(3000)
+        _auto_refresh_timer.setInterval(2000)
         _auto_refresh_timer.timeout.connect(_silent_refresh)
         _auto_refresh_timer.start()
         data['_auto_refresh_timer'] = _auto_refresh_timer
@@ -5092,7 +5092,7 @@ class RetranslationMixin:
                 pass
 
         _auto_refresh_timer = QTimer(dialog)
-        _auto_refresh_timer.setInterval(3000)
+        _auto_refresh_timer.setInterval(2000)
         _auto_refresh_timer.timeout.connect(_silent_refresh_images)
         _auto_refresh_timer.start()
         dialog._auto_refresh_timer = _auto_refresh_timer
