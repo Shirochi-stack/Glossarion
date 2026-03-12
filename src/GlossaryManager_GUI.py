@@ -1809,23 +1809,23 @@ CRITICAL EXTRACTION RULES:
             if hasattr(self, 'additional_glossary_label'):
                 self.additional_glossary_label.setText(f"(Current: {os.path.basename(file_path)})")
             
-            # Show success message with icon
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Additional Glossary Loaded")
-            msg_box.setIcon(QMessageBox.Information)
-            # Use the actual file extension in the message
-            target_filename = f"glossary_extension{file_ext}"
-            msg_box.setText(f"Successfully loaded additional glossary:\n\n{os.path.basename(file_path)}\n\n{content_preview}\n\nThis will be copied as '{target_filename}' alongside the main glossary and sent to the API.")
-            
-            # Set window icon
-            try:
-                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-                if os.path.exists(icon_path):
-                    msg_box.setWindowIcon(QIcon(icon_path))
-            except Exception:
-                pass  # If icon fails to load, continue without it
-            
-            msg_box.exec()
+            # Animate the button to show success (no modal dialog)
+            btn = getattr(self, '_load_additional_glossary_btn', None)
+            if btn:
+                from PySide6.QtCore import QTimer
+                original_text = btn.text()
+                original_style = btn.styleSheet()
+                btn.setText("✅ Loaded!")
+                btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; border-radius: 3px; font-weight: bold; }")
+                btn.setEnabled(False)
+                def _restore_btn():
+                    try:
+                        btn.setText(original_text)
+                        btn.setStyleSheet(original_style)
+                        btn.setEnabled(True)
+                    except Exception:
+                        pass
+                QTimer.singleShot(2000, _restore_btn)
             
         except Exception as e:
             QMessageBox.critical(
@@ -2024,6 +2024,7 @@ CRITICAL EXTRACTION RULES:
         """)
         load_additional_btn.clicked.connect(self._load_additional_glossary)
         additional_glossary_layout.addWidget(load_additional_btn)
+        self._load_additional_glossary_btn = load_additional_btn  # Store reference for animation
         
         # Show current additional glossary path if exists
         additional_glossary_path = self.config.get('additional_glossary_path', '')
