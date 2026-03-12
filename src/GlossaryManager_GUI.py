@@ -1754,7 +1754,7 @@ CRITICAL EXTRACTION RULES:
         
         # Validate file exists
         if not os.path.exists(file_path):
-            QMessageBox.warning(None, "File Not Found", f"Selected file does not exist:\n{file_path}")
+            QMessageBox.warning(self, "File Not Found", f"Selected file does not exist:\n{file_path}")
             return
         
         # Load and validate the file content
@@ -1793,7 +1793,7 @@ CRITICAL EXTRACTION RULES:
                 content_preview = f"PDF file ({file_size} bytes)"
             
             else:
-                QMessageBox.warning(None, "Unsupported Format", f"Unsupported file format: {file_ext}\nSupported formats: .csv, .txt, .json, .pdf, .md")
+                QMessageBox.warning(self, "Unsupported Format", f"Unsupported file format: {file_ext}\nSupported formats: .csv, .txt, .json, .pdf, .md")
                 return
             
             # Save to config
@@ -1810,7 +1810,7 @@ CRITICAL EXTRACTION RULES:
                 self.additional_glossary_label.setText(f"(Current: {os.path.basename(file_path)})")
             
             # Show success message with icon
-            msg_box = QMessageBox(None)
+            msg_box = QMessageBox(self)
             msg_box.setWindowTitle("Additional Glossary Loaded")
             msg_box.setIcon(QMessageBox.Information)
             # Use the actual file extension in the message
@@ -1829,7 +1829,7 @@ CRITICAL EXTRACTION RULES:
             
         except Exception as e:
             QMessageBox.critical(
-                None,
+                self,
                 "Error Loading File",
                 f"Failed to load additional glossary:\n\n{str(e)}"
             )
