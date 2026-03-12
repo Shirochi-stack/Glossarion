@@ -1965,6 +1965,8 @@ CRITICAL EXTRACTION RULES:
             "based on filename matching. If disabled, use Load Glossary / Auto-Fill manually."
         )
         auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
+        auto_load_desc = QLabel("(Maps Glossary subfolder content → Output folder automatically)")
+        auto_load_layout.addWidget(auto_load_desc)
         auto_load_layout.addStretch()
 
         # Auto-Mapping only makes sense when Append Glossary is enabled.
