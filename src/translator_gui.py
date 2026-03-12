@@ -14872,7 +14872,7 @@ Important rules:
                     if v == val:
                         card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 2px solid {mi['accent']}; border-radius: 5px; }}")
                     else:
-                        card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 1px solid {mi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
+                        card.setStyleSheet(f"QFrame {{ background-color: #111520; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; opacity: 0.6; }} QFrame:hover {{ background-color: {mi['hover']}; border-color: {mi['accent']}; }}")
             
             for idx, mi in enumerate(mode_data):
                 card = QFrame()
@@ -14886,7 +14886,7 @@ Important rules:
                 if is_sel:
                     card.setStyleSheet(f"QFrame {{ background-color: {mi['hover']}; border: 2px solid {mi['accent']}; border-radius: 5px; }}")
                 else:
-                    card.setStyleSheet(f"QFrame {{ background-color: {mi['bg']}; border: 1px solid {mi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; }}")
+                    card.setStyleSheet(f"QFrame {{ background-color: #111520; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; border-color: {mi['accent']}; }}")
                 
                 cl = QVBoxLayout(card)
                 m = max(6, int(10 * ui_s))
@@ -15008,7 +15008,7 @@ Important rules:
                     if v == val:
                         card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 2px solid {fi['accent']}; border-radius: 5px; }}")
                     else:
-                        card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 1px solid {fi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+                        card.setStyleSheet(f"QFrame {{ background-color: #111520; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; border-color: {fi['accent']}; }}")
             
             for idx, fi in enumerate(format_data):
                 card = QFrame()
@@ -15020,7 +15020,7 @@ Important rules:
                 if is_sel:
                     card.setStyleSheet(f"QFrame {{ background-color: {fi['hover']}; border: 2px solid {fi['accent']}; border-radius: 5px; }}")
                 else:
-                    card.setStyleSheet(f"QFrame {{ background-color: {fi['bg']}; border: 1px solid {fi['accent']}; border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; }}")
+                    card.setStyleSheet(f"QFrame {{ background-color: #111520; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; }} QFrame:hover {{ background-color: {fi['hover']}; border-color: {fi['accent']}; }}")
                 fmt_lay.addWidget(card, 0, idx)
                 
                 cl = QVBoxLayout(card)
