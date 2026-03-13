@@ -678,6 +678,13 @@ class GlossaryManagerMixin:
                     self.partial_ratio_weight = self.partial_ratio_slider.value() / 100.0
                     self.config['glossary_partial_ratio_weight'] = self.partial_ratio_weight
                     self.glossary_partial_ratio_weight_var = self.partial_ratio_weight
+
+                # Entry type filter mode
+                if hasattr(self, 'entry_type_filter_combo'):
+                    filter_map = {0: 'strict', 1: 'loose', 2: 'none'}
+                    mode = filter_map.get(self.entry_type_filter_combo.currentIndex(), 'loose')
+                    self.config['glossary_entry_type_filter_mode'] = mode
+                    os.environ['GLOSSARY_ENTRY_TYPE_FILTER_MODE'] = mode
                 
                 # Save auto compression state
                 if hasattr(self, 'glossary_auto_compression_checkbox'):
@@ -909,7 +916,27 @@ class GlossaryManagerMixin:
         add_type_button.clicked.connect(add_custom_type)
         # add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
         type_control_layout.addWidget(add_type_button)
-        
+
+        # Entry type filter mode dropdown
+        filter_label = QLabel("Entry Type Filtering:")
+        type_control_layout.addWidget(filter_label)
+        filter_desc = QLabel(
+            "Controls how strictly the AI-returned 'type' column is validated.\n"
+            "Strict = exact match only (e.g. 'terms' is rejected when only 'term' is enabled)\n"
+            "Loose = normalizes common plurals (e.g. 'terms' → 'term')\n"
+            "No Filtering = any value in the type column is accepted"
+        )
+        filter_desc.setWordWrap(True)
+        type_control_layout.addWidget(filter_desc)
+
+        self.entry_type_filter_combo = QComboBox()
+        self.entry_type_filter_combo.addItems(["Strict", "Loose", "No Filtering"])
+        self.entry_type_filter_combo.wheelEvent = lambda event: event.ignore()
+        saved_mode = self.config.get('glossary_entry_type_filter_mode', 'loose')
+        mode_to_index = {'strict': 0, 'loose': 1, 'none': 2}
+        self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 1))
+        type_control_layout.addWidget(self.entry_type_filter_combo)
+
         type_control_layout.addStretch()
         
         # Initialize checkboxes

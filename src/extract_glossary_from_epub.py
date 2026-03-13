@@ -1454,6 +1454,30 @@ def load_progress() -> Dict:
             return {"completed": [], "glossary": [], "context_history": []}
     return {"completed": [], "glossary": [], "context_history": [], "merged_indices": []}
 
+def _is_entry_type_accepted(entry_type, enabled_types):
+    """Check if entry type is accepted based on the configured filter mode.
+    
+    Modes (via GLOSSARY_ENTRY_TYPE_FILTER_MODE env var):
+      strict - exact match required (e.g. 'terms' is rejected when only 'term' is enabled)
+      loose  - normalizes common plurals (e.g. 'terms' -> 'term', 'characters' -> 'character')
+      none   - any value in the type column is accepted
+    """
+    filter_mode = os.getenv('GLOSSARY_ENTRY_TYPE_FILTER_MODE', 'loose').lower()
+    if filter_mode == 'none':
+        return True
+    if entry_type in enabled_types:
+        return True
+    if filter_mode == 'loose':
+        # Normalize common AI variants: strip trailing 's'
+        normalized = entry_type.rstrip('s')
+        if normalized and normalized in enabled_types:
+            return True
+        # Also try adding 's' in case enabled type is plural
+        if (entry_type + 's') in enabled_types:
+            return True
+    return False
+
+
 def parse_api_response(response_text: str) -> List[Dict]:
     """Parse API response to extract glossary entries - handles custom types"""
     entries = []
@@ -1512,7 +1536,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                                     break
                         else:
                             # Standard format with type field
-                            if entry_type in enabled_types:
+                            if _is_entry_type_accepted(entry_type, enabled_types):
                                 entries.append(item)
                 
                 return entries
@@ -1520,7 +1544,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
             elif isinstance(data, dict):
                 # Handle single entry
                 entry_type = data.get('type', '').lower()
-                if entry_type in enabled_types:
+                if _is_entry_type_accepted(entry_type, enabled_types):
                     return [data]
                 
                 # Check for wrapper
@@ -1595,7 +1619,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                         row = row[:len(header_fields)]
                 entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}
                 entry_type = (entry_map.get('type') or '').lower() or 'term'
-                if entry_type not in enabled_types:
+                if not _is_entry_type_accepted(entry_type, enabled_types):
                     continue
                 entry_map['type'] = entry_type
 
@@ -1617,7 +1641,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 entry_type = parts[0].lower()
 
                 # Check if type is enabled
-                if entry_type not in enabled_types:
+                if not _is_entry_type_accepted(entry_type, enabled_types):
                     continue
 
                 entry = {
