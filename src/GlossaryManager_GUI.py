@@ -2150,7 +2150,10 @@ CRITICAL EXTRACTION RULES:
                         new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
-                            self.append_log(f"📑 Glossary editor switched to: {os.path.basename(new_path)}")
+                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
+                            if getattr(self, '_last_glossary_log', '') != _log_msg:
+                                self.append_log(_log_msg)
+                                self._last_glossary_log = _log_msg
                 except Exception:
                     pass
             except Exception:
@@ -3081,7 +3084,10 @@ CRITICAL EXTRACTION RULES:
                         new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
-                            self.append_log(f"📑 Glossary editor switched to: {os.path.basename(new_path)}")
+                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
+                            if getattr(self, '_last_glossary_log', '') != _log_msg:
+                                self.append_log(_log_msg)
+                                self._last_glossary_log = _log_msg
             except Exception:
                 pass
         
@@ -3974,7 +3980,10 @@ CRITICAL EXTRACTION RULES:
                    stats.append(f"Characters: {chars}, Locations: {locs}")
                
                self.stats_label.setText(" | ".join(stats))
-               self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
+               _log_msg = f"✅ Loaded {len(entries)} entries from glossary"
+               if getattr(self, '_last_glossary_log', '') != _log_msg:
+                   self.append_log(_log_msg)
+                   self._last_glossary_log = _log_msg
                self._last_find_text = ""
                self._last_find_pos = -1
                # Capture baseline translated values for change tracking

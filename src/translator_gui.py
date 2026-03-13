@@ -4995,7 +4995,10 @@ Recent translations to summarize:
                         new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
-                            self.append_log(f"📑 Glossary editor switched to: {os.path.basename(new_path)}")
+                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
+                            if getattr(self, '_last_glossary_log', '') != _log_msg:
+                                self.append_log(_log_msg)
+                                self._last_glossary_log = _log_msg
             except Exception:
                 pass
 
@@ -14067,7 +14070,10 @@ Important rules:
                     self.auto_loaded_glossary_path = glossary_path
                     self.auto_loaded_glossary_for_file = file_path
                     self.manual_glossary_manually_loaded = False  # This is auto-loaded
-                    self.append_log(f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}")
+                    _log_msg = f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}"
+                    if getattr(self, '_last_glossary_log', '') != _log_msg:
+                        self.append_log(_log_msg)
+                        self._last_glossary_log = _log_msg
                     return True
 
                 # TXT / MD: accept as-is
@@ -14076,7 +14082,10 @@ Important rules:
                     self.auto_loaded_glossary_path = glossary_path
                     self.auto_loaded_glossary_for_file = file_path
                     self.manual_glossary_manually_loaded = False
-                    self.append_log(f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}")
+                    _log_msg = f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}"
+                    if getattr(self, '_last_glossary_log', '') != _log_msg:
+                        self.append_log(_log_msg)
+                        self._last_glossary_log = _log_msg
                     return True
 
                 # JSON: validate parse before accepting
@@ -14086,7 +14095,10 @@ Important rules:
                 self.auto_loaded_glossary_path = glossary_path
                 self.auto_loaded_glossary_for_file = file_path
                 self.manual_glossary_manually_loaded = False  # This is auto-loaded
-                self.append_log(f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}")
+                _log_msg = f"📑 Auto-loaded glossary (output folder): {os.path.basename(glossary_path)}"
+                if getattr(self, '_last_glossary_log', '') != _log_msg:
+                    self.append_log(_log_msg)
+                    self._last_glossary_log = _log_msg
                 return True
 
             except Exception:
@@ -15909,7 +15921,10 @@ Important rules:
                 try:
                     if hasattr(self, 'append_log'):
                         # This is Auto-Fill filename matching (not output-folder auto-load)
-                        self.append_log(f"📑 Auto-mapped glossary: {os.path.basename(gp)}")
+                        _log_msg = f"📑 Auto-mapped glossary: {os.path.basename(gp)}"
+                        if getattr(self, '_last_glossary_log', '') != _log_msg:
+                            self.append_log(_log_msg)
+                            self._last_glossary_log = _log_msg
                 except Exception:
                     pass
                 return 1
