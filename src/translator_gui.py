@@ -5054,20 +5054,38 @@ Recent translations to summarize:
                     QMessageBox.information(self, "Nothing to Delete", f"No glossary files found for '{base}'.")
                     return
 
-                # Confirmation
+                # Confirmation with centered, larger buttons
                 file_list = "\n".join(os.path.basename(f) for f in files_to_delete)
-                reply = QMessageBox.question(
-                    self, "Delete Glossary",
-                    f"Delete the following files for '{base}'?\n\n{file_list}",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-                )
-                if reply != QMessageBox.Yes:
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Question)
+                msg.setWindowTitle("Delete Glossary")
+                msg.setText(f"Delete the following files for '{base}'?\n\n{file_list}")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg.setDefaultButton(QMessageBox.No)
+                msg.setStyleSheet("""
+                    QMessageBox QPushButton {
+                        min-width: 80px;
+                        min-height: 32px;
+                        font-size: 11pt;
+                        padding: 4px 16px;
+                    }
+                    QMessageBox QDialogButtonBox {
+                        qproperty-centerButtons: true;
+                    }
+                """)
+                if msg.exec() != QMessageBox.Yes:
                     return
+
+                # Back up files to Backups/ folder before removing
+                import shutil
+                backup_dir = os.path.join(os.path.dirname(files_to_delete[0]), 'Backups')
+                os.makedirs(backup_dir, exist_ok=True)
 
                 deleted = []
                 for f in files_to_delete:
                     try:
-                        os.remove(f)
+                        backup_path = os.path.join(backup_dir, os.path.basename(f))
+                        shutil.move(f, backup_path)
                         deleted.append(os.path.basename(f))
                     except Exception as e:
                         self.append_log(f"⚠️ Failed to delete {f}: {e}")
@@ -5080,7 +5098,7 @@ Recent translations to summarize:
                 os.environ.pop('MANUAL_GLOSSARY', None)
 
                 if deleted:
-                    self.append_log(f"🗑️ Deleted: {', '.join(deleted)}")
+                    self.append_log(f"🗑️ Deleted (backed up to {backup_dir}): {', '.join(deleted)}")
             except Exception as e:
                 self.append_log(f"⚠️ Error deleting glossary: {e}")
 
