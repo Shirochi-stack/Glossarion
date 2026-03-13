@@ -2028,8 +2028,10 @@ CRITICAL EXTRACTION RULES:
         )
         append_layout.addWidget(self.append_glossary_checkbox)
         
-        label2 = QLabel("(Applies to ALL glossaries - manual and automatic)")
-        append_layout.addWidget(label2)
+        self._append_glossary_desc_label = QLabel("(Applies to ALL glossaries - manual and automatic)")
+        self._append_glossary_desc_label.setCursor(Qt.PointingHandCursor)
+        self._append_glossary_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle() if not getattr(self.append_glossary_checkbox, '_mode_locked', False) else None
+        append_layout.addWidget(self._append_glossary_desc_label)
         append_layout.addStretch()
 
         # Auto-load glossaries toggle (under Append Glossary)
@@ -3028,13 +3030,20 @@ CRITICAL EXTRACTION RULES:
             except Exception:
                 pass
 
+            # Get the append glossary description label
+            _append_desc_label = getattr(self, '_append_glossary_desc_label', None)
+
             # Auto-enable & lock append glossary when an active extraction mode is selected
             if enabled and hasattr(self, 'append_glossary_checkbox'):
                 if not self.append_glossary_checkbox.isChecked():
                     self.append_glossary_checkbox.setChecked(True)
-                _lock_toggle(self.append_glossary_checkbox)
+                _lock_toggle(self.append_glossary_checkbox, _append_desc_label)
+                if _append_desc_label:
+                    _append_desc_label.mousePressEvent = lambda _: None
             elif hasattr(self, 'append_glossary_checkbox'):
-                _unlock_toggle(self.append_glossary_checkbox)
+                _unlock_toggle(self.append_glossary_checkbox, _append_desc_label)
+                if _append_desc_label:
+                    _append_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle()
 
             # Auto-enable & lock auto-map when balanced/full is selected
             if mode in ('balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
@@ -3055,7 +3064,9 @@ CRITICAL EXTRACTION RULES:
                 if hasattr(self, 'append_glossary_checkbox'):
                     if self.append_glossary_checkbox.isChecked():
                         self.append_glossary_checkbox.setChecked(False)
-                    _lock_toggle(self.append_glossary_checkbox)
+                    _lock_toggle(self.append_glossary_checkbox, _append_desc_label)
+                    if _append_desc_label:
+                        _append_desc_label.mousePressEvent = lambda _: None
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):
                     if self.append_glossary_auto_load_checkbox.isChecked():
                         self.append_glossary_auto_load_checkbox.setChecked(False)

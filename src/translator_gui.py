@@ -5132,8 +5132,116 @@ Recent translations to summarize:
 
                 if deleted:
                     self.append_log(f"🗑️ Deleted (backed up to {backup_dir}): {', '.join(deleted)}")
+                    _update_restore_visibility()
             except Exception as e:
                 self.append_log(f"⚠️ Error deleting glossary: {e}")
+
+        def _find_latest_backup():
+            """Find the latest backup subfolder for the current input file."""
+            try:
+                epub_path = None
+                files = list(getattr(self, 'selected_files', []) or [])
+                epubs = [p for p in files if str(p).lower().endswith('.epub')]
+                if len(epubs) == 1:
+                    epub_path = epubs[0]
+                if not epub_path and hasattr(self, 'get_current_epub_path'):
+                    epub_path = self.get_current_epub_path()
+                if not epub_path:
+                    return None, []
+
+                base = os.path.splitext(os.path.basename(epub_path))[0]
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+
+                # Check both possible backup locations
+                backup_dirs_to_check = []
+                if override_dir:
+                    backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', 'Backups'))
+                    backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), base, 'Backups'))
+                else:
+                    backup_dirs_to_check.append(os.path.join('Glossary', 'Backups'))
+                    backup_dirs_to_check.append(os.path.join(os.getcwd(), base, 'Backups'))
+
+                latest_dir = None
+                latest_time = ''
+                for bdir in backup_dirs_to_check:
+                    if not os.path.isdir(bdir):
+                        continue
+                    for sub in os.listdir(bdir):
+                        sub_path = os.path.join(bdir, sub)
+                        if os.path.isdir(sub_path) and sub > latest_time:
+                            # Check the subfolder contains files relevant to this book
+                            backup_files = [f for f in os.listdir(sub_path) if os.path.isfile(os.path.join(sub_path, f))]
+                            if backup_files:
+                                latest_time = sub
+                                latest_dir = sub_path
+                return latest_dir, os.listdir(latest_dir) if latest_dir else []
+            except Exception:
+                return None, []
+
+        def _restore_glossary_backup():
+            """Restore the most recent glossary backup."""
+            try:
+                import shutil
+                backup_dir, backup_files = _find_latest_backup()
+                if not backup_dir or not backup_files:
+                    return
+
+                file_list = "\n".join(backup_files)
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Question)
+                msg.setWindowTitle("Restore Glossary")
+                msg.setText(f"Restore from backup ({os.path.basename(backup_dir)})?\n\n{file_list}")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg.setDefaultButton(QMessageBox.No)
+                msg.setStyleSheet("""
+                    QMessageBox QPushButton {
+                        min-width: 80px;
+                        min-height: 32px;
+                        font-size: 11pt;
+                        padding: 4px 16px;
+                    }
+                    QMessageBox QDialogButtonBox {
+                        qproperty-centerButtons: true;
+                    }
+                """)
+                if msg.exec() != QMessageBox.Yes:
+                    return
+
+                # Determine where to restore to (parent of Backups dir)
+                restore_dir = os.path.dirname(os.path.dirname(backup_dir))
+                restored = []
+                for fname in backup_files:
+                    src = os.path.join(backup_dir, fname)
+                    dst = os.path.join(restore_dir, fname)
+                    try:
+                        shutil.copy2(src, dst)
+                        restored.append(fname)
+                    except Exception as e:
+                        self.append_log(f"⚠️ Failed to restore {fname}: {e}")
+
+                if restored:
+                    self.append_log(f"↩️ Restored from {os.path.basename(backup_dir)}: {', '.join(restored)}")
+                    # Re-trigger glossary auto-load
+                    epub_path = None
+                    files = list(getattr(self, 'selected_files', []) or [])
+                    epubs = [p for p in files if str(p).lower().endswith('.epub')]
+                    if len(epubs) == 1:
+                        epub_path = epubs[0]
+                    if epub_path:
+                        try:
+                            self.auto_load_glossary_for_file(epub_path)
+                        except Exception:
+                            pass
+            except Exception as e:
+                self.append_log(f"⚠️ Error restoring glossary: {e}")
+
+        def _update_restore_visibility():
+            """Show/hide restore button based on whether a backup exists."""
+            try:
+                backup_dir, backup_files = _find_latest_backup()
+                restore_glossary_btn.setVisible(bool(backup_dir and backup_files))
+            except Exception:
+                restore_glossary_btn.setVisible(False)
 
         delete_glossary_btn = QPushButton("🗑️")
         delete_glossary_btn.setToolTip("Delete glossary files for the current input file")
@@ -5145,6 +5253,24 @@ Recent translations to summarize:
         )
         delete_glossary_btn.clicked.connect(_delete_current_glossary)
         batch_right_layout.addWidget(delete_glossary_btn)
+
+        restore_glossary_btn = QPushButton("↩️")
+        restore_glossary_btn.setToolTip("Restore the most recent glossary backup")
+        restore_glossary_btn.setFixedWidth(32)
+        restore_glossary_btn.setFixedHeight(32)
+        restore_glossary_btn.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
+            "QPushButton:hover { background-color: #5a32a3; }"
+        )
+        restore_glossary_btn.clicked.connect(_restore_glossary_backup)
+        restore_glossary_btn.setVisible(False)
+        batch_right_layout.addWidget(restore_glossary_btn)
+
+        # Check restore visibility on startup (deferred so selected_files is populated)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, _update_restore_visibility)
+        # Store updater so file-change handlers can call it
+        self._update_restore_visibility = _update_restore_visibility
 
         batch_right_layout.addStretch()
         
@@ -14123,6 +14249,13 @@ Important rules:
             except Exception:
                 # If parsing fails, try next candidate
                 continue
+
+        # Update restore button visibility for this file
+        if hasattr(self, '_update_restore_visibility'):
+            try:
+                self._update_restore_visibility()
+            except Exception:
+                pass
 
         return False
 
