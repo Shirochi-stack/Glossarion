@@ -5123,6 +5123,11 @@ Recent translations to summarize:
                 if deleted:
                     self.append_log(f"🗑️ Deleted ({len(deleted)} files backed up): {', '.join(deleted)}")
                     _update_restore_visibility()
+                    try:
+                        import winsound
+                        winsound.PlaySound('Recycle', winsound.SND_ALIAS | winsound.SND_ASYNC)
+                    except Exception:
+                        pass
             except Exception as e:
                 self.append_log(f"⚠️ Error deleting glossary: {e}")
 
@@ -5207,6 +5212,11 @@ Recent translations to summarize:
 
                 if restored:
                     self.append_log(f"↩️ Restored from {os.path.basename(backup_dir)}: {', '.join(restored)}")
+                    try:
+                        import winsound
+                        winsound.MessageBeep(winsound.MB_OK)
+                    except Exception:
+                        pass
                     # Re-trigger glossary auto-load
                     epub_path = None
                     files = list(getattr(self, 'selected_files', []) or [])
@@ -5235,7 +5245,8 @@ Recent translations to summarize:
         self.delete_glossary_btn.setFixedHeight(32)
         self.delete_glossary_btn.setStyleSheet(
             "QPushButton { background-color: #dc3545; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
-            "QPushButton:hover { background-color: #c82333; }"
+            "QPushButton:hover { background-color: #c82333; } "
+            "QPushButton:disabled { background-color: #555; color: #888; }"
         )
         self.delete_glossary_btn.clicked.connect(_delete_current_glossary)
         batch_right_layout.addWidget(self.delete_glossary_btn)
@@ -5246,7 +5257,8 @@ Recent translations to summarize:
         self.restore_glossary_btn.setFixedHeight(32)
         self.restore_glossary_btn.setStyleSheet(
             "QPushButton { background-color: #6f42c1; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
-            "QPushButton:hover { background-color: #5a32a3; }"
+            "QPushButton:hover { background-color: #5a32a3; } "
+            "QPushButton:disabled { background-color: #555; color: #888; }"
         )
         self.restore_glossary_btn.clicked.connect(_restore_glossary_backup)
         self.restore_glossary_btn.setVisible(False)
