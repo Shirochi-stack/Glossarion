@@ -5008,6 +5008,101 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_on_auto_glossary_shortcut_changed)
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
+
+        # Delete glossary button
+        def _delete_current_glossary():
+            try:
+                # Get current epub
+                epub_path = None
+                files = list(getattr(self, 'selected_files', []) or [])
+                epubs = [p for p in files if str(p).lower().endswith('.epub')]
+                if len(epubs) == 1:
+                    epub_path = epubs[0]
+                if not epub_path:
+                    if hasattr(self, 'get_current_epub_path'):
+                        epub_path = self.get_current_epub_path()
+                if not epub_path:
+                    QMessageBox.warning(self, "No File", "No input file selected.")
+                    return
+
+                base = os.path.splitext(os.path.basename(epub_path))[0]
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+
+                # Determine current mode
+                mode = self.config.get('auto_glossary_mode', 'off').lower()
+                is_balanced_full = mode in ('balanced', 'full')
+
+                files_to_delete = []
+                if is_balanced_full:
+                    # Balanced/Full: glossary + progress in Glossary subfolder
+                    if override_dir:
+                        gdir = os.path.join(os.path.abspath(override_dir), 'Glossary')
+                    else:
+                        gdir = 'Glossary'
+                    for ext in ['.csv', '.json', '.txt', '.md']:
+                        f = os.path.join(gdir, f"{base}_glossary{ext}")
+                        if os.path.exists(f):
+                            files_to_delete.append(f)
+                    # Progress file
+                    pf = os.path.join(gdir, f"{base}_glossary_progress.json")
+                    if os.path.exists(pf):
+                        files_to_delete.append(pf)
+                else:
+                    # Other modes: glossary.csv in per-book output folder
+                    if override_dir:
+                        out_dir = os.path.join(os.path.abspath(override_dir), base)
+                    else:
+                        out_dir = os.path.join(os.getcwd(), base)
+                    for ext in ['.csv', '.json', '.txt', '.md']:
+                        f = os.path.join(out_dir, f"glossary{ext}")
+                        if os.path.exists(f):
+                            files_to_delete.append(f)
+
+                if not files_to_delete:
+                    QMessageBox.information(self, "Nothing to Delete", f"No glossary files found for '{base}'.")
+                    return
+
+                # Confirmation
+                file_list = "\n".join(os.path.basename(f) for f in files_to_delete)
+                reply = QMessageBox.question(
+                    self, "Delete Glossary",
+                    f"Delete the following files for '{base}'?\n\n{file_list}",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+                deleted = []
+                for f in files_to_delete:
+                    try:
+                        os.remove(f)
+                        deleted.append(os.path.basename(f))
+                    except Exception as e:
+                        self.append_log(f"⚠️ Failed to delete {f}: {e}")
+
+                # Clear glossary state
+                self.auto_loaded_glossary_path = None
+                self.auto_loaded_glossary_for_file = None
+                self.manual_glossary_path = None
+                self.manual_glossary_manually_loaded = False
+                os.environ.pop('MANUAL_GLOSSARY', None)
+
+                if deleted:
+                    self.append_log(f"🗑️ Deleted: {', '.join(deleted)}")
+            except Exception as e:
+                self.append_log(f"⚠️ Error deleting glossary: {e}")
+
+        delete_glossary_btn = QPushButton("🗑️")
+        delete_glossary_btn.setToolTip("Delete glossary files for the current input file")
+        delete_glossary_btn.setFixedWidth(32)
+        delete_glossary_btn.setFixedHeight(32)
+        delete_glossary_btn.setStyleSheet(
+            "QPushButton { background-color: #dc3545; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
+            "QPushButton:hover { background-color: #c82333; }"
+        )
+        delete_glossary_btn.clicked.connect(_delete_current_glossary)
+        batch_right_layout.addWidget(delete_glossary_btn)
+
         batch_right_layout.addStretch()
         
         self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
