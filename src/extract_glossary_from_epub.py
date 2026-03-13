@@ -1701,14 +1701,12 @@ def validate_extracted_entry(entry):
     if 'type' not in entry:
         return False
     
-    # Check if type is enabled
+    # Check if type is accepted by the current filter mode
     custom_types = get_custom_entry_types()
     entry_type = entry.get('type', '').lower()
+    enabled_types = [t for t, cfg in custom_types.items() if cfg.get('enabled', True)]
     
-    if entry_type not in custom_types:
-        return False
-    
-    if not custom_types[entry_type].get('enabled', True):
+    if not _is_entry_type_accepted(entry_type, enabled_types):
         return False
     
     # Must have raw_name and translated_name
