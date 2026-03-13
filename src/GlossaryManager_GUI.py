@@ -3013,10 +3013,10 @@ CRITICAL EXTRACTION RULES:
                     if hasattr(checkbox, '_original_text'):
                         checkbox.setText(checkbox._original_text)
                     checkbox.setEnabled(True)
-                    checkbox.setStyleSheet("")
+                    checkbox.setStyleSheet("QCheckBox { color: #ddd; }")
                     checkbox._mode_locked = False
                 if label and getattr(label, '_mode_locked', False):
-                    label.setStyleSheet("")
+                    label.setStyleSheet("color: #ddd;")
                     label._mode_locked = False
 
             # Get the auto_load description label (sibling in auto_load_layout)
