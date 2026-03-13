@@ -5029,8 +5029,15 @@ Recent translations to summarize:
                 is_balanced_full = mode in ('balanced', 'full')
 
                 files_to_delete = []
+
+                # Per-book output folder path (used by all modes)
+                if override_dir:
+                    out_dir = os.path.join(os.path.abspath(override_dir), base)
+                else:
+                    out_dir = os.path.join(os.getcwd(), base)
+
                 if is_balanced_full:
-                    # Balanced/Full: glossary + progress in Glossary subfolder
+                    # Balanced/Full: check BOTH shared Glossary subfolder AND per-book folder
                     if override_dir:
                         gdir = os.path.join(os.path.abspath(override_dir), 'Glossary')
                     else:
@@ -5039,16 +5046,16 @@ Recent translations to summarize:
                         f = os.path.join(gdir, f"{base}_glossary{ext}")
                         if os.path.exists(f):
                             files_to_delete.append(f)
-                    # Progress file
                     pf = os.path.join(gdir, f"{base}_glossary_progress.json")
                     if os.path.exists(pf):
                         files_to_delete.append(pf)
+                    # Also check per-book folder for glossary.csv
+                    for ext in ['.csv', '.json', '.txt', '.md']:
+                        f = os.path.join(out_dir, f"glossary{ext}")
+                        if os.path.exists(f):
+                            files_to_delete.append(f)
                 else:
-                    # Other modes: glossary.csv in per-book output folder
-                    if override_dir:
-                        out_dir = os.path.join(os.path.abspath(override_dir), base)
-                    else:
-                        out_dir = os.path.join(os.getcwd(), base)
+                    # Other modes: only per-book output folder
                     for ext in ['.csv', '.json', '.txt', '.md']:
                         f = os.path.join(out_dir, f"glossary{ext}")
                         if os.path.exists(f):
