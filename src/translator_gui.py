@@ -1300,14 +1300,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             # Also enable glossary parallel processing explicitly
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "1"
             print(f"✅ Parallel extraction enabled with {workers} workers")
-            # Pre-warm the extraction daemon subprocess in the background
-            # so it's ready instantly when the user first triggers chapter extraction.
-            try:
-                from chapter_extraction_manager import prewarm_daemon
-                prewarm_daemon()
-                print(f"🔥 Extraction daemon pre-warming in background...")
-            except Exception as e:
-                print(f"⚠️ Could not pre-warm extraction daemon: {e}")
         else:
             os.environ["EXTRACTION_WORKERS"] = "1"
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "0"

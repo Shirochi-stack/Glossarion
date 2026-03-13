@@ -4970,20 +4970,37 @@ CRITICAL EXTRACTION RULES:
                     abs_override = os.path.abspath(override_dir)
                     ext_priority = ['.csv', '.json', '.txt', '.md']
 
-                    candidates = []
-                    # 1) Shared Glossary folder: <override>/Glossary/<book>_glossary.* and <book>.*
-                    glossary_folder = os.path.join(abs_override, 'Glossary')
-                    for ext in ext_priority:
-                        candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
-                    for ext in ext_priority:
-                        candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
+                    # Check if auto-mapping or minimal mode is active
+                    auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
+                    mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
+                    use_per_book = auto_mapping_on or mode == 'minimal'
 
-                    # 2) Per-book output folder: <override>/<book>/glossary.* and <override>/<book>/Glossary/glossary.*
+                    candidates = []
+                    glossary_folder = os.path.join(abs_override, 'Glossary')
                     book_dir = os.path.join(abs_override, base)
-                    for ext in ext_priority:
-                        candidates.append(os.path.join(book_dir, f"glossary{ext}"))
-                    for ext in ext_priority:
-                        candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
+
+                    if use_per_book:
+                        # Auto-mapping / minimal: per-book output folder first
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(book_dir, f"glossary{ext}"))
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
+                        # Then shared Glossary folder
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
+                    else:
+                        # Balanced/Full: shared Glossary folder first
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
+                        # Then per-book output folder
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(book_dir, f"glossary{ext}"))
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
 
                     for cand in candidates:
                         if os.path.exists(cand):
