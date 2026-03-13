@@ -922,8 +922,8 @@ class GlossaryManagerMixin:
         filter_label = QLabel("Entry Type Filtering:")
         type_control_layout.addWidget(filter_label)
         filter_desc = QLabel(
-            "Strict = exact match only (e.g. 'terms' rejected)  •  "
-            "Loose = normalizes plurals (e.g. 'terms' → 'term')  •  "
+            "Strict = exact match only (e.g. 'term' rejected if type is 'terms')  •  "
+            "Loose = normalizes plurals (e.g. 'term' → matches 'terms')  •  "
             "No Filtering = any type accepted"
         )
         filter_desc.setStyleSheet("font-size: 9pt; color: #aaa;")
@@ -972,6 +972,7 @@ class GlossaryManagerMixin:
         mode_to_index = {'strict': 0, 'loose': 1, 'none': 2}
         self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 1))
         filter_combo_layout.addWidget(self.entry_type_filter_combo)
+        self._add_combobox_arrow(self.entry_type_filter_combo)
         filter_combo_layout.addStretch()
 
         type_control_layout.addStretch()
