@@ -4819,7 +4819,21 @@ CRITICAL EXTRACTION RULES:
                 auto_path = getattr(self, 'auto_loaded_glossary_path', None)
                 manual_path = getattr(self, 'manual_glossary_path', None)
 
-                # Prefer the auto-loaded glossary if it exists and is a CSV
+                # Determine if auto-mapping or minimal mode is active
+                auto_mapping_on = False
+                try:
+                    auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
+                except Exception:
+                    pass
+                minimal_mode = False
+                try:
+                    mode = self.config.get('auto_glossary_mode', 'off')
+                    minimal_mode = (str(mode).lower() == 'minimal')
+                except Exception:
+                    pass
+                use_auto_mapping_path = auto_mapping_on or minimal_mode
+
+                # Prefer the auto-loaded glossary if it exists
                 if auto_path and os.path.exists(auto_path):
                     self.editor_file_entry.setText(auto_path)
                     load_glossary_for_editing()
@@ -4831,16 +4845,48 @@ CRITICAL EXTRACTION RULES:
                     load_glossary_for_editing()
                     return
 
-                # SIMPLE FALLBACK: derive from current input file's output folder
+                # Resolve the current input file for further lookups
+                epub_path = None
                 try:
-                    epub_path = None
                     if hasattr(self, 'get_current_epub_path'):
                         epub_path = self.get_current_epub_path()
                     if not epub_path and hasattr(self, 'file_path'):
                         epub_path = getattr(self, 'file_path', None)
+                    if not epub_path:
+                        # Try selected_files list
+                        sel = getattr(self, 'selected_files', None) or []
+                        for sf in sel:
+                            if str(sf).lower().endswith('.epub') and os.path.exists(sf):
+                                epub_path = sf
+                                break
+                except Exception:
+                    pass
+
+                # When auto-mapping or minimal mode is active, use
+                # _guess_glossary_for_input_file which already honors the
+                # output directory override from other_settings.py
+                if use_auto_mapping_path and epub_path and os.path.exists(epub_path):
+                    try:
+                        if hasattr(self, '_guess_glossary_for_input_file'):
+                            guessed = self._guess_glossary_for_input_file(epub_path)
+                            if guessed and os.path.exists(guessed):
+                                self.editor_file_entry.setText(guessed)
+                                load_glossary_for_editing()
+                                return
+                    except Exception:
+                        pass
+
+                # SIMPLE FALLBACK: derive from current input file's output folder
+                # (respects OUTPUT_DIRECTORY override from other_settings.py)
+                try:
                     if epub_path and os.path.exists(epub_path):
                         base = os.path.splitext(os.path.basename(epub_path))[0]
-                        out_dir = os.path.join(os.getcwd(), base)
+                        # Honor output directory override
+                        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                        if override_dir:
+                            out_dir = os.path.join(os.path.abspath(override_dir), base)
+                        else:
+                            out_dir = os.path.join(os.getcwd(), base)
                         candidates = [
                             # CSV (highest priority)
                             os.path.join(out_dir, "glossary.csv"),
