@@ -1282,6 +1282,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_output_legacy_json_var = self.config.get('glossary_output_legacy_json', False)
         # Dynamic limit expansion toggle (include all characters)
         self.glossary_include_all_characters_var = self.config.get('glossary_include_all_characters', False)
+        # Entry type filter mode
+        self.glossary_entry_type_filter_mode_var = self.config.get('glossary_entry_type_filter_mode', 'none')
 
         
         # Initialize the variables with default values
@@ -2603,6 +2605,8 @@ Recent translations to summarize:
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
+        if not hasattr(self, 'glossary_entry_type_filter_mode_var'):
+            self.glossary_entry_type_filter_mode_var = self.config.get('glossary_entry_type_filter_mode', 'none')
         
         # Legacy migration: map old conservative_batching flag to new batching_mode/batch_group_size
         if 'batching_mode' not in self.config:
@@ -10362,6 +10366,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
+            'GLOSSARY_ENTRY_TYPE_FILTER_MODE': self.config.get('glossary_entry_type_filter_mode', 'none'),
             'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
             'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
@@ -11626,6 +11631,7 @@ Important rules:
                     'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', {})),
                     'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', [])),
                     'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
+                    'GLOSSARY_ENTRY_TYPE_FILTER_MODE': self.config.get('glossary_entry_type_filter_mode', 'none'),
                     'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
                     'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
@@ -17273,6 +17279,7 @@ Important rules:
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
                     ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics') else '0'),
                     ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
+                    ('GLOSSARY_ENTRY_TYPE_FILTER_MODE', self.config.get('glossary_entry_type_filter_mode', 'none')),
                     ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
                     ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
                     ('GLOSSARY_INCLUDE_ALL_CHARACTERS', '1' if self.config.get('glossary_include_all_characters') else '0'),
@@ -17662,6 +17669,7 @@ Important rules:
                 ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
                 ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
                 ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
+                ('GLOSSARY_ENTRY_TYPE_FILTER_MODE', self.config.get('glossary_entry_type_filter_mode', 'none')),
                 ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                 ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                 ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv', False) else '0'),

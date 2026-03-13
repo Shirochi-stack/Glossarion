@@ -682,7 +682,7 @@ class GlossaryManagerMixin:
                 # Entry type filter mode
                 if hasattr(self, 'entry_type_filter_combo'):
                     filter_map = {0: 'strict', 1: 'loose', 2: 'none'}
-                    mode = filter_map.get(self.entry_type_filter_combo.currentIndex(), 'loose')
+                    mode = filter_map.get(self.entry_type_filter_combo.currentIndex(), 'none')
                     self.config['glossary_entry_type_filter_mode'] = mode
                     os.environ['GLOSSARY_ENTRY_TYPE_FILTER_MODE'] = mode
                 
@@ -923,8 +923,8 @@ class GlossaryManagerMixin:
         type_control_layout.addWidget(filter_label)
         filter_desc = QLabel(
             "Strict = exact match only (e.g. 'term' rejected if type is 'terms')  •  "
-            "Loose = normalizes plurals (e.g. 'term' → matches 'terms')  •  "
-            "No Filtering = any type accepted"
+            "Loose = normalizes plurals and accepts all  •  "
+            "No Filtering = accepts any type (still normalizes plurals)"
         )
         filter_desc.setStyleSheet("font-size: 9pt; color: #aaa;")
         filter_desc.setWordWrap(True)
@@ -968,9 +968,9 @@ class GlossaryManagerMixin:
         self.entry_type_filter_combo = QComboBox()
         self.entry_type_filter_combo.addItems(["Strict", "Loose", "No Filtering"])
         self.entry_type_filter_combo.wheelEvent = lambda event: event.ignore()
-        saved_mode = self.config.get('glossary_entry_type_filter_mode', 'loose')
+        saved_mode = self.config.get('glossary_entry_type_filter_mode', 'none')
         mode_to_index = {'strict': 0, 'loose': 1, 'none': 2}
-        self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 1))
+        self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 2))
         filter_combo_layout.addWidget(self.entry_type_filter_combo)
         self._add_combobox_arrow(self.entry_type_filter_combo)
         filter_combo_layout.addStretch()

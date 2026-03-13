@@ -1454,40 +1454,59 @@ def load_progress() -> Dict:
             return {"completed": [], "glossary": [], "context_history": []}
     return {"completed": [], "glossary": [], "context_history": [], "merged_indices": []}
 
+def _normalize_entry_type(entry_type, enabled_types):
+    """Normalize an entry type to match an enabled type if possible.
+    
+    Always attempts plural normalization regardless of filter mode.
+    Returns the best matching enabled type, or the original type if no match found.
+    """
+    if not entry_type:
+        return entry_type
+    if entry_type in enabled_types:
+        return entry_type
+    # Strip apostrophe-s: "term's" → "term"
+    cleaned = entry_type.replace("'s", "").replace("\u2019s", "")
+    if cleaned in enabled_types:
+        return cleaned
+    # Strip trailing s: "terms" → "term", "characters" → "character"
+    if cleaned.endswith('s'):
+        singular = cleaned[:-1]
+        if singular and singular in enabled_types:
+            return singular
+    # Handle -ies → -y: "abilities" → "ability", "entities" → "entity"
+    if cleaned.endswith('ies'):
+        y_form = cleaned[:-3] + 'y'
+        if y_form in enabled_types:
+            return y_form
+    # Reverse: enabled type is plural, AI returned singular
+    if (cleaned + 's') in enabled_types:
+        return cleaned + 's'
+    # Reverse y→ies: "funny" → "funnies"
+    if cleaned.endswith('y'):
+        ies_form = cleaned[:-1] + 'ies'
+        if ies_form in enabled_types:
+            return ies_form
+    if (cleaned + 'ies') in enabled_types:
+        return cleaned + 'ies'
+    return entry_type
+
+
 def _is_entry_type_accepted(entry_type, enabled_types):
     """Check if entry type is accepted based on the configured filter mode.
     
     Modes (via GLOSSARY_ENTRY_TYPE_FILTER_MODE env var):
       strict - exact match required (e.g. 'terms' is rejected when only 'term' is enabled)
-      loose  - normalizes common plurals/variants
-      none   - any value in the type column is accepted
+      loose  - normalizes common plurals/variants and accepts matches
+      none   - any value in the type column is accepted (still normalizes)
     """
-    filter_mode = os.getenv('GLOSSARY_ENTRY_TYPE_FILTER_MODE', 'loose').lower()
+    filter_mode = os.getenv('GLOSSARY_ENTRY_TYPE_FILTER_MODE', 'none').lower()
     if filter_mode == 'none':
         return True
-    if entry_type in enabled_types:
+    normalized = _normalize_entry_type(entry_type, enabled_types)
+    if normalized in enabled_types:
         return True
     if filter_mode == 'loose':
-        # Strip apostrophe-s: "term's" → "term"
-        cleaned = entry_type.replace("'s", "").replace("'s", "")
-        if cleaned and cleaned in enabled_types:
-            return True
-        # Strip trailing s: "terms" → "term", "characters" → "character"
-        if cleaned.endswith('s'):
-            singular = cleaned[:-1]
-            if singular and singular in enabled_types:
-                return True
-        # Handle -ies → -y: "abilities" → "ability", "entities" → "entity"
-        if cleaned.endswith('ies'):
-            y_form = cleaned[:-3] + 'y'
-            if y_form in enabled_types:
-                return True
-        # Reverse: enabled type is plural, AI returned singular
-        # e.g. enabled="terms", AI returned "term" → try "term"+"s"
-        if (cleaned + 's') in enabled_types:
-            return True
-        if (cleaned + 'ies') in enabled_types:
-            return True
+        return True  # Loose accepts anything that was attempted to normalize
     return False
 
 
@@ -1634,7 +1653,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 entry_type = (entry_map.get('type') or '').lower() or 'term'
                 if not _is_entry_type_accepted(entry_type, enabled_types):
                     continue
-                entry_map['type'] = entry_type
+                entry_map['type'] = _normalize_entry_type(entry_type, enabled_types)
 
                 # Default gender if column exists but value missing for gendered types
                 if custom_types.get(entry_type, {}).get('has_gender', False):
@@ -1658,7 +1677,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     continue
 
                 entry = {
-                    'type': entry_type,
+                    'type': _normalize_entry_type(entry_type, enabled_types),
                     'raw_name': parts[1],
                     'translated_name': parts[2]
                 }
