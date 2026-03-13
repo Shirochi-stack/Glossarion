@@ -4969,6 +4969,40 @@ Recent translations to summarize:
                 self.auto_glossary_mode_combo.blockSignals(True)
                 self.auto_glossary_mode_combo.setCurrentIndex(index)
                 self.auto_glossary_mode_combo.blockSignals(False)
+
+            # Real-time glossary path switching based on auto-mapping state
+            # (blockSignals above prevents _on_auto_mapping_toggled from firing,
+            #  so we do the path switch inline here.)
+            try:
+                automap_now = new_mode in ('balanced', 'full') or (
+                    new_mode != 'minimal' and
+                    hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
+                )
+                epub_path = None
+                files = list(getattr(self, 'selected_files', []) or [])
+                epubs = [p for p in files if str(p).lower().endswith('.epub')]
+                if len(epubs) == 1:
+                    epub_path = epubs[0]
+                if epub_path:
+                    # Clear current glossary state for a clean switch
+                    self.manual_glossary_path = None
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
+                    self.manual_glossary_manually_loaded = False
+                    if automap_now:
+                        if hasattr(self, '_autofill_glossary_for_current_selection'):
+                            self._autofill_glossary_for_current_selection()
+                    else:
+                        self.auto_load_glossary_for_file(epub_path)
+                    # Refresh editor path
+                    if hasattr(self, 'editor_file_entry'):
+                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if new_path and os.path.exists(new_path):
+                            self.editor_file_entry.setText(new_path)
+                            self.append_log(f"📑 Glossary editor switched to: {os.path.basename(new_path)}")
+            except Exception:
+                pass
+
             self.save_config(show_message=False)
         
         self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_on_auto_glossary_shortcut_changed)
@@ -14237,8 +14271,31 @@ Important rules:
             
             if len(epub_files) == 1:
                 # Single EPUB - auto-load glossary (from the book's output folder)
+                # When auto-mapping is enabled, skip output-folder auto-load so
+                # _autofill_glossary_for_current_selection can find the Glossary
+                # subfolder file instead.
                 try:
-                    self.auto_load_glossary_for_file(epub_files[0])
+                    _skip_output_autoload = False
+                    try:
+                        _append_on = bool(getattr(self, 'append_glossary_var', False) or self.config.get('append_glossary', False))
+                        if hasattr(self, 'append_glossary_checkbox'):
+                            _append_on = bool(self.append_glossary_checkbox.isChecked())
+                        _automap_on = bool(getattr(self, 'append_glossary_auto_load_var', False) or self.config.get('append_glossary_auto_load', False))
+                        if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                            _automap_on = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                        _skip_output_autoload = _append_on and _automap_on
+                        # Minimal mode always uses output folder, even if auto-mapping is on
+                        if _skip_output_autoload:
+                            try:
+                                _cur_mode = getattr(self, 'auto_glossary_mode_var', self.config.get('auto_glossary_mode', 'off'))
+                                if str(_cur_mode).lower() == 'minimal':
+                                    _skip_output_autoload = False
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    if not _skip_output_autoload:
+                        self.auto_load_glossary_for_file(epub_files[0])
                 except Exception:
                     pass
 
@@ -15725,6 +15782,10 @@ Important rules:
                     pass
                 try:
                     os.environ['MANUAL_GLOSSARY'] = gp
+                except Exception:
+                    pass
+                try:
+                    self.auto_loaded_glossary_path = gp
                 except Exception:
                     pass
                 try:
