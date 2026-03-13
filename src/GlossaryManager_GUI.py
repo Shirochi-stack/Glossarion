@@ -1151,7 +1151,13 @@ class GlossaryManagerMixin:
         partial_label = QLabel("Partial ratio strength (substring matcher):")
         duplicate_frame_layout.addWidget(partial_label)
 
-        partial_desc = QLabel("0 disables substring matching; higher values increase partial-ratio influence.")
+        partial_desc = QLabel(
+            "0 disables substring matching; higher values increase partial-ratio influence.\n"
+            "Example: Your glossary has both 'Soo-hyun' and 'Kim Soo-hyun' as separate entries.\n"
+            "• Low/0 value → Keeps both entries (treats them as different names)\n"
+            "• High value → Skips 'Soo-hyun' (detects it's already inside 'Kim Soo-hyun')"
+        )
+        partial_desc.setWordWrap(True)
         duplicate_frame_layout.addWidget(partial_desc)
 
         partial_slider_row = QWidget()
@@ -1979,6 +1985,8 @@ CRITICAL EXTRACTION RULES:
         )
         auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
         auto_load_desc = QLabel("(Maps Glossary subfolder content → Output folder automatically)")
+        auto_load_desc.setCursor(Qt.PointingHandCursor)
+        auto_load_desc.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
         auto_load_layout.addWidget(auto_load_desc)
         auto_load_layout.addStretch()
 
