@@ -5008,122 +5008,112 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
 
-        # Delete glossary button
+        # Delete glossary button (supports multiple EPUBs)
         def _delete_current_glossary():
             try:
-                # Get current epub
-                epub_path = None
                 files = list(getattr(self, 'selected_files', []) or [])
                 epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                if len(epubs) == 1:
-                    epub_path = epubs[0]
-                if not epub_path:
-                    if hasattr(self, 'get_current_epub_path'):
-                        epub_path = self.get_current_epub_path()
-                if not epub_path:
+                if not epubs and hasattr(self, 'get_current_epub_path'):
+                    ep = self.get_current_epub_path()
+                    if ep:
+                        epubs = [ep]
+                if not epubs:
                     QMessageBox.warning(self, "No File", "No input file selected.")
                     return
 
-                base = os.path.splitext(os.path.basename(epub_path))[0]
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-
-                # Determine current mode
                 mode = self.config.get('auto_glossary_mode', 'off').lower()
                 is_balanced_full = mode in ('balanced', 'full')
 
-                files_to_delete = []
-
-                # Per-book output folder path (used by all modes)
-                if override_dir:
-                    out_dir = os.path.join(os.path.abspath(override_dir), base)
-                else:
-                    out_dir = os.path.join(os.getcwd(), base)
-
-                if is_balanced_full:
-                    # Balanced/Full: check BOTH shared Glossary subfolder AND per-book folder
+                all_files = []  # (book_base, file_path)
+                for epub_path in epubs:
+                    base = os.path.splitext(os.path.basename(epub_path))[0]
                     if override_dir:
-                        gdir = os.path.join(os.path.abspath(override_dir), 'Glossary')
+                        out_dir = os.path.join(os.path.abspath(override_dir), base)
                     else:
-                        gdir = 'Glossary'
-                    for ext in ['.csv', '.json', '.txt', '.md']:
-                        f = os.path.join(gdir, f"{base}_glossary{ext}")
-                        if os.path.exists(f):
-                            files_to_delete.append(f)
-                    pf = os.path.join(gdir, f"{base}_glossary_progress.json")
-                    if os.path.exists(pf):
-                        files_to_delete.append(pf)
-                    # Also check per-book folder for glossary.csv
-                    for ext in ['.csv', '.json', '.txt', '.md']:
-                        f = os.path.join(out_dir, f"glossary{ext}")
-                        if os.path.exists(f):
-                            files_to_delete.append(f)
-                else:
-                    # Other modes: only per-book output folder
-                    for ext in ['.csv', '.json', '.txt', '.md']:
-                        f = os.path.join(out_dir, f"glossary{ext}")
-                        if os.path.exists(f):
-                            files_to_delete.append(f)
+                        out_dir = os.path.join(os.getcwd(), base)
 
-                if not files_to_delete:
+                    if is_balanced_full:
+                        gdir = os.path.join(os.path.abspath(override_dir), 'Glossary') if override_dir else 'Glossary'
+                        for ext in ['.csv', '.json', '.txt', '.md']:
+                            f = os.path.join(gdir, f"{base}_glossary{ext}")
+                            if os.path.exists(f):
+                                all_files.append((base, f))
+                        pf = os.path.join(gdir, f"{base}_glossary_progress.json")
+                        if os.path.exists(pf):
+                            all_files.append((base, pf))
+                        for ext in ['.csv', '.json', '.txt', '.md']:
+                            f = os.path.join(out_dir, f"glossary{ext}")
+                            if os.path.exists(f):
+                                all_files.append((base, f))
+                        # Per-book progress file
+                        for pname in ['glossary_progress.json', f'{base}_glossary_progress.json']:
+                            pf2 = os.path.join(out_dir, pname)
+                            if os.path.exists(pf2):
+                                all_files.append((base, pf2))
+                    else:
+                        for ext in ['.csv', '.json', '.txt', '.md']:
+                            f = os.path.join(out_dir, f"glossary{ext}")
+                            if os.path.exists(f):
+                                all_files.append((base, f))
+                        # Progress file
+                        for pname in ['glossary_progress.json', f'{base}_glossary_progress.json']:
+                            pf = os.path.join(out_dir, pname)
+                            if os.path.exists(pf):
+                                all_files.append((base, pf))
+
+                if not all_files:
+                    books_str = ", ".join(os.path.splitext(os.path.basename(e))[0] for e in epubs)
                     nd_msg = QMessageBox(self)
                     nd_msg.setIcon(QMessageBox.Information)
                     nd_msg.setWindowTitle("Nothing to Delete")
-                    nd_msg.setText(f"No glossary files found for '{base}'.")
+                    nd_msg.setText(f"No glossary files found for: {books_str}")
                     nd_msg.setStandardButtons(QMessageBox.Ok)
                     nd_msg.setStyleSheet("""
-                        QMessageBox QPushButton {
-                            min-width: 80px;
-                            min-height: 32px;
-                            font-size: 11pt;
-                            padding: 4px 16px;
-                        }
-                        QMessageBox QDialogButtonBox {
-                            qproperty-centerButtons: true;
-                        }
+                        QMessageBox QPushButton { min-width: 80px; min-height: 32px; font-size: 11pt; padding: 4px 16px; }
+                        QMessageBox QDialogButtonBox { qproperty-centerButtons: true; }
                     """)
                     nd_msg.exec()
                     return
 
-                # Confirmation with centered, larger buttons
-                file_list = "\n".join(os.path.basename(f) for f in files_to_delete)
+                # Group by book for display
+                from collections import OrderedDict
+                grouped = OrderedDict()
+                for bk, fp in all_files:
+                    grouped.setdefault(bk, []).append(fp)
+                display = []
+                for bk, fps in grouped.items():
+                    display.append(f"[{bk}]")
+                    for fp in fps:
+                        display.append(f"  {os.path.basename(fp)}")
+
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Question)
                 msg.setWindowTitle("Delete Glossary")
-                msg.setText(f"Delete the following files for '{base}'?\n\n{file_list}")
+                msg.setText(f"Delete the following files?\n\n" + "\n".join(display))
                 msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                 msg.setDefaultButton(QMessageBox.No)
                 msg.setStyleSheet("""
-                    QMessageBox QPushButton {
-                        min-width: 80px;
-                        min-height: 32px;
-                        font-size: 11pt;
-                        padding: 4px 16px;
-                    }
-                    QMessageBox QDialogButtonBox {
-                        qproperty-centerButtons: true;
-                    }
+                    QMessageBox QPushButton { min-width: 80px; min-height: 32px; font-size: 11pt; padding: 4px 16px; }
+                    QMessageBox QDialogButtonBox { qproperty-centerButtons: true; }
                 """)
                 if msg.exec() != QMessageBox.Yes:
                     return
 
-                # Back up files to timestamped subfolder in Backups/
                 import shutil
                 from datetime import datetime
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                backup_root = os.path.join(os.path.dirname(files_to_delete[0]), 'Backups')
-                backup_dir = os.path.join(backup_root, timestamp)
-                os.makedirs(backup_dir, exist_ok=True)
-
                 deleted = []
-                for f in files_to_delete:
+                for bk, fp in all_files:
                     try:
-                        backup_path = os.path.join(backup_dir, os.path.basename(f))
-                        shutil.move(f, backup_path)
-                        deleted.append(os.path.basename(f))
+                        backup_root = os.path.join(os.path.dirname(fp), 'Backups')
+                        backup_dir = os.path.join(backup_root, timestamp)
+                        os.makedirs(backup_dir, exist_ok=True)
+                        shutil.move(fp, os.path.join(backup_dir, os.path.basename(fp)))
+                        deleted.append(f"{bk}/{os.path.basename(fp)}")
                     except Exception as e:
-                        self.append_log(f"⚠️ Failed to delete {f}: {e}")
+                        self.append_log(f"⚠️ Failed to delete {fp}: {e}")
 
-                # Clear glossary state
                 self.auto_loaded_glossary_path = None
                 self.auto_loaded_glossary_for_file = None
                 self.manual_glossary_path = None
@@ -5131,49 +5121,45 @@ Recent translations to summarize:
                 os.environ.pop('MANUAL_GLOSSARY', None)
 
                 if deleted:
-                    self.append_log(f"🗑️ Deleted (backed up to {backup_dir}): {', '.join(deleted)}")
+                    self.append_log(f"🗑️ Deleted ({len(deleted)} files backed up): {', '.join(deleted)}")
                     _update_restore_visibility()
             except Exception as e:
                 self.append_log(f"⚠️ Error deleting glossary: {e}")
 
         def _find_latest_backup():
-            """Find the latest backup subfolder for the current input file."""
+            """Find the latest backup subfolder across all selected EPUBs."""
             try:
-                epub_path = None
                 files = list(getattr(self, 'selected_files', []) or [])
                 epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                if len(epubs) == 1:
-                    epub_path = epubs[0]
-                if not epub_path and hasattr(self, 'get_current_epub_path'):
-                    epub_path = self.get_current_epub_path()
-                if not epub_path:
+                if not epubs and hasattr(self, 'get_current_epub_path'):
+                    ep = self.get_current_epub_path()
+                    if ep:
+                        epubs = [ep]
+                if not epubs:
                     return None, []
 
-                base = os.path.splitext(os.path.basename(epub_path))[0]
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-
-                # Check both possible backup locations
-                backup_dirs_to_check = []
-                if override_dir:
-                    backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', 'Backups'))
-                    backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), base, 'Backups'))
-                else:
-                    backup_dirs_to_check.append(os.path.join('Glossary', 'Backups'))
-                    backup_dirs_to_check.append(os.path.join(os.getcwd(), base, 'Backups'))
-
                 latest_dir = None
                 latest_time = ''
-                for bdir in backup_dirs_to_check:
-                    if not os.path.isdir(bdir):
-                        continue
-                    for sub in os.listdir(bdir):
-                        sub_path = os.path.join(bdir, sub)
-                        if os.path.isdir(sub_path) and sub > latest_time:
-                            # Check the subfolder contains files relevant to this book
-                            backup_files = [f for f in os.listdir(sub_path) if os.path.isfile(os.path.join(sub_path, f))]
-                            if backup_files:
-                                latest_time = sub
-                                latest_dir = sub_path
+                for epub_path in epubs:
+                    base = os.path.splitext(os.path.basename(epub_path))[0]
+                    backup_dirs_to_check = []
+                    if override_dir:
+                        backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', 'Backups'))
+                        backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), base, 'Backups'))
+                    else:
+                        backup_dirs_to_check.append(os.path.join('Glossary', 'Backups'))
+                        backup_dirs_to_check.append(os.path.join(os.getcwd(), base, 'Backups'))
+                    for bdir in backup_dirs_to_check:
+                        if not os.path.isdir(bdir):
+                            continue
+                        for sub in os.listdir(bdir):
+                            sub_path = os.path.join(bdir, sub)
+                            if os.path.isdir(sub_path) and sub > latest_time:
+                                backup_files = [f for f in os.listdir(sub_path) if os.path.isfile(os.path.join(sub_path, f))]
+                                if backup_files:
+                                    latest_time = sub
+                                    latest_dir = sub_path
                 return latest_dir, os.listdir(latest_dir) if latest_dir else []
             except Exception:
                 return None, []
@@ -5239,37 +5225,36 @@ Recent translations to summarize:
             """Show/hide restore button based on whether a backup exists."""
             try:
                 backup_dir, backup_files = _find_latest_backup()
-                restore_glossary_btn.setVisible(bool(backup_dir and backup_files))
+                self.restore_glossary_btn.setVisible(bool(backup_dir and backup_files))
             except Exception:
-                restore_glossary_btn.setVisible(False)
+                self.restore_glossary_btn.setVisible(False)
 
-        delete_glossary_btn = QPushButton("🗑️")
-        delete_glossary_btn.setToolTip("Delete glossary files for the current input file")
-        delete_glossary_btn.setFixedWidth(32)
-        delete_glossary_btn.setFixedHeight(32)
-        delete_glossary_btn.setStyleSheet(
+        self.delete_glossary_btn = QPushButton("🗑️")
+        self.delete_glossary_btn.setToolTip("Delete glossary files for selected input files")
+        self.delete_glossary_btn.setFixedWidth(32)
+        self.delete_glossary_btn.setFixedHeight(32)
+        self.delete_glossary_btn.setStyleSheet(
             "QPushButton { background-color: #dc3545; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
             "QPushButton:hover { background-color: #c82333; }"
         )
-        delete_glossary_btn.clicked.connect(_delete_current_glossary)
-        batch_right_layout.addWidget(delete_glossary_btn)
+        self.delete_glossary_btn.clicked.connect(_delete_current_glossary)
+        batch_right_layout.addWidget(self.delete_glossary_btn)
 
-        restore_glossary_btn = QPushButton("↩️")
-        restore_glossary_btn.setToolTip("Restore the most recent glossary backup")
-        restore_glossary_btn.setFixedWidth(32)
-        restore_glossary_btn.setFixedHeight(32)
-        restore_glossary_btn.setStyleSheet(
+        self.restore_glossary_btn = QPushButton("↩️")
+        self.restore_glossary_btn.setToolTip("Restore the most recent glossary backup")
+        self.restore_glossary_btn.setFixedWidth(32)
+        self.restore_glossary_btn.setFixedHeight(32)
+        self.restore_glossary_btn.setStyleSheet(
             "QPushButton { background-color: #6f42c1; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
             "QPushButton:hover { background-color: #5a32a3; }"
         )
-        restore_glossary_btn.clicked.connect(_restore_glossary_backup)
-        restore_glossary_btn.setVisible(False)
-        batch_right_layout.addWidget(restore_glossary_btn)
+        self.restore_glossary_btn.clicked.connect(_restore_glossary_backup)
+        self.restore_glossary_btn.setVisible(False)
+        batch_right_layout.addWidget(self.restore_glossary_btn)
 
         # Check restore visibility on startup (deferred so selected_files is populated)
         from PySide6.QtCore import QTimer
         QTimer.singleShot(500, _update_restore_visibility)
-        # Store updater so file-change handlers can call it
         self._update_restore_visibility = _update_restore_visibility
 
         batch_right_layout.addStretch()
@@ -12279,6 +12264,12 @@ Important rules:
        )
        
        any_process_running = self._is_any_process_running()
+       
+       # Disable delete/restore buttons while any process is running
+       if hasattr(self, 'delete_glossary_btn'):
+           self.delete_glossary_btn.setEnabled(not any_process_running)
+       if hasattr(self, 'restore_glossary_btn'):
+           self.restore_glossary_btn.setEnabled(not any_process_running)
        
        # Translation button
        try:

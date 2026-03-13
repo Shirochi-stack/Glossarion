@@ -3671,9 +3671,59 @@ CRITICAL EXTRACTION RULES:
         editor_layout.addWidget(file_widget)
 
         file_layout.addWidget(QLabel("Glossary File:"))
-        self.editor_file_entry = QLineEdit()
-        self.editor_file_entry.setReadOnly(True)
-        file_layout.addWidget(self.editor_file_entry)
+
+        # Navigation arrows
+        self._editor_prev_btn = QPushButton("◀")
+        self._editor_prev_btn.setFixedSize(24, 24)
+        self._editor_prev_btn.setStyleSheet(
+            "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
+            "QPushButton:hover { background: #666; }"
+        )
+        self._editor_prev_btn.setToolTip("Previous glossary")
+        self._editor_prev_btn.clicked.connect(lambda: self._editor_nav(-1))
+        file_layout.addWidget(self._editor_prev_btn)
+
+        self.editor_file_combo = QComboBox()
+        self.editor_file_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.editor_file_combo.setStyleSheet("QComboBox { padding: 4px; }")
+        self.editor_file_combo.wheelEvent = lambda e: e.ignore()
+        file_layout.addWidget(self.editor_file_combo)
+
+        self._editor_next_btn = QPushButton("▶")
+        self._editor_next_btn.setFixedSize(24, 24)
+        self._editor_next_btn.setStyleSheet(
+            "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
+            "QPushButton:hover { background: #666; }"
+        )
+        self._editor_next_btn.setToolTip("Next glossary")
+        self._editor_next_btn.clicked.connect(lambda: self._editor_nav(1))
+        file_layout.addWidget(self._editor_next_btn)
+
+        # Hide arrows when only 0-1 items
+        self._editor_prev_btn.setVisible(False)
+        self._editor_next_btn.setVisible(False)
+
+        # Compatibility shim: editor_file_entry.text() / .setText() still work
+        class _ComboShim:
+            def __init__(shim, combo, owner):
+                shim._combo = combo
+                shim._owner = owner
+            def text(shim):
+                return shim._combo.currentData() or shim._combo.currentText() or ''
+            def setText(shim, path):
+                # If path already in combo, select it; otherwise add it
+                for i in range(shim._combo.count()):
+                    if shim._combo.itemData(i) == path:
+                        shim._combo.setCurrentIndex(i)
+                        return
+                shim._combo.blockSignals(True)
+                shim._combo.clear()
+                if path:
+                    display = os.path.basename(os.path.dirname(path)) + '/' + os.path.basename(path) if path else ''
+                    shim._combo.addItem(display, path)
+                shim._combo.blockSignals(False)
+                shim._owner._update_editor_nav_buttons()
+        self.editor_file_entry = _ComboShim(self.editor_file_combo, self)
 
         stats_widget = QWidget()
         stats_layout = QHBoxLayout(stats_widget)
@@ -5102,110 +5152,149 @@ CRITICAL EXTRACTION RULES:
            except Exception as e:
                QMessageBox.critical(self.dialog, "Error", f"Failed to save: {e}")
 
-        # Automatically load the currently auto-loaded glossary (CSV preferred) when opening the tab
+        # ------------------------------------------------------------------
+        #  Editor navigation helpers (for multi-EPUB glossary switching)
+        # ------------------------------------------------------------------
+        def _editor_nav_impl(direction):
+            """Navigate ◀/▶ through glossary files."""
+            combo = self.editor_file_combo
+            if combo.count() <= 1:
+                return
+            new_idx = combo.currentIndex() + direction
+            if new_idx < 0:
+                new_idx = combo.count() - 1
+            elif new_idx >= combo.count():
+                new_idx = 0
+            combo.setCurrentIndex(new_idx)
+
+        self._editor_nav = _editor_nav_impl
+
+        def _on_editor_combo_changed_impl(idx):
+            """When user picks a different glossary from the combo, load it."""
+            if idx < 0:
+                return
+            path = self.editor_file_combo.itemData(idx)
+            if path and os.path.exists(path):
+                load_glossary_for_editing()
+
+        self._on_editor_combo_changed = _on_editor_combo_changed_impl
+
+        def _update_editor_nav_buttons_impl():
+            """Show/hide ◀ ▶ arrows depending on combo item count."""
+            show = self.editor_file_combo.count() > 1
+            self._editor_prev_btn.setVisible(show)
+            self._editor_next_btn.setVisible(show)
+
+        self._update_editor_nav_buttons = _update_editor_nav_buttons_impl
+
+        # Reconnect combo signal to our impl (it was connected before the method existed)
+        try:
+            self.editor_file_combo.currentIndexChanged.disconnect()
+        except Exception:
+            pass
+        self.editor_file_combo.currentIndexChanged.connect(_on_editor_combo_changed_impl)
+
+        # ------------------------------------------------------------------
+        # Auto-select glossary: populates combo for all selected EPUBs
+        # ------------------------------------------------------------------
         def auto_select_current_glossary():
             try:
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
 
-                if override_dir and override_dir.strip():
-                    # Output directory override is set — search ONLY there, no fallbacks
-                    epub_path = None
-                    try:
-                        if hasattr(self, 'get_current_epub_path'):
-                            epub_path = self.get_current_epub_path()
-                        if not epub_path and hasattr(self, 'file_path'):
-                            epub_path = getattr(self, 'file_path', None)
-                    except Exception:
-                        pass
-                    if not epub_path or not os.path.exists(epub_path):
-                        return
-
-                    base = os.path.splitext(os.path.basename(epub_path))[0]
-                    abs_override = os.path.abspath(override_dir)
-                    ext_priority = ['.csv', '.json', '.txt', '.md']
-
-                    # auto-mapping ON or minimal mode → per-book output folder
-                    # balanced/full always uses Glossary subfolder (even though they auto-enable auto-mapping)
-                    mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
-                    auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
-                    use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full'))
-
-                    candidates = []
-                    glossary_folder = os.path.join(abs_override, 'Glossary')
-                    book_dir = os.path.join(abs_override, base)
-
-                    if use_per_book:
-                        # Auto-mapping / minimal: per-book output folder first
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(book_dir, f"glossary{ext}"))
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
-                        # Then shared Glossary folder
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
-                    else:
-                        # Balanced/Full: shared Glossary folder first
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
-                        # Then per-book output folder
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(book_dir, f"glossary{ext}"))
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
-
-                    for cand in candidates:
-                        if os.path.exists(cand):
-                            self.editor_file_entry.setText(cand)
-                            load_glossary_for_editing()
-                            return
-                    # Override is set but nothing found — leave editor empty, no fallbacks
-                    return
-
-                # No override set — original behavior
-                auto_path = getattr(self, 'auto_loaded_glossary_path', None)
-                manual_path = getattr(self, 'manual_glossary_path', None)
-
-                if auto_path and os.path.exists(auto_path):
-                    self.editor_file_entry.setText(auto_path)
-                    load_glossary_for_editing()
-                    return
-
-                if manual_path and os.path.exists(manual_path):
-                    self.editor_file_entry.setText(manual_path)
-                    load_glossary_for_editing()
-                    return
-
-                # CWD fallback
+                # Collect all selected EPUBs
+                epub_paths = []
                 try:
-                    epub_path = None
-                    if hasattr(self, 'get_current_epub_path'):
-                        epub_path = self.get_current_epub_path()
-                    if not epub_path and hasattr(self, 'file_path'):
-                        epub_path = getattr(self, 'file_path', None)
-                    if epub_path and os.path.exists(epub_path):
-                        base = os.path.splitext(os.path.basename(epub_path))[0]
-                        out_dir = os.path.join(os.getcwd(), base)
-                        candidates = [
-                            os.path.join(out_dir, "glossary.csv"),
-                            os.path.join(out_dir, "Glossary", "glossary.csv"),
-                            os.path.join(out_dir, "glossary.json"),
-                            os.path.join(out_dir, "Glossary", "glossary.json"),
-                            os.path.join(out_dir, "glossary.txt"),
-                            os.path.join(out_dir, "Glossary", "glossary.txt"),
-                            os.path.join(out_dir, "glossary.md"),
-                            os.path.join(out_dir, "Glossary", "glossary.md"),
-                        ]
-                        for cand in candidates:
-                            if os.path.exists(cand):
-                                self.editor_file_entry.setText(cand)
-                                load_glossary_for_editing()
-                                return
+                    files = list(getattr(self, 'selected_files', []) or [])
+                    epub_paths = [p for p in files if str(p).lower().endswith('.epub')]
                 except Exception:
                     pass
+                if not epub_paths:
+                    try:
+                        if hasattr(self, 'get_current_epub_path'):
+                            ep = self.get_current_epub_path()
+                            if ep:
+                                epub_paths = [ep]
+                        if not epub_paths and hasattr(self, 'file_path'):
+                            ep = getattr(self, 'file_path', None)
+                            if ep:
+                                epub_paths = [ep]
+                    except Exception:
+                        pass
+
+                if not epub_paths:
+                    return
+
+                ext_priority = ['.csv', '.json', '.txt', '.md']
+                mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
+                auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
+                use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full'))
+
+                found_glossaries = []  # list of (display_name, full_path)
+
+                for epub_path in epub_paths:
+                    if not epub_path or not os.path.exists(epub_path):
+                        continue
+                    base = os.path.splitext(os.path.basename(epub_path))[0]
+
+                    candidates = []
+                    if override_dir and override_dir.strip():
+                        abs_override = os.path.abspath(override_dir)
+                        glossary_folder = os.path.join(abs_override, 'Glossary')
+                        book_dir = os.path.join(abs_override, base)
+
+                        if use_per_book:
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(book_dir, f"glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
+                        else:
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(book_dir, f"glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
+                    else:
+                        # No override — check auto/manual paths first, then CWD
+                        auto_path = getattr(self, 'auto_loaded_glossary_path', None)
+                        manual_path = getattr(self, 'manual_glossary_path', None)
+                        if auto_path and os.path.exists(auto_path):
+                            candidates.append(auto_path)
+                        if manual_path and os.path.exists(manual_path):
+                            candidates.append(manual_path)
+                        out_dir = os.path.join(os.getcwd(), base)
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(out_dir, f"glossary{ext}"))
+                        for ext in ext_priority:
+                            candidates.append(os.path.join(out_dir, 'Glossary', f"glossary{ext}"))
+
+                    # Pick first match for this book
+                    for cand in candidates:
+                        if os.path.exists(cand):
+                            display = f"{base}/{os.path.basename(cand)}"
+                            if not any(fp == cand for _, fp in found_glossaries):
+                                found_glossaries.append((display, cand))
+                            break
+
+                # Populate combo
+                self.editor_file_combo.blockSignals(True)
+                self.editor_file_combo.clear()
+                for display, fpath in found_glossaries:
+                    self.editor_file_combo.addItem(display, fpath)
+                self.editor_file_combo.blockSignals(False)
+                self._update_editor_nav_buttons()
+
+                # Load the first one
+                if found_glossaries:
+                    self.editor_file_combo.setCurrentIndex(0)
+                    load_glossary_for_editing()
+
             except Exception:
                 pass
 
