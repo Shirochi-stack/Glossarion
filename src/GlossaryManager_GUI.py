@@ -918,16 +918,52 @@ class GlossaryManagerMixin:
         type_control_layout.addWidget(add_type_button)
 
         # Entry type filter mode dropdown
+        type_control_layout.addSpacing(10)
         filter_label = QLabel("Entry Type Filtering:")
         type_control_layout.addWidget(filter_label)
         filter_desc = QLabel(
-            "Controls how strictly the AI-returned 'type' column is validated.\n"
-            "Strict = exact match only (e.g. 'terms' is rejected when only 'term' is enabled)\n"
-            "Loose = normalizes common plurals (e.g. 'terms' → 'term')\n"
-            "No Filtering = any value in the type column is accepted"
+            "Strict = exact match only (e.g. 'terms' rejected)  •  "
+            "Loose = normalizes plurals (e.g. 'terms' → 'term')  •  "
+            "No Filtering = any type accepted"
         )
+        filter_desc.setStyleSheet("font-size: 9pt; color: #aaa;")
         filter_desc.setWordWrap(True)
         type_control_layout.addWidget(filter_desc)
+
+        filter_combo_widget = QWidget()
+        filter_combo_layout = QHBoxLayout(filter_combo_widget)
+        filter_combo_layout.setContentsMargins(0, 0, 0, 0)
+        type_control_layout.addWidget(filter_combo_widget)
+
+        # Halgakos icon (HiDPI-aware)
+        filter_icon_label = QLabel()
+        filter_icon_label.setStyleSheet("background-color: transparent;")
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtGui import QIcon, QPixmap
+                from PySide6.QtCore import QSize
+                icon = QIcon(icon_path)
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                logical_px = 16
+                dev_px = int(logical_px * max(1.0, dpr))
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    raw = QPixmap(icon_path)
+                    img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm = QPixmap.fromImage(img)
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                filter_icon_label.setPixmap(pm)
+                filter_icon_label.setFixedSize(24, 24)
+        except Exception:
+            pass
+        filter_combo_layout.addWidget(filter_icon_label)
 
         self.entry_type_filter_combo = QComboBox()
         self.entry_type_filter_combo.addItems(["Strict", "Loose", "No Filtering"])
@@ -935,7 +971,8 @@ class GlossaryManagerMixin:
         saved_mode = self.config.get('glossary_entry_type_filter_mode', 'loose')
         mode_to_index = {'strict': 0, 'loose': 1, 'none': 2}
         self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 1))
-        type_control_layout.addWidget(self.entry_type_filter_combo)
+        filter_combo_layout.addWidget(self.entry_type_filter_combo)
+        filter_combo_layout.addStretch()
 
         type_control_layout.addStretch()
         

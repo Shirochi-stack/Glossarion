@@ -1459,7 +1459,7 @@ def _is_entry_type_accepted(entry_type, enabled_types):
     
     Modes (via GLOSSARY_ENTRY_TYPE_FILTER_MODE env var):
       strict - exact match required (e.g. 'terms' is rejected when only 'term' is enabled)
-      loose  - normalizes common plurals (e.g. 'terms' -> 'term', 'characters' -> 'character')
+      loose  - normalizes common plurals/variants
       none   - any value in the type column is accepted
     """
     filter_mode = os.getenv('GLOSSARY_ENTRY_TYPE_FILTER_MODE', 'loose').lower()
@@ -1468,12 +1468,25 @@ def _is_entry_type_accepted(entry_type, enabled_types):
     if entry_type in enabled_types:
         return True
     if filter_mode == 'loose':
-        # Normalize common AI variants: strip trailing 's'
-        normalized = entry_type.rstrip('s')
-        if normalized and normalized in enabled_types:
+        # Strip apostrophe-s: "term's" → "term"
+        cleaned = entry_type.replace("'s", "").replace("'s", "")
+        if cleaned and cleaned in enabled_types:
             return True
-        # Also try adding 's' in case enabled type is plural
-        if (entry_type + 's') in enabled_types:
+        # Strip trailing s: "terms" → "term", "characters" → "character"
+        if cleaned.endswith('s'):
+            singular = cleaned[:-1]
+            if singular and singular in enabled_types:
+                return True
+        # Handle -ies → -y: "abilities" → "ability", "entities" → "entity"
+        if cleaned.endswith('ies'):
+            y_form = cleaned[:-3] + 'y'
+            if y_form in enabled_types:
+                return True
+        # Reverse: enabled type is plural, AI returned singular
+        # e.g. enabled="terms", AI returned "term" → try "term"+"s"
+        if (cleaned + 's') in enabled_types:
+            return True
+        if (cleaned + 'ies') in enabled_types:
             return True
     return False
 
