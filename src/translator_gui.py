@@ -5065,7 +5065,23 @@ Recent translations to summarize:
                             files_to_delete.append(f)
 
                 if not files_to_delete:
-                    QMessageBox.information(self, "Nothing to Delete", f"No glossary files found for '{base}'.")
+                    nd_msg = QMessageBox(self)
+                    nd_msg.setIcon(QMessageBox.Information)
+                    nd_msg.setWindowTitle("Nothing to Delete")
+                    nd_msg.setText(f"No glossary files found for '{base}'.")
+                    nd_msg.setStandardButtons(QMessageBox.Ok)
+                    nd_msg.setStyleSheet("""
+                        QMessageBox QPushButton {
+                            min-width: 80px;
+                            min-height: 32px;
+                            font-size: 11pt;
+                            padding: 4px 16px;
+                        }
+                        QMessageBox QDialogButtonBox {
+                            qproperty-centerButtons: true;
+                        }
+                    """)
+                    nd_msg.exec()
                     return
 
                 # Confirmation with centered, larger buttons
@@ -5090,9 +5106,12 @@ Recent translations to summarize:
                 if msg.exec() != QMessageBox.Yes:
                     return
 
-                # Back up files to Backups/ folder before removing
+                # Back up files to timestamped subfolder in Backups/
                 import shutil
-                backup_dir = os.path.join(os.path.dirname(files_to_delete[0]), 'Backups')
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                backup_root = os.path.join(os.path.dirname(files_to_delete[0]), 'Backups')
+                backup_dir = os.path.join(backup_root, timestamp)
                 os.makedirs(backup_dir, exist_ok=True)
 
                 deleted = []

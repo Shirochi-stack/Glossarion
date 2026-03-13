@@ -3050,7 +3050,23 @@ CRITICAL EXTRACTION RULES:
                 if _auto_load_desc_label:
                     _auto_load_desc_label.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
 
-            # Physically disable auto-mapping when "Off (No Auto-Mapping)" is selected
+            # "No Glossary" - lock both toggles OFF
+            if mode == 'no_glossary':
+                if hasattr(self, 'append_glossary_checkbox'):
+                    if self.append_glossary_checkbox.isChecked():
+                        self.append_glossary_checkbox.setChecked(False)
+                    _lock_toggle(self.append_glossary_checkbox)
+                if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                    if self.append_glossary_auto_load_checkbox.isChecked():
+                        self.append_glossary_auto_load_checkbox.setChecked(False)
+                    _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
+                    if _auto_load_desc_label:
+                        _auto_load_desc_label.mousePressEvent = lambda _: None
+                    self.config['append_glossary_auto_load'] = False
+                    if hasattr(self, 'append_glossary_auto_load_var'):
+                        self.append_glossary_auto_load_var = False
+
+            # "Off (No Auto-Mapping)" - lock auto-mapping OFF
             if mode == 'off_no_automap' and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(False)
