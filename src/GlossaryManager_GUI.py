@@ -1992,93 +1992,6 @@ CRITICAL EXTRACTION RULES:
             self.append_glossary_checkbox.toggled.connect(_sync_auto_mapping_enabled_state)
         except Exception:
             pass
-
-        # Real-time path switching when auto-mapping is toggled
-        def _on_auto_mapping_toggled(checked):
-            """Switch glossary path between Glossary subfolder and output folder in real time."""
-            try:
-                # Only act if Append Glossary is also enabled
-                if not (hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked()):
-                    return
-
-                # Determine current EPUB
-                epub_path = None
-                try:
-                    files = list(getattr(self, 'selected_files', []) or [])
-                    epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                    if len(epubs) == 1:
-                        epub_path = epubs[0]
-                except Exception:
-                    pass
-                if not epub_path:
-                    return
-
-                if checked:
-                    # Auto-mapping ON → switch to Glossary subfolder file
-                    # BUT if Minimal mode is active, use output folder instead
-                    _use_subfolder = True
-                    try:
-                        _cur_mode = getattr(self, 'auto_glossary_mode_var', self.config.get('auto_glossary_mode', 'off'))
-                        if str(_cur_mode).lower() == 'minimal':
-                            _use_subfolder = False
-                    except Exception:
-                        pass
-
-                    # Clear the current state so the correct loader can take over
-                    try:
-                        self.manual_glossary_path = None
-                        self.auto_loaded_glossary_path = None
-                        self.auto_loaded_glossary_for_file = None
-                        self.manual_glossary_manually_loaded = False
-                    except Exception:
-                        pass
-
-                    if _use_subfolder:
-                        try:
-                            if hasattr(self, '_autofill_glossary_for_current_selection'):
-                                self._autofill_glossary_for_current_selection()
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self.auto_load_glossary_for_file(epub_path)
-                        except Exception:
-                            pass
-                else:
-                    # Auto-mapping OFF → fall back to output folder glossary
-                    try:
-                        self.manual_glossary_path = None
-                        self.auto_loaded_glossary_path = None
-                        self.auto_loaded_glossary_for_file = None
-                        self.manual_glossary_manually_loaded = False
-                    except Exception:
-                        pass
-                    try:
-                        self.auto_load_glossary_for_file(epub_path)
-                    except Exception:
-                        pass
-
-                # Refresh the glossary editor if it has been set up
-                try:
-                    if hasattr(self, 'editor_file_entry'):
-                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                        if new_path and os.path.exists(new_path):
-                            self.editor_file_entry.setText(new_path)
-                            self.append_log(f"📑 Glossary editor switched to: {os.path.basename(new_path)}")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        # Connect (avoid duplicate connections)
-        try:
-            self.append_glossary_auto_load_checkbox.toggled.disconnect(_on_auto_mapping_toggled)
-        except Exception:
-            pass
-        try:
-            self.append_glossary_auto_load_checkbox.toggled.connect(_on_auto_mapping_toggled)
-        except Exception:
-            pass
         
         # Add additional glossary toggle (below append glossary)
         additional_glossary_widget = QWidget()
@@ -2894,14 +2807,6 @@ CRITICAL EXTRACTION RULES:
             
             # Enable/disable text widgets (prompt still relevant for all non-off modes)
             self.auto_prompt_text.setEnabled(enabled)
-            # Update mode var and config immediately so other code can read it
-            try:
-                self.auto_glossary_mode_var = mode
-                self.config['auto_glossary_mode'] = mode
-                self.config['enable_auto_glossary'] = enabled
-                self.enable_auto_glossary_var = enabled
-            except Exception:
-                pass
             # Auto-enable append glossary when an active extraction mode is selected
             if enabled and hasattr(self, 'append_glossary_checkbox'):
                 if not self.append_glossary_checkbox.isChecked():
@@ -2926,33 +2831,6 @@ CRITICAL EXTRACTION RULES:
                 self.config['append_glossary_auto_load'] = False
                 if hasattr(self, 'append_glossary_auto_load_var'):
                     self.append_glossary_auto_load_var = False
-
-            # Real-time glossary path switching when mode changes
-            try:
-                _automap_on = hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
-                _use_subfolder = _automap_on and mode != 'minimal'
-                epub_path = None
-                files = list(getattr(self, 'selected_files', []) or [])
-                epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                if len(epubs) == 1:
-                    epub_path = epubs[0]
-                if epub_path:
-                    self.manual_glossary_path = None
-                    self.auto_loaded_glossary_path = None
-                    self.auto_loaded_glossary_for_file = None
-                    self.manual_glossary_manually_loaded = False
-                    if _use_subfolder:
-                        if hasattr(self, '_autofill_glossary_for_current_selection'):
-                            self._autofill_glossary_for_current_selection()
-                    else:
-                        self.auto_load_glossary_for_file(epub_path)
-                    if hasattr(self, 'editor_file_entry'):
-                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                        if new_path and os.path.exists(new_path):
-                            self.editor_file_entry.setText(new_path)
-                            self.append_log(f"📑 Glossary editor switched to: {os.path.basename(new_path)}")
-            except Exception:
-                pass
         
         def update_append_prompt_state(checked=None):
             enabled = self.append_glossary_checkbox.isChecked()
