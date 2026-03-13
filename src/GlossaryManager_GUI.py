@@ -2988,27 +2988,72 @@ CRITICAL EXTRACTION RULES:
                 self.enable_auto_glossary_var = enabled
             except Exception:
                 pass
-            # Auto-enable append glossary when an active extraction mode is selected
+            # --- Lock/unlock helpers for mode-controlled toggles ---
+            def _lock_toggle(checkbox, label=None):
+                """Lock a toggle: purple text, 🔒 prefix, non-interactive."""
+                if not hasattr(checkbox, '_original_text'):
+                    checkbox._original_text = checkbox.text()
+                if not checkbox.text().startswith('🔒'):
+                    checkbox.setText(f"🔒 {checkbox._original_text}")
+                checkbox.setEnabled(False)
+                checkbox.setStyleSheet("QCheckBox { color: #b388ff; }")
+                checkbox._mode_locked = True
+                if label:
+                    label.setStyleSheet("color: #b388ff;")
+                    label._mode_locked = True
+
+            def _unlock_toggle(checkbox, label=None):
+                """Unlock a toggle: restore text and interactivity."""
+                if getattr(checkbox, '_mode_locked', False):
+                    if hasattr(checkbox, '_original_text'):
+                        checkbox.setText(checkbox._original_text)
+                    checkbox.setEnabled(True)
+                    checkbox.setStyleSheet("")
+                    checkbox._mode_locked = False
+                if label and getattr(label, '_mode_locked', False):
+                    label.setStyleSheet("")
+                    label._mode_locked = False
+
+            # Get the auto_load description label (sibling in auto_load_layout)
+            _auto_load_desc_label = None
+            try:
+                for i in range(auto_load_layout.count()):
+                    w = auto_load_layout.itemAt(i).widget()
+                    if isinstance(w, QLabel) and 'Maps' in (w.text() or ''):
+                        _auto_load_desc_label = w
+                        break
+            except Exception:
+                pass
+
+            # Auto-enable & lock append glossary when an active extraction mode is selected
             if enabled and hasattr(self, 'append_glossary_checkbox'):
                 if not self.append_glossary_checkbox.isChecked():
                     self.append_glossary_checkbox.setChecked(True)
-                    self.append_glossary_checkbox.style().unpolish(self.append_glossary_checkbox)
-                    self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
-                    self.append_glossary_checkbox.update()
-            # Auto-enable auto map when balanced/full is selected
+                _lock_toggle(self.append_glossary_checkbox)
+            elif hasattr(self, 'append_glossary_checkbox'):
+                _unlock_toggle(self.append_glossary_checkbox)
+
+            # Auto-enable & lock auto-map when balanced/full is selected
             if mode in ('balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if not self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(True)
-                    self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
-                    self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
-                    self.append_glossary_auto_load_checkbox.update()
+                _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
+                # Block label click when locked
+                if _auto_load_desc_label:
+                    _auto_load_desc_label.mousePressEvent = lambda _: None
+            elif hasattr(self, 'append_glossary_auto_load_checkbox'):
+                _unlock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
+                # Restore label click
+                if _auto_load_desc_label:
+                    _auto_load_desc_label.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
+
             # Physically disable auto-mapping when "Off (No Auto-Mapping)" is selected
             if mode == 'off_no_automap' and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(False)
-                    self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
-                    self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
-                    self.append_glossary_auto_load_checkbox.update()
+                _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
+                if _auto_load_desc_label:
+                    _auto_load_desc_label.mousePressEvent = lambda _: None
                 self.config['append_glossary_auto_load'] = False
                 if hasattr(self, 'append_glossary_auto_load_var'):
                     self.append_glossary_auto_load_var = False
