@@ -4970,10 +4970,9 @@ CRITICAL EXTRACTION RULES:
                     abs_override = os.path.abspath(override_dir)
                     ext_priority = ['.csv', '.json', '.txt', '.md']
 
-                    # Check if auto-mapping or minimal mode is active
-                    auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
+                    # Balanced/Full saves to Glossary subfolder; minimal/off saves to per-book folder
                     mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
-                    use_per_book = auto_mapping_on or mode == 'minimal'
+                    use_per_book = mode not in ('balanced', 'full')
 
                     candidates = []
                     glossary_folder = os.path.join(abs_override, 'Glossary')
