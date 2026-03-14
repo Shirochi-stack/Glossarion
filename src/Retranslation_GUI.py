@@ -2298,10 +2298,9 @@ class RetranslationMixin:
         listbox = data['listbox']
         listbox.setContextMenuPolicy(Qt.CustomContextMenu)
 
-        def _open_file_for_item(item):
-            info_meta = item.data(Qt.UserRole) or {}
-            meta = info_meta.get('info', info_meta) or {}
-            output_file = meta.get('output_file')
+        def _open_file_for_item(display_info):
+            """Open the output file for a chapter. Accepts pre-extracted display_info dict."""
+            output_file = display_info.get('output_file')
             if not output_file:
                 self._show_message('error', "File Missing", "No output file recorded for this entry.", parent=data.get('dialog', self))
                 return
@@ -2319,9 +2318,19 @@ class RetranslationMixin:
             if not item:
                 return
             
-            # Check for missing images in QA issues
-            info_wrapper = item.data(Qt.UserRole)
-            display_info = info_wrapper.get('info', {})
+            # IMPORTANT: Extract ALL data from the item BEFORE menu.exec() blocks.
+            # The auto-refresh timer (2s) can rebuild the listbox and delete C++ objects
+            # while the context menu is open, making the item reference stale.
+            try:
+                info_wrapper = item.data(Qt.UserRole)
+                if not info_wrapper:
+                    return
+                display_info = info_wrapper.get('info', {})
+                item_text = item.text()
+            except RuntimeError:
+                # C++ object already deleted
+                return
+            
             # The actual progress entry is nested inside 'info' key of display_info
             progress_entry = display_info.get('info', {})
             
@@ -2333,7 +2342,7 @@ class RetranslationMixin:
             has_missing_images = any('missing_images' in str(issue) for issue in qa_issues)
             
             # Fallback: Check item text directly as it definitely contains the issue if visible
-            if not has_missing_images and item and 'missing_images' in item.text():
+            if not has_missing_images and 'missing_images' in item_text:
                 has_missing_images = True
                 print("DEBUG: Detected missing_images via list item text")
             
@@ -2377,7 +2386,7 @@ class RetranslationMixin:
             act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
-                _open_file_for_item(item)
+                _open_file_for_item(display_info)
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_insert_img and chosen == act_insert_img:
