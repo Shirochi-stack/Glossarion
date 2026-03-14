@@ -4928,8 +4928,8 @@ Recent translations to summarize:
             self.config['enable_auto_glossary'] = is_on
             self.enable_auto_glossary_var = is_on
             self.auto_glossary_mode_var = new_mode
-            # Auto-enable append glossary when an active mode is selected
-            if is_on:
+            # Auto-enable append glossary when off/minimal/balanced/full is selected
+            if new_mode != 'no_glossary':
                 self.config['append_glossary'] = True
                 self.append_glossary_var = True
                 if hasattr(self, 'append_glossary_checkbox'):
@@ -4950,8 +4950,8 @@ Recent translations to summarize:
                     self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.update()
-            # Physically disable auto-mapping when "Off (No Auto-Mapping)" is selected
-            if new_mode == 'off_no_automap':
+            # Physically disable auto-mapping when "Off (No Auto-Mapping)" or "Minimal" is selected
+            if new_mode in ('off_no_automap', 'minimal'):
                 self.config['append_glossary_auto_load'] = False
                 self.append_glossary_auto_load_var = False
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):

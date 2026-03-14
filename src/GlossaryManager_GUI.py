@@ -3033,8 +3033,8 @@ CRITICAL EXTRACTION RULES:
             # Get the append glossary description label
             _append_desc_label = getattr(self, '_append_glossary_desc_label', None)
 
-            # Auto-enable & lock append glossary when an active extraction mode is selected
-            if enabled and hasattr(self, 'append_glossary_checkbox'):
+            # Auto-enable & lock append glossary when off/minimal/balanced/full is selected
+            if mode not in ('no_glossary',) and hasattr(self, 'append_glossary_checkbox'):
                 if not self.append_glossary_checkbox.isChecked():
                     self.append_glossary_checkbox.setChecked(True)
                 _lock_toggle(self.append_glossary_checkbox, _append_desc_label)
@@ -3077,8 +3077,8 @@ CRITICAL EXTRACTION RULES:
                     if hasattr(self, 'append_glossary_auto_load_var'):
                         self.append_glossary_auto_load_var = False
 
-            # "Off (No Auto-Mapping)" - lock auto-mapping OFF
-            if mode == 'off_no_automap' and hasattr(self, 'append_glossary_auto_load_checkbox'):
+            # "Off (No Auto-Mapping)" / "Minimal" - lock auto-mapping OFF
+            if mode in ('off_no_automap', 'minimal') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(False)
                 _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
