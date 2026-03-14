@@ -2649,7 +2649,7 @@ Recent translations to summarize:
             ('disable_empty_safety_heuristic_var', 'disable_empty_safety_heuristic', False),
             ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', True),
             ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
-            ('disable_refusal_checks_var', 'disable_refusal_checks', False),
+            ('disable_refusal_checks_var', 'disable_refusal_checks', True),
             ('refusal_pattern_length_limit_var', 'refusal_pattern_length_limit', '1000'),
             # NEW: QA scanning helpers
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
@@ -17087,7 +17087,7 @@ Important rules:
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
                 ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], True, bool),
                 ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
-                ('disable_refusal_checks', ['disable_refusal_checks_var'], False, bool),
+                ('disable_refusal_checks', ['disable_refusal_checks_var'], True, bool),
                 ('refusal_pattern_length_limit', ['refusal_pattern_length_limit_var'], 1000, lambda v: safe_int(v, 1000)),
                 ('save_partial_results', ['save_partial_results_var'], True, bool),
                 ('save_prohibited_results', ['save_prohibited_results_var'], False, bool),
@@ -17407,7 +17407,7 @@ Important rules:
             # Set defaults for settings that might not exist yet
             self.config.setdefault('glossary_auto_backup', True)
             self.config.setdefault('glossary_max_backups', 50)
-            default_qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': False, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
+            default_qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
             self.config.setdefault('save_partial_results', True)

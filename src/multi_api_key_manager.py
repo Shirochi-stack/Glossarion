@@ -1207,21 +1207,7 @@ class RefusalPatternsDialog(QDialog):
                 pass
             self.patterns = self._get_default_patterns()
             self._refresh_tree()
-            # Reset toggle + limit to defaults
-            try:
-                if hasattr(self, 'disable_refusal_checks_cb'):
-                    self.disable_refusal_checks_cb.setChecked(False)
-                    if hasattr(self.translator_gui, 'disable_refusal_checks_var'):
-                        self.translator_gui.disable_refusal_checks_var = False
-            except Exception:
-                pass
-            try:
-                if hasattr(self, 'refusal_length_limit_entry'):
-                    self.refusal_length_limit_entry.setText("1000")
-                    if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
-                        self.translator_gui.refusal_pattern_length_limit_var = 1000
-            except Exception:
-                pass
+
     
     def _load_patterns_from_file(self):
         """Load patterns from a text file (one per line), merging with existing"""

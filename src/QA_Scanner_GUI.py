@@ -316,7 +316,7 @@ class QAScannerMixin:
             'source_language': 'auto',
             'check_encoding_issues': False,
             'check_repetition': True,
-            'check_translation_artifacts': False,
+            'check_translation_artifacts': True,
             'check_ai_artifacts': True,
             'check_punctuation_mismatch': False,
             'punctuation_loss_threshold': 49,
@@ -2338,12 +2338,12 @@ class QAScannerMixin:
         detection_layout.addWidget(check_repetition_checkbox)
         
         check_artifacts_checkbox = self._create_styled_checkbox("Check for translation artifacts (MTL notes, watermarks)")
-        check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', False))
+        check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', True))
         detection_layout.addWidget(check_artifacts_checkbox)
 
         # Separate toggle for AI artifacts
         check_ai_artifacts_checkbox = self._create_styled_checkbox("Check for AI artifacts (\"Sure, here’s…\", thinking tags, JSON)")
-        check_ai_artifacts_checkbox.setChecked(qa_settings.get('check_ai_artifacts', False))
+        check_ai_artifacts_checkbox.setChecked(qa_settings.get('check_ai_artifacts', True))
         check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
         detection_layout.addWidget(check_ai_artifacts_checkbox)
         
@@ -3632,8 +3632,8 @@ class QAScannerMixin:
                 # Detection defaults
                 check_encoding_checkbox.setChecked(False)
                 check_repetition_checkbox.setChecked(True)
-                check_artifacts_checkbox.setChecked(False)
-                check_ai_artifacts_checkbox.setChecked(False)
+                check_artifacts_checkbox.setChecked(True)
+                check_ai_artifacts_checkbox.setChecked(True)
                 check_punctuation_checkbox.setChecked(False)
                 punct_threshold_spinbox.setValue(49)
                 excess_punct_checkbox.setChecked(False)
