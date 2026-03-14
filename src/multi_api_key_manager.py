@@ -964,15 +964,15 @@ class RefusalPatternsDialog(QDialog):
         save_cancel_layout.addStretch()
 
         
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton("Close")
         cancel_btn.setMinimumHeight(38)
         cancel_btn.setMinimumWidth(100)
         cancel_btn.clicked.connect(self.reject)
         save_cancel_layout.addWidget(cancel_btn)
         
-        save_btn = QPushButton("Save & Close")
+        save_btn = QPushButton("Save Patterns")
         save_btn.setMinimumHeight(38)
-        save_btn.setMinimumWidth(120)
+        save_btn.setMinimumWidth(200)
         save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4a7ba7;
@@ -984,7 +984,9 @@ class RefusalPatternsDialog(QDialog):
             }
         """)
         save_btn.clicked.connect(self._save_and_close)
+        self._save_btn = save_btn
         save_cancel_layout.addWidget(save_btn)
+        
         save_cancel_layout.addStretch()
         
         main_layout.addWidget(save_cancel_frame)
@@ -1181,8 +1183,40 @@ class RefusalPatternsDialog(QDialog):
                         btn.setText(_btn_text)
                 except Exception:
                     pass
-            QMessageBox.information(self, "Success", f"Saved {len(self.patterns)} refusal patterns")
-        self.accept()
+            # Animate save button to flash green
+            _count = len(self.patterns)
+            try:
+                self._save_btn.setText(f"💾 Saved {_count} patterns")
+                self._save_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2e7d32;
+                        color: white;
+                        font-weight: bold;
+                    }
+                """)
+                def _restore_btn():
+                    try:
+                        self._save_btn.setText("Save Patterns")
+                        self._save_btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #4a7ba7;
+                                color: white;
+                                font-weight: bold;
+                            }
+                            QPushButton:hover {
+                                background-color: #5a9fd4;
+                            }
+                        """)
+                    except Exception:
+                        pass
+                QTimer.singleShot(2000, _restore_btn)
+            except Exception:
+                pass
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
 
 
 class MultiAPIKeyDialog(QDialog):
@@ -3023,16 +3057,18 @@ class MultiAPIKeyDialog(QDialog):
         
         button_layout.addStretch()
         
-        # Cancel button
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setMinimumHeight(40)
-        cancel_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
+        # Close button
+        cancel_btn = QPushButton("Close")
+        cancel_btn.setMinimumHeight(44)
+        cancel_btn.setMinimumWidth(110)
+        cancel_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 10px 24px; }")
         cancel_btn.clicked.connect(self._on_close)
         button_layout.addWidget(cancel_btn)
         
         # Save button
-        save_btn = QPushButton("Save & Close")
-        save_btn.setMinimumHeight(40)
+        save_btn = QPushButton("Save")
+        save_btn.setMinimumHeight(44)
+        save_btn.setMinimumWidth(130)
         save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4a7ba7;
@@ -3046,6 +3082,7 @@ class MultiAPIKeyDialog(QDialog):
             }
         """)
         save_btn.clicked.connect(self._save_and_close)
+        self._save_btn = save_btn
         button_layout.addWidget(save_btn)
         
         # Add button frame to container
@@ -5290,10 +5327,45 @@ class MultiAPIKeyDialog(QDialog):
             self.stats_label.setText(message)
     
     def _save_and_close(self):
-        """Save configuration and close"""
+        """Save configuration"""
         self._save_keys_to_config()
-        QMessageBox.information(self, "Success", "API key configuration saved")
-        self.accept()
+        # Animate the save button to flash green
+        try:
+            self._save_btn.setText("💾 Saved!")
+            self._save_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2e7d32;
+                    color: white;
+                    font-weight: bold;
+                    font-size: 11pt;
+                    padding: 8px 20px;
+                }
+            """)
+            def _restore_btn():
+                try:
+                    self._save_btn.setText("Save")
+                    self._save_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #4a7ba7;
+                            color: white;
+                            font-weight: bold;
+                            font-size: 11pt;
+                            padding: 8px 20px;
+                        }
+                        QPushButton:hover {
+                            background-color: #5a9fd4;
+                        }
+                    """)
+                except Exception:
+                    pass
+            QTimer.singleShot(2000, _restore_btn)
+        except Exception:
+            pass
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
     
     def _on_close(self):
         """Handle dialog close"""
