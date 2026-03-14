@@ -886,7 +886,7 @@ class RefusalPatternsDialog(QDialog):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         self.tree.setStyleSheet("""
-            QTreeWidget::item { min-height: 28px; padding: 4px 0px; }
+            QTreeWidget::item { min-height: 22px; padding: 2px 0px; }
             QTreeWidget QLineEdit {
                 color: #ffffff;
                 background-color: #3a3a4a;
@@ -896,7 +896,10 @@ class RefusalPatternsDialog(QDialog):
                 font-size: 10pt;
             }
         """)
+        # Connect all editing signals eagerly
         self.tree.itemDoubleClicked.connect(self._on_double_click)
+        self.tree.itemChanged.connect(self._on_item_edited)
+        self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
         main_layout.addWidget(self.tree)
         
         # Load patterns into tree
@@ -1037,10 +1040,6 @@ class RefusalPatternsDialog(QDialog):
             item.setData(0, Qt.UserRole, "edit")
             item.setData(0, Qt.UserRole + 1, old_pattern)
             self.tree.editItem(item, 0)
-            if not hasattr(self, '_item_changed_connected'):
-                self.tree.itemChanged.connect(self._on_item_edited)
-                self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
-                self._item_changed_connected = True
     
     def _show_context_menu(self, position):
         """Show right-click context menu for tree items"""
@@ -1069,33 +1068,32 @@ class RefusalPatternsDialog(QDialog):
     
     def _refresh_tree(self):
         """Refresh the tree widget with current patterns"""
+        self.tree.blockSignals(True)
         self.tree.clear()
         for pattern in self.patterns:
             item = QTreeWidgetItem([pattern])
             self.tree.addTopLevelItem(item)
+        self.tree.blockSignals(False)
     
     def _add_pattern(self):
         """Add a new pattern directly in the tree"""
-        # Insert a new empty item at the top
         item = QTreeWidgetItem()
-        item.setText(0, "")
         item.setFlags(item.flags() | Qt.ItemIsEditable)
+        item.setData(0, Qt.UserRole, "new")
+        self.tree.blockSignals(True)
+        item.setText(0, "")
         self.tree.insertTopLevelItem(0, item)
+        self.tree.blockSignals(False)
         self.tree.setCurrentItem(item)
         self.tree.scrollToItem(item)
         self.tree.editItem(item, 0)
-        
-        # Track that this is a new item being added
-        item.setData(0, Qt.UserRole, "new")
-        
-        # Connect signals to handle commit and cleanup
-        if not hasattr(self, '_item_changed_connected'):
-            self.tree.itemChanged.connect(self._on_item_edited)
-            self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
-            self._item_changed_connected = True
     
     def _on_editor_closed(self, editor, hint=None):
         """Clean up empty new items when editor closes without input"""
+        QTimer.singleShot(100, self._cleanup_empty_new_items)
+    
+    def _cleanup_empty_new_items(self):
+        """Remove any lingering empty 'new' items"""
         try:
             for i in range(self.tree.topLevelItemCount()):
                 item = self.tree.topLevelItem(i)
@@ -1109,35 +1107,30 @@ class RefusalPatternsDialog(QDialog):
         """Handle inline edit completion for add/edit"""
         pattern = item.text(0).strip().lower()
         is_new = item.data(0, Qt.UserRole) == "new"
-        old_pattern = item.data(0, Qt.UserRole + 1)  # stored for edits
+        old_pattern = item.data(0, Qt.UserRole + 1)
         
         if not pattern:
-            # Empty pattern - remove if new, revert if editing
             if is_new:
                 index = self.tree.indexOfTopLevelItem(item)
                 if index >= 0:
                     self.tree.takeTopLevelItem(index)
             elif old_pattern:
-                # Block signals to avoid recursion
                 self.tree.blockSignals(True)
                 item.setText(0, old_pattern)
                 self.tree.blockSignals(False)
             return
         
-        # Check for duplicates (excluding self)
         if is_new:
             if pattern in self.patterns:
-                # Duplicate - remove the new item
                 index = self.tree.indexOfTopLevelItem(item)
                 if index >= 0:
                     self.tree.takeTopLevelItem(index)
                 return
             self.patterns.insert(0, pattern)
-            item.setData(0, Qt.UserRole, None)  # No longer "new"
+            item.setData(0, Qt.UserRole, None)
         else:
             if old_pattern and pattern != old_pattern:
                 if pattern in self.patterns:
-                    # Duplicate - revert
                     self.tree.blockSignals(True)
                     item.setText(0, old_pattern)
                     self.tree.blockSignals(False)
@@ -1145,9 +1138,7 @@ class RefusalPatternsDialog(QDialog):
                 idx = self.patterns.index(old_pattern)
                 self.patterns[idx] = pattern
         
-        # Update the stored pattern for future edits
         item.setData(0, Qt.UserRole + 1, pattern)
-        # Update display
         self.tree.blockSignals(True)
         item.setText(0, pattern)
         self.tree.blockSignals(False)
@@ -1164,11 +1155,6 @@ class RefusalPatternsDialog(QDialog):
         item.setData(0, Qt.UserRole, "edit")
         item.setData(0, Qt.UserRole + 1, old_pattern)
         self.tree.editItem(item, 0)
-        
-        # Ensure itemChanged is connected
-        if not hasattr(self, '_item_changed_connected'):
-            self.tree.itemChanged.connect(self._on_item_edited)
-            self._item_changed_connected = True
     
     def _delete_patterns(self):
         """Delete selected patterns"""
