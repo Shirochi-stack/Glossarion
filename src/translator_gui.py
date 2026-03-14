@@ -1034,7 +1034,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "7.9.8"
+        __version__ = "7.9.9"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1109,7 +1109,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.8')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.7.9.9')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2922,7 +2922,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v7.9.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v7.9.9 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -4879,7 +4879,7 @@ Recent translations to summarize:
         _mode_idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(_auto_mode.lower(), 0)
         self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
         self.auto_glossary_shortcut_combo.setToolTip(
-            "Off: No automatic glossary extraction\n"
+            "Off: No automatic glossary extraction + enables Auto-Mapping\n"
             "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
             "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
@@ -4939,8 +4939,8 @@ Recent translations to summarize:
                     self.append_glossary_checkbox.style().unpolish(self.append_glossary_checkbox)
                     self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
                     self.append_glossary_checkbox.update()
-            # Auto-enable auto map when balanced/full is selected
-            if new_mode in ('balanced', 'full'):
+            # Auto-enable auto map when off/balanced/full is selected
+            if new_mode in ('off', 'balanced', 'full'):
                 self.config['append_glossary_auto_load'] = True
                 self.append_glossary_auto_load_var = True
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):
@@ -15135,8 +15135,8 @@ Important rules:
             mode_data = [
                 {
                     "value": "off", "emoji": "🚫", "title": "OFF",
-                    "subtitle": "Manual control only",
-                    "features": ["✓ No automatic extraction", "✓ Full manual glossary control",
+                    "subtitle": "Manual control + Auto-Mapping ON",
+                    "features": ["✓ No automatic extraction", "✓ Enables Auto-Mapping (auto-fill)",
                                  "✓ Load your own glossary CSV",
                                  "✓ Best for pre-made glossaries",
                                  "✓ Zero extra API cost"],
@@ -18361,7 +18361,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v7.9.8...")
+    print("🚀 Starting Glossarion v7.9.9...")
     
     # Initialize splash screen
     splash_manager = None

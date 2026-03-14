@@ -1958,7 +1958,7 @@ CRITICAL EXTRACTION RULES:
             mode_index = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(saved_mode.lower(), 4)
             self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
         self.auto_glossary_mode_combo.setToolTip(
-            "Off: No automatic glossary extraction\n"
+            "Off: No automatic glossary extraction + enables Auto-Mapping\n"
             "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
             "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
@@ -3045,8 +3045,8 @@ CRITICAL EXTRACTION RULES:
                 if _append_desc_label:
                     _append_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle()
 
-            # Auto-enable & lock auto-map when balanced/full is selected
-            if mode in ('balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
+            # Auto-enable & lock auto-map when off/balanced/full is selected
+            if mode in ('off', 'balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if not self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(True)
                 _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
