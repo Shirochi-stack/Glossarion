@@ -3948,9 +3948,11 @@ def _create_response_handling_section(self, parent):
     disable_qa_markers_desc.setContentsMargins(20, 5, 0, 10)
     section_v.addWidget(disable_qa_markers_desc)
     
-    # Manage Refusal Patterns shortcut button
-    refusal_patterns_btn = QPushButton("🚫 Manage Refusal Patterns...")
-    refusal_patterns_btn.setFixedWidth(250)
+    _refusal_disabled = self.config.get('disable_refusal_checks', True)
+    _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
+    refusal_patterns_btn = QPushButton(f"🚫 Manage Refusal Patterns ({_refusal_status})")
+    self._refusal_patterns_btn_other = refusal_patterns_btn
+    refusal_patterns_btn.setFixedWidth(310)
     refusal_patterns_btn.setStyleSheet("""
         QPushButton {
             background-color: #5c2e5b;

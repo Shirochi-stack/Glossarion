@@ -317,7 +317,7 @@ class QAScannerMixin:
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,
-            'check_ai_artifacts': False,
+            'check_ai_artifacts': True,
             'check_punctuation_mismatch': False,
             'punctuation_loss_threshold': 49,
             'flag_excess_punctuation': False,

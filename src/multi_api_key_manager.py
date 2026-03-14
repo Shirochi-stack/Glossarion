@@ -601,10 +601,10 @@ class RefusalPatternsDialog(QDialog):
         """Load refusal check disable toggle from config"""
         try:
             if hasattr(self.translator_gui, 'config'):
-                return bool(self.translator_gui.config.get('disable_refusal_checks', False))
+                return bool(self.translator_gui.config.get('disable_refusal_checks', True))
         except Exception:
             pass
-        return False
+        return True
     
     def _load_refusal_length_limit(self):
         """Load refusal length limit from config"""
@@ -957,19 +957,22 @@ class RefusalPatternsDialog(QDialog):
         
         main_layout.addWidget(button_frame)
         
-        # Save/Cancel buttons
+        # Save/Cancel buttons (centered)
         save_cancel_frame = QWidget()
         save_cancel_layout = QHBoxLayout(save_cancel_frame)
         save_cancel_layout.setContentsMargins(0, 10, 0, 0)
         save_cancel_layout.addStretch()
+
         
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setMinimumHeight(32)
+        cancel_btn.setMinimumHeight(38)
+        cancel_btn.setMinimumWidth(100)
         cancel_btn.clicked.connect(self.reject)
         save_cancel_layout.addWidget(cancel_btn)
         
         save_btn = QPushButton("Save & Close")
-        save_btn.setMinimumHeight(32)
+        save_btn.setMinimumHeight(38)
+        save_btn.setMinimumWidth(120)
         save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4a7ba7;
@@ -982,6 +985,7 @@ class RefusalPatternsDialog(QDialog):
         """)
         save_btn.clicked.connect(self._save_and_close)
         save_cancel_layout.addWidget(save_btn)
+        save_cancel_layout.addStretch()
         
         main_layout.addWidget(save_cancel_frame)
     
@@ -1166,6 +1170,17 @@ class RefusalPatternsDialog(QDialog):
                 if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
                     self.translator_gui.refusal_pattern_length_limit_var = 1000
             self.translator_gui.save_config(show_message=False)
+            # Update any refusal pattern buttons to reflect new state
+            _disabled = bool(self.disable_refusal_checks_cb.isChecked())
+            _status = "Disabled" if _disabled else "Enabled"
+            _btn_text = f"🚫 Manage Refusal Patterns ({_status})"
+            for attr in ('_refusal_patterns_btn_other', '_refusal_patterns_btn_multi'):
+                try:
+                    btn = getattr(self.translator_gui, attr, None)
+                    if btn is not None:
+                        btn.setText(_btn_text)
+                except Exception:
+                    pass
             QMessageBox.information(self, "Success", f"Saved {len(self.patterns)} refusal patterns")
         self.accept()
 
@@ -2980,7 +2995,10 @@ class MultiAPIKeyDialog(QDialog):
         button_layout.addWidget(export_btn)
         
         # Manage Refusal Patterns button
-        refusal_btn = QPushButton("🚫 Manage Refusal Patterns")
+        _refusal_disabled = self.translator_gui.config.get('disable_refusal_checks', True)
+        _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
+        refusal_btn = QPushButton(f"🚫 Manage Refusal Patterns ({_refusal_status})")
+        self.translator_gui._refusal_patterns_btn_multi = refusal_btn
         refusal_btn.setMinimumHeight(40)
         refusal_btn.setStyleSheet("""
             QPushButton {
