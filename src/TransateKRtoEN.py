@@ -2526,6 +2526,38 @@ class ContentProcessor:
     """Unified content processing"""
     
     @staticmethod
+    def strip_split_markers(text):
+        """Strip ALL forms of split markers from text.
+        
+        Handles:
+        1. Raw HTML:  <h1 id="split-N">SPLIT MARKER: Do Not Remove This Tag</h1>
+        2. Entity-encoded in <p> tags:  <p>&lt;h1 id="split-N"&gt;SPLIT MARKER...&lt;/h1&gt;</p>
+        3. Entity-encoded standalone:   &lt;h1 id="split-N"&gt;...&lt;/h1&gt;
+        """
+        # 1. Raw HTML markers
+        text = re.sub(
+            r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+            '',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # 2. Entity-encoded markers (optionally wrapped in <p> tags)
+        text = re.sub(
+            r'<p>\s*&lt;h1[^&]*split-\d+[^&]*&gt;.*?&lt;/h1&gt;\s*</p>\s*',
+            '',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # 3. Entity-encoded markers without <p> wrapper
+        text = re.sub(
+            r'&lt;h1[^&]*split-\d+[^&]*&gt;.*?&lt;/h1&gt;\s*',
+            '',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return text
+    
+    @staticmethod
     def clean_ai_artifacts(text, remove_artifacts=True):
         """Remove AI response artifacts from text - but ONLY when enabled"""
         if not remove_artifacts:
@@ -6271,12 +6303,7 @@ class BatchTranslationProcessor:
                     if should_save:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save if isinstance(cleaned_to_save, str) else "")
                         except Exception:
@@ -6284,12 +6311,7 @@ class BatchTranslationProcessor:
                     elif not is_only_error_marker and cleaned_stripped:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save)
                         except Exception:
@@ -6343,12 +6365,7 @@ class BatchTranslationProcessor:
                         # Save for debugging - contains actual translation attempt that failed split
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save)
                         except Exception:
@@ -6448,12 +6465,7 @@ class BatchTranslationProcessor:
                 fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
 
                 # Always strip split markers from saved output
-                cleaned_to_save = re.sub(
-                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                    '',
-                    cleaned,
-                    flags=re.IGNORECASE | re.DOTALL,
-                )
+                cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
                 
                 # If translating a plain text source, mirror non-merged behavior and write .txt
                 if getattr(self, 'is_text_file', False):
@@ -13193,12 +13205,7 @@ def main(log_callback=None, stop_callback=None):
                         # Save for debugging - contains actual translation attempt that failed QA
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
                             with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save)
                         except Exception:
@@ -13253,12 +13260,7 @@ def main(log_callback=None, stop_callback=None):
                     if not is_only_error_marker:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
                             with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save)
                         except Exception:
@@ -13327,12 +13329,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Normal merged behavior (split not enabled or header count mismatch)
                 # Save entire merged response to parent chapter's file
-                cleaned_to_save = re.sub(
-                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                    '',
-                    cleaned,
-                    flags=re.IGNORECASE | re.DOTALL,
-                )
+                cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
 
                 if is_text_file and not is_pdf_file:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
