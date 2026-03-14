@@ -970,7 +970,7 @@ class RefusalPatternsDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         save_cancel_layout.addWidget(cancel_btn)
         
-        save_btn = QPushButton("Save Patterns")
+        save_btn = QPushButton("Save Refusal Patterns")
         save_btn.setMinimumHeight(38)
         save_btn.setMinimumWidth(200)
         save_btn.setStyleSheet("""
@@ -999,101 +999,100 @@ class RefusalPatternsDialog(QDialog):
             self.tree.addTopLevelItem(item)
     
     def _add_pattern(self):
-        """Add a new pattern"""
-        # Create input dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Add Refusal Pattern")
-        dialog.setMinimumWidth(500)
+        """Add a new pattern directly in the tree"""
+        # Insert a new empty item at the top
+        item = QTreeWidgetItem()
+        item.setText(0, "")
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        self.tree.insertTopLevelItem(0, item)
+        self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(item)
+        self.tree.editItem(item, 0)
         
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
+        # Track that this is a new item being added
+        item.setData(0, Qt.UserRole, "new")
         
-        label = QLabel("Enter refusal pattern (case-insensitive):")
-        layout.addWidget(label)
-        
-        entry = QLineEdit()
-        layout.addWidget(entry)
-        
-        hint_label = QLabel("Examples: \"i cannot assist\", \"as an ai\", \"violates content policy\"")
-        hint_label.setStyleSheet("color: gray; font-size: 9pt;")
-        layout.addWidget(hint_label)
-        
-        # Buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        
-        ok_btn = QPushButton("Add")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(dialog.accept)
-        btn_layout.addWidget(ok_btn)
-        
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        # Show dialog
-        if dialog.exec_() == QDialog.Accepted:
-            pattern = entry.text().strip().lower()
-            if pattern and pattern not in self.patterns:
-                self.patterns.append(pattern)
-                self._refresh_tree()
+        # Connect signals to handle commit and cleanup
+        if not hasattr(self, '_item_changed_connected'):
+            self.tree.itemChanged.connect(self._on_item_edited)
+            self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
+            self._item_changed_connected = True
     
-    def _edit_pattern(self):
-        """Edit the selected pattern"""
-        selected = self.tree.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "Warning", "Please select a pattern to edit")
+    def _on_editor_closed(self, editor, hint=None):
+        """Clean up empty new items when editor closes without input"""
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                if item and item.data(0, Qt.UserRole) == "new" and not item.text(0).strip():
+                    self.tree.takeTopLevelItem(i)
+                    break
+        except Exception:
+            pass
+    
+    def _on_item_edited(self, item, column):
+        """Handle inline edit completion for add/edit"""
+        pattern = item.text(0).strip().lower()
+        is_new = item.data(0, Qt.UserRole) == "new"
+        old_pattern = item.data(0, Qt.UserRole + 1)  # stored for edits
+        
+        if not pattern:
+            # Empty pattern - remove if new, revert if editing
+            if is_new:
+                index = self.tree.indexOfTopLevelItem(item)
+                if index >= 0:
+                    self.tree.takeTopLevelItem(index)
+            elif old_pattern:
+                # Block signals to avoid recursion
+                self.tree.blockSignals(True)
+                item.setText(0, old_pattern)
+                self.tree.blockSignals(False)
             return
         
-        if len(selected) > 1:
-            QMessageBox.warning(self, "Warning", "Please select only one pattern to edit")
+        # Check for duplicates (excluding self)
+        if is_new:
+            if pattern in self.patterns:
+                # Duplicate - remove the new item
+                index = self.tree.indexOfTopLevelItem(item)
+                if index >= 0:
+                    self.tree.takeTopLevelItem(index)
+                return
+            self.patterns.insert(0, pattern)
+            item.setData(0, Qt.UserRole, None)  # No longer "new"
+        else:
+            if old_pattern and pattern != old_pattern:
+                if pattern in self.patterns:
+                    # Duplicate - revert
+                    self.tree.blockSignals(True)
+                    item.setText(0, old_pattern)
+                    self.tree.blockSignals(False)
+                    return
+                idx = self.patterns.index(old_pattern)
+                self.patterns[idx] = pattern
+        
+        # Update the stored pattern for future edits
+        item.setData(0, Qt.UserRole + 1, pattern)
+        # Update display
+        self.tree.blockSignals(True)
+        item.setText(0, pattern)
+        self.tree.blockSignals(False)
+    
+    def _edit_pattern(self):
+        """Edit the selected pattern inline"""
+        selected = self.tree.selectedItems()
+        if not selected:
             return
         
         item = selected[0]
         old_pattern = item.text(0)
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        item.setData(0, Qt.UserRole, "edit")
+        item.setData(0, Qt.UserRole + 1, old_pattern)
+        self.tree.editItem(item, 0)
         
-        # Create input dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Edit Refusal Pattern")
-        dialog.setMinimumWidth(500)
-        
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        label = QLabel("Edit refusal pattern:")
-        layout.addWidget(label)
-        
-        entry = QLineEdit()
-        entry.setText(old_pattern)
-        layout.addWidget(entry)
-        
-        # Buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        
-        ok_btn = QPushButton("Save")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(dialog.accept)
-        btn_layout.addWidget(ok_btn)
-        
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        # Show dialog
-        if dialog.exec_() == QDialog.Accepted:
-            new_pattern = entry.text().strip().lower()
-            if new_pattern and new_pattern != old_pattern:
-                if new_pattern in self.patterns:
-                    QMessageBox.warning(self, "Warning", "Pattern already exists")
-                else:
-                    index = self.patterns.index(old_pattern)
-                    self.patterns[index] = new_pattern
-                    self._refresh_tree()
+        # Ensure itemChanged is connected
+        if not hasattr(self, '_item_changed_connected'):
+            self.tree.itemChanged.connect(self._on_item_edited)
+            self._item_changed_connected = True
     
     def _delete_patterns(self):
         """Delete selected patterns"""
@@ -1196,7 +1195,7 @@ class RefusalPatternsDialog(QDialog):
                 """)
                 def _restore_btn():
                     try:
-                        self._save_btn.setText("Save Patterns")
+                        self._save_btn.setText("Save Refusal Patterns")
                         self._save_btn.setStyleSheet("""
                             QPushButton {
                                 background-color: #4a7ba7;
