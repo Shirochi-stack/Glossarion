@@ -15576,10 +15576,15 @@ Important rules:
                 text_col.addWidget(dl)
                 cl.addLayout(text_col, 1)
                 
-                # Toggle checkbox with checkmark
+                # Toggle checkbox with visible checkmark
                 cb = QCheckBox()
                 cb.setChecked(td["default"])
+                cb.setFixedSize(30, 30)
                 cb.setStyleSheet(f"""
+                    QCheckBox {{
+                        background: transparent; border: none;
+                        spacing: 0px;
+                    }}
                     QCheckBox::indicator {{
                         width: 26px; height: 26px;
                         border: 2px solid {td['accent']};
@@ -15589,31 +15594,20 @@ Important rules:
                     QCheckBox::indicator:checked {{
                         background-color: {td['accent']};
                         border-color: {td['accent']};
-                        image: none;
                     }}
                     QCheckBox::indicator:hover {{
                         border-color: white;
                     }}
-                    QCheckBox {{ background: transparent; border: none; }}
                 """)
-                # Overlay checkmark label
-                check_label = QLabel("✓")
-                check_label.setFont(QFont("Arial", 16, QFont.Bold))
+                
+                # Checkmark label overlaid on top
+                check_label = QLabel("✓", cb)
+                check_label.setFont(QFont("Arial", 14, QFont.Bold))
                 check_label.setAlignment(Qt.AlignCenter)
-                check_label.setFixedSize(26, 26)
+                check_label.setGeometry(0, 0, 30, 30)
                 check_label.setStyleSheet(f"color: {'#1a1a2e' if td['default'] else 'transparent'}; background: transparent; border: none;")
                 check_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-                
-                # Stack checkbox + checkmark
-                from PySide6.QtWidgets import QStackedLayout
-                cb_container = QWidget()
-                cb_container.setFixedSize(30, 30)
-                cb_container.setStyleSheet("background: transparent; border: none;")
-                cb_stack = QStackedLayout(cb_container)
-                cb_stack.setStackingMode(QStackedLayout.StackAll)
-                cb_stack.addWidget(cb)
-                cb_stack.addWidget(check_label)
-                cl.addWidget(cb_container)
+                cl.addWidget(cb)
                 
                 def _make_toggle_handler(key, checkbox, chk_lbl, accent_color):
                     def handler(state):
