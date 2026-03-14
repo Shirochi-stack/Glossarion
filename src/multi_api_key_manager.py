@@ -852,6 +852,30 @@ class RefusalPatternsDialog(QDialog):
         controls_h.addWidget(self.refusal_length_limit_entry)
         controls_h.addWidget(QLabel("chars"))
         controls_h.addStretch()
+        
+        load_btn = QPushButton("📂 Load Patterns")
+        load_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3d5a80;
+                color: #ffffff;
+                padding: 5px 10px;
+                border: 1px solid #2c4160;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4e6e96;
+                border-color: #3d5a80;
+            }
+            QPushButton:pressed {
+                background-color: #2c4160;
+            }
+        """)
+        load_btn.setToolTip("Import patterns from a text file (one pattern per line)")
+        load_btn.clicked.connect(self._load_patterns_from_file)
+        self._load_btn = load_btn
+        controls_h.addWidget(load_btn)
+        
         main_layout.addWidget(controls_row)
         
         # Tree widget for patterns
@@ -1145,6 +1169,65 @@ class RefusalPatternsDialog(QDialog):
                         self.translator_gui.refusal_pattern_length_limit_var = 1000
             except Exception:
                 pass
+    
+    def _load_patterns_from_file(self):
+        """Load patterns from a text file (one per line), merging with existing"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Refusal Patterns",
+            "",
+            "Text files (*.txt);;All files (*.*)"
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            added = 0
+            skipped = 0
+            for line in lines:
+                pattern = line.strip().lower()
+                if not pattern or pattern.startswith('#'):
+                    continue
+                if pattern in self.patterns:
+                    skipped += 1
+                else:
+                    self.patterns.append(pattern)
+                    added += 1
+            
+            self._refresh_tree()
+            
+            # Flash the load button with result
+            try:
+                _orig_style = self._load_btn.styleSheet()
+                self._load_btn.setText(f"✅ Loaded {added} new, {skipped} skipped")
+                self._load_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2e7d32;
+                        color: white;
+                        font-weight: bold;
+                        padding: 5px 10px;
+                        border: 1px solid #1b5e20;
+                        border-radius: 3px;
+                    }
+                """)
+                def _restore():
+                    try:
+                        self._load_btn.setText("📂 Load Patterns")
+                        self._load_btn.setStyleSheet(_orig_style)
+                    except Exception:
+                        pass
+                QTimer.singleShot(3000, _restore)
+            except Exception:
+                pass
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load file: {e}")
     
     def _save_and_close(self):
         """Save patterns and close dialog"""
