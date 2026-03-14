@@ -15317,7 +15317,7 @@ Important rules:
                         "⚠ May lose some formatting",
                     ],
                     "bg": "#162848", "hover": "#4070c8", "border": "#6aadff", "accent": "#a0d0ff",
-                    "rec": None,
+                    "rec": "✅ Recommended for Token Efficiency",
                 },
                 {
                     "value": "standard", "emoji": "🔬", "title": "BeautifulSoup",
@@ -15330,7 +15330,7 @@ Important rules:
                         "✓ Auto-selects per-language profiles",
                     ],
                     "bg": "#162820", "hover": "#3e7858", "border": "#40e8b0", "accent": "#70ffd8",
-                    "rec": "✅ Recommended for most novels",
+                    "rec": "✅ Recommended for Format Preservation",
                 },
             ]
             
@@ -15524,6 +15524,18 @@ Important rules:
                     "desc": "Automatically retry text/image chunks that take too long to process.\nDefault timeout: 1800s (30 min). Configurable in Other Settings.",
                     "default": True,
                     "bg": "#2a1a14", "accent": "#f0a060",
+                },
+                {
+                    "key": "emergency_image_restore", "emoji": "🖼️", "title": "Emergency Image Restoration",
+                    "desc": "Guarantees img tags are present when the AI skips them.\n⚠️ May result in img tags not appearing where intended.",
+                    "default": False,
+                    "bg": "#1e2636", "accent": "#90a8c8",
+                },
+                {
+                    "key": "request_merging_enabled", "emoji": "🔗", "title": "Request Merging (default 3)",
+                    "desc": "Merges multiple chapter requests into 1.\nNot recommended — may degrade translation quality due to increased context.",
+                    "default": False,
+                    "bg": "#261e2e", "accent": "#b090c8",
                 },
             ]
             
@@ -15924,6 +15936,14 @@ Important rules:
                     if tb_imgcomp: enabled_toggles.append("Image Compression")
                     if tb_scan: enabled_toggles.append("Post-Translation Scanning")
                     if tb_retry: enabled_toggles.append("API Timeout Retry")
+                    tb_img_restore = toggle_states.get('emergency_image_restore', False)
+                    self.config['emergency_image_restore'] = tb_img_restore
+                    self.emergency_image_restore_var = tb_img_restore
+                    if tb_img_restore: enabled_toggles.append("Emergency Image Restoration")
+                    tb_req_merge = toggle_states.get('request_merging_enabled', False)
+                    self.config['request_merging_enabled'] = tb_req_merge
+                    self.request_merging_enabled_var = tb_req_merge
+                    if tb_req_merge: enabled_toggles.append("Request Merging")
                     self.append_log(f"⚙️ Translation toggles: {', '.join(enabled_toggles) if enabled_toggles else 'None'}")
                     self.config['glossary_mode_dialog_shown'] = True
                     try:
