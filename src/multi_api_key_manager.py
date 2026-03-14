@@ -12,7 +12,7 @@ try:
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-        QCompleter
+        QCompleter, QDialogButtonBox
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
@@ -883,6 +883,20 @@ class RefusalPatternsDialog(QDialog):
         self.tree.setHeaderLabels(["Pattern"])
         self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.tree.header().setStretchLastSection(True)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.setStyleSheet("""
+            QTreeWidget::item { min-height: 28px; padding: 4px 0px; }
+            QTreeWidget QLineEdit {
+                color: #ffffff;
+                background-color: #3a3a4a;
+                border: 1px solid #5a9fd4;
+                padding: 4px 6px;
+                min-height: 24px;
+                font-size: 10pt;
+            }
+        """)
+        self.tree.itemDoubleClicked.connect(self._on_double_click)
         main_layout.addWidget(self.tree)
         
         # Load patterns into tree
@@ -1015,6 +1029,44 @@ class RefusalPatternsDialog(QDialog):
         
         main_layout.addWidget(save_cancel_frame)
     
+    def _on_double_click(self, item, column):
+        """Edit pattern on double-click"""
+        if item:
+            old_pattern = item.text(0)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setData(0, Qt.UserRole, "edit")
+            item.setData(0, Qt.UserRole + 1, old_pattern)
+            self.tree.editItem(item, 0)
+            if not hasattr(self, '_item_changed_connected'):
+                self.tree.itemChanged.connect(self._on_item_edited)
+                self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
+                self._item_changed_connected = True
+    
+    def _show_context_menu(self, position):
+        """Show right-click context menu for tree items"""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { menu-scrollable: 1; } QMenu::icon { width: 0px; }")
+        
+        add_action = menu.addAction("➕ Add New Pattern")
+        add_action.triggered.connect(self._add_pattern)
+        
+        item = self.tree.itemAt(position)
+        selected = self.tree.selectedItems()
+        
+        if item:
+            menu.addSeparator()
+            
+            edit_action = menu.addAction("✏️ Edit")
+            edit_action.triggered.connect(self._edit_pattern)
+            
+            delete_action = menu.addAction("🗑️ Delete")
+            if len(selected) > 1:
+                delete_action.setText(f"🗑️ Delete ({len(selected)} selected)")
+            delete_action.triggered.connect(self._delete_patterns)
+        
+        menu.exec_(self.tree.viewport().mapToGlobal(position))
+    
     def _refresh_tree(self):
         """Refresh the tree widget with current patterns"""
         self.tree.clear()
@@ -1143,15 +1195,30 @@ class RefusalPatternsDialog(QDialog):
     
     def _reset_to_defaults(self):
         """Reset patterns to defaults"""
-        reply = QMessageBox.question(
-            self,
-            "Confirm Reset",
-            "Reset all patterns to defaults? This will replace your current patterns.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Confirm Reset")
+        msg.setText("Reset all patterns to defaults? This will replace your current patterns.")
+        msg.setIcon(QMessageBox.Question)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        msg.setStyleSheet("""
+            QPushButton {
+                min-width: 70px;
+                min-height: 28px;
+                padding: 4px 14px;
+            }
+        """)
+        # Center the button box
+        for child in msg.findChildren(QDialogButtonBox):
+            child.setCenterButtons(True)
+        reply = msg.exec_()
         
         if reply == QMessageBox.Yes:
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
             self.patterns = self._get_default_patterns()
             self._refresh_tree()
             # Reset toggle + limit to defaults
