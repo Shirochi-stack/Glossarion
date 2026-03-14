@@ -268,6 +268,42 @@ AI_JSON_LINE_MARKERS = [
     '"role":', '"content":', '"messages":',
     '{"role"', '{"content"', '[{', '}]'
 ]
+
+# Default AI refusal patterns (mirrors RefusalPatternsDialog._get_default_patterns)
+DEFAULT_REFUSAL_PATTERNS = [
+    "i cannot assist", "i can't assist", "i'm not able to assist",
+    "i cannot help", "i can't help", "i'm unable to help",
+    "i'm afraid i cannot help with that", "designed to ensure appropriate use",
+    "as an ai", "as a language model", "as an ai language model",
+    "i don't feel comfortable", "i apologize, but i cannot",
+    "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
+    "against my programming", "against my guidelines",
+    "violates content policy", "i'm not programmed to",
+    "cannot provide that kind", "unable to provide that",
+    "i cannot assist with this request",
+    "that's not within my capabilities to appropriately assist with",
+    "is there something different i can help you with",
+    "careful ethical considerations",
+    "i could help you with a different question or task",
+    "what other topics or questions can i help you explore",
+    "i cannot and will not translate",
+    "i cannot translate this content",
+    "i can't translate this content",
+]
+
+def _get_refusal_patterns_for_scan():
+    """Load refusal patterns from config.json or return defaults."""
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                patterns = config.get('refusal_patterns')
+                if patterns and isinstance(patterns, list):
+                    return patterns
+    except Exception:
+        pass
+    return DEFAULT_REFUSAL_PATTERNS
 # Cache configuration - will be updated by configure_qa_cache()
 _cache_config = {
     "enabled": True,
@@ -1093,6 +1129,31 @@ def detect_ai_artifacts(text):
             'examples': json_lines[:3],
             'severity': 'medium'
         })
+
+    # AI refusal patterns (full-text substring match, short responses only)
+    try:
+        refusal_limit = 900  # Match default refusal length limit
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    _cfg = json.load(f)
+                    refusal_limit = int(_cfg.get('refusal_pattern_length_limit', 900))
+        except Exception:
+            pass
+        if len(text) <= refusal_limit:
+            text_lower = text.lower()
+            refusal_patterns = _get_refusal_patterns_for_scan()
+            matched_refusals = [p for p in refusal_patterns if p in text_lower]
+            if matched_refusals:
+                artifacts_found.append({
+                    'type': 'ai_refusal_pattern',
+                    'count': len(matched_refusals),
+                    'examples': matched_refusals[:3],
+                    'severity': 'high'
+                })
+    except Exception:
+        pass
 
     return artifacts_found
     
@@ -7151,6 +7212,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         issues.append(issue_text)
                     else:
                         issues.append(f"ai_json_artifacts_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_refusal_pattern':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:60] if len(str(examples[0])) > 60 else str(examples[0])
+                        log(f"   🚫 AI refusal pattern detected: '{first_example}'")
+                        issue_text = f"ai_refusal_pattern: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_refusal_pattern_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
                     severity = artifact.get('severity', 'medium')
                     examples = artifact.get('examples', [])
