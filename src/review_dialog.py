@@ -494,6 +494,81 @@ class ReviewDialog(QDialog):
 
         layout.addLayout(button_layout)
 
+    # ─── EPUB list sync ──────────────────────────────────────────────
+
+    def refresh_epub_list(self):
+        """Re-read selected EPUBs from translator_gui and update the dropdown."""
+        new_paths = []
+        selected = getattr(self.translator_gui, 'selected_epub_files', None) or \
+                   getattr(self.translator_gui, 'selected_files', None) or []
+        for f in selected:
+            f_str = str(f)
+            if f_str.lower().endswith('.epub') and os.path.exists(f_str):
+                new_paths.append(f_str)
+        # Ensure current file_path is in list
+        if self.file_path not in new_paths:
+            if os.path.exists(self.file_path):
+                new_paths.insert(0, self.file_path)
+
+        # Skip update if list hasn't changed
+        if new_paths == self._all_epub_paths:
+            return
+
+        self._all_epub_paths = new_paths
+        show_nav = len(new_paths) > 1
+
+        # Update combo
+        self._epub_combo.blockSignals(True)
+        self._epub_combo.clear()
+        for ep in new_paths:
+            self._epub_combo.addItem(f"📖 Review: {os.path.basename(ep)}", ep)
+        # Select current file_path
+        try:
+            idx = new_paths.index(self.file_path)
+        except ValueError:
+            idx = 0
+            if new_paths:
+                self.file_path = new_paths[0]
+        self._epub_combo.setCurrentIndex(idx)
+        self._epub_combo.blockSignals(False)
+
+        # Show/hide nav elements
+        self._nav_prev_btn.setVisible(show_nav)
+        self._nav_next_btn.setVisible(show_nav)
+        self._nav_counter.setVisible(show_nav)
+        if show_nav:
+            self._nav_prev_btn.setEnabled(idx > 0)
+            self._nav_next_btn.setEnabled(idx < len(new_paths) - 1)
+            self._nav_counter.setText(f"{idx + 1} / {len(new_paths)}")
+        # Show/hide Generate All button
+        if hasattr(self, 'generate_all_btn'):
+            self.generate_all_btn.setVisible(show_nav)
+
+        # Update combo style for single vs multi
+        if not show_nav:
+            self._epub_combo.setStyleSheet(
+                "QComboBox { background-color: #2b2b2b; color: white; border: none; "
+                "border-radius: 3px; padding: 4px 8px; font-size: 12pt; font-weight: bold; }"
+                "QComboBox::drop-down { width: 0px; }"
+                "QComboBox QAbstractItemView { background-color: #2b2b2b; color: white; "
+                "selection-background-color: #5a9fd4; border: 1px solid #555; }"
+            )
+        else:
+            self._epub_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: #2b2b2b; color: white; border: 1px solid #555;
+                    border-radius: 3px; padding: 4px 8px; font-size: 10pt;
+                }
+                QComboBox:hover { border-color: #5a9fd4; }
+                QComboBox::drop-down { border: none; width: 20px; }
+                QComboBox::down-arrow { image: none; border: none; }
+                QComboBox QAbstractItemView {
+                    background-color: #2b2b2b; color: white;
+                    selection-background-color: #5a9fd4;
+                    border: 1px solid #555;
+                }
+            """)
+
     # ─── Config / persistence ────────────────────────────────────────
 
     def _load_saved_prompt(self):

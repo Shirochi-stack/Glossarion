@@ -161,19 +161,14 @@ class MetadataBatchTranslatorUI:
                     pass
                 app = QApplication(sys.argv)
 
-            # Reuse existing dialog
+            # Always recreate dialog to stay in sync with current EPUB selection
             if hasattr(self, '_metadata_fields_dialog') and self._metadata_fields_dialog is not None:
                 try:
-                    try:
-                        from dialog_animations import show_dialog_with_fade
-                        show_dialog_with_fade(self._metadata_fields_dialog, duration=220)
-                    except Exception:
-                        self._metadata_fields_dialog.show()
-                    self._metadata_fields_dialog.raise_()
-                    self._metadata_fields_dialog.activateWindow()
-                    return
-                except RuntimeError:
-                    self._metadata_fields_dialog = None
+                    self._metadata_fields_dialog.close()
+                    self._metadata_fields_dialog.deleteLater()
+                except (RuntimeError, Exception):
+                    pass
+                self._metadata_fields_dialog = None
 
             # Create dialog — child of other_settings, non-modal
             parent = getattr(self.gui, '_other_settings_dialog', None) or None

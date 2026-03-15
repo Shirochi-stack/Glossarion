@@ -12384,6 +12384,7 @@ Important rules:
            existing = getattr(self, '_review_dialog', None)
            if existing is not None:
                try:
+                   existing.refresh_epub_list()
                    existing.show()
                    existing.raise_()
                    existing.activateWindow()
