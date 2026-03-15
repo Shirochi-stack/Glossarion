@@ -32,18 +32,22 @@ from bs4 import BeautifulSoup
 
 # ─── tokenizer setup ────────────────────────────────────────────────────
 _enc = None
+_enc_lock = threading.Lock()
 
 def _get_encoder():
     global _enc
-    if _enc is None:
+    if _enc is not None:
+        return _enc
+    with _enc_lock:
+        if _enc is not None:
+            return _enc
         try:
-            model = os.getenv("MODEL", "gpt-4")
-            _enc = tiktoken.encoding_for_model(model)
+            # Use cl100k_base directly — it works well for token estimation
+            # and avoids hangs from tiktoken trying to download BPE files
+            # for unrecognized model names (e.g. gemini-2.0-flash)
+            _enc = tiktoken.get_encoding("cl100k_base")
         except Exception:
-            try:
-                _enc = tiktoken.get_encoding("cl100k_base")
-            except Exception:
-                _enc = None
+            _enc = None
     return _enc
 
 
@@ -269,6 +273,9 @@ def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
     chapters = extract_chapter_texts(epub_path, log_fn=lambda *_: None)
     if not chapters:
         return 0
+
+    # Eagerly initialize encoder before threading
+    _get_encoder()
 
     # Count tokens in parallel across chapters
     with ThreadPoolExecutor(max_workers=min(8, len(chapters))) as pool:
