@@ -706,7 +706,7 @@ class ReviewDialog(QDialog):
             self._force_stop = True
             self._stop_click_times = []
             self._stop_text_label.setText("Finishing...")
-            self._stop_spinner_timer.stop()
+            # Keep spinner running (don't stop it)
             try:
                 self.translator_gui.append_log("[Review] ⚡ Double-click detected — forcing immediate stop!")
             except Exception:
@@ -726,17 +726,10 @@ class ReviewDialog(QDialog):
                 except Exception:
                     pass
 
-            # Stop the queue poller so late thread results are discarded
+            # Stop poll timer and reset UI directly
             if hasattr(self, '_review_poll_timer'):
                 self._review_poll_timer.stop()
-
-            # Wait briefly for hard_cancel to propagate before resetting UI
-            def _delayed_reset():
-                try:
-                    self._on_review_done(None)
-                except RuntimeError:
-                    pass
-            QTimer.singleShot(500, _delayed_reset)
+            self._on_review_done(None)
             return
 
         # First click: graceful stop
