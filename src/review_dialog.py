@@ -1502,6 +1502,7 @@ class ReviewDialog(QDialog):
 
         # Re-enable delete (its handler already shows "No Review" if nothing to delete)
         self.delete_btn.setEnabled(True)
+        self._update_restore_btn_visibility()
 
         # Re-enable nav (may have been disabled during review)
         try:
