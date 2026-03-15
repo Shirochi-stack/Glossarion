@@ -7863,13 +7863,26 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Multi-file
             if hasattr(self, '_multi_file_retranslation_dialog') and self._multi_file_retranslation_dialog:
                 dlg = self._multi_file_retranslation_dialog
-                try:
-                    dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
-                    dlg.show(); dlg.raise_(); dlg.activateWindow()
-                    _refresh_dialog(dlg)
-                    return True
-                except Exception:
-                    pass
+                # Validate selection hasn't changed (user may have cleared/added EPUBs)
+                current_key = tuple(sorted(getattr(self, 'selected_files', [])))
+                cached_key = getattr(self, '_multi_file_selection_key', None)
+                if cached_key is not None and current_key != cached_key:
+                    # Selection changed — destroy stale dialog so it gets rebuilt
+                    try:
+                        dlg.close()
+                        dlg.deleteLater()
+                    except Exception:
+                        pass
+                    self._multi_file_retranslation_dialog = None
+                    self._multi_file_selection_key = None
+                else:
+                    try:
+                        dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+                        dlg.show(); dlg.raise_(); dlg.activateWindow()
+                        _refresh_dialog(dlg)
+                        return True
+                    except Exception:
+                        pass
             # Image folder cache
             if hasattr(self, '_image_retranslation_dialog_cache') and hasattr(self, 'selected_files') and self.selected_files:
                 first = self.selected_files[0]

@@ -3977,35 +3977,111 @@ class RetranslationMixin:
             summary_label.setFont(summary_font)
             dialog_layout.addWidget(summary_label)
             
-            # Create tab widget with custom styling
-            notebook = QTabWidget()
-            notebook.setStyleSheet("""
-                QTabWidget::pane {
-                    border: 2px solid #5a9fd4;
-                    border-radius: 4px;
-                    background-color: #2d2d2d;
-                }
-                QTabBar::tab {
-                    background-color: #3a3a3a;
-                    color: white;
-                    padding: 8px 16px;
-                    margin-right: 2px;
-                    border: 1px solid #5a9fd4;
-                    border-bottom: none;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-                    font-weight: bold;
-                    font-size: 11pt;
-                }
-                QTabBar::tab:selected {
-                    background-color: #5a9fd4;
-                    color: white;
-                }
-                QTabBar::tab:hover {
-                    background-color: #4a8fc4;
-                }
-            """)
-            dialog_layout.addWidget(notebook)
+            # Count total files for UI decision
+            total_files = len(epub_files) + len(text_files) + len(folders) + len(image_files)
+            use_dropdown = total_files > 7
+
+            if use_dropdown:
+                # ── Dropdown + arrows for many files ──
+                from PySide6.QtWidgets import QComboBox, QStackedWidget
+
+                nav_row = QHBoxLayout()
+                nav_row.setSpacing(6)
+
+                nav_prev = QPushButton("◀")
+                nav_prev.setFixedWidth(36)
+                nav_prev.setStyleSheet(
+                    "QPushButton { background-color:#3a3a3a; color:white; font-weight:bold; "
+                    "font-size:13pt; border:1px solid #5a9fd4; border-radius:4px; padding:4px; }"
+                    "QPushButton:hover { background-color:#4a8fc4; }"
+                    "QPushButton:disabled { color:#666; background-color:#2a2a2a; }"
+                )
+
+                combo = QComboBox()
+                combo.setStyleSheet(
+                    "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; "
+                    "font-size:11pt; padding:6px 10px; border:1px solid #5a9fd4; border-radius:4px; }"
+                    "QComboBox::drop-down { border:none; }"
+                    "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
+                    "selection-background-color:#5a9fd4; }"
+                )
+
+                nav_counter = QLabel("1 / 1")
+                nav_counter.setStyleSheet("color:#94a3b8; font-size:10pt; font-weight:bold;")
+                nav_counter.setFixedWidth(60)
+                nav_counter.setAlignment(Qt.AlignCenter)
+
+                nav_next = QPushButton("▶")
+                nav_next.setFixedWidth(36)
+                nav_next.setStyleSheet(nav_prev.styleSheet())
+
+                nav_row.addWidget(nav_prev)
+                nav_row.addWidget(combo, stretch=1)
+                nav_row.addWidget(nav_counter)
+                nav_row.addWidget(nav_next)
+                dialog_layout.addLayout(nav_row)
+
+                stack = QStackedWidget()
+                dialog_layout.addWidget(stack)
+
+                def _update_nav():
+                    idx = combo.currentIndex()
+                    n = combo.count()
+                    nav_prev.setEnabled(idx > 0)
+                    nav_next.setEnabled(idx < n - 1)
+                    nav_counter.setText(f"{idx + 1} / {n}")
+                    stack.setCurrentIndex(idx)
+
+                combo.currentIndexChanged.connect(lambda _: _update_nav())
+                nav_prev.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() - 1))
+                nav_next.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() + 1))
+
+                # Wrap stack+combo to behave like QTabWidget for the rest of the code
+                class _DropdownNotebook:
+                    """Thin adapter so addTab() works the same as QTabWidget."""
+                    def __init__(self, stack, combo):
+                        self._stack = stack
+                        self._combo = combo
+                    def addTab(self, widget, label):
+                        self._stack.addWidget(widget)
+                        self._combo.addItem(label)
+                    def currentIndex(self):
+                        return self._combo.currentIndex()
+                    def setCurrentIndex(self, idx):
+                        self._combo.setCurrentIndex(idx)
+
+                notebook = _DropdownNotebook(stack, combo)
+                dialog._dropdown_update_nav = _update_nav
+            else:
+                # ── Standard tabs for ≤7 files ──
+                notebook = QTabWidget()
+                notebook.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 2px solid #5a9fd4;
+                        border-radius: 4px;
+                        background-color: #2d2d2d;
+                    }
+                    QTabBar::tab {
+                        background-color: #3a3a3a;
+                        color: white;
+                        padding: 8px 16px;
+                        margin-right: 2px;
+                        border: 1px solid #5a9fd4;
+                        border-bottom: none;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                        font-weight: bold;
+                        font-size: 11pt;
+                    }
+                    QTabBar::tab:selected {
+                        background-color: #5a9fd4;
+                        color: white;
+                    }
+                    QTabBar::tab:hover {
+                        background-color: #4a8fc4;
+                    }
+                """)
+                dialog_layout.addWidget(notebook)
             
             # Track all tab data
             tab_data = []
@@ -4053,7 +4129,7 @@ class RetranslationMixin:
                 # Create tab
                 tab_frame = QWidget()
                 tab_layout = QVBoxLayout(tab_frame)
-                tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
+                tab_name = file_base if use_dropdown else (file_base[:20] + "..." if len(file_base) > 20 else file_base)
                 
                 # Use shared logic to populate the tab with global state
                 tab_result = self._force_retranslation_epub_or_text(
@@ -4165,6 +4241,10 @@ class RetranslationMixin:
             else:
                 print(f"[WARN] No tab data to refresh on dialog open")
             
+            # Update dropdown nav state after all tabs are added
+            if hasattr(dialog, '_dropdown_update_nav'):
+                dialog._dropdown_update_nav()
+
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()
             
