@@ -465,8 +465,9 @@ class ReviewDialog(QDialog):
         # Delete Review
         self.delete_btn = QPushButton("🗑️ Delete")
         self.delete_btn.setStyleSheet(
-            "background-color: #dc3545; color: white; font-weight: bold; "
-            "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
+            "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+            "QPushButton:disabled { background-color: #555; color: #888; }"
         )
         self.delete_btn.setMinimumWidth(120)
         self.delete_btn.clicked.connect(self._on_delete)
@@ -613,7 +614,8 @@ class ReviewDialog(QDialog):
                     content = f.read()
                 if content.strip():
                     self._raw_review_md = content
-                    self.log_field.setHtml(self._md_to_html(content))
+                    self._last_rendered_html = self._md_to_html(content)
+                    self.log_field.setHtml(self._last_rendered_html)
                     self._load_remote_images()
                     self.save_btn.setEnabled(True)
                     self.delete_btn.setEnabled(True)
@@ -1121,11 +1123,14 @@ class ReviewDialog(QDialog):
         to the document resource cache so they actually render."""
         import re
         import urllib.request
-        from PySide6.QtGui import QImage, QTextDocument
-        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QImage
 
-        html = self.log_field.toHtml()
-        urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', html)
+        # Store the ORIGINAL rendered HTML (not doc.toHtml() which mangles it)
+        original_html = self._last_rendered_html if hasattr(self, '_last_rendered_html') else None
+        if not original_html:
+            return
+
+        urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', original_html)
         if not urls:
             return
 
@@ -1133,10 +1138,13 @@ class ReviewDialog(QDialog):
         unique_urls = list(dict.fromkeys(urls))
 
         def _fetch_all():
+            fetched = []
             for url in unique_urls:
                 try:
                     req = urllib.request.Request(url, headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Glossarion/1.0'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'image/*,*/*;q=0.8',
+                        'Referer': url,
                     })
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         data = resp.read()
@@ -1145,22 +1153,26 @@ class ReviewDialog(QDialog):
                         # Scale down if very large (max 600px wide)
                         if img.width() > 600:
                             img = img.scaledToWidth(600, Qt.SmoothTransformation)
-                        # Must add resource on main thread
-                        QTimer.singleShot(0, lambda u=url, i=img: self._insert_image_resource(u, i))
+                        fetched.append((url, img))
                 except Exception:
                     pass  # Non-fatal: image just won't show
+            if fetched:
+                # Insert all resources on main thread, then re-render once
+                QTimer.singleShot(0, lambda: self._insert_all_image_resources(fetched))
 
         threading.Thread(target=_fetch_all, daemon=True).start()
 
-    def _insert_image_resource(self, url: str, image):
-        """Insert a fetched image into the document resource cache and refresh."""
+    def _insert_all_image_resources(self, images):
+        """Insert all fetched images into the document resource cache and refresh once."""
         from PySide6.QtGui import QTextDocument
         from PySide6.QtCore import QUrl
         try:
             doc = self.log_field.document()
-            doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), image)
-            # Force re-render by re-setting the same HTML
-            self.log_field.setHtml(doc.toHtml())
+            for url, image in images:
+                doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), image)
+            # Re-render using the ORIGINAL HTML (not doc.toHtml() which mangles URLs)
+            if hasattr(self, '_last_rendered_html') and self._last_rendered_html:
+                self.log_field.setHtml(self._last_rendered_html)
         except RuntimeError:
             pass  # Widget may have been destroyed
 
@@ -1412,6 +1424,11 @@ class ReviewDialog(QDialog):
         # Re-enable save (was disabled at review start)
         self.save_btn.setEnabled(True)
 
+        # Re-enable delete if a review file exists on disk
+        review_path = self._get_review_path()
+        if review_path and os.path.exists(review_path):
+            self.delete_btn.setEnabled(True)
+
         # Re-enable nav (may have been disabled during review)
         try:
             self._epub_combo.setEnabled(True)
@@ -1485,7 +1502,8 @@ class ReviewDialog(QDialog):
             try:
                 self.log_field.clear()
                 self._raw_review_md = text
-                self.log_field.setHtml(self._md_to_html(text))
+                self._last_rendered_html = self._md_to_html(text)
+                self.log_field.setHtml(self._last_rendered_html)
                 self._load_remote_images()
                 fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
                 fade_in.setDuration(2000)
@@ -1756,7 +1774,8 @@ class ReviewDialog(QDialog):
             with open(review_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             self._raw_review_md = content
-            self.log_field.setHtml(self._md_to_html(content))
+            self._last_rendered_html = self._md_to_html(content)
+            self.log_field.setHtml(self._last_rendered_html)
             self._load_remote_images()
             self.delete_btn.setEnabled(True)
 
