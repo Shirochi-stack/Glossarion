@@ -691,7 +691,7 @@ class ReviewDialog(QDialog):
                         pass
                 fade_in.finished.connect(_cleanup)
                 # Re-enable start button early (don't wait for full fade-in)
-                QTimer.singleShot(500, lambda: self.start_btn.setEnabled(True))
+                QTimer.singleShot(200, lambda: self.start_btn.setEnabled(True))
                 self._fade_in_anim = fade_in
                 fade_in.start()
             except RuntimeError:
