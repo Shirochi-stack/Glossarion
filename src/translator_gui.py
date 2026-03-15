@@ -4748,7 +4748,7 @@ Recent translations to summarize:
         token_limit_layout.setSpacing(6)
         
         self.token_limit_entry = QLineEdit()
-        self.token_limit_entry.setText(f"{self.config.get('token_limit', 200000):,}")
+        self.token_limit_entry.setText(f"{self.config.get('token_limit') or 200000:,}")
         self.token_limit_entry.setMaximumWidth(110)
         self.token_limit_entry.setEnabled(not self.token_limit_disabled)
 
