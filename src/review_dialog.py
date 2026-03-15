@@ -1119,13 +1119,10 @@ class ReviewDialog(QDialog):
         QTimer.singleShot(delay_ms, _reset)
 
     def _load_remote_images(self):
-        """Fetch remote images referenced in the QTextEdit HTML and add them
-        to the document resource cache so they actually render."""
+        """Fetch remote images and embed them as data URIs in the HTML."""
         import re
-        import urllib.request
-        from PySide6.QtGui import QImage
+        import base64
 
-        # Store the ORIGINAL rendered HTML (not doc.toHtml() which mangles it)
         original_html = self._last_rendered_html if hasattr(self, '_last_rendered_html') else None
         if not original_html:
             return
@@ -1137,42 +1134,93 @@ class ReviewDialog(QDialog):
         # De-duplicate
         unique_urls = list(dict.fromkeys(urls))
 
+        def _fetch_image(url):
+            """Try to fetch a single image, returns (data, content_type) or None."""
+            headers = {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Safari/537.36'
+                ),
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': url.rsplit('/', 1)[0] + '/',
+                'Sec-Fetch-Dest': 'image',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site',
+            }
+            # Try requests library first (handles redirects/cookies better)
+            try:
+                import requests as req_lib
+                resp = req_lib.get(url, headers=headers, timeout=10, allow_redirects=True)
+                if resp.status_code == 200 and len(resp.content) > 1024:
+                    ct = resp.headers.get('Content-Type', '')
+                    if 'image' in ct or 'octet' in ct:
+                        return resp.content, ct
+            except Exception:
+                pass
+            # Fallback to urllib
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = resp.read()
+                    ct = resp.headers.get('Content-Type', '')
+                if data and len(data) > 1024 and ('image' in ct or 'octet' in ct):
+                    return data, ct
+            except Exception:
+                pass
+            return None
+
         def _fetch_all():
-            fetched = []
+            replacements = {}  # url -> data_uri
+            failed_urls = []
             for url in unique_urls:
                 try:
-                    req = urllib.request.Request(url, headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept': 'image/*,*/*;q=0.8',
-                        'Referer': url,
-                    })
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        data = resp.read()
-                    img = QImage()
-                    if img.loadFromData(data):
-                        # Scale down if very large (max 600px wide)
-                        if img.width() > 600:
-                            img = img.scaledToWidth(600, Qt.SmoothTransformation)
-                        fetched.append((url, img))
+                    result = _fetch_image(url)
+                    if not result:
+                        failed_urls.append(url)
+                        continue
+                    data, content_type = result
+                    # Determine MIME type from content-type header or URL extension
+                    url_lower = url.lower()
+                    if 'gif' in content_type or url_lower.endswith('.gif'):
+                        mime = 'image/gif'
+                    elif 'png' in content_type or url_lower.endswith('.png'):
+                        mime = 'image/png'
+                    elif 'webp' in content_type or url_lower.endswith('.webp'):
+                        mime = 'image/webp'
+                    elif 'svg' in content_type or url_lower.endswith('.svg'):
+                        mime = 'image/svg+xml'
+                    else:
+                        mime = 'image/jpeg'
+                    b64 = base64.b64encode(data).decode('ascii')
+                    replacements[url] = f"data:{mime};base64,{b64}"
                 except Exception:
-                    pass  # Non-fatal: image just won't show
-            if fetched:
-                # Insert all resources on main thread, then re-render once
-                QTimer.singleShot(0, lambda: self._insert_all_image_resources(fetched))
+                    failed_urls.append(url)  # Track for fallback link
+            if replacements or failed_urls:
+                QTimer.singleShot(0, lambda: self._apply_image_data_uris(replacements, failed_urls))
 
         threading.Thread(target=_fetch_all, daemon=True).start()
 
-    def _insert_all_image_resources(self, images):
-        """Insert all fetched images into the document resource cache and refresh once."""
-        from PySide6.QtGui import QTextDocument
-        from PySide6.QtCore import QUrl
+    def _apply_image_data_uris(self, replacements: dict, failed_urls: list = None):
+        """Replace remote URLs with data URIs or fallback links, then re-render."""
+        import re
         try:
-            doc = self.log_field.document()
-            for url, image in images:
-                doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), image)
-            # Re-render using the ORIGINAL HTML (not doc.toHtml() which mangles URLs)
-            if hasattr(self, '_last_rendered_html') and self._last_rendered_html:
-                self.log_field.setHtml(self._last_rendered_html)
+            html = self._last_rendered_html
+            for url, data_uri in replacements.items():
+                html = html.replace(url, data_uri)
+            # Replace failed images with clickable links
+            for url in (failed_urls or []):
+                # Match the full <img> tag containing this URL and replace with a link
+                pattern = r'<br/>\s*<img[^>]*src="' + re.escape(url) + r'"[^>]*/?>\s*<br/>'
+                link_html = (
+                    f'<br/><a href="{url}" style="color:#5a9fd4;text-decoration:underline;">'
+                    f'🖼️ View Image</a><br/>'
+                )
+                html = re.sub(pattern, link_html, html)
+            self._last_rendered_html = html
+            self.log_field.setHtml(html)
         except RuntimeError:
             pass  # Widget may have been destroyed
 
@@ -1733,8 +1781,13 @@ class ReviewDialog(QDialog):
         return os.path.join(os.path.dirname(review_path), "backups")
 
     def _update_restore_btn_visibility(self):
-        """Show/hide the restore button based on whether backups exist."""
+        """Show/hide the restore button based on whether backups exist
+        and the delete button is enabled (i.e. not during review generation)."""
         try:
+            # Hide restore when delete is disabled (review in progress)
+            if not self.delete_btn.isEnabled():
+                self.restore_btn.hide()
+                return
             backups_dir = self._get_backups_dir()
             if backups_dir and os.path.isdir(backups_dir):
                 backups = [f for f in os.listdir(backups_dir) if f.endswith('.md')]
