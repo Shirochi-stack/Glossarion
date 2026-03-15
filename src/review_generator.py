@@ -269,19 +269,31 @@ def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
     Uses parallel threading for speed on large files.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
 
+    print(f"[TokenCount] Starting for: {os.path.basename(epub_path)}")
+    t0 = time.time()
+
+    print(f"[TokenCount] Extracting chapters...")
     chapters = extract_chapter_texts(epub_path, log_fn=lambda *_: None)
+    print(f"[TokenCount] Extracted {len(chapters)} chapters in {time.time() - t0:.1f}s")
     if not chapters:
         return 0
 
     # Eagerly initialize encoder before threading
-    _get_encoder()
+    print(f"[TokenCount] Initializing encoder...")
+    enc = _get_encoder()
+    if enc is None:
+        print(f"[TokenCount] WARNING: tiktoken encoder is None, using fallback")
+    print(f"[TokenCount] Encoder ready in {time.time() - t0:.1f}s")
 
     # Count tokens in parallel across chapters
+    print(f"[TokenCount] Counting tokens across {len(chapters)} chapters...")
     with ThreadPoolExecutor(max_workers=min(8, len(chapters))) as pool:
         futures = [pool.submit(count_tokens, text) for _, text in chapters]
         total = sum(f.result() for f in as_completed(futures))
 
+    print(f"[TokenCount] Done: {total:,} tokens in {time.time() - t0:.1f}s")
     return total
 
 

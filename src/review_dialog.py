@@ -311,34 +311,43 @@ class ReviewDialog(QDialog):
     def _start_token_count(self):
         """Count EPUB tokens in a background thread."""
         self._counting = True
+        self._token_result = None  # Will be set by background thread
         self.token_label.setText("⏳ Counting tokens...")
         self.token_label.setStyleSheet("color: #f59e0b; font-size: 10pt;")
 
         def _count():
             try:
                 total = count_epub_tokens(self.file_path)
-                QTimer.singleShot(0, lambda t=total: self._on_token_count_done(t))
+                self._token_result = ('ok', total)
             except Exception as e:
                 import traceback
                 err_msg = f"{e}\n{traceback.format_exc()}"
                 print(f"[ReviewDialog] Token counting error: {err_msg}")
-                QTimer.singleShot(0, lambda msg=err_msg: self._on_token_count_done(-1, msg))
+                self._token_result = ('error', err_msg)
 
         t = threading.Thread(target=_count, daemon=True)
         t.start()
 
-    def _on_token_count_done(self, total: int, error: str = None):
-        """Called on main thread when token counting finishes."""
-        self._counting = False
-        if error:
-            self.token_label.setText(f"⚠️ Token count failed: {error}")
-            self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
-        elif total >= 0:
-            self.token_label.setText(f"📊 File tokens: {total:,}")
-            self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
-        else:
-            self.token_label.setText("⚠️ Could not count tokens")
-            self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+        # Poll for result on the main thread every 200ms
+        self._token_poll_timer = QTimer(self)
+        self._token_poll_timer.setInterval(200)
+        def _check_result():
+            result = self._token_result
+            if result is None:
+                return  # Still counting
+            self._token_poll_timer.stop()
+            self._counting = False
+            if result[0] == 'error':
+                self.token_label.setText(f"⚠️ Token count failed: {result[1][:100]}")
+                self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+            elif result[1] >= 0:
+                self.token_label.setText(f"📊 File tokens: {result[1]:,}")
+                self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
+            else:
+                self.token_label.setText("⚠️ Could not count tokens")
+                self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+        self._token_poll_timer.timeout.connect(_check_result)
+        self._token_poll_timer.start()
 
     # ─── Review generation ───────────────────────────────────────────
 
