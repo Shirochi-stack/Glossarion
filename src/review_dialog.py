@@ -347,7 +347,7 @@ class ReviewDialog(QDialog):
         # Font size
         self._review_font_size_spin = QSpinBox()
         self._review_font_size_spin.setRange(5, 36)
-        self._review_font_size_spin.setValue(int(self.translator_gui.config.get('review_font_size', 8)))
+        self._review_font_size_spin.setValue(int(self.translator_gui.config.get('review_font_size', 9)))
         self._review_font_size_spin.setSuffix("pt")
         self._review_font_size_spin.setFocusPolicy(Qt.StrongFocus)
         self._review_font_size_spin.wheelEvent = lambda e: e.ignore()
@@ -377,7 +377,7 @@ class ReviewDialog(QDialog):
         # Header spacing
         self._review_header_spacing_spin = QSpinBox()
         self._review_header_spacing_spin.setRange(-4, 24)
-        self._review_header_spacing_spin.setValue(int(self.translator_gui.config.get('review_header_spacing', -4)))
+        self._review_header_spacing_spin.setValue(int(self.translator_gui.config.get('review_header_spacing', 6)))
         self._review_header_spacing_spin.setSuffix("px")
         self._review_header_spacing_spin.setFocusPolicy(Qt.StrongFocus)
         self._review_header_spacing_spin.wheelEvent = lambda e: e.ignore()
@@ -386,7 +386,7 @@ class ReviewDialog(QDialog):
         # Paragraph spacing
         self._review_para_spacing_spin = QSpinBox()
         self._review_para_spacing_spin.setRange(0, 24)
-        self._review_para_spacing_spin.setValue(int(self.translator_gui.config.get('review_spacing', 6)))
+        self._review_para_spacing_spin.setValue(int(self.translator_gui.config.get('review_spacing', 8)))
         self._review_para_spacing_spin.setSuffix("px")
         self._review_para_spacing_spin.setFocusPolicy(Qt.StrongFocus)
         self._review_para_spacing_spin.wheelEvent = lambda e: e.ignore()
@@ -416,15 +416,16 @@ class ReviewDialog(QDialog):
             spacing_row.addWidget(w)
         spacing_row.addStretch()
 
-        reset_btn = QPushButton("Reset")
-        reset_btn.setFixedHeight(22)
-        reset_btn.setCursor(Qt.PointingHandCursor)
-        reset_btn.setStyleSheet(
-            "QPushButton { color: #aaa; font-size: 9pt; padding: 2px 10px; }"
-            "QPushButton:hover { color: white; }"
+        self._reset_font_btn = QPushButton("↺ Reset")
+        self._reset_font_btn.setFixedHeight(22)
+        self._reset_font_btn.setCursor(Qt.PointingHandCursor)
+        self._reset_font_btn.setStyleSheet(
+            "QPushButton { color: #ccc; font-size: 9pt; padding: 2px 10px; "
+            "border: 1px solid #555; border-radius: 3px; background: #383838; }"
+            "QPushButton:hover { background: #4a4a4a; color: white; border-color: #888; }"
         )
-        reset_btn.clicked.connect(self._reset_font_settings)
-        spacing_row.addWidget(reset_btn)
+        self._reset_font_btn.clicked.connect(self._reset_font_settings)
+        spacing_row.addWidget(self._reset_font_btn)
 
         font_settings_layout = QVBoxLayout()
         font_settings_layout.setContentsMargins(0, 0, 0, 0)
@@ -1478,16 +1479,16 @@ class ReviewDialog(QDialog):
         """Get font settings from config for _md_to_html."""
         return {
             'font_family': self.translator_gui.config.get('review_font_family', 'Segoe UI'),
-            'font_size': int(self.translator_gui.config.get('review_font_size', 8)),
-            'spacing': int(self.translator_gui.config.get('review_spacing', 6)),
-            'header_spacing': int(self.translator_gui.config.get('review_header_spacing', -4)),
+            'font_size': int(self.translator_gui.config.get('review_font_size', 9)),
+            'spacing': int(self.translator_gui.config.get('review_spacing', 8)),
+            'header_spacing': int(self.translator_gui.config.get('review_header_spacing', 6)),
             'line_height': int(self.translator_gui.config.get('review_line_height', 50)),
             'font_color': self.translator_gui.config.get('review_font_color', '#e0e0e0'),
         }
 
     @staticmethod
-    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 8, spacing: int = 6,
-                    header_spacing: int = -4, line_height: int = 50, font_color: str = '#e0e0e0') -> str:
+    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 9, spacing: int = 8,
+                    header_spacing: int = 6, line_height: int = 50, font_color: str = '#e0e0e0') -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
 
@@ -1933,18 +1934,35 @@ class ReviewDialog(QDialog):
         )
 
     def _reset_font_settings(self):
-        """Reset all font settings to defaults."""
+        """Reset all font settings to defaults with sound and animation."""
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
+
         self._review_font_combo.setCurrentText("Segoe UI")
-        self._review_font_size_spin.setValue(8)
+        self._review_font_size_spin.setValue(9)
         self._review_line_height_spin.setValue(50)
-        self._review_header_spacing_spin.setValue(-4)
-        self._review_para_spacing_spin.setValue(6)
+        self._review_header_spacing_spin.setValue(6)
+        self._review_para_spacing_spin.setValue(8)
         self._review_font_color = '#e0e0e0'
         self._review_color_btn.setStyleSheet(
             "QPushButton { background-color: #e0e0e0; border: 1px solid #888; border-radius: 3px; }"
             "QPushButton:hover { border: 2px solid white; }"
         )
         self._on_review_font_changed()
+
+        # Brief green flash on the button
+        self._reset_font_btn.setStyleSheet(
+            "QPushButton { color: white; font-size: 9pt; padding: 2px 10px; "
+            "border: 1px solid #4CAF50; border-radius: 3px; background: #4CAF50; }"
+        )
+        QTimer.singleShot(400, lambda: self._reset_font_btn.setStyleSheet(
+            "QPushButton { color: #ccc; font-size: 9pt; padding: 2px 10px; "
+            "border: 1px solid #555; border-radius: 3px; background: #383838; }"
+            "QPushButton:hover { background: #4a4a4a; color: white; border-color: #888; }"
+        ))
 
     def _on_review_font_changed(self, _=None):
         """Handle font family or size change — save and re-render."""
