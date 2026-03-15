@@ -10,8 +10,9 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QPlainTextEdit, QCheckBox, QApplication, QGroupBox, QSplitter
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QIcon
+from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 from review_generator import (
     DEFAULT_REVIEW_PROMPT,
@@ -631,24 +632,39 @@ class ReviewDialog(QDialog):
         if error:
             self._append_log(f"\n❌ Error: {error}")
         elif result:
-            # Transition: show success flash, then reveal review
-            self.log_field.clear()
-            self.log_field.setPlainText("✅ Review generated successfully!")
-            self.log_field.setStyleSheet(
-                "QPlainTextEdit { color: #4ade80; font-size: 14pt; font-weight: bold; }"
-            )
+            # Visual fade transition: fade out log → swap text → fade in review
             self.delete_btn.setEnabled(True)
             self._update_restore_btn_visibility()
 
-            # After brief delay, swap to actual review text with normal styling
-            def _show_review():
+            opacity_effect = QGraphicsOpacityEffect(self.log_field)
+            self.log_field.setGraphicsEffect(opacity_effect)
+            opacity_effect.setOpacity(1.0)
+
+            # Fade out
+            fade_out = QPropertyAnimation(opacity_effect, b"opacity", self)
+            fade_out.setDuration(300)
+            fade_out.setStartValue(1.0)
+            fade_out.setEndValue(0.0)
+            fade_out.setEasingCurve(QEasingCurve.InQuad)
+
+            def _swap_and_fade_in():
                 try:
-                    self.log_field.setStyleSheet("")
                     self.log_field.clear()
                     self.log_field.setPlainText(result)
+                    # Fade in
+                    fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
+                    fade_in.setDuration(400)
+                    fade_in.setStartValue(0.0)
+                    fade_in.setEndValue(1.0)
+                    fade_in.setEasingCurve(QEasingCurve.OutQuad)
+                    self._fade_in_anim = fade_in  # prevent GC
+                    fade_in.start()
                 except RuntimeError:
                     pass
-            QTimer.singleShot(800, _show_review)
+
+            fade_out.finished.connect(_swap_and_fade_in)
+            self._fade_out_anim = fade_out  # prevent GC
+            fade_out.start()
 
             # Update the review emoji in the main GUI
             try:
