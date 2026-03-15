@@ -882,6 +882,11 @@ class MetadataBatchTranslatorUI:
         user_label.setContentsMargins(0, 15, 0, 0)
         tab_layout.addWidget(user_label)
         
+        user_desc = QLabel("Instructions for how to translate the book title:")
+        user_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        user_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(user_desc)
+        
         self.title_user_text = QTextEdit()
         self.title_user_text.setMinimumHeight(80)
         self.title_user_text.setStyleSheet("""
@@ -893,10 +898,18 @@ class MetadataBatchTranslatorUI:
                 padding: 5px;
                 font-family: 'Consolas', 'Courier New', monospace;
             }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
         """)
         self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
             "Translate this book title to {target_lang} while retaining any acronyms:"))
         tab_layout.addWidget(self.title_user_text)
+        
+        var_label = QLabel("Variables available: {target_lang} - detected source language")
+        var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
+        var_label.setContentsMargins(0, 10, 0, 0)
+        tab_layout.addWidget(var_label)
         
         tab_layout.addStretch()
     
@@ -928,6 +941,9 @@ class MetadataBatchTranslatorUI:
                 border-radius: 3px;
                 padding: 5px;
                 font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
             }
         """)
         self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
@@ -962,6 +978,9 @@ class MetadataBatchTranslatorUI:
                 padding: 5px;
                 font-family: 'Consolas', 'Courier New', monospace;
             }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
         """)
         self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
             "Translate these chapter titles to {target_lang}\n"
@@ -970,7 +989,7 @@ class MetadataBatchTranslatorUI:
         tab_layout.addWidget(self.header_batch_text)
         
         var_label = QLabel("Variables available: {target_lang} - detected source language")
-        var_label.setStyleSheet("color: blue; font-size: 10pt;")
+        var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
         
@@ -1097,7 +1116,7 @@ class MetadataBatchTranslatorUI:
             tab_layout.addWidget(field_widget)
         
         var_label = QLabel("Variables: {target_lang} - detected language, {field_value} - the text to translate")
-        var_label.setStyleSheet("color: blue; font-size: 10pt;")
+        var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
         
