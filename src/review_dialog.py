@@ -642,7 +642,7 @@ class ReviewDialog(QDialog):
 
             # Fade out
             fade_out = QPropertyAnimation(opacity_effect, b"opacity", self)
-            fade_out.setDuration(300)
+            fade_out.setDuration(600)
             fade_out.setStartValue(1.0)
             fade_out.setEndValue(0.0)
             fade_out.setEasingCurve(QEasingCurve.InQuad)
@@ -653,7 +653,7 @@ class ReviewDialog(QDialog):
                     self.log_field.setPlainText(result)
                     # Fade in
                     fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
-                    fade_in.setDuration(400)
+                    fade_in.setDuration(800)
                     fade_in.setStartValue(0.0)
                     fade_in.setEndValue(1.0)
                     fade_in.setEasingCurve(QEasingCurve.OutQuad)
