@@ -2091,15 +2091,22 @@ Text to analyze:
                 except:
                     pass
 
-            # Close review dialog and stop its background thread
+            # Close review dialog and stop its background review generator thread
             if hasattr(self, '_review_dialog') and self._review_dialog:
                 try:
-                    print("[CLEANUP] Closing review dialog...")
+                    print("[CLEANUP] Closing review dialog & stopping review generator...")
                     dlg = self._review_dialog
-                    # Signal the review thread to stop
+                    # Signal the review generator thread to stop
                     if hasattr(dlg, '_stop_requested'):
                         dlg._stop_requested = True
                         dlg._force_stop = True
+                    # Cancel any in-flight API calls from review_generator
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.set_global_cancellation(True)
+                        UnifiedClient.hard_cancel_all()
+                    except Exception:
+                        pass
                     # Stop poll timer
                     if hasattr(dlg, '_review_poll_timer'):
                         try:
@@ -2114,7 +2121,7 @@ Text to analyze:
                             pass
                     _force_close_dialog(dlg)
                     self._review_dialog = None
-                    print("[CLEANUP] Review dialog closed")
+                    print("[CLEANUP] Review dialog & generator closed")
                 except Exception:
                     pass
 
