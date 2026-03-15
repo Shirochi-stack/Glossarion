@@ -251,15 +251,18 @@ class ReviewDialog(QDialog):
             self._nav_next_btn.setEnabled(init_idx < len(self._all_epub_paths) - 1)
             self._nav_counter.setText(f"{init_idx + 1} / {len(self._all_epub_paths)}")
 
-        # Reset to Default button (right-aligned, above the System Prompt group)
+        # Reset to Default button (right-aligned, compact above System Prompt)
         reset_row = QHBoxLayout()
+        reset_row.setContentsMargins(0, 0, 0, 0)
+        reset_row.setSpacing(0)
         reset_row.addStretch()
         reset_prompt_btn = QPushButton("↺ Reset to Default")
         reset_prompt_btn.setFixedHeight(24)
+        reset_prompt_btn.setCursor(Qt.PointingHandCursor)
         reset_prompt_btn.setStyleSheet(
-            "QPushButton { background-color: #3a3a3a; color: #aaa; border: 1px solid #555; "
-            "border-radius: 3px; padding: 2px 10px; font-size: 9pt; }"
-            "QPushButton:hover { background-color: #4a4a4a; color: white; }"
+            "QPushButton { background-color: #2b3a4a; color: #5a9fd4; border: 1px solid #3d5a73; "
+            "border-radius: 3px; padding: 2px 10px; font-size: 9pt; font-weight: 600; }"
+            "QPushButton:hover { background-color: #3a4f66; color: #7ab8e8; border-color: #5a9fd4; }"
         )
         def _confirm_reset_prompt():
             from PySide6.QtWidgets import QMessageBox, QDialogButtonBox
@@ -345,7 +348,7 @@ class ReviewDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(8)
 
-        # 4. Start Review
+        # 4. Start Review (single EPUB)
         self.start_btn = QPushButton("🚀 Start Review")
         self.start_btn.setStyleSheet(
             "QPushButton { background-color: #4a7ba7; color: white; font-weight: bold; "
@@ -355,6 +358,21 @@ class ReviewDialog(QDialog):
         self.start_btn.setMinimumWidth(140)
         self.start_btn.clicked.connect(self._on_start_review)
         button_layout.addWidget(self.start_btn)
+
+        # Generate All button (visible only with multiple EPUBs)
+        self.generate_all_btn = QPushButton("📚 Review all Files")
+        self.generate_all_btn.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; "
+            "padding: 8px 16px; border-radius: 4px; font-size: 10pt; }"
+            "QPushButton:hover { background-color: #8552e0; }"
+            "QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }"
+        )
+        self.generate_all_btn.setMinimumWidth(140)
+        self.generate_all_btn.setToolTip("Generate reviews for all selected EPUBs")
+        self.generate_all_btn.clicked.connect(self._on_generate_all)
+        button_layout.addWidget(self.generate_all_btn)
+        if len(self._all_epub_paths) <= 1:
+            self.generate_all_btn.hide()
 
         # Stop button with spinning Halgakos icon (hidden initially)
         self.stop_btn = QPushButton()
@@ -728,6 +746,204 @@ class ReviewDialog(QDialog):
         self._review_poll_timer.timeout.connect(_drain_queue)
         self._review_poll_timer.start()
 
+    def _on_generate_all(self):
+        """Generate reviews for all selected EPUBs (sequential or parallel)."""
+        if self._review_thread and self._review_thread.is_alive():
+            return  # Already running
+
+        if len(self._all_epub_paths) <= 1:
+            self._on_start_review()
+            return
+
+        # Confirm with user
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Generate All Reviews")
+        msg.setText(
+            f"Generate reviews for all {len(self._all_epub_paths)} EPUBs?\n\n"
+            "This will process each EPUB and save the review automatically."
+        )
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
+        if msg.exec() != QMessageBox.Yes:
+            return
+
+        self._stop_requested = False
+        self._force_stop = False
+        self._save_prompt_to_config()
+
+        # Gather parameters
+        gui = self.translator_gui
+        api_key = gui.api_key_entry.text().strip() if hasattr(gui, 'api_key_entry') else ''
+        model = getattr(gui, 'model_var', os.getenv('MODEL', 'gemini-2.0-flash'))
+        endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
+        temperature = float(gui.config.get('translation_temperature', 0.3))
+        config = dict(gui.config)
+
+        try:
+            token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
+        except (ValueError, AttributeError):
+            token_limit = 200000
+
+        system_prompt_template = self.prompt_edit.toPlainText().strip()
+        output_lang = getattr(gui, 'lang_var', 'English')
+        system_prompt = system_prompt_template.replace('{target_lang}', output_lang)
+        spoiler_mode = self.spoiler_checkbox.isChecked()
+
+        # Get batch size for parallelism
+        try:
+            batch_size = int(getattr(gui, 'batch_size_var', 1))
+            if batch_size < 1:
+                batch_size = 1
+        except (ValueError, TypeError):
+            batch_size = 1
+
+        # UI state
+        self.start_btn.hide()
+        self.generate_all_btn.hide()
+        self._stop_text_label.setText("Stop All")
+        self.stop_btn.show()
+        self._stop_spinner_timer.start()
+        self.log_field.clear()
+        self.save_btn.setEnabled(False)
+
+        # Clear cancellation
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_global_cancellation(False)
+        except Exception:
+            pass
+
+        # Message queue for thread → main-thread
+        import queue
+        self._review_queue = queue.Queue()
+        all_paths = list(self._all_epub_paths)
+        total = len(all_paths)
+
+        def _get_output_dir(epub_path):
+            epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
+            if override_dir:
+                return os.path.join(os.path.abspath(override_dir), epub_base)
+            return os.path.join(os.getcwd(), epub_base)
+
+        def _stop_check():
+            return self._stop_requested
+
+        def _run_all():
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _generate_single(idx, epub_path):
+                basename = os.path.basename(epub_path)
+                self._review_queue.put(('log', f"\n{'═'*50}"))
+                self._review_queue.put(('log', f"📖 [{idx+1}/{total}] {basename}"))
+                self._review_queue.put(('log', f"{'═'*50}\n"))
+                self._review_queue.put(('nav', idx))  # Navigate dropdown to this EPUB
+
+                if self._stop_requested:
+                    self._review_queue.put(('log', f"⏹️ Skipped (stopped): {basename}"))
+                    return idx, None, None
+
+                out_dir = _get_output_dir(epub_path)
+                try:
+                    result = generate_review(
+                        epub_path=epub_path,
+                        output_dir=out_dir,
+                        api_key=api_key,
+                        model=model,
+                        endpoint=endpoint,
+                        system_prompt=system_prompt,
+                        input_token_limit=token_limit,
+                        spoiler_mode=spoiler_mode,
+                        temperature=temperature,
+                        config=config,
+                        log_fn=lambda msg: self._review_queue.put(('log', f"[{basename}] {msg}")),
+                        stop_check_fn=_stop_check,
+                    )
+                    self._review_queue.put(('log', f"✅ Done: {basename}"))
+                    return idx, result, None
+                except Exception as e:
+                    self._review_queue.put(('log', f"❌ Error [{basename}]: {e}"))
+                    return idx, None, str(e)
+
+            workers = min(batch_size, total)
+            completed = 0
+            errors = 0
+
+            if workers <= 1:
+                # Sequential
+                for i, path in enumerate(all_paths):
+                    if self._stop_requested:
+                        break
+                    idx, result, err = _generate_single(i, path)
+                    completed += 1
+                    if err:
+                        errors += 1
+            else:
+                # Parallel
+                self._review_queue.put(('log', f"🔄 Running {workers} reviews in parallel...\n"))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {executor.submit(_generate_single, i, p): i for i, p in enumerate(all_paths)}
+                    for future in as_completed(futures):
+                        if self._stop_requested:
+                            break
+                        try:
+                            idx, result, err = future.result()
+                            completed += 1
+                            if err:
+                                errors += 1
+                        except Exception as e:
+                            completed += 1
+                            errors += 1
+                            self._review_queue.put(('log', f"❌ Future error: {e}"))
+
+            self._review_queue.put(('log', f"\n{'═'*50}"))
+            self._review_queue.put(('log', f"📊 Finished: {completed}/{total} reviews ({errors} errors)"))
+            self._review_queue.put(('log', f"{'═'*50}"))
+            self._review_queue.put(('all_done', None))
+
+        self._review_thread = threading.Thread(target=_run_all, daemon=True)
+        self._review_thread.start()
+
+        # Poll queue
+        self._review_poll_timer = QTimer(self)
+        self._review_poll_timer.setInterval(100)
+        def _drain_all_queue():
+            while not self._review_queue.empty():
+                try:
+                    kind, data = self._review_queue.get_nowait()
+                except Exception:
+                    break
+                if kind == 'log':
+                    self._append_log(data)
+                elif kind == 'nav':
+                    # Navigate dropdown to this EPUB index
+                    try:
+                        if 0 <= data < len(self._all_epub_paths):
+                            self._epub_combo.blockSignals(True)
+                            self._epub_combo.setCurrentIndex(data)
+                            self._epub_combo.blockSignals(False)
+                    except Exception:
+                        pass
+                elif kind == 'all_done':
+                    self._review_poll_timer.stop()
+                    self.stop_btn.hide()
+                    self._stop_spinner_timer.stop()
+                    self.start_btn.show()
+                    self.generate_all_btn.show()
+                    self.start_btn.setEnabled(True)
+                    self.generate_all_btn.setEnabled(True)
+                    self.save_btn.setEnabled(True)
+                    # Update review indicator
+                    try:
+                        if hasattr(self.translator_gui, '_update_review_indicator'):
+                            self.translator_gui._update_review_indicator()
+                    except Exception:
+                        pass
+        self._review_poll_timer.timeout.connect(_drain_all_queue)
+        self._review_poll_timer.start()
+
     def _safe_delayed_reset(self, btn, text, style, delay_ms=1500):
         """Reset a button's text/style after a delay, safely handling deleted widgets."""
         def _reset():
@@ -768,6 +984,9 @@ class ReviewDialog(QDialog):
         self._stop_spinner_timer.stop()
         self.start_btn.show()
         self.start_btn.setEnabled(True)
+        if hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1:
+            self.generate_all_btn.show()
+            self.generate_all_btn.setEnabled(True)
 
         if error:
             self._append_log(f"\n❌ Error: {error}")
