@@ -326,6 +326,7 @@ class ReviewDialog(QDialog):
         self._review_font_combo = QComboBox()
         self._review_font_combo.setEditable(True)
         self._review_font_combo.setInsertPolicy(QComboBox.NoInsert)
+        self._review_font_combo.setMinimumWidth(200)
         self._review_font_combo.setFocusPolicy(Qt.StrongFocus)
         self._review_font_combo.wheelEvent = lambda e: e.ignore()
         # Set dropdown arrow icon
@@ -356,8 +357,8 @@ class ReviewDialog(QDialog):
         self._font_settings_panel.addWidget(size_label)
 
         self._review_font_size_spin = QSpinBox()
-        self._review_font_size_spin.setRange(8, 24)
-        self._review_font_size_spin.setValue(int(self.translator_gui.config.get('review_font_size', 10)))
+        self._review_font_size_spin.setRange(5, 36)
+        self._review_font_size_spin.setValue(int(self.translator_gui.config.get('review_font_size', 8)))
         self._review_font_size_spin.setSuffix("pt")
         self._review_font_size_spin.setFocusPolicy(Qt.StrongFocus)
         self._review_font_size_spin.wheelEvent = lambda e: e.ignore()
@@ -704,6 +705,11 @@ class ReviewDialog(QDialog):
                     self._load_remote_images()
                     self.save_btn.setEnabled(True)
                     self.delete_btn.setEnabled(True)
+                    # Apply font size on widget level
+                    font_kwargs = self._get_font_kwargs()
+                    f = self.log_field.font()
+                    f.setPointSize(font_kwargs['font_size'])
+                    self.log_field.document().setDefaultFont(f)
             except Exception:
                 pass
 
@@ -1420,12 +1426,12 @@ class ReviewDialog(QDialog):
         """Get font settings from config for _md_to_html."""
         return {
             'font_family': self.translator_gui.config.get('review_font_family', 'Segoe UI'),
-            'font_size': int(self.translator_gui.config.get('review_font_size', 10)),
+            'font_size': int(self.translator_gui.config.get('review_font_size', 8)),
             'spacing': int(self.translator_gui.config.get('review_spacing', -4)),
         }
 
     @staticmethod
-    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 10, spacing: int = -4) -> str:
+    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 8, spacing: int = -4) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
 
@@ -1631,7 +1637,7 @@ class ReviewDialog(QDialog):
         if in_list:
             html_lines.append('</ul>')
 
-        return (f'<div style="font-family: {font_family}, sans-serif; font-size: {font_size}pt;">\n'
+        return (f'<div style="font-family: {font_family}, sans-serif;">\n'
                 + '\n'.join(html_lines) + '\n</div>')
 
     def _append_log(self, msg: str):
@@ -1893,6 +1899,10 @@ class ReviewDialog(QDialog):
                 spacing=spacing,
             )
             self.log_field.setHtml(self._last_rendered_html)
+        # Apply font size on widget level so Ctrl+/- zoom still works
+        f = self.log_field.font()
+        f.setPointSize(font_size)
+        self.log_field.document().setDefaultFont(f)
 
     # ─── Save ────────────────────────────────────────────────────────
 
