@@ -188,8 +188,9 @@ class ReviewDialog(QDialog):
         # 4. Start Review
         self.start_btn = QPushButton("🚀 Start Review")
         self.start_btn.setStyleSheet(
-            "background-color: #4a7ba7; color: white; font-weight: bold; "
-            "padding: 8px 16px; border-radius: 4px; font-size: 10pt;"
+            "QPushButton { background-color: #4a7ba7; color: white; font-weight: bold; "
+            "padding: 8px 16px; border-radius: 4px; font-size: 10pt; }"
+            "QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }"
         )
         self.start_btn.setMinimumWidth(140)
         self.start_btn.clicked.connect(self._on_start_review)
@@ -431,8 +432,8 @@ class ReviewDialog(QDialog):
             # Clear log and show only the review
             self.log_field.clear()
             self.log_field.setPlainText(result)
-            self.save_btn.setEnabled(True)
             self.delete_btn.setEnabled(True)
+            self._update_restore_btn_visibility()
             self._append_log("")  # Scroll trigger
 
             # Update the review emoji in the main GUI
@@ -547,6 +548,18 @@ class ReviewDialog(QDialog):
 
         review_path = self._get_review_path()
         if not review_path or not os.path.exists(review_path):
+            # Flash "No review found" on the button
+            original_text = self.delete_btn.text()
+            original_style = self.delete_btn.styleSheet()
+            self.delete_btn.setText("⚠️ No review found")
+            self.delete_btn.setStyleSheet(
+                "background-color: #6c757d; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            )
+            QTimer.singleShot(1500, lambda: (
+                self.delete_btn.setText(original_text),
+                self.delete_btn.setStyleSheet(original_style),
+            ))
             return
 
         try:

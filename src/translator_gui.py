@@ -12612,6 +12612,21 @@ Important rules:
                if getattr(self, 'qa_spinner', None):
                    self.qa_spinner.stop()
 
+       # Generate Review button — disable while any task is running
+       if hasattr(self, 'generate_review_btn'):
+           token_limit_enabled = not getattr(self, 'token_limit_disabled', False)
+           can_review = token_limit_enabled and not any_process_running
+           self.generate_review_btn.setEnabled(can_review)
+
+       # Review dialog's Start Review button
+       review_dlg = getattr(self, '_review_dialog', None)
+       if review_dlg is not None:
+           try:
+               if review_dlg.isVisible() and hasattr(review_dlg, 'start_btn'):
+                   review_dlg.start_btn.setEnabled(not any_process_running)
+           except RuntimeError:
+               pass
+
     def _reset_api_watchdog_progress(self, *, clear_stale_external_files: bool = True) -> None:
         """Reset the API watchdog (and the UI bar) immediately - thread-safe.
 
