@@ -9851,28 +9851,38 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 # Create Payloads directory for API response tracking
                 payloads_dir = "Payloads"
-                os.makedirs(payloads_dir, exist_ok=True)
+                try:
+                    os.makedirs(payloads_dir, exist_ok=True)
+                except (PermissionError, OSError):
+                    # Fall back to temp directory if CWD is not writable
+                    import tempfile
+                    payloads_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+                    try:
+                        os.makedirs(payloads_dir, exist_ok=True)
+                    except Exception:
+                        payloads_dir = None  # Skip payload saving entirely
                 
                 # Create timestamp for unique filename
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-                payload_file = os.path.join(payloads_dir, f"image_api_{timestamp}_{base_name}.json")
+                if payloads_dir:
+                    payload_file = os.path.join(payloads_dir, f"image_api_{timestamp}_{base_name}.json")
                 
-                # Save the request payload
-                request_payload = {
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "model": model,
-                    "image_file": image_name,
-                    "image_size_mb": size_mb,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "messages": messages,
-                    "image_base64": image_base64  # Full payload without truncation
-                }
+                    # Save the request payload
+                    request_payload = {
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "model": model,
+                        "image_file": image_name,
+                        "image_size_mb": size_mb,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "messages": messages,
+                        "image_base64": image_base64  # Full payload without truncation
+                    }
                 
-                with open(payload_file, 'w', encoding='utf-8') as f:
-                    json.dump(request_payload, f, ensure_ascii=False, indent=2)
+                    with open(payload_file, 'w', encoding='utf-8') as f:
+                        json.dump(request_payload, f, ensure_ascii=False, indent=2)
                 
-                self.append_log(f"📝 Saved request payload: {payload_file}")
+                    self.append_log(f"📝 Saved request payload: {payload_file}")
                 
                 # Call the vision API with interrupt support
                 # Check if the client supports a stop_callback parameter
@@ -9959,11 +9969,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     "content_length": len(response_content) if response_content else 0
                 }
                 
-                response_file = os.path.join(payloads_dir, f"image_api_response_{timestamp}_{base_name}.json")
-                with open(response_file, 'w', encoding='utf-8') as f:
-                    json.dump(response_payload, f, ensure_ascii=False, indent=2)
+                if payloads_dir:
+                    response_file = os.path.join(payloads_dir, f"image_api_response_{timestamp}_{base_name}.json")
+                    with open(response_file, 'w', encoding='utf-8') as f:
+                        json.dump(response_payload, f, ensure_ascii=False, indent=2)
                 
-                self.append_log(f"📝 Saved response payload: {response_file}")
+                    self.append_log(f"📝 Saved response payload: {response_file}")
                 
                 # Check if we got valid content
                 if not response_content or response_content.strip() == "[IMAGE TRANSLATION FAILED]":
@@ -10375,8 +10386,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.append_log("🚀 Starting translation...")
                 
-                # Ensure Payloads directory exists
-                os.makedirs("Payloads", exist_ok=True)
+                # Ensure Payloads directory exists (non-fatal if it fails)
+                try:
+                    os.makedirs("Payloads", exist_ok=True)
+                except (PermissionError, OSError):
+                    pass  # Payload saving handled by unified_api_client fallback
                 
                 # Run translation
                 translation_main(

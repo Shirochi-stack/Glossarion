@@ -635,12 +635,39 @@ setup_http_logging()
 # Definitive payload capture helpers (request/response)
 # These dump exactly what we are sending via HTTP paths, with headers redacted.
 
+_payloads_resolved_dir = None  # Cached resolved payloads directory
+_PAYLOADS_DISABLED = False  # Set True when even fallback fails
+
 def _payloads_dir() -> str:
+    global _payloads_resolved_dir, _PAYLOADS_DISABLED
+    if _payloads_resolved_dir is not None:
+        return _payloads_resolved_dir
+    # Try CWD/Payloads first
     try:
         os.makedirs("Payloads", exist_ok=True)
+        # Verify we can actually write there
+        _test = os.path.join("Payloads", ".write_test")
+        with open(_test, "w") as _f:
+            _f.write("ok")
+        os.remove(_test)
+        _payloads_resolved_dir = "Payloads"
+        return _payloads_resolved_dir
+    except (PermissionError, OSError):
+        pass
+    # Fallback: use temp directory
+    try:
+        import tempfile
+        fallback = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+        os.makedirs(fallback, exist_ok=True)
+        _payloads_resolved_dir = fallback
+        logger.info(f"Payloads directory: using fallback {fallback} (CWD not writable)")
+        return _payloads_resolved_dir
     except Exception:
         pass
-    return "Payloads"
+    # Last resort: disable payload saving entirely
+    _PAYLOADS_DISABLED = True
+    _payloads_resolved_dir = "Payloads"  # Return something, callers should check _PAYLOADS_DISABLED
+    return _payloads_resolved_dir
 
 def _redact_headers_for_dump(headers: dict) -> dict:
     try:
@@ -673,7 +700,7 @@ def _make_request_id(url: str, body_obj) -> str:
 def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, body, request_id: str = None, out_dir: str = None):
     try:
         # Enabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=0 to disable
-        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1" or _PAYLOADS_DISABLED:
             return
 
         # Abort immediately if a stop/cancel has been requested
@@ -717,7 +744,7 @@ def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, 
 def _save_incoming_response(provider: str, url: str, status: int, headers: dict, body, request_id: str, out_dir: str = None):
     try:
         # Enabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=0 to disable
-        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1" or _PAYLOADS_DISABLED:
             return
         out_dir = out_dir or _payloads_dir()
         try:
@@ -5026,7 +5053,10 @@ class UnifiedClient:
                 if not valid:
                     raise UnifiedClientError(f"Invalid request: {error_msg}", error_type="validation")
                 
-                os.makedirs("Payloads", exist_ok=True)
+                try:
+                    os.makedirs(_payloads_dir(), exist_ok=True)
+                except (PermissionError, OSError):
+                    pass
                 
                 # Apply reinforcement
                 messages = self._apply_pure_reinforcement(messages)
