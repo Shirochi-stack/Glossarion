@@ -56,6 +56,7 @@ class ReviewDialog(QDialog):
         self._build_ui()
         self._load_saved_prompt()
         self._load_existing_review()
+        self._update_restore_btn_visibility()
         self._start_token_count()
 
     # ─── Styled checkbox (matches project pattern) ─────────────────
@@ -215,7 +216,6 @@ class ReviewDialog(QDialog):
         )
         self.save_btn.setMinimumWidth(120)
         self.save_btn.clicked.connect(self._on_save)
-        self.save_btn.setEnabled(False)
         button_layout.addWidget(self.save_btn)
 
         # Delete Review
@@ -228,6 +228,17 @@ class ReviewDialog(QDialog):
         self.delete_btn.clicked.connect(self._on_delete)
         self.delete_btn.setEnabled(False)
         button_layout.addWidget(self.delete_btn)
+
+        # Restore Review (hidden when no backups exist)
+        self.restore_btn = QPushButton("↩️ Restore")
+        self.restore_btn.setStyleSheet(
+            "background-color: #6f42c1; color: white; font-weight: bold; "
+            "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+        )
+        self.restore_btn.setMinimumWidth(120)
+        self.restore_btn.clicked.connect(self._on_restore)
+        self.restore_btn.hide()
+        button_layout.addWidget(self.restore_btn)
 
         # 7. Close
         close_btn = QPushButton("Close")
@@ -553,7 +564,6 @@ class ReviewDialog(QDialog):
 
             # Clear UI
             self.log_field.clear()
-            self.save_btn.setEnabled(False)
             self.delete_btn.setEnabled(False)
 
             # Update the review indicator in main GUI
@@ -562,6 +572,9 @@ class ReviewDialog(QDialog):
                     self.translator_gui._update_review_indicator()
             except Exception:
                 pass
+
+            # Show restore button now that a backup exists
+            self._update_restore_btn_visibility()
 
             # Play sound + animate button
             try:
@@ -584,6 +597,88 @@ class ReviewDialog(QDialog):
 
         except Exception as e:
             self._append_log(f"❌ Failed to delete review: {e}")
+
+    # ─── Restore ─────────────────────────────────────────────────────
+
+    def _get_backups_dir(self) -> str:
+        """Get the backups directory path."""
+        review_path = self._get_review_path()
+        if not review_path:
+            return None
+        return os.path.join(os.path.dirname(review_path), "backups")
+
+    def _update_restore_btn_visibility(self):
+        """Show/hide the restore button based on whether backups exist."""
+        try:
+            backups_dir = self._get_backups_dir()
+            if backups_dir and os.path.isdir(backups_dir):
+                backups = [f for f in os.listdir(backups_dir) if f.endswith('.md')]
+                if backups:
+                    self.restore_btn.show()
+                    return
+            self.restore_btn.hide()
+        except Exception:
+            self.restore_btn.hide()
+
+    def _on_restore(self):
+        """Restore the most recent backup to review.md."""
+        import shutil
+
+        backups_dir = self._get_backups_dir()
+        if not backups_dir or not os.path.isdir(backups_dir):
+            return
+
+        try:
+            # Find the most recent backup
+            backups = sorted(
+                [f for f in os.listdir(backups_dir) if f.endswith('.md')],
+                reverse=True
+            )
+            if not backups:
+                return
+
+            latest = os.path.join(backups_dir, backups[0])
+            review_path = self._get_review_path()
+            if not review_path:
+                return
+
+            os.makedirs(os.path.dirname(review_path), exist_ok=True)
+            shutil.copy2(latest, review_path)
+
+            # Load restored content into UI
+            with open(review_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.log_field.setPlainText(content)
+            self.delete_btn.setEnabled(True)
+
+            # Update the review indicator in main GUI
+            try:
+                if hasattr(self.translator_gui, '_update_review_indicator'):
+                    self.translator_gui._update_review_indicator()
+            except Exception:
+                pass
+
+            # Play sound + animate
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+
+            original_text = self.restore_btn.text()
+            original_style = self.restore_btn.styleSheet()
+            self.restore_btn.setText("✅ Restored!")
+            self.restore_btn.setStyleSheet(
+                "background-color: #1a8f3a; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            )
+            QTimer.singleShot(1500, lambda: (
+                self.restore_btn.setText(original_text),
+                self.restore_btn.setStyleSheet(original_style),
+            ))
+
+        except Exception as e:
+            self._append_log(f"❌ Failed to restore: {e}")
 
     def closeEvent(self, event):
         """Save prompt on close."""
