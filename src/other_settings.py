@@ -9925,106 +9925,116 @@ def validate_epub_structure_gui(self):
     import os
     
     # Get icon path
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
     
-    input_path = ''
-    if hasattr(self, 'entry_epub'):
-        if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
-            input_path = self.entry_epub.text()
-        elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
-            input_path = self.entry_epub.get()
-    if not input_path:
+    # Gather all selected EPUB files (same logic as delete_headers / delete_toc)
+    epub_files_to_process = []
+    if hasattr(self, 'selected_files') and self.selected_files:
+        current_epub_files = [f for f in self.selected_files if str(f).lower().endswith('.epub')]
+        if current_epub_files:
+            epub_files_to_process = [str(f) for f in current_epub_files]
+    if not epub_files_to_process:
+        entry_path = ''
+        if hasattr(self, 'entry_epub'):
+            if hasattr(self.entry_epub, 'text'):
+                entry_path = self.entry_epub.text().strip()
+            elif hasattr(self.entry_epub, 'get'):
+                entry_path = self.entry_epub.get().strip()
+        if entry_path and entry_path.lower().endswith('.epub') and os.path.exists(entry_path):
+            epub_files_to_process = [entry_path]
+    
+    if not epub_files_to_process:
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setWindowTitle("Error")
-        msg_box.setText("Please select a file first.")
+        msg_box.setText("Please select an EPUB file first.")
         msg_box.setWindowIcon(icon)
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
         return
     
-    if input_path.lower().endswith('.txt'):
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowTitle("Info")
-        msg_box.setText("Structure validation is only available for EPUB files.")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
-        return
+    current_dir = os.getcwd()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    override_dir = os.environ.get('OUTPUT_DIRECTORY') or (self.config.get('output_directory') if hasattr(self, 'config') else None)
     
-    epub_base = os.path.splitext(os.path.basename(input_path))[0]
-    output_dir = epub_base
+    all_passed = True
+    all_results = []
     
-    if not os.path.exists(output_dir):
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowTitle("Info")
-        msg_box.setText(f"No output directory found: {output_dir}")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
-        return
-    
-    self.append_log("🔍 Validating EPUB structure...")
-    
-    try:
-        from TransateKRtoEN import validate_epub_structure, check_epub_readiness
+    for epub_path in epub_files_to_process:
+        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+        self.append_log(f"🔍 Validating EPUB structure for: {epub_base}")
         
-        structure_ok = validate_epub_structure(output_dir)
-        readiness_ok = check_epub_readiness(output_dir)
+        # Candidate-based output directory resolution (matches delete_headers logic)
+        candidates = [
+            os.path.join(current_dir, epub_base),
+            os.path.join(script_dir, epub_base),
+            os.path.join(current_dir, 'src', epub_base),
+        ]
+        if override_dir:
+            candidates.insert(0, os.path.join(override_dir, epub_base))
         
-        if structure_ok and readiness_ok:
-            self.append_log("✅ EPUB validation PASSED - Ready for compilation!")
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Information)
-            msg_box.setWindowTitle("Validation Passed")
-            msg_box.setText("✅ All EPUB structure files are present!\n\n"
-                              "Your translation is ready for EPUB compilation.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
-        elif structure_ok:
-            self.append_log("⚠️ EPUB structure OK, but some issues found")
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Warning)
-            msg_box.setWindowTitle("Validation Warning")
-            msg_box.setText("⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
-                                 "Check the log for details.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
-        else:
-            self.append_log("❌ EPUB validation FAILED - Missing critical files")
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setWindowTitle("Validation Failed")
-            msg_box.setText("❌ Missing critical EPUB files!\n\n"
-                               "container.xml and/or OPF files are missing.\n"
-                               "Try re-running the translation to extract them.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
+        output_dir = None
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                try:
+                    files = os.listdir(candidate)
+                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                    if html_files:
+                        output_dir = candidate
+                        break
+                except Exception:
+                    continue
+        
+        if not output_dir:
+            self.append_log(f"  ⚠️ No output directory found for {epub_base}")
+            all_results.append(f"⚠️ {epub_base}: No output directory found")
+            continue
+        
+        try:
+            from TransateKRtoEN import validate_epub_structure, check_epub_readiness
+            
+            structure_ok = validate_epub_structure(output_dir)
+            readiness_ok = check_epub_readiness(output_dir)
+            
+            if structure_ok and readiness_ok:
+                self.append_log(f"  ✅ {epub_base}: PASSED — Ready for compilation!")
+                all_results.append(f"✅ {epub_base}: All structure files present")
+            elif structure_ok:
+                self.append_log(f"  ⚠️ {epub_base}: Structure OK, but some issues found")
+                all_results.append(f"⚠️ {epub_base}: Structure OK, some issues found")
+                all_passed = False
+            else:
+                self.append_log(f"  ❌ {epub_base}: FAILED — Missing critical files")
+                all_results.append(f"❌ {epub_base}: Missing critical EPUB files")
+                all_passed = False
+        except ImportError as e:
+            self.append_log(f"  ❌ Could not import validation functions: {e}")
+            all_results.append(f"❌ {epub_base}: Import error — {e}")
+            all_passed = False
+        except Exception as e:
+            self.append_log(f"  ❌ Validation error for {epub_base}: {e}")
+            all_results.append(f"❌ {epub_base}: {e}")
+            all_passed = False
     
-    except ImportError as e:
-        self.append_log(f"❌ Could not import validation functions: {e}")
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle("Error")
-        msg_box.setText("Validation functions not available.")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
-    except Exception as e:
-        self.append_log(f"❌ Validation error: {e}")
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle("Error")
-        msg_box.setText(f"Validation failed: {e}")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
+    # Show summary dialog
+    result_text = "\n".join(all_results)
+    msg_box = QMessageBox()
+    if all_passed and all_results:
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Validation Passed")
+        msg_box.setText(f"✅ All {len(epub_files_to_process)} EPUB(s) validated successfully!\n\n{result_text}")
+    elif all_results:
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("Validation Results")
+        msg_box.setText(f"Validation results for {len(epub_files_to_process)} EPUB(s):\n\n{result_text}")
+    else:
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("No Results")
+        msg_box.setText("No output directories found for any selected EPUBs.")
+    msg_box.setWindowIcon(icon)
+    _center_messagebox_buttons(msg_box)
+    msg_box.exec()
 
 def delete_translated_headers_file(self):
     """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
