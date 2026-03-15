@@ -151,6 +151,8 @@ app_files = [
 	# Metadata and header batch translation
     ('metadata_batch_translator.py', '.'),
     ('translate_headers_standalone.py', '.'),
+    ('review_dialog.py', '.'),
+    ('review_generator.py', '.'),
     
     # Resources
 	
@@ -251,6 +253,8 @@ app_modules = [
 	'async_api_processor',
 	'metadata_batch_translator',
 	'translate_headers_standalone',
+	'review_dialog',
+	'review_generator',
 	'enhanced_text_extractor.py',
 	'pdf_extractor',
 	'multi_api_key_manager.py',
