@@ -472,7 +472,6 @@ class ReviewDialog(QDialog):
         )
         self.delete_btn.setMinimumWidth(120)
         self.delete_btn.clicked.connect(self._on_delete)
-        self.delete_btn.setEnabled(False)
         button_layout.addWidget(self.delete_btn)
 
         # Restore Review (hidden when no backups exist)
@@ -1827,10 +1826,6 @@ class ReviewDialog(QDialog):
         """Show/hide the restore button based on whether backups exist
         and the delete button is enabled (i.e. not during review generation)."""
         try:
-            # Hide restore when delete is disabled (review in progress)
-            if not self.delete_btn.isEnabled():
-                self.restore_btn.hide()
-                return
             backups_dir = self._get_backups_dir()
             if backups_dir and os.path.isdir(backups_dir):
                 backups = [f for f in os.listdir(backups_dir) if f.endswith('.md')]
