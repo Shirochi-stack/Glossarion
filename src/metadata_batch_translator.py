@@ -160,16 +160,37 @@ class MetadataBatchTranslatorUI:
                 except:
                     pass
                 app = QApplication(sys.argv)
-            
-            # Create dialog (use None as parent for top-level window)
-            dialog = QDialog(None)
+
+            # Reuse existing dialog
+            if hasattr(self, '_metadata_fields_dialog') and self._metadata_fields_dialog is not None:
+                try:
+                    try:
+                        from dialog_animations import show_dialog_with_fade
+                        show_dialog_with_fade(self._metadata_fields_dialog, duration=220)
+                    except Exception:
+                        self._metadata_fields_dialog.show()
+                    self._metadata_fields_dialog.raise_()
+                    self._metadata_fields_dialog.activateWindow()
+                    return
+                except RuntimeError:
+                    self._metadata_fields_dialog = None
+
+            # Create dialog — child of other_settings, non-modal
+            parent = getattr(self.gui, '_other_settings_dialog', None) or None
+            dialog = QDialog(parent)
             dialog.setWindowTitle("Configure Metadata Translation")
-            
+            dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+            dialog.setWindowModality(Qt.NonModal)
+
             # Get screen dimensions and calculate size
             screen = app.primaryScreen().geometry()
-            dialog_width = int(screen.width() * 0.28)  # Slightly increased from 0.25
+            dialog_width = int(screen.width() * 0.28)
             dialog_height = int(screen.height() * 0.50)
             dialog.resize(dialog_width, dialog_height)
+
+            # Hide on close
+            dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+            self._metadata_fields_dialog = dialog
             
             # Set window icon
             # Try several locations to find the icon
@@ -455,7 +476,7 @@ class MetadataBatchTranslatorUI:
                 self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
                 self.gui.config['metadata_translation_mode'] = selected_mode
                 self.gui.save_config(show_message=False)
-                dialog.accept()
+                dialog.hide()
             
             def reset_metadata_config():
                 msg_box = QMessageBox(dialog)  # Set dialog as parent
@@ -514,7 +535,7 @@ class MetadataBatchTranslatorUI:
             cancel_btn = QPushButton("❌ Cancel")
             cancel_btn.setMinimumWidth(120)
             cancel_btn.setMinimumHeight(35)
-            cancel_btn.clicked.connect(dialog.reject)
+            cancel_btn.clicked.connect(dialog.hide)
             cancel_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #6c757d;
@@ -534,8 +555,12 @@ class MetadataBatchTranslatorUI:
             main_layout.addLayout(button_layout)
             dialog.setLayout(main_layout)
             
-            # Execute dialog directly in main thread
-            dialog.exec()
+            # Show non-modally with fade
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(dialog, duration=220)
+            except Exception:
+                dialog.show()
     
     def configure_translation_prompts(self):
         """Configure all translation prompts in one place"""
@@ -549,15 +574,36 @@ class MetadataBatchTranslatorUI:
                 pass
             app = QApplication(sys.argv)
         
-        # Create dialog (use None as parent for top-level window)
-        dialog = QDialog(None)
+        # Reuse existing dialog
+        if hasattr(self, '_translation_prompts_dialog') and self._translation_prompts_dialog is not None:
+            try:
+                try:
+                    from dialog_animations import show_dialog_with_fade
+                    show_dialog_with_fade(self._translation_prompts_dialog, duration=220)
+                except Exception:
+                    self._translation_prompts_dialog.show()
+                self._translation_prompts_dialog.raise_()
+                self._translation_prompts_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._translation_prompts_dialog = None
+
+        # Create dialog — child of other_settings, non-modal
+        parent = getattr(self.gui, '_other_settings_dialog', None) or None
+        dialog = QDialog(parent)
         dialog.setWindowTitle("Configure Translation Prompts")
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        dialog.setWindowModality(Qt.NonModal)
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.3)  # Reduced from 70% to 35%
+        dialog_width = int(screen.width() * 0.3)
         dialog_height = int(screen.height() * 0.8)
         dialog.resize(dialog_width, dialog_height)
+
+        # Hide on close
+        dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+        self._translation_prompts_dialog = dialog
         
         # Apply global stylesheet for checkboxes and radio buttons
         checkbox_radio_style = """
@@ -699,7 +745,7 @@ class MetadataBatchTranslatorUI:
             # Save all text widgets to config
             self._save_all_prompt_configs()
             self.gui.save_config(show_message=False)
-            dialog.accept()
+            dialog.hide()
         
         def reset_all_prompts():
             msg_box = QMessageBox(dialog)  # Set dialog as parent
@@ -714,7 +760,7 @@ class MetadataBatchTranslatorUI:
             
             if msg_box.exec() == QMessageBox.Yes:
                 self._reset_all_prompts_to_defaults()
-                dialog.close()
+                dialog.hide()
                 # Re-open dialog with defaults to refresh the UI
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(100, self.configure_translation_prompts)
@@ -760,7 +806,7 @@ class MetadataBatchTranslatorUI:
         cancel_btn = QPushButton("❌ Cancel")
         cancel_btn.setMinimumWidth(120)
         cancel_btn.setMinimumHeight(35)
-        cancel_btn.clicked.connect(dialog.reject)
+        cancel_btn.clicked.connect(dialog.hide)
         cancel_btn.setStyleSheet("""
             QPushButton {
                 background-color: #6c757d;
@@ -783,8 +829,12 @@ class MetadataBatchTranslatorUI:
         main_layout.addLayout(button_layout)
         dialog.setLayout(main_layout)
         
-        # Execute dialog directly in main thread
-        dialog.exec()
+        # Show non-modally with fade
+        try:
+            from dialog_animations import show_dialog_with_fade
+            show_dialog_with_fade(dialog, duration=220)
+        except Exception:
+            dialog.show()
     
     def _create_title_prompts_tab(self, parent):
         """Create tab for book title prompts"""

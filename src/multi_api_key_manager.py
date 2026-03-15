@@ -535,6 +535,7 @@ class RefusalPatternsDialog(QDialog):
         super().__init__(parent)
         self.translator_gui = translator_gui
         self.setWindowTitle("Manage Refusal Patterns")
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
         
         # Set dialog size based on screen size (35% width, 40% height)
         from PySide6.QtWidgets import QApplication
@@ -552,6 +553,11 @@ class RefusalPatternsDialog(QDialog):
         self.refusal_length_limit = self._load_refusal_length_limit()
         
         self._create_dialog()
+    
+    def closeEvent(self, event):
+        """Hide instead of closing."""
+        event.ignore()
+        self.hide()
     
     def _set_icon(self):
         """Set Halgakos.ico as window icon if available."""

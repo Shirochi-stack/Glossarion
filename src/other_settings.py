@@ -4476,21 +4476,41 @@ def configure_translation_chunk_prompt(self):
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
-    
-    dialog = QDialog(None)
+
+    # Reuse existing dialog
+    if hasattr(self, '_chunk_prompt_dialog') and self._chunk_prompt_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._chunk_prompt_dialog, duration=220)
+            except Exception:
+                self._chunk_prompt_dialog.show()
+            self._chunk_prompt_dialog.raise_()
+            self._chunk_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._chunk_prompt_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
     dialog.setWindowTitle("Configure Chunk Prompt")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
     # Use screen ratios for sizing
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
     width = int(screen.width() * 0.36)  # 36% of screen width
     height = int(screen.height() * 0.56)  # 56% of screen height
     dialog.resize(width, height)
-    
+
     # Set icon
     try:
         dialog.setWindowIcon(QIcon("halgakos.ico"))
     except Exception:
         pass
+
+    # Hide on close
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._chunk_prompt_dialog = dialog
     
     main_layout = QVBoxLayout(dialog)
     main_layout.setContentsMargins(20, 20, 20, 20)
@@ -4566,7 +4586,7 @@ def configure_translation_chunk_prompt(self):
         self.translation_chunk_prompt = chunk_prompt_text.toPlainText().strip()
         self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
         QMessageBox.information(dialog, "Success", "Translation chunk prompt saved!")
-        dialog.close()
+        dialog.hide()
     
     def reset_chunk_prompt():
         result = QMessageBox.question(dialog, "Reset Prompt", "Reset to default chunk prompt?",
@@ -4584,33 +4604,58 @@ def configure_translation_chunk_prompt(self):
     button_layout.addWidget(reset_btn)
     
     cancel_btn = QPushButton("Cancel")
-    cancel_btn.clicked.connect(dialog.close)
+    cancel_btn.clicked.connect(dialog.hide)
     button_layout.addWidget(cancel_btn)
     
     main_layout.addLayout(button_layout)
     
-    dialog.show()
+    # Show with fade
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
 
 def configure_image_chunk_prompt(self):
     """Configure the prompt template for image chunks (PySide6)"""
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
-    
-    dialog = QDialog(None)
+
+    # Reuse existing dialog
+    if hasattr(self, '_image_chunk_prompt_dialog') and self._image_chunk_prompt_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._image_chunk_prompt_dialog, duration=220)
+            except Exception:
+                self._image_chunk_prompt_dialog.show()
+            self._image_chunk_prompt_dialog.raise_()
+            self._image_chunk_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._image_chunk_prompt_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
     dialog.setWindowTitle("Configure Image Chunk Prompt")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
     # Use screen ratios for sizing
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
-    width = int(screen.width() * 0.36)  # 36% of screen width
-    height = int(screen.height() * 0.56)  # 56% of screen height
+    width = int(screen.width() * 0.36)
+    height = int(screen.height() * 0.56)
     dialog.resize(width, height)
-    
+
     # Set icon
     try:
         dialog.setWindowIcon(QIcon("halgakos.ico"))
     except Exception:
         pass
+
+    # Hide on close
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._image_chunk_prompt_dialog = dialog
     
     main_layout = QVBoxLayout(dialog)
     main_layout.setContentsMargins(20, 20, 20, 20)
@@ -4685,7 +4730,7 @@ def configure_image_chunk_prompt(self):
         self.image_chunk_prompt = image_chunk_prompt_text.toPlainText().strip()
         self.config['image_chunk_prompt'] = self.image_chunk_prompt
         QMessageBox.information(dialog, "Success", "Image chunk prompt saved!")
-        dialog.close()
+        dialog.hide()
     
     def reset_image_chunk_prompt():
         result = QMessageBox.question(dialog, "Reset Prompt", "Reset to default image chunk prompt?",
@@ -4703,12 +4748,17 @@ def configure_image_chunk_prompt(self):
     button_layout.addWidget(reset_btn)
     
     cancel_btn = QPushButton("Cancel")
-    cancel_btn.clicked.connect(dialog.close)
+    cancel_btn.clicked.connect(dialog.hide)
     button_layout.addWidget(cancel_btn)
     
     main_layout.addLayout(button_layout)
     
-    dialog.show()
+    # Show with fade
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
 
 def configure_image_compression(self):
     """Open the image compression configuration dialog (PySide6)"""
@@ -4717,21 +4767,41 @@ def configure_image_compression(self):
                                    QWidget, QScrollArea, QMessageBox, QFrame)
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
-    
-    dialog = QDialog(None)
+
+    # Reuse existing dialog
+    if hasattr(self, '_image_compression_dialog') and self._image_compression_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._image_compression_dialog, duration=220)
+            except Exception:
+                self._image_compression_dialog.show()
+            self._image_compression_dialog.raise_()
+            self._image_compression_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._image_compression_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
     dialog.setWindowTitle("Image Compression Settings")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
     # Use screen ratios for sizing
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
-    width = int(screen.width() * 0.34)  # 34% of screen width
-    height = int(screen.height() * 0.65)  # 65% of screen height
+    width = int(screen.width() * 0.34)
+    height = int(screen.height() * 0.65)
     dialog.resize(width, height)
-    
+
     # Set icon
     try:
         dialog.setWindowIcon(QIcon("halgakos.ico"))
     except Exception:
         pass
+
+    # Hide on close
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._image_compression_dialog = dialog
     
     # Apply global stylesheet for checkboxes and radio buttons
     checkbox_radio_style = """
@@ -5024,7 +5094,7 @@ def configure_image_compression(self):
         self.config['save_compressed_images'] = save_compressed_cb.isChecked()
         
         self.append_log("✅ Image compression settings saved")
-        dialog.close()
+        dialog.hide()
     
     save_btn = QPushButton("💾 Save Settings")
     save_btn.clicked.connect(save_compression_settings)
@@ -5043,7 +5113,7 @@ def configure_image_compression(self):
     button_layout.addWidget(save_btn)
     
     cancel_btn = QPushButton("❌ Cancel")
-    cancel_btn.clicked.connect(dialog.close)
+    cancel_btn.clicked.connect(dialog.hide)
     cancel_btn.setMinimumHeight(35)
     cancel_btn.setStyleSheet(
         "QPushButton { "
@@ -5060,7 +5130,12 @@ def configure_image_compression(self):
     
     dialog_layout.addLayout(button_layout)
     
-    dialog.show()
+    # Show with fade
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
 
 def toggle_ai_hunter(self):
     """Toggle AI Hunter enabled state"""
