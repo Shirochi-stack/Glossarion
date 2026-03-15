@@ -1404,7 +1404,7 @@ class ReviewDialog(QDialog):
             if len(table_lines) < 2:
                 # Not enough lines for a table, render as plain text
                 return ''.join(
-                    f'<p style="margin-top:2px; margin-bottom:2px;">{_inline(l)}</p>\n'
+                    f'<p style="margin-top:6px; margin-bottom:6px;">{_inline(l)}</p>\n'
                     for l in table_lines
                 )
 
@@ -1506,7 +1506,7 @@ class ReviewDialog(QDialog):
             lm = re.match(r'^[-*•]\s+(.*)', stripped)
             if lm:
                 if not in_list:
-                    html_lines.append('<ul style="margin-top:2px; margin-bottom:2px;">')
+                    html_lines.append('<ul style="margin-top:6px; margin-bottom:6px;">')
                     in_list = True
                 item_text = _inline(lm.group(1))
                 html_lines.append(f'<li>{item_text}</li>')
@@ -1526,7 +1526,7 @@ class ReviewDialog(QDialog):
                 continue
 
             # Regular paragraph — apply inline formatting
-            html_lines.append(f'<p style="margin-top:2px; margin-bottom:2px;">{_inline(stripped)}</p>')
+            html_lines.append(f'<p style="margin-top:6px; margin-bottom:6px;">{_inline(stripped)}</p>')
             i += 1
 
         # Flush any remaining table buffer
@@ -1540,7 +1540,7 @@ class ReviewDialog(QDialog):
         if in_list:
             html_lines.append('</ul>')
 
-        return '\n'.join(html_lines)
+        return f'<div style="font-family: Comic Sans MS, cursive;">\n' + '\n'.join(html_lines) + '\n</div>'
 
     def _append_log(self, msg: str):
         """Append a message to the log field (main thread)."""
