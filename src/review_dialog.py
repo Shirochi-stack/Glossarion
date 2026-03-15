@@ -36,11 +36,11 @@ class ReviewDialog(QDialog):
 
         self.setWindowTitle("Generate Review")
         self.setModal(False)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint | Qt.WindowMaximizeButtonHint)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
 
         # Sizing
         screen = QApplication.primaryScreen().availableGeometry()
-        width = int(screen.width() * 0.40)
+        width = int(screen.width() * 0.48)
         height = int(screen.height() * 0.75)
         self.setMinimumSize(width, height)
         self.resize(width, height)
@@ -671,17 +671,23 @@ class ReviewDialog(QDialog):
                 return  # Still counting
             self._token_poll_timer.stop()
             self._counting = False
+            counted_path = result[2]
             if result[0] == 'error':
-                self.token_label.setText(f"⚠️ Token count failed: {result[1][:100]}")
-                self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+                # Only update label if still on the same file
+                if self.file_path == counted_path:
+                    self.token_label.setText(f"⚠️ Token count failed: {result[1][:100]}")
+                    self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
             elif result[1] >= 0:
-                # Cache the result
-                self._token_cache[result[2]] = result[1]
-                self.token_label.setText(f"📊 File tokens: {result[1]:,}")
-                self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
+                # Always cache the result
+                self._token_cache[counted_path] = result[1]
+                # Only update label if still on the same file
+                if self.file_path == counted_path:
+                    self.token_label.setText(f"📊 File tokens: {result[1]:,}")
+                    self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
             else:
-                self.token_label.setText("⚠️ Could not count tokens")
-                self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+                if self.file_path == counted_path:
+                    self.token_label.setText("⚠️ Could not count tokens")
+                    self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
         self._token_poll_timer.timeout.connect(_check_result)
         self._token_poll_timer.start()
 
@@ -1358,7 +1364,7 @@ class ReviewDialog(QDialog):
             # Flash "No review found" on the button
             original_text = self.delete_btn.text()
             original_style = self.delete_btn.styleSheet()
-            self.delete_btn.setText("⚠️ No review found")
+            self.delete_btn.setText("📭 No Review")
             self.delete_btn.setStyleSheet(
                 "background-color: #6c757d; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
