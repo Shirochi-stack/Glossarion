@@ -523,12 +523,7 @@ class ReviewDialog(QDialog):
         self._review_log_active = True
 
         def _hijacked_append_log(message):
-            # Call original to keep main GUI log working
-            try:
-                self._original_append_log(message)
-            except Exception:
-                pass
-            # Also write to review dialog output field (thread-safe via queue)
+            # During review: send ONLY to review dialog, suppress main GUI log
             if self._review_log_active:
                 self._review_queue.put(('log', str(message)))
 
