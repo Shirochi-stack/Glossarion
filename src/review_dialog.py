@@ -897,9 +897,10 @@ class ReviewDialog(QDialog):
         system_prompt = system_prompt_template.replace('{target_lang}', output_lang)
         spoiler_mode = self.spoiler_checkbox.isChecked()
 
-        # Bug fix #1: Respect BATCH_MODE toggle for parallelism
-        batch_mode_on = os.environ.get('BATCH_MODE', '0').strip().lower() not in ('0', 'false', 'off', '')
-        if batch_mode_on:
+        # Respect batch mode toggle for parallelism
+        # batch_translation_var is the on/off toggle; batch_size_var is the worker count
+        batch_on = bool(getattr(gui, 'batch_translation_var', False))
+        if batch_on:
             try:
                 batch_size = int(getattr(gui, 'batch_size_var', 1))
                 if batch_size < 1:
