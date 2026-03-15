@@ -12281,7 +12281,12 @@ Important rules:
            # Find selected file (any supported type)
            files = list(getattr(self, 'selected_files', []) or [])
            if not files:
-               # Flash button text instead of popup
+               # Flash button text and play warning sound
+               try:
+                   import winsound
+                   winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+               except Exception:
+                   pass
                original_text = self.generate_review_btn.text()
                original_style = self.generate_review_btn.styleSheet()
                self.generate_review_btn.setText("⚠️ No File Selected!")
