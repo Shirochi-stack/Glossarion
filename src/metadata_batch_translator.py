@@ -1635,6 +1635,61 @@ class MetadataBatchTranslatorUI:
                 self.gui.config = decrypt_config(self.gui.config)
         except Exception as e:
             print(f"Error reloading config: {e}")
+        
+        # Re-initialize defaults again after reload (in case config.json didn't have them)
+        self._initialize_default_prompts()
+        
+        # --- Update all UI widgets to reflect the reset defaults ---
+        
+        # Book Title tab
+        if hasattr(self, 'title_system_text'):
+            self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt',
+                "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."))
+        if hasattr(self, 'title_user_text'):
+            self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
+                "Translate this book title to {target_lang} while retaining any acronyms:"))
+        
+        # Chapter Headers tab
+        if hasattr(self, 'header_batch_system_text'):
+            self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
+                "You are a professional translator specializing in novel chapter titles. "
+                "You must translate the chapter titles to {target_lang}. "
+                "Respond with only the translated JSON, nothing else. "
+                "Maintain the original tone and style while making titles natural in the target language."))
+        if hasattr(self, 'header_batch_text'):
+            self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
+                "Translate these chapter titles to {target_lang}.\n"
+                "- For titles with parenthetical text, translate both the main title and the parenthetical content.\n"
+                "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
+                "- Preserve the chapter number format exactly as shown.\n"
+                "Return ONLY a JSON object with chapter numbers as keys.\n"
+                "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
+        
+        # Metadata Fields tab
+        if hasattr(self, 'metadata_batch_text'):
+            self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
+                "Translate the following metadata fields to {target_lang}.\n"
+                "Output ONLY a JSON object with the same field names as keys."))
+        
+        # Field-specific prompts
+        if hasattr(self, 'field_prompt_widgets'):
+            default_field_prompts = self.gui.config.get('metadata_field_prompts', {})
+            for field_key, widget in self.field_prompt_widgets.items():
+                default_prompt = default_field_prompts.get(field_key, '')
+                widget.setPlainText(default_prompt)
+        
+        # Advanced tab - language detection radio buttons
+        if hasattr(self, 'lang_behavior_group'):
+            for button in self.lang_behavior_group.buttons():
+                button.setChecked(button.property("value") == 'auto')
+        
+        # Advanced tab - forced language entry
+        if hasattr(self, 'forced_lang_entry'):
+            self.forced_lang_entry.setText('Korean')
+        
+        # Advanced tab - output language combo
+        if hasattr(self, 'output_lang_combo'):
+            self.output_lang_combo.setCurrentText('English')
     
     def _detect_all_metadata_fields_for_epub(self, epub_path: str) -> Dict[str, str]:
         """Detect ALL metadata fields in the given EPUB file"""
