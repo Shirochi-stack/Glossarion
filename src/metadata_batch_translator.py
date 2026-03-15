@@ -385,6 +385,12 @@ class MetadataBatchTranslatorUI:
             # State tracking
             per_epub_field_vars = {}  # {epub_path: {field: checkbox}}
             current_epub_state = {'path': epub_paths[0] if epub_paths else None}
+            # Shared field sync state — when a checkbox is toggled, sync across all EPUBs
+            field_sync_state = {}  # {field_name: bool}
+            sync_enabled = {'active': True}  # Guard to prevent recursion
+            
+            # Fields that are enabled by default
+            default_enabled_fields = {'description', 'subject'}
             
             # Get saved per-EPUB settings (or flat dict for backward compat)
             translate_fields_config = self.gui.config.get('translate_metadata_fields', {})
@@ -476,11 +482,24 @@ class MetadataBatchTranslatorUI:
                                 continue
                             
                             # Normal field with checkbox
-                            default_value = False
+                            default_value = field in default_enabled_fields
+                            # Use synced state if available, then saved, then default
+                            if field in field_sync_state:
+                                checked = field_sync_state[field]
+                            else:
+                                checked = saved.get(field, default_value)
+                                field_sync_state[field] = checked
                             checkbox = self._create_styled_checkbox(f"{label}:")
-                            checkbox.setChecked(saved.get(field, default_value))
+                            checkbox.setChecked(checked)
                             checkbox.setMinimumWidth(200)
                             field_vars[field] = checkbox
+                            # Connect sync handler
+                            def _make_sync(f):
+                                def _on_toggle(state):
+                                    if sync_enabled['active']:
+                                        field_sync_state[f] = bool(state)
+                                return _on_toggle
+                            checkbox.stateChanged.connect(_make_sync(field))
                             frame_layout.addWidget(checkbox)
                             
                             current_value = str(all_fields[field])
@@ -514,9 +533,21 @@ class MetadataBatchTranslatorUI:
                             frame_layout.setContentsMargins(0, 5, 0, 5)
                             
                             checkbox = self._create_styled_checkbox(f"{field}:")
-                            checkbox.setChecked(saved.get(field, False))
+                            if field in field_sync_state:
+                                checked = field_sync_state[field]
+                            else:
+                                checked = saved.get(field, False)
+                                field_sync_state[field] = checked
+                            checkbox.setChecked(checked)
                             checkbox.setMinimumWidth(200)
                             field_vars[field] = checkbox
+                            # Connect sync handler
+                            def _make_sync_custom(f):
+                                def _on_toggle(state):
+                                    if sync_enabled['active']:
+                                        field_sync_state[f] = bool(state)
+                                return _on_toggle
+                            checkbox.stateChanged.connect(_make_sync_custom(field))
                             frame_layout.addWidget(checkbox)
                             
                             display_value = str(value)
