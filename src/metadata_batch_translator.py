@@ -838,6 +838,7 @@ class MetadataBatchTranslatorUI:
     
     def _create_title_prompts_tab(self, parent):
         """Create tab for book title prompts"""
+        parent.setStyleSheet("background-color: #2b2b2b;")
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
         
@@ -915,6 +916,7 @@ class MetadataBatchTranslatorUI:
     
     def _create_header_prompts_tab(self, parent):
         """Create tab for chapter header prompts"""
+        parent.setStyleSheet("background-color: #2b2b2b;")
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
         
