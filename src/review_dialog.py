@@ -1460,6 +1460,17 @@ class ReviewDialog(QDialog):
         self.start_btn.setEnabled(False)
         self.generate_all_btn.setEnabled(False)
 
+        # SAFETY: Always re-enable buttons after max 3 seconds, even if animation fails
+        def _safety_reenable():
+            try:
+                if not self.start_btn.isEnabled():
+                    self.start_btn.setEnabled(True)
+                if hasattr(self, 'generate_all_btn') and not self.generate_all_btn.isEnabled():
+                    self.generate_all_btn.setEnabled(True)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(3000, _safety_reenable)
+
         opacity_effect = QGraphicsOpacityEffect(self.log_field)
         self.log_field.setGraphicsEffect(opacity_effect)
         opacity_effect.setOpacity(1.0)
@@ -1488,15 +1499,18 @@ class ReviewDialog(QDialog):
                     except RuntimeError:
                         pass
                 fade_in.finished.connect(_cleanup)
-                # Re-enable start button early (don't wait for full fade-in)
-                def _reenable_btns():
-                    self.start_btn.setEnabled(True)
-                    self.generate_all_btn.setEnabled(True)
-                QTimer.singleShot(200, _reenable_btns)
                 self._fade_in_anim = fade_in
                 fade_in.start()
             except RuntimeError:
                 pass
+            # Re-enable start button ALWAYS (outside try/except)
+            def _reenable_btns():
+                try:
+                    self.start_btn.setEnabled(True)
+                    self.generate_all_btn.setEnabled(True)
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(200, _reenable_btns)
 
         fade_out.finished.connect(_swap_and_fade_in)
         self._fade_out_anim = fade_out
