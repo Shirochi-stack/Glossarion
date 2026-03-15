@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QPlainTextEdit, QTextEdit, QTextBrowser, QCheckBox, QApplication, QGroupBox, QSplitter
 )
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Slot, QEvent
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 
@@ -1206,11 +1206,25 @@ class ReviewDialog(QDialog):
                     failed_urls.append(url)  # Track for fallback link
             if replacements or failed_urls:
                 print(f'[DEBUG] _fetch_all done: {len(replacements)} ok, {len(failed_urls)} failed')
-                QTimer.singleShot(0, lambda: self._apply_image_data_uris(replacements, failed_urls))
+                self._pending_image_data = (replacements, failed_urls)
+                # Post a custom event to trigger processing on the main thread
+                app = QApplication.instance()
+                if app:
+                    app.postEvent(self, QEvent(QEvent.Type(QEvent.User + 1)))
             else:
                 print('[DEBUG] _fetch_all: nothing to do')
 
         threading.Thread(target=_fetch_all, daemon=True).start()
+
+    def event(self, e):
+        """Handle custom events for cross-thread image loading."""
+        if e.type() == QEvent.Type(QEvent.User + 1):
+            data = getattr(self, '_pending_image_data', None)
+            if data:
+                self._pending_image_data = None
+                self._apply_image_data_uris(data[0], data[1])
+            return True
+        return super().event(e)
 
     def _apply_image_data_uris(self, replacements: dict, failed_urls: list = None):
         """Replace remote URLs with data URIs or fallback links, then re-render."""
@@ -1241,10 +1255,12 @@ class ReviewDialog(QDialog):
 
         def _inline(text):
             """Apply inline markdown formatting."""
-            # Images: ![alt](url)
+            # Images: ![alt](url) — wrap in <a> so always clickable
             text = re.sub(
                 r'!\[([^\]]*)\]\((https?://[^)]+)\)',
-                r'<br/><img src="\2" alt="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/><br/>',
+                r'<br/><a href="\2" style="text-decoration:none;">'
+                r'<img src="\2" alt="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/>'
+                r'</a><br/><a href="\2" style="color:#5a9fd4;font-size:9pt;">\1 🔗</a><br/>',
                 text
             )
             # Links: [text](url)  — must come after images to avoid matching ![...]
@@ -1262,7 +1278,9 @@ class ReviewDialog(QDialog):
             # Bare image URLs (common extensions) not already inside tags
             text = re.sub(
                 r'(?<!["\'])(?<!=)(https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp))(?!["\'])',
-                r'<br/><img src="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/><br/>',
+                r'<br/><a href="\1" style="text-decoration:none;">'
+                r'<img src="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/>'
+                r'</a><br/><a href="\1" style="color:#5a9fd4;font-size:9pt;">🖼️ View Image 🔗</a><br/>',
                 text,
                 flags=re.IGNORECASE
             )
