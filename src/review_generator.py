@@ -471,8 +471,7 @@ def generate_review(
 
         client = create_client_with_multi_key_support(api_key, model, output_dir, config)
 
-        # Show actual model/key info (multi-key aware)
-        actual_model = getattr(client, 'model', model)
+        # Show token/key info (model is logged by UnifiedClient after key selection)
         is_multi = getattr(client, '_multi_key_mode', False)
         key_count = 1
         if is_multi:
@@ -483,11 +482,11 @@ def generate_review(
                 elif pool and hasattr(pool, '_keys'):
                     key_count = len(pool._keys)
             except Exception:
-                key_count = 2  # We know it's multi-key, just can't get exact count
+                key_count = 2
         if key_count > 1:
-            log_fn(f"📤 Sending {content_tokens:,} tokens to {actual_model} ({key_count} keys)...")
+            log_fn(f"📤 Sending {content_tokens:,} tokens ({key_count} keys available)...")
         else:
-            log_fn(f"📤 Sending {content_tokens:,} tokens to {actual_model}...")
+            log_fn(f"📤 Sending {content_tokens:,} tokens to {model}...")
 
         log_fn("🚀 Sending API request (single call)...")
         start_time = time.time()

@@ -508,7 +508,6 @@ class ReviewDialog(QDialog):
         self.stop_btn.show()
         self._stop_spinner_timer.start()
         self.log_field.clear()
-        self.log_field.setPlainText("⏳ Generating review... (check main log for progress)")
         self.save_btn.setEnabled(False)
 
         # Clear any lingering cancellation from a previous force stop
@@ -518,12 +517,29 @@ class ReviewDialog(QDialog):
         except Exception:
             pass
 
-        # Message queue for thread → main-thread communication (only done/error)
+        # ── Hijack translator_gui.append_log ──
+        # Save original and replace with a wrapper that also writes to review dialog
+        self._original_append_log = self.translator_gui.append_log
+        self._review_log_active = True
+
+        def _hijacked_append_log(message):
+            # Call original to keep main GUI log working
+            try:
+                self._original_append_log(message)
+            except Exception:
+                pass
+            # Also write to review dialog output field (thread-safe via queue)
+            if self._review_log_active:
+                self._review_queue.put(('log', str(message)))
+
+        self.translator_gui.append_log = _hijacked_append_log
+
+        # Message queue for thread → main-thread communication
         import queue
         self._review_queue = queue.Queue()
 
         def _log(msg):
-            # Send ALL progress logs to the main GUI log ONLY — not to review dialog
+            # Send through the hijacked append_log (reaches both main GUI and review dialog)
             try:
                 self.translator_gui.append_log(f"[Review] {msg}")
             except Exception:
@@ -555,7 +571,7 @@ class ReviewDialog(QDialog):
         self._review_thread = threading.Thread(target=_run, daemon=True)
         self._review_thread.start()
 
-        # Poll the queue on the main thread every 100ms (only done/error)
+        # Poll the queue on the main thread every 100ms
         self._review_poll_timer = QTimer(self)
         self._review_poll_timer.setInterval(100)
         def _drain_queue():
@@ -564,7 +580,9 @@ class ReviewDialog(QDialog):
                     kind, data = self._review_queue.get_nowait()
                 except Exception:
                     break
-                if kind == 'done':
+                if kind == 'log':
+                    self._append_log(data)
+                elif kind == 'done':
                     self._review_poll_timer.stop()
                     self._on_review_done(data)
                 elif kind == 'error':
@@ -590,18 +608,24 @@ class ReviewDialog(QDialog):
         scrollbar = self.log_field.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _unhijack_log(self):
+        """Restore the original translator_gui.append_log."""
+        self._review_log_active = False
+        if hasattr(self, '_original_append_log'):
+            try:
+                self.translator_gui.append_log = self._original_append_log
+            except Exception:
+                pass
+
     def _on_review_done(self, result: str = None, error: str = None):
         """Called on main thread when review generation finishes."""
+        self._unhijack_log()
         self.stop_btn.hide()
         self._stop_spinner_timer.stop()
         self.start_btn.show()
 
         if error:
-            self.log_field.clear()
-            try:
-                self.translator_gui.append_log(f"[Review] ❌ Error: {error}")
-            except Exception:
-                pass
+            self._append_log(f"\n❌ Error: {error}")
         elif result:
             # Show only the review in the dialog
             self.log_field.clear()
@@ -616,11 +640,6 @@ class ReviewDialog(QDialog):
             except Exception:
                 pass
         else:
-            self.log_field.clear()
-            try:
-                self.translator_gui.append_log("[Review] ⚠️ No review generated.")
-            except Exception:
-                pass
             # Reload existing review from file (if any) so dialog is refreshed
             self._load_existing_review()
 
