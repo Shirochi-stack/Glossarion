@@ -392,6 +392,15 @@ class ReviewDialog(QDialog):
         self._review_para_spacing_spin.wheelEvent = lambda e: e.ignore()
         self._review_para_spacing_spin.valueChanged.connect(self._on_review_font_changed)
 
+        # List item spacing
+        self._review_list_gap_spin = QSpinBox()
+        self._review_list_gap_spin.setRange(0, 24)
+        self._review_list_gap_spin.setValue(int(self.translator_gui.config.get('review_list_gap', 10)))
+        self._review_list_gap_spin.setSuffix("px")
+        self._review_list_gap_spin.setFocusPolicy(Qt.StrongFocus)
+        self._review_list_gap_spin.wheelEvent = lambda e: e.ignore()
+        self._review_list_gap_spin.valueChanged.connect(self._on_review_font_changed)
+
         # Layout: two rows
         _s = "color: #aaa; font-size: 9pt;"
         font_row = QHBoxLayout()
@@ -409,7 +418,8 @@ class ReviewDialog(QDialog):
         spacing_row.setContentsMargins(8, 0, 8, 4)
         spacing_row.setSpacing(6)
         for lbl, w in [("Header Gap:", self._review_header_spacing_spin),
-                        ("Paragraph Gap:", self._review_para_spacing_spin)]:
+                        ("Paragraph Gap:", self._review_para_spacing_spin),
+                        ("List Gap:", self._review_list_gap_spin)]:
             l = QLabel(lbl)
             l.setStyleSheet(_s)
             spacing_row.addWidget(l)
@@ -428,8 +438,8 @@ class ReviewDialog(QDialog):
         spacing_row.addWidget(self._reset_font_btn)
 
         font_settings_layout = QVBoxLayout()
-        font_settings_layout.setContentsMargins(0, 0, 0, 0)
-        font_settings_layout.setSpacing(2)
+        font_settings_layout.setContentsMargins(0, 4, 0, 4)
+        font_settings_layout.setSpacing(8)
         font_settings_layout.addLayout(font_row)
         font_settings_layout.addLayout(spacing_row)
 
@@ -1484,11 +1494,13 @@ class ReviewDialog(QDialog):
             'header_spacing': int(self.translator_gui.config.get('review_header_spacing', 6)),
             'line_height': int(self.translator_gui.config.get('review_line_height', 50)),
             'font_color': self.translator_gui.config.get('review_font_color', '#e0e0e0'),
+            'list_gap': int(self.translator_gui.config.get('review_list_gap', 10)),
         }
 
     @staticmethod
     def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 9, spacing: int = 8,
-                    header_spacing: int = 6, line_height: int = 50, font_color: str = '#e0e0e0') -> str:
+                    header_spacing: int = 6, line_height: int = 50, font_color: str = '#e0e0e0',
+                    list_gap: int = 10) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
 
@@ -1663,7 +1675,7 @@ class ReviewDialog(QDialog):
                     html_lines.append(f'<ul style="margin-top:{spacing}px; margin-bottom:{spacing}px;">')
                     in_list = True
                 item_text = _inline(lm.group(1))
-                html_lines.append(f'<li>{item_text}</li>')
+                html_lines.append(f'<li style="margin-bottom:{list_gap}px;">{item_text}</li>')
                 i += 1
                 continue
 
@@ -1946,6 +1958,7 @@ class ReviewDialog(QDialog):
         self._review_line_height_spin.setValue(50)
         self._review_header_spacing_spin.setValue(6)
         self._review_para_spacing_spin.setValue(8)
+        self._review_list_gap_spin.setValue(10)
         self._review_font_color = '#e0e0e0'
         self._review_color_btn.setStyleSheet(
             "QPushButton { background-color: #e0e0e0; border: 1px solid #888; border-radius: 3px; }"
@@ -1971,6 +1984,7 @@ class ReviewDialog(QDialog):
         spacing = self._review_para_spacing_spin.value()
         header_spacing = self._review_header_spacing_spin.value()
         line_height = self._review_line_height_spin.value()
+        list_gap = self._review_list_gap_spin.value()
         font_color = self._review_font_color
 
         self.translator_gui.config['review_font_family'] = font_family
@@ -1979,6 +1993,7 @@ class ReviewDialog(QDialog):
         self.translator_gui.config['review_header_spacing'] = header_spacing
         self.translator_gui.config['review_line_height'] = line_height
         self.translator_gui.config['review_font_color'] = font_color
+        self.translator_gui.config['review_list_gap'] = list_gap
         try:
             self.translator_gui.save_config(show_message=False)
         except Exception:
@@ -1994,6 +2009,7 @@ class ReviewDialog(QDialog):
                 header_spacing=header_spacing,
                 line_height=line_height,
                 font_color=font_color,
+                list_gap=list_gap,
             )
             self.log_field.setHtml(self._last_rendered_html)
         # Apply font size on widget level so Ctrl+/- zoom still works
