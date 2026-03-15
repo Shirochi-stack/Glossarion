@@ -1232,13 +1232,14 @@ class ReviewDialog(QDialog):
             html = self._last_rendered_html
             for url, data_uri in replacements.items():
                 html = html.replace(url, data_uri)
-            # Replace failed images with clickable links
+            # Replace failed images with clickable links showing full URL
             for url in (failed_urls or []):
-                # Match the <img> tag containing this URL and replace with a link
-                pattern = r'<img[^>]*src="' + re.escape(url) + r'"[^>]*/>'
+                # Match the full <a><img/></a> wrapper and replace with a URL link
+                escaped = re.escape(url)
+                pattern = r'<a[^>]*href="' + escaped + r'"[^>]*>\s*<img[^>]*/>\s*</a>'
                 link_html = (
-                    f'<a href="{url}" style="color:#5a9fd4;text-decoration:underline;">'
-                    f'🖼️ View Image</a>'
+                    f'<a href="{url}" style="color:#5a9fd4;text-decoration:underline;word-break:break-all;">'
+                    f'{url}</a>'
                 )
                 html = re.sub(pattern, link_html, html)
             self._last_rendered_html = html
@@ -1259,7 +1260,7 @@ class ReviewDialog(QDialog):
                 r'!\[([^\]]*)\]\((https?://[^)]+)\)',
                 r'<br/><a href="\2" style="text-decoration:none;">'
                 r'<img src="\2" alt="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/>'
-                r'</a><br/><a href="\2" style="color:#5a9fd4;font-size:9pt;">\1 🔗</a><br/>',
+                r'</a><br/>',
                 text
             )
             # Links: [text](url)  — must come after images to avoid matching ![...]
@@ -1279,7 +1280,7 @@ class ReviewDialog(QDialog):
                 r'(?<!["\'])(?<!=)(https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp))(?!["\'])',
                 r'<br/><a href="\1" style="text-decoration:none;">'
                 r'<img src="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/>'
-                r'</a><br/><a href="\1" style="color:#5a9fd4;font-size:9pt;">🖼️ View Image 🔗</a><br/>',
+                r'</a><br/>',
                 text,
                 flags=re.IGNORECASE
             )
