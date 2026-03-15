@@ -57,6 +57,70 @@ class ReviewDialog(QDialog):
         self._load_existing_review()
         self._start_token_count()
 
+    # ─── Styled checkbox (matches project pattern) ─────────────────
+
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #e0e0e0;
+                spacing: 8px;
+                font-size: 12px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #5a5a5a;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4a7ba7;
+                border-color: #4a7ba7;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #6a6a6a;
+            }
+        """)
+
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 12px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 16, 16)
+            except RuntimeError:
+                pass
+
+        def update_checkmark():
+            try:
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+
+        checkbox.stateChanged.connect(update_checkmark)
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+
+        return checkbox
+
     # ─── UI construction ─────────────────────────────────────────────
 
     def _build_ui(self):
@@ -98,7 +162,7 @@ class ReviewDialog(QDialog):
         controls_layout.setSpacing(12)
 
         # 3. Spoiler Mode
-        self.spoiler_checkbox = QCheckBox("Spoiler Mode")
+        self.spoiler_checkbox = self._create_styled_checkbox("Spoiler Mode")
         self.spoiler_checkbox.setToolTip(
             "When enabled, includes both the first and last chapters "
             "(50/50 split) for a comprehensive review.\n"

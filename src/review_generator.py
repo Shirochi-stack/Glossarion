@@ -261,13 +261,20 @@ def extract_chapter_texts(file_path: str, log_fn: Callable = print) -> List[Tupl
 
 def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
     """
-    Count total tokens in the EPUB using html2text + tiktoken.
-    Designed to be called from a background thread.
+    Count total tokens in a file using html2text + tiktoken.
+    Uses parallel threading for speed on large files.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     chapters = extract_chapter_texts(epub_path, log_fn=lambda *_: None)
-    total = 0
-    for _, text in chapters:
-        total += count_tokens(text)
+    if not chapters:
+        return 0
+
+    # Count tokens in parallel across chapters
+    with ThreadPoolExecutor(max_workers=min(8, len(chapters))) as pool:
+        futures = [pool.submit(count_tokens, text) for _, text in chapters]
+        total = sum(f.result() for f in as_completed(futures))
+
     return total
 
 
