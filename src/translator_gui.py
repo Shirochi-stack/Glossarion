@@ -1034,7 +1034,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.0.0"
+        __version__ = "8.0.1"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1109,7 +1109,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.0.0')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.0.1')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2909,6 +2909,11 @@ Recent translations to summarize:
             self.token_limit_entry.setEnabled(False)
             self.toggle_token_btn.setText("Enable Input Token Limit")
             self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
+            if hasattr(self, 'generate_review_btn'):
+                self.generate_review_btn.setEnabled(False)
+        
+        # Initial review indicator check (deferred so selected_files is populated)
+        QTimer.singleShot(500, lambda: self._update_review_indicator() if hasattr(self, '_update_review_indicator') else None)
         
         # Initialize prompt text with the active profile's content
         if hasattr(self, 'profile_var') and self.profile_var in self.prompt_profiles:
@@ -2922,7 +2927,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.0.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.0.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -4733,11 +4738,39 @@ Recent translations to summarize:
         token_limit_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Maximum allowed tokens for the prompt the model receives (input side).</p></qt>")
         self.frame.addWidget(token_limit_label, 6, 0, Qt.AlignLeft)
         
+        # Container for token limit entry + review button + review emoji
+        token_limit_container = QWidget()
+        token_limit_layout = QHBoxLayout(token_limit_container)
+        token_limit_layout.setContentsMargins(0, 0, 0, 0)
+        token_limit_layout.setSpacing(6)
+        
         self.token_limit_entry = QLineEdit()
         self.token_limit_entry.setText(str(self.config.get('token_limit', 200000)))
         self.token_limit_entry.setMaximumWidth(80)
         self.token_limit_entry.setEnabled(not self.token_limit_disabled)
-        self.frame.addWidget(self.token_limit_entry, 6, 1, Qt.AlignLeft)
+        token_limit_layout.addWidget(self.token_limit_entry)
+        
+        # Generate Review button
+        self.generate_review_btn = QPushButton("Generate Review")
+        self.generate_review_btn.setToolTip("Generate an AI-powered review/summary of the selected EPUB")
+        self.generate_review_btn.setStyleSheet(
+            "QPushButton { background-color: #4a7ba7; color: white; font-weight: bold; "
+            "padding: 4px 10px; border-radius: 3px; font-size: 9pt; }"
+            "QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }"
+        )
+        self.generate_review_btn.setEnabled(not self.token_limit_disabled)
+        self.generate_review_btn.clicked.connect(self._open_review_dialog)
+        token_limit_layout.addWidget(self.generate_review_btn)
+        
+        # Review emoji indicator (only visible when a review exists)
+        self.review_indicator_label = QLabel("📝")
+        self.review_indicator_label.setToolTip("A review exists for this EPUB")
+        self.review_indicator_label.setStyleSheet("font-size: 14px; padding: 0; margin: 0;")
+        self.review_indicator_label.hide()
+        token_limit_layout.addWidget(self.review_indicator_label)
+        
+        token_limit_layout.addStretch()
+        self.frame.addWidget(token_limit_container, 6, 1, Qt.AlignLeft)
         
         # Set initial button text and style based on current state
         btn_text = "Enable Input Token Limit" if self.token_limit_disabled else "Disable Input Token Limit"
@@ -12227,6 +12260,9 @@ Important rules:
            self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
            self.token_limit_disabled = True
+           # Disable Generate Review button when token limit is off
+           if hasattr(self, 'generate_review_btn'):
+               self.generate_review_btn.setEnabled(False)
        else:
            self.token_limit_entry.setEnabled(True)
            if not self.token_limit_entry.text().strip():
@@ -12235,6 +12271,76 @@ Important rules:
            self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
+           # Re-enable Generate Review button when token limit is on
+           if hasattr(self, 'generate_review_btn'):
+               self.generate_review_btn.setEnabled(True)
+
+    def _open_review_dialog(self):
+       """Open the review generation dialog for the currently selected EPUB."""
+       try:
+           # Find selected EPUB
+           files = list(getattr(self, 'selected_files', []) or [])
+           epubs = [p for p in files if str(p).lower().endswith('.epub')]
+           if not epubs:
+               # Flash button text instead of popup
+               original_text = self.generate_review_btn.text()
+               original_style = self.generate_review_btn.styleSheet()
+               self.generate_review_btn.setText("⚠️ No EPUB Selected!")
+               self.generate_review_btn.setStyleSheet(
+                   "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
+                   "padding: 4px 10px; border-radius: 3px; font-size: 9pt; }"
+                   "QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }"
+               )
+               QTimer.singleShot(2000, lambda: (
+                   self.generate_review_btn.setText(original_text),
+                   self.generate_review_btn.setStyleSheet(original_style),
+               ))
+               return
+           epub_path = str(epubs[0])
+           
+           # Reuse existing dialog if open
+           existing = getattr(self, '_review_dialog', None)
+           if existing is not None:
+               try:
+                   if existing.isVisible():
+                       existing.raise_()
+                       existing.activateWindow()
+                       return
+               except RuntimeError:
+                   pass
+           
+           from review_dialog import ReviewDialog
+           dialog = ReviewDialog(self, self, epub_path)
+           self._review_dialog = dialog
+           dialog.finished.connect(lambda *_: setattr(self, '_review_dialog', None))
+           dialog.show()
+           dialog.raise_()
+           dialog.activateWindow()
+       except Exception as e:
+           self.append_log(f"⚠️ Failed to open review dialog: {e}")
+
+    def _update_review_indicator(self):
+       """Show/hide the review emoji based on whether a review file exists."""
+       try:
+           if not hasattr(self, 'review_indicator_label'):
+               return
+           files = list(getattr(self, 'selected_files', []) or [])
+           epubs = [p for p in files if str(p).lower().endswith('.epub')]
+           if not epubs:
+               self.review_indicator_label.hide()
+               return
+           epub_base = os.path.splitext(os.path.basename(str(epubs[0])))[0]
+           override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+           if override_dir:
+               review_path = os.path.join(os.path.abspath(override_dir), epub_base, "review", "review.md")
+           else:
+               review_path = os.path.join(os.getcwd(), epub_base, "review", "review.md")
+           if os.path.exists(review_path):
+               self.review_indicator_label.show()
+           else:
+               self.review_indicator_label.hide()
+       except Exception:
+           self.review_indicator_label.hide()
 
     def _is_any_process_running(self):
        """Check if any background process is currently running"""
@@ -18375,7 +18481,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.0.0...")
+    print("🚀 Starting Glossarion v8.0.1...")
     
     # Initialize splash screen
     splash_manager = None
