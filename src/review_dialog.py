@@ -297,6 +297,8 @@ class ReviewDialog(QDialog):
         self.log_field.setReadOnly(True)
         self.log_field.setOpenExternalLinks(True)
         self.log_field.setPlaceholderText("Generated review will appear here...")
+        self.log_field.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.log_field.customContextMenuRequested.connect(self._show_log_context_menu)
         log_layout.addWidget(self.log_field)
 
         # ── Splitter between prompt and output ──
@@ -1225,13 +1227,96 @@ class ReviewDialog(QDialog):
             return True
         return super().event(e)
 
+    def _show_log_context_menu(self, pos):
+        """Custom context menu for the review output with image actions."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        import re
+
+        menu = QMenu(self.log_field)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2b2b2b; color: white;
+                border: 1px solid #555; padding: 4px;
+            }
+            QMenu::item { padding: 6px 24px; }
+            QMenu::item:selected { background-color: #4a7ba7; }
+            QMenu::item:disabled { color: #888; }
+            QMenu::separator { height: 1px; background: #555; margin: 4px 8px; }
+        """)
+
+        # Detect image or link under cursor
+        cursor = self.log_field.cursorForPosition(pos)
+        char_fmt = cursor.charFormat()
+        anchor = char_fmt.anchorHref() if char_fmt.isAnchor() else ''
+
+        # Check if it's an image anchor (original URL, not data URI)
+        image_url = ''
+        if anchor and anchor.startswith('http'):
+            image_url = anchor
+        elif not anchor:
+            # Check if cursor is on an image by looking at the block's HTML
+            block = cursor.block()
+            if block.isValid():
+                doc = self.log_field.document()
+                block_html = ''
+                cursor_in_block = cursor.position() - block.position()
+                # Check fragments in this block for images
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid():
+                        fmt = frag.charFormat()
+                        if fmt.isImageFormat():
+                            img_name = fmt.toImageFormat().name()
+                            if img_name.startswith('http'):
+                                image_url = img_name
+                                break
+                        if fmt.isAnchor() and fmt.anchorHref().startswith('http'):
+                            image_url = fmt.anchorHref()
+                            break
+                    it += 1
+
+        if image_url:
+            # Show full URL as disabled label
+            url_label = menu.addAction(f"🔗 {image_url}")
+            url_label.setEnabled(False)
+            menu.addSeparator()
+
+            # Open in browser
+            open_action = menu.addAction("🌐  Open Image in Browser")
+            open_action.triggered.connect(
+                lambda checked=False, u=image_url: QDesktopServices.openUrl(QUrl(u))
+            )
+
+            # Copy URL
+            copy_url_action = menu.addAction("📋  Copy Image URL")
+            copy_url_action.triggered.connect(
+                lambda checked=False, u=image_url: QApplication.clipboard().setText(u)
+            )
+            menu.addSeparator()
+
+        # Standard actions
+        if self.log_field.textCursor().hasSelection():
+            copy_action = menu.addAction("📄  Copy")
+            copy_action.setShortcut("Ctrl+C")
+            copy_action.triggered.connect(self.log_field.copy)
+
+        select_all_action = menu.addAction("🔲  Select All")
+        select_all_action.setShortcut("Ctrl+A")
+        select_all_action.triggered.connect(self.log_field.selectAll)
+
+        menu.exec(self.log_field.mapToGlobal(pos))
+
     def _apply_image_data_uris(self, replacements: dict, failed_urls: list = None):
         """Replace remote URLs with data URIs or fallback links, then re-render."""
         import re
         try:
             html = self._last_rendered_html
             for url, data_uri in replacements.items():
-                html = html.replace(url, data_uri)
+                # Only replace src="url" in <img> tags, keep href="url" in <a> intact
+                html = html.replace(f'src="{url}"', f'src="{data_uri}"')
             # Replace failed images with clickable links showing full URL
             for url in (failed_urls or []):
                 # Match the full <a><img/></a> wrapper and replace with a URL link

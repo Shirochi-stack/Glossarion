@@ -372,12 +372,15 @@ Write a comprehensive review ENTIRELY in {target_lang} that includes:
 3. **Themes** — Major themes explored in the work
 4. **Writing Style** — Assessment of the author's writing style, pacing, and narrative technique
 5. **Strengths & Weaknesses** — What the work does well and where it falls short
-6. **Overall Assessment** — Your overall rating and recommendation
-7. **Originality Score** — Create a markdown comparison table scoring how unique vs generic the novel is across these categories: Plot, Setting/World-Building, Characters, Power System/Magic, Themes, Prose Style, and Overall. Use a 1-10 scale (1 = completely generic/derivative, 10 = highly original/unique). Include a brief note for each score explaining your reasoning. Example format:
+6. **Originality Score** — Create a markdown comparison table scoring how unique vs generic the novel is across these categories: Plot, Setting/World-Building, Characters, Power System/Magic, Themes, Prose Style, and Overall. Use a 1-10 scale (1 = completely generic/derivative, 10 = highly original/unique). Include a brief note for each score explaining your reasoning. Example format:
 
 | Category | Score | Notes |
 |----------|:-----:|-------|
 | Plot | 6/10 | ... |
+
+7. **Overall Assessment** — Your overall rating and recommendation
+
+Use markdown ### headers for each section title (e.g. ### 1. Summary) to make them stand out. Use **bold** for emphasis within sections.
 
 IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text from the source language. All character names, place names, titles, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
 
