@@ -861,6 +861,17 @@ class ReviewDialog(QDialog):
         )
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.Yes)
+        msg.setStyleSheet("""
+            QPushButton {
+                min-width: 80px;
+                min-height: 30px;
+                padding: 6px 20px;
+                font-size: 10pt;
+            }
+            QDialogButtonBox {
+                qproperty-centerButtons: true;
+            }
+        """)
         if msg.exec() != QMessageBox.Yes:
             return
 
