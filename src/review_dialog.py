@@ -1756,6 +1756,13 @@ class ReviewDialog(QDialog):
             self.log_field.clear()
             self.delete_btn.setEnabled(False)
 
+            # Ensure start button is usable after delete
+            self.start_btn.show()
+            self.start_btn.setEnabled(True)
+            if hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1:
+                self.generate_all_btn.show()
+                self.generate_all_btn.setEnabled(True)
+
             # Update the review indicator in main GUI
             try:
                 if hasattr(self.translator_gui, '_update_review_indicator'):
