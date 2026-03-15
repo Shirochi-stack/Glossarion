@@ -9928,6 +9928,11 @@ def validate_epub_structure_gui(self):
     from PySide6.QtGui import QIcon
     from PySide6.QtCore import QTimer
     import os
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
+    except Exception:
+        pass
 
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
