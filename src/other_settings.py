@@ -6029,7 +6029,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(epub_title)
     
     validate_row = QHBoxLayout()
-    validate_row.setContentsMargins(0, 0, 0, 0)
+    validate_row.setContentsMargins(0, 0, 0, 8)
     validate_row.setSpacing(8)
     btn_validate = QPushButton("🔍 Validate EPUB Structure")
     btn_validate.setFixedWidth(250)
@@ -10054,7 +10054,17 @@ def validate_epub_structure_gui(self):
             msg_box.setWindowTitle("No Results")
             msg_box.setText("No output directories found for any selected EPUBs.")
         msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
+        msg_box.setStyleSheet("""
+            QPushButton {
+                min-width: 80px;
+                min-height: 30px;
+                padding: 6px 20px;
+                font-size: 10pt;
+            }
+            QDialogButtonBox {
+                qproperty-centerButtons: true;
+            }
+        """)
         msg_box.exec()
 
 def delete_translated_headers_file(self):
