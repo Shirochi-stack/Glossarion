@@ -730,8 +730,13 @@ class ReviewDialog(QDialog):
             if hasattr(self, '_review_poll_timer'):
                 self._review_poll_timer.stop()
 
-            # Immediately reset UI
-            self._on_review_done(None)
+            # Wait briefly for hard_cancel to propagate before resetting UI
+            def _delayed_reset():
+                try:
+                    self._on_review_done(None)
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(500, _delayed_reset)
             return
 
         # First click: graceful stop
