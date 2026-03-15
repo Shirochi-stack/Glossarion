@@ -229,14 +229,14 @@ class ReviewDialog(QDialog):
         # Build icon + text layout inside button
         stop_btn_layout = QHBoxLayout(self.stop_btn)
         stop_btn_layout.setContentsMargins(8, 4, 8, 4)
-        stop_btn_layout.setSpacing(6)
+        stop_btn_layout.setSpacing(2)
 
         self._stop_icon_label = QLabel()
         self._stop_icon_label.setStyleSheet("background-color: transparent;")
         self._stop_icon_label.setFixedSize(32, 32)
         self._stop_icon_label.setAlignment(Qt.AlignCenter)
 
-        self._stop_text_label = QLabel("Stop")
+        self._stop_text_label = QLabel("Stop Review")
         self._stop_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent; font-size: 10pt;")
         self._stop_text_label.setAlignment(Qt.AlignCenter)
 
@@ -505,7 +505,7 @@ class ReviewDialog(QDialog):
 
         # UI state
         self.start_btn.hide()
-        self._stop_text_label.setText("Stop")
+        self._stop_text_label.setText("Stop Review")
         self.stop_btn.show()
         self._stop_spinner_timer.start()
         self.log_field.clear()
@@ -632,39 +632,9 @@ class ReviewDialog(QDialog):
         if error:
             self._append_log(f"\n❌ Error: {error}")
         elif result:
-            # Visual fade transition: fade out log → swap text → fade in review
             self.delete_btn.setEnabled(True)
             self._update_restore_btn_visibility()
-
-            opacity_effect = QGraphicsOpacityEffect(self.log_field)
-            self.log_field.setGraphicsEffect(opacity_effect)
-            opacity_effect.setOpacity(1.0)
-
-            # Fade out
-            fade_out = QPropertyAnimation(opacity_effect, b"opacity", self)
-            fade_out.setDuration(600)
-            fade_out.setStartValue(1.0)
-            fade_out.setEndValue(0.0)
-            fade_out.setEasingCurve(QEasingCurve.InQuad)
-
-            def _swap_and_fade_in():
-                try:
-                    self.log_field.clear()
-                    self.log_field.setPlainText(result)
-                    # Fade in
-                    fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
-                    fade_in.setDuration(800)
-                    fade_in.setStartValue(0.0)
-                    fade_in.setEndValue(1.0)
-                    fade_in.setEasingCurve(QEasingCurve.OutQuad)
-                    self._fade_in_anim = fade_in  # prevent GC
-                    fade_in.start()
-                except RuntimeError:
-                    pass
-
-            fade_out.finished.connect(_swap_and_fade_in)
-            self._fade_out_anim = fade_out  # prevent GC
-            fade_out.start()
+            self._fade_to_text(result)
 
             # Update the review emoji in the main GUI
             try:
@@ -673,8 +643,50 @@ class ReviewDialog(QDialog):
             except Exception:
                 pass
         else:
-            # Reload existing review from file (if any) so dialog is refreshed
+            # Fade to existing review from file (if any)
+            review_path = self._get_review_path()
+            if review_path and os.path.exists(review_path):
+                try:
+                    with open(review_path, 'r', encoding='utf-8') as f:
+                        existing = f.read().strip()
+                    if existing:
+                        self._fade_to_text(existing)
+                        self.delete_btn.setEnabled(True)
+                        self._update_restore_btn_visibility()
+                        return
+                except Exception:
+                    pass
             self._load_existing_review()
+
+    def _fade_to_text(self, text: str):
+        """Fade out the log field, swap text, fade back in."""
+        opacity_effect = QGraphicsOpacityEffect(self.log_field)
+        self.log_field.setGraphicsEffect(opacity_effect)
+        opacity_effect.setOpacity(1.0)
+
+        fade_out = QPropertyAnimation(opacity_effect, b"opacity", self)
+        fade_out.setDuration(500)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.InQuad)
+
+        def _swap_and_fade_in():
+            try:
+                self.log_field.clear()
+                self.log_field.setPlainText(text)
+                fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
+                fade_in.setDuration(1500)
+                fade_in.setStartValue(0.0)
+                fade_in.setEndValue(1.0)
+                fade_in.setEasingCurve(QEasingCurve.OutQuad)
+                self._fade_in_anim = fade_in
+                fade_in.start()
+            except RuntimeError:
+                pass
+
+        fade_out.finished.connect(_swap_and_fade_in)
+        self._fade_out_anim = fade_out
+        fade_out.start()
 
     def _on_stop(self):
         """Stop the review generation — double-click to force stop."""
@@ -693,7 +705,7 @@ class ReviewDialog(QDialog):
             self._stop_requested = True
             self._force_stop = True
             self._stop_click_times = []
-            self._stop_text_label.setText("Force Stopped")
+            self._stop_text_label.setText("Finishing...")
             self._stop_spinner_timer.stop()
             try:
                 self.translator_gui.append_log("[Review] ⚡ Double-click detected — forcing immediate stop!")
