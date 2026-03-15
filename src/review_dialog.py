@@ -1144,6 +1144,9 @@ class ReviewDialog(QDialog):
             self.generate_all_btn.show()
             self.generate_all_btn.setEnabled(True)
 
+        # Re-enable save (was disabled at review start)
+        self.save_btn.setEnabled(True)
+
         # Re-enable nav (may have been disabled during review)
         try:
             self._epub_combo.setEnabled(True)
