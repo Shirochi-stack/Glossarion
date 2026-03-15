@@ -628,6 +628,7 @@ class ReviewDialog(QDialog):
         self.stop_btn.hide()
         self._stop_spinner_timer.stop()
         self.start_btn.show()
+        self.start_btn.setEnabled(True)
 
         if error:
             self._append_log(f"\n❌ Error: {error}")
@@ -660,6 +661,9 @@ class ReviewDialog(QDialog):
 
     def _fade_to_text(self, text: str):
         """Fade out the log field, swap text, fade back in."""
+        # Disable start button during transition
+        self.start_btn.setEnabled(False)
+
         opacity_effect = QGraphicsOpacityEffect(self.log_field)
         self.log_field.setGraphicsEffect(opacity_effect)
         opacity_effect.setOpacity(1.0)
@@ -679,6 +683,14 @@ class ReviewDialog(QDialog):
                 fade_in.setStartValue(0.0)
                 fade_in.setEndValue(1.0)
                 fade_in.setEasingCurve(QEasingCurve.OutQuad)
+                # Remove effect and re-enable button after fade-in
+                def _cleanup():
+                    try:
+                        self.log_field.setGraphicsEffect(None)
+                        self.start_btn.setEnabled(True)
+                    except RuntimeError:
+                        pass
+                fade_in.finished.connect(_cleanup)
                 self._fade_in_anim = fade_in
                 fade_in.start()
             except RuntimeError:
@@ -700,17 +712,26 @@ class ReviewDialog(QDialog):
         # Remove clicks older than 1 second
         self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
 
-        # Double-click: force immediate stop
-        if len(self._stop_click_times) >= 2:
+        # Double-click OR single click with graceful stop disabled: force immediate stop
+        graceful = getattr(self.translator_gui, 'graceful_stop_var', True)
+        is_force = len(self._stop_click_times) >= 2 or not graceful
+
+        if is_force:
             self._stop_requested = True
             self._force_stop = True
             self._stop_click_times = []
             self._stop_text_label.setText("Finishing...")
             # Keep spinner running (don't stop it)
-            try:
-                self.translator_gui.append_log("[Review] ⚡ Double-click detected — forcing immediate stop!")
-            except Exception:
-                pass
+            if graceful:
+                try:
+                    self.translator_gui.append_log("[Review] ⚡ Double-click detected — forcing immediate stop!")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.translator_gui.append_log("[Review] ⚡ Forcing immediate stop!")
+                except Exception:
+                    pass
 
             # Hard cancel all in-flight HTTP requests
             try:
@@ -732,22 +753,14 @@ class ReviewDialog(QDialog):
             self._on_review_done(None)
             return
 
-        # First click: graceful stop
-        graceful = getattr(self.translator_gui, 'graceful_stop_var', True)
+        # First click (graceful mode): wait for API response
         self._stop_requested = True
         self._force_stop = False
-
-        if graceful:
-            self._stop_text_label.setText("Finishing...")
-            try:
-                self.translator_gui.append_log("[Review] 🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
-            except Exception:
-                pass
-        else:
-            try:
-                self.translator_gui.append_log("[Review] 🛑 Stopping...")
-            except Exception:
-                pass
+        self._stop_text_label.setText("Finishing...")
+        try:
+            self.translator_gui.append_log("[Review] 🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
+        except Exception:
+            pass
 
     def _advance_stop_spinner(self):
         """Advance the spinning icon frame."""
