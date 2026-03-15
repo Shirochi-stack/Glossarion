@@ -139,12 +139,7 @@ class ReviewDialog(QDialog):
         header.setWordWrap(True)
         layout.addWidget(header)
 
-        # ── 1. System Prompt ──
-        prompt_group = QGroupBox("System Prompt")
-        prompt_layout = QVBoxLayout(prompt_group)
-        prompt_layout.setContentsMargins(8, 8, 8, 8)
-
-        # Reset to Default button (right-aligned above the prompt field)
+        # Reset to Default button (right-aligned, above the System Prompt group)
         reset_row = QHBoxLayout()
         reset_row.addStretch()
         reset_prompt_btn = QPushButton("↺ Reset to Default")
@@ -154,10 +149,27 @@ class ReviewDialog(QDialog):
             "border-radius: 3px; padding: 2px 10px; font-size: 9pt; }"
             "QPushButton:hover { background-color: #4a4a4a; color: white; }"
         )
-        reset_prompt_btn.clicked.connect(lambda: self.prompt_edit.setPlainText(DEFAULT_REVIEW_PROMPT))
+        def _confirm_reset_prompt():
+            from PySide6.QtWidgets import QMessageBox, QDialogButtonBox
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Reset Prompt")
+            msg.setText("Reset system prompt to default?")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            btn_box = msg.findChild(QDialogButtonBox)
+            if btn_box:
+                btn_box.setCenterButtons(True)
+            if msg.exec() == QMessageBox.Yes:
+                self.prompt_edit.setPlainText(DEFAULT_REVIEW_PROMPT)
+        reset_prompt_btn.clicked.connect(_confirm_reset_prompt)
         reset_row.addWidget(reset_prompt_btn)
-        prompt_layout.addLayout(reset_row)
+        layout.addLayout(reset_row)
 
+        # ── 1. System Prompt ──
+        prompt_group = QGroupBox("System Prompt")
+        prompt_layout = QVBoxLayout(prompt_group)
+        prompt_layout.setContentsMargins(8, 8, 8, 8)
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("Enter the system prompt for the review...")
         prompt_layout.addWidget(self.prompt_edit)

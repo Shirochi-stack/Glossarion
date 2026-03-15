@@ -694,22 +694,49 @@ def show_header_help_dialog(self):
 def configure_rolling_summary_prompts(self):
     """Configure rolling summary prompts (PySide6)"""
     from PySide6.QtGui import QIcon
-    
-    # Create a non-modal dialog
+
+    # Reuse existing dialog if it exists
+    if hasattr(self, '_rolling_summary_dialog') and self._rolling_summary_dialog is not None:
+        try:
+            # Refresh content from current state
+            if hasattr(self, 'summary_system_text'):
+                self.summary_system_text.setPlainText(getattr(self, 'rolling_summary_system_prompt', ''))
+            if hasattr(self, 'summary_user_text'):
+                self.summary_user_text.setPlainText(getattr(self, 'rolling_summary_user_prompt', ''))
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._rolling_summary_dialog, duration=220)
+            except Exception:
+                self._rolling_summary_dialog.show()
+            self._rolling_summary_dialog.raise_()
+            self._rolling_summary_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._rolling_summary_dialog = None
+
+    # Create a non-modal dialog, child of other_settings so it stays on top
     from PySide6.QtWidgets import QApplication
-    dialog = QDialog(None)
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
     dialog.setWindowTitle("Configure Memory System Prompts")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
     # Use screen ratios for sizing
     screen = QApplication.primaryScreen().geometry()
     width = int(screen.width() * 0.42)  # 42% of screen width
     height = int(screen.height() * 0.75)  # 75% of screen height
     dialog.resize(width, height)
-    
+
     # Set icon
     try:
         dialog.setWindowIcon(QIcon("halgakos.ico"))
     except Exception:
         pass
+
+    # Hide on close instead of destroying
+    def _hide_on_close(event):
+        event.ignore()
+        dialog.hide()
+    dialog.closeEvent = _hide_on_close
 
     # Keep a reference so it isn't garbage-collected
     self._rolling_summary_dialog = dialog
@@ -769,7 +796,7 @@ def configure_rolling_summary_prompts(self):
         os.environ['ROLLING_SUMMARY_USER_PROMPT'] = self.rolling_summary_user_prompt
 
         QMessageBox.information(dialog, "Success", "Memory prompts saved!")
-        dialog.close()
+        dialog.hide()
 
     def _reset_prompts():
         res = QMessageBox.question(
@@ -792,7 +819,7 @@ def configure_rolling_summary_prompts(self):
     btn_row.addWidget(reset_btn)
 
     cancel_btn = QPushButton("Cancel")
-    cancel_btn.clicked.connect(dialog.close)
+    cancel_btn.clicked.connect(dialog.hide)
     btn_row.addWidget(cancel_btn)
 
     layout.addLayout(btn_row)
