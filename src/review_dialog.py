@@ -8,7 +8,8 @@ import os
 import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QPlainTextEdit, QTextEdit, QTextBrowser, QCheckBox, QApplication, QGroupBox, QSplitter
+    QPlainTextEdit, QTextEdit, QTextBrowser, QCheckBox, QApplication, QGroupBox, QSplitter,
+    QComboBox, QWidget, QSpinBox
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Slot, QEvent
 from PySide6.QtGui import QFont, QIcon
@@ -300,6 +301,82 @@ class ReviewDialog(QDialog):
         self.log_field.setContextMenuPolicy(Qt.CustomContextMenu)
         self.log_field.customContextMenuRequested.connect(self._show_log_context_menu)
         log_layout.addWidget(self.log_field)
+
+        # ── Collapsible Font Settings ──
+        self._font_settings_toggle = QPushButton("▶  Font Settings")
+        self._font_settings_toggle.setStyleSheet(
+            "QPushButton { background: transparent; color: #aaa; border: none; "
+            "text-align: left; padding: 2px 8px; font-size: 9pt; }"
+            "QPushButton:hover { color: #ddd; }"
+        )
+        self._font_settings_toggle.setFixedHeight(22)
+        self._font_settings_toggle.setCursor(Qt.PointingHandCursor)
+        self._font_settings_toggle.clicked.connect(self._toggle_font_settings)
+        log_layout.addWidget(self._font_settings_toggle)
+
+        self._font_settings_panel = QHBoxLayout()
+        self._font_settings_panel.setContentsMargins(8, 0, 8, 4)
+        self._font_settings_panel.setSpacing(8)
+
+        from PySide6.QtGui import QFontDatabase
+        font_label = QLabel("Font:")
+        font_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        self._font_settings_panel.addWidget(font_label)
+
+        self._review_font_combo = QComboBox()
+        self._review_font_combo.setEditable(True)
+        self._review_font_combo.setInsertPolicy(QComboBox.NoInsert)
+        self._review_font_combo.setFocusPolicy(Qt.StrongFocus)
+        self._review_font_combo.wheelEvent = lambda e: e.ignore()
+        # Populate with system fonts
+        families = sorted(set(
+            f for f in QFontDatabase.families()
+            if QFontDatabase.isSmoothlyScalable(f)
+        ))
+        self._review_font_combo.addItem("Segoe UI")
+        for fam in families:
+            if fam != "Segoe UI":
+                self._review_font_combo.addItem(fam)
+        # Load saved font or default
+        saved_font = self.translator_gui.config.get('review_font_family', 'Segoe UI')
+        idx = self._review_font_combo.findText(saved_font)
+        if idx >= 0:
+            self._review_font_combo.setCurrentIndex(idx)
+        self._review_font_combo.currentTextChanged.connect(self._on_review_font_changed)
+        self._font_settings_panel.addWidget(self._review_font_combo)
+
+        size_label = QLabel("Size:")
+        size_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        self._font_settings_panel.addWidget(size_label)
+
+        self._review_font_size_spin = QSpinBox()
+        self._review_font_size_spin.setRange(8, 24)
+        self._review_font_size_spin.setValue(int(self.translator_gui.config.get('review_font_size', 12)))
+        self._review_font_size_spin.setSuffix("pt")
+        self._review_font_size_spin.setFocusPolicy(Qt.StrongFocus)
+        self._review_font_size_spin.wheelEvent = lambda e: e.ignore()
+        self._review_font_size_spin.valueChanged.connect(self._on_review_font_changed)
+        self._font_settings_panel.addWidget(self._review_font_size_spin)
+
+        spacing_label = QLabel("Spacing:")
+        spacing_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        self._font_settings_panel.addWidget(spacing_label)
+
+        self._review_spacing_spin = QSpinBox()
+        self._review_spacing_spin.setRange(0, 12)
+        self._review_spacing_spin.setValue(int(self.translator_gui.config.get('review_spacing', 2)))
+        self._review_spacing_spin.setSuffix("px")
+        self._review_spacing_spin.setFocusPolicy(Qt.StrongFocus)
+        self._review_spacing_spin.wheelEvent = lambda e: e.ignore()
+        self._review_spacing_spin.valueChanged.connect(self._on_review_font_changed)
+        self._font_settings_panel.addWidget(self._review_spacing_spin)
+
+        self._font_settings_panel.addStretch()
+
+        self._font_settings_widget = QWidget()
+        self._font_settings_widget.setLayout(self._font_settings_panel)
+        self._font_settings_widget.hide()
+        log_layout.addWidget(self._font_settings_widget)
 
         # ── Splitter between prompt and output ──
         splitter = QSplitter(Qt.Vertical)
@@ -616,7 +693,7 @@ class ReviewDialog(QDialog):
                     content = f.read()
                 if content.strip():
                     self._raw_review_md = content
-                    self._last_rendered_html = self._md_to_html(content)
+                    self._last_rendered_html = self._md_to_html(content, **self._get_font_kwargs())
                     self.log_field.setHtml(self._last_rendered_html)
                     self._load_remote_images()
                     self.save_btn.setEnabled(True)
@@ -1333,8 +1410,16 @@ class ReviewDialog(QDialog):
         except RuntimeError:
             pass  # Widget may have been destroyed
 
+    def _get_font_kwargs(self):
+        """Get font settings from config for _md_to_html."""
+        return {
+            'font_family': self.translator_gui.config.get('review_font_family', 'Segoe UI'),
+            'font_size': int(self.translator_gui.config.get('review_font_size', 12)),
+            'spacing': int(self.translator_gui.config.get('review_spacing', 2)),
+        }
+
     @staticmethod
-    def _md_to_html(md: str) -> str:
+    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 12, spacing: int = 2) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
 
@@ -1404,7 +1489,7 @@ class ReviewDialog(QDialog):
             if len(table_lines) < 2:
                 # Not enough lines for a table, render as plain text
                 return ''.join(
-                    f'<p style="margin-top:6px; margin-bottom:6px;">{_inline(l)}</p>\n'
+                    f'<p style="margin-top:{spacing}px; margin-bottom:{spacing}px;">{_inline(l)}</p>\n'
                     for l in table_lines
                 )
 
@@ -1497,7 +1582,7 @@ class ReviewDialog(QDialog):
                 sz = sizes.get(level, '10pt')
                 text = _inline(m.group(2))
                 html_lines.append(
-                    f'<p style="font-size:{sz}; font-weight:bold; margin-top:10px; margin-bottom:4px;">{text}</p>'
+                    f'<p style="font-size:{sz}; font-weight:bold; margin-top:{spacing + 4}px; margin-bottom:{spacing}px;">{text}</p>'
                 )
                 i += 1
                 continue
@@ -1506,7 +1591,7 @@ class ReviewDialog(QDialog):
             lm = re.match(r'^[-*•]\s+(.*)', stripped)
             if lm:
                 if not in_list:
-                    html_lines.append('<ul style="margin-top:6px; margin-bottom:6px;">')
+                    html_lines.append(f'<ul style="margin-top:{spacing}px; margin-bottom:{spacing}px;">')
                     in_list = True
                 item_text = _inline(lm.group(1))
                 html_lines.append(f'<li>{item_text}</li>')
@@ -1526,7 +1611,7 @@ class ReviewDialog(QDialog):
                 continue
 
             # Regular paragraph — apply inline formatting
-            html_lines.append(f'<p style="margin-top:6px; margin-bottom:6px;">{_inline(stripped)}</p>')
+            html_lines.append(f'<p style="margin-top:{spacing}px; margin-bottom:{spacing}px;">{_inline(stripped)}</p>')
             i += 1
 
         # Flush any remaining table buffer
@@ -1540,7 +1625,8 @@ class ReviewDialog(QDialog):
         if in_list:
             html_lines.append('</ul>')
 
-        return f'<div style="font-family: Comic Sans MS, cursive;">\n' + '\n'.join(html_lines) + '\n</div>'
+        return (f'<div style="font-family: {font_family}, sans-serif; font-size: {font_size}pt;">\n'
+                + '\n'.join(html_lines) + '\n</div>')
 
     def _append_log(self, msg: str):
         """Append a message to the log field (main thread)."""
@@ -1662,7 +1748,7 @@ class ReviewDialog(QDialog):
             try:
                 self.log_field.clear()
                 self._raw_review_md = text
-                self._last_rendered_html = self._md_to_html(text)
+                self._last_rendered_html = self._md_to_html(text, **self._get_font_kwargs())
                 self.log_field.setHtml(self._last_rendered_html)
                 self._load_remote_images()
                 fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
@@ -1767,6 +1853,40 @@ class ReviewDialog(QDialog):
             return
         self._stop_icon_label.setPixmap(self._stop_spinner_frames[self._stop_spinner_idx])
         self._stop_spinner_idx = (self._stop_spinner_idx + 1) % len(self._stop_spinner_frames)
+
+    # ─── Font Settings ─────────────────────────────────────────────
+
+    def _toggle_font_settings(self):
+        """Toggle the font settings panel visibility."""
+        visible = self._font_settings_widget.isVisible()
+        self._font_settings_widget.setVisible(not visible)
+        self._font_settings_toggle.setText(
+            "▼  Font Settings" if not visible else "▶  Font Settings"
+        )
+
+    def _on_review_font_changed(self, _=None):
+        """Handle font family or size change — save and re-render."""
+        font_family = self._review_font_combo.currentText()
+        font_size = self._review_font_size_spin.value()
+        spacing = self._review_spacing_spin.value()
+
+        self.translator_gui.config['review_font_family'] = font_family
+        self.translator_gui.config['review_font_size'] = font_size
+        self.translator_gui.config['review_spacing'] = spacing
+        try:
+            self.translator_gui.save_config(show_message=False)
+        except Exception:
+            pass
+
+        # Re-render the current review with the new font
+        if self._raw_review_md:
+            self._last_rendered_html = self._md_to_html(
+                self._raw_review_md,
+                font_family=font_family,
+                font_size=font_size,
+                spacing=spacing,
+            )
+            self.log_field.setHtml(self._last_rendered_html)
 
     # ─── Save ────────────────────────────────────────────────────────
 
@@ -1951,7 +2071,7 @@ class ReviewDialog(QDialog):
             with open(review_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             self._raw_review_md = content
-            self._last_rendered_html = self._md_to_html(content)
+            self._last_rendered_html = self._md_to_html(content, **self._get_font_kwargs())
             self.log_field.setHtml(self._last_rendered_html)
             self._load_remote_images()
             self.delete_btn.setEnabled(True)
