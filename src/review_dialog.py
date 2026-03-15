@@ -1122,9 +1122,31 @@ class ReviewDialog(QDialog):
 
         def _inline(text):
             """Apply inline markdown formatting."""
+            # Images: ![alt](url)
+            text = re.sub(
+                r'!\[([^\]]*)\]\((https?://[^)]+)\)',
+                r'<br/><img src="\2" alt="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/><br/>',
+                text
+            )
+            # Links: [text](url)  — must come after images to avoid matching ![...]
+            text = re.sub(
+                r'\[([^\]]+)\]\((https?://[^)]+)\)',
+                r'<a href="\2" style="color:#5a9fd4;text-decoration:underline;">\1</a>',
+                text
+            )
+            # Bold
             text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+            # Italic
             text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+            # Inline code
             text = re.sub(r'`([^`]+)`', r'<code style="background:#2a2a2a;padding:1px 4px;border-radius:3px;font-size:95%;">\1</code>', text)
+            # Bare image URLs (common extensions) not already inside tags
+            text = re.sub(
+                r'(?<!["\'])(?<!=)(https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp))(?!["\'])',
+                r'<br/><img src="\1" style="max-width:100%;margin:6px 0;border-radius:4px;"/><br/>',
+                text,
+                flags=re.IGNORECASE
+            )
             return text
 
         def _is_table_row(s):
