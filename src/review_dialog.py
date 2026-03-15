@@ -369,8 +369,8 @@ class ReviewDialog(QDialog):
         self._font_settings_panel.addWidget(spacing_label)
 
         self._review_spacing_spin = QSpinBox()
-        self._review_spacing_spin.setRange(-12, 24)
-        self._review_spacing_spin.setValue(int(self.translator_gui.config.get('review_spacing', 2)))
+        self._review_spacing_spin.setRange(-4, 24)
+        self._review_spacing_spin.setValue(int(self.translator_gui.config.get('review_spacing', -4)))
         self._review_spacing_spin.setSuffix("px")
         self._review_spacing_spin.setFocusPolicy(Qt.StrongFocus)
         self._review_spacing_spin.wheelEvent = lambda e: e.ignore()
@@ -1421,11 +1421,11 @@ class ReviewDialog(QDialog):
         return {
             'font_family': self.translator_gui.config.get('review_font_family', 'Segoe UI'),
             'font_size': int(self.translator_gui.config.get('review_font_size', 10)),
-            'spacing': int(self.translator_gui.config.get('review_spacing', 2)),
+            'spacing': int(self.translator_gui.config.get('review_spacing', -4)),
         }
 
     @staticmethod
-    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 10, spacing: int = 2) -> str:
+    def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 10, spacing: int = -4) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
 
