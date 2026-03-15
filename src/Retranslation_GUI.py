@@ -1231,7 +1231,7 @@ class RetranslationMixin:
             dialog = QDialog(parent_widget)
             dialog.setWindowTitle("Progress Manager - OPF Based" if spine_chapters else "Progress Manager")
             # Keep above the translator window but allow interaction with it
-            dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            # Parent-child windowing keeps this above the translator GUI
             dialog.setWindowModality(Qt.NonModal)
             # Use 38% width, 40% height for 1920x1080
             width, height = self._get_dialog_size(0.38, 0.4)
@@ -3947,7 +3947,7 @@ class RetranslationMixin:
             # Create main dialog
             dialog = QDialog(self)
             dialog.setWindowTitle("Progress Manager - Multiple Files")
-            dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            # Parent-child windowing keeps this above the translator GUI
             dialog.setWindowModality(Qt.NonModal)
             # Store the list of EPUBs in the dialog for cross-tab state updates
             dialog._epub_files_in_dialog = epub_files + text_files
@@ -4612,7 +4612,7 @@ class RetranslationMixin:
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Progress Manager - Images")
-        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        # Parent-child windowing keeps this above the translator GUI
         dialog.setWindowModality(Qt.NonModal)
         # Decreased width to 18%, increased height to 25% for better vertical space
         width, height = self._get_dialog_size(0.18, 0.25)
