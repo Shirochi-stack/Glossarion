@@ -1335,8 +1335,11 @@ class ReviewDialog(QDialog):
                         pass
 
             # Animate button: flash green "Saved!"
-            original_text = self.save_btn.text()
-            original_style = self.save_btn.styleSheet()
+            original_text = "💾 Save"
+            original_style = (
+                "background-color: #28a745; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            )
             self.save_btn.setText("✅ Saved!")
             self.save_btn.setStyleSheet(
                 "background-color: #1a8f3a; color: white; font-weight: bold; "
