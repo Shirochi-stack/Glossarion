@@ -886,13 +886,17 @@ class ReviewDialog(QDialog):
         system_prompt = system_prompt_template.replace('{target_lang}', output_lang)
         spoiler_mode = self.spoiler_checkbox.isChecked()
 
-        # Get batch size for parallelism
-        try:
-            batch_size = int(getattr(gui, 'batch_size_var', 1))
-            if batch_size < 1:
+        # Bug fix #1: Respect BATCH_MODE toggle for parallelism
+        batch_mode_on = os.environ.get('BATCH_MODE', '0').strip().lower() not in ('0', 'false', 'off', '')
+        if batch_mode_on:
+            try:
+                batch_size = int(getattr(gui, 'batch_size_var', 1))
+                if batch_size < 1:
+                    batch_size = 1
+            except (ValueError, TypeError):
                 batch_size = 1
-        except (ValueError, TypeError):
-            batch_size = 1
+        else:
+            batch_size = 1  # Sequential when batch mode is OFF
 
         # UI state
         self.start_btn.hide()
@@ -909,6 +913,18 @@ class ReviewDialog(QDialog):
             UnifiedClient.set_global_cancellation(False)
         except Exception:
             pass
+
+        # Bug fix #2: Hijack translator_gui.append_log (same as _on_start_review)
+        self._original_append_log = self.translator_gui.append_log
+        self._review_log_active = True
+        self._review_log_backlog = []
+
+        def _hijacked_append_log(message):
+            if self._review_log_active:
+                self._review_queue.put(('log', str(message)))
+                self._review_log_backlog.append(str(message))
+
+        self.translator_gui.append_log = _hijacked_append_log
 
         # Message queue for thread → main-thread
         import queue
@@ -953,7 +969,7 @@ class ReviewDialog(QDialog):
                         spoiler_mode=spoiler_mode,
                         temperature=temperature,
                         config=config,
-                        log_fn=lambda msg: self._review_queue.put(('log', f"[{basename}] {msg}")),
+                        log_fn=lambda msg, _bn=basename: self._review_queue.put(('log', f"[{_bn}] {msg}")),
                         stop_check_fn=_stop_check,
                     )
                     self._review_queue.put(('log', f"✅ Done: {basename}"))
@@ -1023,6 +1039,10 @@ class ReviewDialog(QDialog):
                         pass
                 elif kind == 'all_done':
                     self._review_poll_timer.stop()
+
+                    # Bug fix #2 (cleanup): Unhijack translator_gui.append_log
+                    self._unhijack_log()
+
                     self.stop_btn.hide()
                     self._stop_spinner_timer.stop()
                     self.start_btn.show()
@@ -1030,6 +1050,20 @@ class ReviewDialog(QDialog):
                     self.start_btn.setEnabled(True)
                     self.generate_all_btn.setEnabled(True)
                     self.save_btn.setEnabled(True)
+
+                    # Bug fix #4: Sync self.file_path to current combo selection
+                    # so arrow buttons don't early-return on the stale path
+                    try:
+                        cur_idx = self._epub_combo.currentIndex()
+                        if 0 <= cur_idx < len(self._all_epub_paths):
+                            self.file_path = self._all_epub_paths[cur_idx]
+                    except Exception:
+                        pass
+
+                    # Bug fix #3: Load the current EPUB's review into the output
+                    self._load_existing_review()
+                    self._update_restore_btn_visibility()
+
                     # Update review indicator
                     try:
                         if hasattr(self.translator_gui, '_update_review_indicator'):
