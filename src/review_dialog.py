@@ -319,7 +319,9 @@ class ReviewDialog(QDialog):
                 total = count_epub_tokens(self.file_path)
                 QTimer.singleShot(0, lambda t=total: self._on_token_count_done(t))
             except Exception as e:
-                err_msg = str(e)
+                import traceback
+                err_msg = f"{e}\n{traceback.format_exc()}"
+                print(f"[ReviewDialog] Token counting error: {err_msg}")
                 QTimer.singleShot(0, lambda msg=err_msg: self._on_token_count_done(-1, msg))
 
         t = threading.Thread(target=_count, daemon=True)
