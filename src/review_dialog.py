@@ -32,6 +32,7 @@ class ReviewDialog(QDialog):
         self._force_stop = False
         self._review_thread = None
         self._counting = False
+        self._token_cache = {}  # {file_path: token_count} — avoids recounting on switch
 
         self.setWindowTitle("Generate Review")
         self.setModal(False)
@@ -632,21 +633,31 @@ class ReviewDialog(QDialog):
     # ─── Token counting (background thread) ──────────────────────────
 
     def _start_token_count(self):
-        """Count EPUB tokens in a background thread."""
+        """Count EPUB tokens in a background thread (cached per file)."""
+        # Check cache first
+        cached = self._token_cache.get(self.file_path)
+        if cached is not None:
+            self.token_label.setText(f"📊 File tokens: {cached:,}")
+            self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
+            self._counting = False
+            return
+
         self._counting = True
         self._token_result = None  # Will be set by background thread
         self.token_label.setText("⏳ Counting tokens...")
         self.token_label.setStyleSheet("color: #f59e0b; font-size: 10pt;")
 
+        file_path_for_count = self.file_path  # Capture for thread + closure
+
         def _count():
             try:
-                total = count_epub_tokens(self.file_path)
-                self._token_result = ('ok', total)
+                total = count_epub_tokens(file_path_for_count)
+                self._token_result = ('ok', total, file_path_for_count)
             except Exception as e:
                 import traceback
                 err_msg = f"{e}\n{traceback.format_exc()}"
                 print(f"[ReviewDialog] Token counting error: {err_msg}")
-                self._token_result = ('error', err_msg)
+                self._token_result = ('error', err_msg, file_path_for_count)
 
         t = threading.Thread(target=_count, daemon=True)
         t.start()
@@ -664,6 +675,8 @@ class ReviewDialog(QDialog):
                 self.token_label.setText(f"⚠️ Token count failed: {result[1][:100]}")
                 self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
             elif result[1] >= 0:
+                # Cache the result
+                self._token_cache[result[2]] = result[1]
                 self.token_label.setText(f"📊 File tokens: {result[1]:,}")
                 self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
             else:
