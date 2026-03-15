@@ -8,7 +8,7 @@ import os
 import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QPlainTextEdit, QTextEdit, QCheckBox, QApplication, QGroupBox, QSplitter
+    QPlainTextEdit, QTextEdit, QTextBrowser, QCheckBox, QApplication, QGroupBox, QSplitter
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QIcon
@@ -293,10 +293,10 @@ class ReviewDialog(QDialog):
         log_group = QGroupBox("Review Output")
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(8, 8, 8, 8)
-        self.log_field = QTextEdit()
+        self.log_field = QTextBrowser()
         self.log_field.setReadOnly(True)
+        self.log_field.setOpenExternalLinks(True)
         self.log_field.setPlaceholderText("Generated review will appear here...")
-        self.log_field.setAcceptRichText(True)
         log_layout.addWidget(self.log_field)
 
         # ── Splitter between prompt and output ──
