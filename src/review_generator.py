@@ -347,7 +347,7 @@ def _fit_chapters(
 
 DEFAULT_REVIEW_PROMPT = """You are a literary critic and book reviewer. You will be given the text content of a novel (or part of it). 
 
-Write a comprehensive review that includes:
+Write a comprehensive review in {target_lang} that includes:
 1. **Summary** — A concise plot summary covering the main storyline
 2. **Characters** — Key characters and their roles
 3. **Themes** — Major themes explored in the work

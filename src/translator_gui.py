@@ -1256,6 +1256,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
         self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
+        # Review settings
+        self.review_system_prompt_var = self.config.get('review_system_prompt', '')
+        self.review_spoiler_mode_var = self.config.get('review_spoiler_mode', False)
         # Request merging - combine multiple chapters into single API request
         self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
         self.request_merge_count_var = str(self.config.get('request_merge_count', 3))

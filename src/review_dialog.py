@@ -28,6 +28,7 @@ class ReviewDialog(QDialog):
         self.translator_gui = translator_gui
         self.file_path = file_path
         self._stop_requested = False
+        self._force_stop = False
         self._review_thread = None
         self._counting = False
 
@@ -217,6 +218,17 @@ class ReviewDialog(QDialog):
         self.save_btn.setEnabled(False)
         button_layout.addWidget(self.save_btn)
 
+        # Delete Review
+        self.delete_btn = QPushButton("🗑️ Delete")
+        self.delete_btn.setStyleSheet(
+            "background-color: #dc3545; color: white; font-weight: bold; "
+            "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+        )
+        self.delete_btn.setMinimumWidth(120)
+        self.delete_btn.clicked.connect(self._on_delete)
+        self.delete_btn.setEnabled(False)
+        button_layout.addWidget(self.delete_btn)
+
         # 7. Close
         close_btn = QPushButton("Close")
         close_btn.setStyleSheet(
@@ -264,6 +276,7 @@ class ReviewDialog(QDialog):
                 if content.strip():
                     self.log_field.setPlainText(content)
                     self.save_btn.setEnabled(True)
+                    self.delete_btn.setEnabled(True)
             except Exception:
                 pass
 
@@ -320,6 +333,8 @@ class ReviewDialog(QDialog):
             return  # Already running
 
         self._stop_requested = False
+        self._force_stop = False
+        self._stop_click_times = []
         self._save_prompt_to_config()
 
         # Gather parameters from the GUI
@@ -337,6 +352,9 @@ class ReviewDialog(QDialog):
             token_limit = 200000
 
         system_prompt = self.prompt_edit.toPlainText().strip()
+        # Replace {target_lang} placeholder with the selected target language
+        output_lang = getattr(gui, 'lang_var', 'English')
+        system_prompt = system_prompt.replace('{target_lang}', output_lang)
         spoiler_mode = self.spoiler_checkbox.isChecked()
 
         # Determine output directory
@@ -349,6 +367,7 @@ class ReviewDialog(QDialog):
 
         # UI state
         self.start_btn.hide()
+        self.stop_btn.setText("🛑 Stop")
         self.stop_btn.show()
         self.log_field.clear()
         self.save_btn.setEnabled(False)
@@ -401,6 +420,7 @@ class ReviewDialog(QDialog):
             self.log_field.clear()
             self.log_field.setPlainText(result)
             self.save_btn.setEnabled(True)
+            self.delete_btn.setEnabled(True)
             self._append_log("")  # Scroll trigger
 
             # Update the review emoji in the main GUI
@@ -413,14 +433,51 @@ class ReviewDialog(QDialog):
             self._append_log("\n⚠️ No review generated.")
 
     def _on_stop(self):
-        """Stop the review generation."""
+        """Stop the review generation — double-click to force stop."""
+        import time
+        current_time = time.time()
+
+        if not hasattr(self, '_stop_click_times'):
+            self._stop_click_times = []
+
+        self._stop_click_times.append(current_time)
+        # Remove clicks older than 1 second
+        self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
+
+        # Double-click: force immediate stop
+        if len(self._stop_click_times) >= 2:
+            self._stop_requested = True
+            self._force_stop = True
+            self._stop_click_times = []
+            self.stop_btn.setText("⚡ Force Stopped")
+            self._append_log("⚡ Double-click detected — forcing immediate stop!")
+
+            # Kill the thread if still running
+            if self._review_thread and self._review_thread.is_alive():
+                # Thread is daemon so it will be cleaned up, but trigger UI reset
+                QTimer.singleShot(500, lambda: self._on_review_done(None))
+            return
+
+        # First click: graceful stop
+        graceful = getattr(self.translator_gui, 'graceful_stop_var', True)
         self._stop_requested = True
-        self._append_log("🛑 Stopping...")
+        self._force_stop = False
+
+        if graceful:
+            self.stop_btn.setText("🛑 Finishing...")
+            self._append_log("🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
+        else:
+            self._append_log("🛑 Stopping...")
 
     # ─── Save ────────────────────────────────────────────────────────
 
     def _on_save(self):
         """Save config with animated button feedback."""
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
         try:
             self._sync_settings_to_gui()
             if hasattr(self.translator_gui, 'save_config'):
@@ -468,6 +525,64 @@ class ReviewDialog(QDialog):
                     "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
                 ),
             ))
+
+    # ─── Delete ──────────────────────────────────────────────────────
+
+    def _on_delete(self):
+        """Move the review file to a backups subfolder."""
+        import shutil
+        from datetime import datetime
+
+        review_path = self._get_review_path()
+        if not review_path or not os.path.exists(review_path):
+            return
+
+        try:
+            # Create backups subfolder next to review/
+            review_dir = os.path.dirname(review_path)
+            backups_dir = os.path.join(review_dir, "backups")
+            os.makedirs(backups_dir, exist_ok=True)
+
+            # Timestamped backup filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_name = f"review_{timestamp}.md"
+            backup_path = os.path.join(backups_dir, backup_name)
+
+            shutil.move(review_path, backup_path)
+
+            # Clear UI
+            self.log_field.clear()
+            self.save_btn.setEnabled(False)
+            self.delete_btn.setEnabled(False)
+
+            # Update the review indicator in main GUI
+            try:
+                if hasattr(self.translator_gui, '_update_review_indicator'):
+                    self.translator_gui._update_review_indicator()
+            except Exception:
+                pass
+
+            # Play sound + animate button
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+
+            original_text = self.delete_btn.text()
+            original_style = self.delete_btn.styleSheet()
+            self.delete_btn.setText("✅ Moved to backups")
+            self.delete_btn.setStyleSheet(
+                "background-color: #6c757d; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            )
+            QTimer.singleShot(2000, lambda: (
+                self.delete_btn.setText(original_text),
+                self.delete_btn.setStyleSheet(original_style),
+            ))
+
+        except Exception as e:
+            self._append_log(f"❌ Failed to delete review: {e}")
 
     def closeEvent(self, event):
         """Save prompt on close."""
