@@ -614,6 +614,7 @@ class ReviewDialog(QDialog):
                 if content.strip():
                     self._raw_review_md = content
                     self.log_field.setHtml(self._md_to_html(content))
+                    self._load_remote_images()
                     self.save_btn.setEnabled(True)
                     self.delete_btn.setEnabled(True)
             except Exception:
@@ -1115,6 +1116,54 @@ class ReviewDialog(QDialog):
                 pass
         QTimer.singleShot(delay_ms, _reset)
 
+    def _load_remote_images(self):
+        """Fetch remote images referenced in the QTextEdit HTML and add them
+        to the document resource cache so they actually render."""
+        import re
+        import urllib.request
+        from PySide6.QtGui import QImage, QTextDocument
+        from PySide6.QtCore import QUrl
+
+        html = self.log_field.toHtml()
+        urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', html)
+        if not urls:
+            return
+
+        # De-duplicate
+        unique_urls = list(dict.fromkeys(urls))
+
+        def _fetch_all():
+            for url in unique_urls:
+                try:
+                    req = urllib.request.Request(url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Glossarion/1.0'
+                    })
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = resp.read()
+                    img = QImage()
+                    if img.loadFromData(data):
+                        # Scale down if very large (max 600px wide)
+                        if img.width() > 600:
+                            img = img.scaledToWidth(600, Qt.SmoothTransformation)
+                        # Must add resource on main thread
+                        QTimer.singleShot(0, lambda u=url, i=img: self._insert_image_resource(u, i))
+                except Exception:
+                    pass  # Non-fatal: image just won't show
+
+        threading.Thread(target=_fetch_all, daemon=True).start()
+
+    def _insert_image_resource(self, url: str, image):
+        """Insert a fetched image into the document resource cache and refresh."""
+        from PySide6.QtGui import QTextDocument
+        from PySide6.QtCore import QUrl
+        try:
+            doc = self.log_field.document()
+            doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), image)
+            # Force re-render by re-setting the same HTML
+            self.log_field.setHtml(doc.toHtml())
+        except RuntimeError:
+            pass  # Widget may have been destroyed
+
     @staticmethod
     def _md_to_html(md: str) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
@@ -1426,6 +1475,7 @@ class ReviewDialog(QDialog):
                 self.log_field.clear()
                 self._raw_review_md = text
                 self.log_field.setHtml(self._md_to_html(text))
+                self._load_remote_images()
                 fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
                 fade_in.setDuration(2000)
                 fade_in.setStartValue(0.0)
@@ -1693,6 +1743,7 @@ class ReviewDialog(QDialog):
                 content = f.read()
             self._raw_review_md = content
             self.log_field.setHtml(self._md_to_html(content))
+            self._load_remote_images()
             self.delete_btn.setEnabled(True)
 
             # Update the review indicator in main GUI
