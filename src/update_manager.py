@@ -898,12 +898,18 @@ class UpdateManager(QObject):
             print("[ERROR] No QApplication instance found - update dialog cannot be shown")
             return
         
-        # Determine parent window for positioning reference only
+        # Determine parent window - prefer Other Settings dialog
         from PySide6.QtWidgets import QWidget
         reference_widget = None
         try:
-            # Check if there's an active modal widget (e.g., Other Settings dialog)
-            reference_widget = app.activeModalWidget()
+            # Prefer use other_settings_dialog if it exists and is visible
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, '_other_settings_dialog'):
+                osd = self.main_gui._other_settings_dialog
+                if osd and isinstance(osd, QWidget) and osd.isVisible():
+                    reference_widget = osd
+            if not reference_widget:
+                # Check if there's an active modal widget (e.g., Other Settings dialog)
+                reference_widget = app.activeModalWidget()
             if not reference_widget:
                 # Fall back to active window
                 reference_widget = app.activeWindow()
