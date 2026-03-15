@@ -683,14 +683,15 @@ class ReviewDialog(QDialog):
                 fade_in.setStartValue(0.0)
                 fade_in.setEndValue(1.0)
                 fade_in.setEasingCurve(QEasingCurve.OutQuad)
-                # Remove effect and re-enable button after fade-in
+                # Remove effect after fade-in
                 def _cleanup():
                     try:
                         self.log_field.setGraphicsEffect(None)
-                        self.start_btn.setEnabled(True)
                     except RuntimeError:
                         pass
                 fade_in.finished.connect(_cleanup)
+                # Re-enable start button early (don't wait for full fade-in)
+                QTimer.singleShot(500, lambda: self.start_btn.setEnabled(True))
                 self._fade_in_anim = fade_in
                 fade_in.start()
             except RuntimeError:
