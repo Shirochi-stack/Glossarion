@@ -1500,10 +1500,8 @@ class ReviewDialog(QDialog):
         # Re-enable save (was disabled at review start)
         self.save_btn.setEnabled(True)
 
-        # Re-enable delete if a review file exists on disk
-        review_path = self._get_review_path()
-        if review_path and os.path.exists(review_path):
-            self.delete_btn.setEnabled(True)
+        # Re-enable delete (its handler already shows "No Review" if nothing to delete)
+        self.delete_btn.setEnabled(True)
 
         # Re-enable nav (may have been disabled during review)
         try:
@@ -1647,23 +1645,27 @@ class ReviewDialog(QDialog):
             try:
                 from unified_api_client import UnifiedClient
                 UnifiedClient.hard_cancel_all()
-                try:
-                    self.translator_gui.append_log("[Review] ⚡ All HTTP sessions forcefully closed")
-                except Exception:
-                    pass
-            except Exception as e:
-                try:
-                    self.translator_gui.append_log(f"[Review] ⚠️ hard_cancel_all error: {e}")
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-            # Stop poll timer and reset UI directly
+            # Abandon the thread — it's a daemon, let it die on its own
+            self._review_thread = None
+
+            # Stop poll timer and drain any leftover queue messages
             if hasattr(self, '_review_poll_timer'):
                 self._review_poll_timer.stop()
+            if hasattr(self, '_review_queue'):
+                while not self._review_queue.empty():
+                    try:
+                        self._review_queue.get_nowait()
+                    except Exception:
+                        break
+
+            # Reset UI immediately — no waiting
             self._on_review_done(None)
             return
 
-        # First click (graceful mode): wait for API response
+        # First click (graceful mode): set flag and keep UI in "Finishing..." state
         self._stop_requested = True
         self._force_stop = False
         self._stop_text_label.setText("Finishing...")
@@ -1671,6 +1673,7 @@ class ReviewDialog(QDialog):
             self.translator_gui.append_log("[Review] 🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
         except Exception:
             pass
+        # Poll timer keeps running — _on_review_done fires when thread finishes
 
     def _advance_stop_spinner(self):
         """Advance the spinning icon frame."""
