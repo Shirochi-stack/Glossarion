@@ -356,7 +356,7 @@ class ReviewDialog(QDialog):
         # Line height
         self._review_line_height_spin = QSpinBox()
         self._review_line_height_spin.setRange(20, 300)
-        self._review_line_height_spin.setValue(int(self.translator_gui.config.get('review_line_height', 50)))
+        self._review_line_height_spin.setValue(int(self.translator_gui.config.get('review_line_height', 100)))
         self._review_line_height_spin.setSuffix("%")
         self._review_line_height_spin.setSingleStep(10)
         self._review_line_height_spin.setFocusPolicy(Qt.StrongFocus)
@@ -1492,14 +1492,14 @@ class ReviewDialog(QDialog):
             'font_size': int(self.translator_gui.config.get('review_font_size', 9)),
             'spacing': int(self.translator_gui.config.get('review_spacing', 8)),
             'header_spacing': int(self.translator_gui.config.get('review_header_spacing', 6)),
-            'line_height': int(self.translator_gui.config.get('review_line_height', 50)),
+            'line_height': int(self.translator_gui.config.get('review_line_height', 100)),
             'font_color': self.translator_gui.config.get('review_font_color', '#e0e0e0'),
             'list_gap': int(self.translator_gui.config.get('review_list_gap', 10)),
         }
 
     @staticmethod
     def _md_to_html(md: str, font_family: str = 'Segoe UI', font_size: int = 9, spacing: int = 8,
-                    header_spacing: int = 6, line_height: int = 50, font_color: str = '#e0e0e0',
+                    header_spacing: int = 6, line_height: int = 100, font_color: str = '#e0e0e0',
                     list_gap: int = 10) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
@@ -1955,7 +1955,7 @@ class ReviewDialog(QDialog):
 
         self._review_font_combo.setCurrentText("Segoe UI")
         self._review_font_size_spin.setValue(9)
-        self._review_line_height_spin.setValue(50)
+        self._review_line_height_spin.setValue(100)
         self._review_header_spacing_spin.setValue(6)
         self._review_para_spacing_spin.setValue(8)
         self._review_list_gap_spin.setValue(10)
