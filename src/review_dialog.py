@@ -1119,11 +1119,126 @@ class ReviewDialog(QDialog):
     def _md_to_html(md: str) -> str:
         """Convert basic markdown to HTML for display in QTextEdit."""
         import re
+
+        def _inline(text):
+            """Apply inline markdown formatting."""
+            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+            text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+            text = re.sub(r'`([^`]+)`', r'<code style="background:#2a2a2a;padding:1px 4px;border-radius:3px;font-size:95%;">\1</code>', text)
+            return text
+
+        def _is_table_row(s):
+            """Check if a stripped line looks like a markdown table row."""
+            return s.startswith('|') and s.endswith('|') and s.count('|') >= 3
+
+        def _is_separator_row(s):
+            """Check if a stripped line is a table separator (|---|---|)."""
+            return bool(re.match(r'^\|[\s:]*-{2,}[\s:]*(\|[\s:]*-{2,}[\s:]*)+\|$', s))
+
+        def _parse_cells(s):
+            """Split a table row into cell contents."""
+            # Strip leading/trailing |, then split on |
+            inner = s.strip('|')
+            return [c.strip() for c in inner.split('|')]
+
+        def _parse_alignment(s):
+            """Parse separator row to determine column alignments."""
+            cells = _parse_cells(s)
+            aligns = []
+            for c in cells:
+                c = c.strip()
+                if c.startswith(':') and c.endswith(':'):
+                    aligns.append('center')
+                elif c.endswith(':'):
+                    aligns.append('right')
+                else:
+                    aligns.append('left')
+            return aligns
+
+        def _render_table(table_lines):
+            """Render collected table lines into an HTML table."""
+            if len(table_lines) < 2:
+                # Not enough lines for a table, render as plain text
+                return ''.join(
+                    f'<p style="margin-top:2px; margin-bottom:2px;">{_inline(l)}</p>\n'
+                    for l in table_lines
+                )
+
+            header_line = table_lines[0].strip()
+            sep_line = table_lines[1].strip() if len(table_lines) > 1 else ''
+
+            has_header = _is_separator_row(sep_line)
+            aligns = _parse_alignment(sep_line) if has_header else []
+
+            table_style = (
+                'border-collapse:collapse; margin:8px 0; width:100%;'
+            )
+            th_style = (
+                'border:1px solid #555; padding:6px 10px; '
+                'background-color:#3a4f66; color:#e0e0e0; font-weight:bold;'
+            )
+            td_style_even = (
+                'border:1px solid #444; padding:5px 10px; '
+                'background-color:#2b2b2b; color:#d0d0d0;'
+            )
+            td_style_odd = (
+                'border:1px solid #444; padding:5px 10px; '
+                'background-color:#333333; color:#d0d0d0;'
+            )
+
+            html = f'<table style="{table_style}">\n'
+
+            if has_header:
+                cells = _parse_cells(header_line)
+                html += '<tr>'
+                for ci, cell in enumerate(cells):
+                    align = aligns[ci] if ci < len(aligns) else 'left'
+                    html += f'<th style="{th_style} text-align:{align};">{_inline(cell)}</th>'
+                html += '</tr>\n'
+                data_lines = table_lines[2:]
+            else:
+                data_lines = table_lines
+
+            for ri, row_line in enumerate(data_lines):
+                row_line = row_line.strip()
+                if not _is_table_row(row_line):
+                    continue
+                if _is_separator_row(row_line):
+                    continue
+                cells = _parse_cells(row_line)
+                style = td_style_odd if ri % 2 else td_style_even
+                html += '<tr>'
+                for ci, cell in enumerate(cells):
+                    align = aligns[ci] if ci < len(aligns) else 'left'
+                    html += f'<td style="{style} text-align:{align};">{_inline(cell)}</td>'
+                html += '</tr>\n'
+
+            html += '</table>'
+            return html
+
         lines = md.split('\n')
         html_lines = []
         in_list = False
-        for line in lines:
-            stripped = line.strip()
+        table_buffer = []
+
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+
+            # ── Table detection ──
+            if _is_table_row(stripped):
+                table_buffer.append(lines[i])
+                i += 1
+                continue
+
+            # If we had a table buffer, flush it
+            if table_buffer:
+                # Close list before table
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                html_lines.append(_render_table(table_buffer))
+                table_buffer = []
 
             # Close list if we're not on a list item
             if in_list and not stripped.startswith(('- ', '* ', '• ')):
@@ -1136,11 +1251,11 @@ class ReviewDialog(QDialog):
                 level = len(m.group(1))
                 sizes = {1: '18pt', 2: '15pt', 3: '13pt', 4: '12pt', 5: '11pt', 6: '10pt'}
                 sz = sizes.get(level, '10pt')
-                text = m.group(2)
-                text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+                text = _inline(m.group(2))
                 html_lines.append(
                     f'<p style="font-size:{sz}; font-weight:bold; margin-top:10px; margin-bottom:4px;">{text}</p>'
                 )
+                i += 1
                 continue
 
             # Unordered list items
@@ -1149,27 +1264,34 @@ class ReviewDialog(QDialog):
                 if not in_list:
                     html_lines.append('<ul style="margin-top:2px; margin-bottom:2px;">')
                     in_list = True
-                item_text = lm.group(1)
-                item_text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', item_text)
-                item_text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', item_text)
+                item_text = _inline(lm.group(1))
                 html_lines.append(f'<li>{item_text}</li>')
+                i += 1
                 continue
 
             # Horizontal rule
             if re.match(r'^[-*_]{3,}\s*$', stripped):
                 html_lines.append('<hr/>')
+                i += 1
                 continue
 
             # Empty line
             if not stripped:
                 html_lines.append('<br/>')
+                i += 1
                 continue
 
             # Regular paragraph — apply inline formatting
-            text = stripped
-            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-            text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
-            html_lines.append(f'<p style="margin-top:2px; margin-bottom:2px;">{text}</p>')
+            html_lines.append(f'<p style="margin-top:2px; margin-bottom:2px;">{_inline(stripped)}</p>')
+            i += 1
+
+        # Flush any remaining table buffer
+        if table_buffer:
+            if in_list:
+                html_lines.append('</ul>')
+                in_list = False
+            html_lines.append(_render_table(table_buffer))
+            table_buffer = []
 
         if in_list:
             html_lines.append('</ul>')
