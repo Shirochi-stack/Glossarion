@@ -6028,6 +6028,9 @@ def _create_prompt_management_section(self, parent):
     epub_title.setContentsMargins(0, 0, 0, 5)
     section_v.addWidget(epub_title)
     
+    validate_row = QHBoxLayout()
+    validate_row.setContentsMargins(0, 0, 0, 0)
+    validate_row.setSpacing(8)
     btn_validate = QPushButton("🔍 Validate EPUB Structure")
     btn_validate.setFixedWidth(250)
     btn_validate.clicked.connect(lambda: self.validate_epub_structure_gui())
@@ -6035,12 +6038,13 @@ def _create_prompt_management_section(self, parent):
         "QPushButton { background-color: #6f42c1; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
         "QPushButton:hover { background-color: #5a32a3; }"
     )
-    section_v.addWidget(btn_validate)
-    
-    validate_desc = QLabel("Check if all required EPUB files are present for compilation")
-    validate_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    validate_desc.setContentsMargins(0, 0, 0, 5)
-    section_v.addWidget(validate_desc)
+    validate_row.addWidget(btn_validate)
+    self._validate_btn = btn_validate
+    self._validate_status = QLabel("")
+    self._validate_status.setStyleSheet("color: gray; font-size: 10pt;")
+    validate_row.addWidget(self._validate_status)
+    validate_row.addStretch()
+    section_v.addLayout(validate_row)
     
     # NCX-only navigation toggle
     ncx_cb = self._create_styled_checkbox("Use NCX-only Navigation (Compatibility Mode)")
@@ -9919,16 +9923,18 @@ def run_standalone_translate_headers(self):
         msg_box.exec()
 
 def validate_epub_structure_gui(self):
-    """GUI wrapper for EPUB structure validation"""
+    """GUI wrapper for EPUB structure validation."""
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtGui import QIcon
+    from PySide6.QtCore import QTimer
     import os
-    
-    # Get icon path
+
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-    
-    # Gather all selected EPUB files (same logic as delete_headers / delete_toc)
+    btn = getattr(self, '_validate_btn', None)
+    status_lbl = getattr(self, '_validate_status', None)
+
+    # Gather all selected EPUB files
     epub_files_to_process = []
     if hasattr(self, 'selected_files') and self.selected_files:
         current_epub_files = [f for f in self.selected_files if str(f).lower().endswith('.epub')]
@@ -9943,7 +9949,7 @@ def validate_epub_structure_gui(self):
                 entry_path = self.entry_epub.get().strip()
         if entry_path and entry_path.lower().endswith('.epub') and os.path.exists(entry_path):
             epub_files_to_process = [entry_path]
-    
+
     if not epub_files_to_process:
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
@@ -9953,19 +9959,18 @@ def validate_epub_structure_gui(self):
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
         return
-    
+
     current_dir = os.getcwd()
     script_dir = os.path.dirname(os.path.abspath(__file__))
     override_dir = os.environ.get('OUTPUT_DIRECTORY') or (self.config.get('output_directory') if hasattr(self, 'config') else None)
-    
+
     all_passed = True
     all_results = []
-    
+
     for epub_path in epub_files_to_process:
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
         self.append_log(f"🔍 Validating EPUB structure for: {epub_base}")
-        
-        # Candidate-based output directory resolution (matches delete_headers logic)
+
         candidates = [
             os.path.join(current_dir, epub_base),
             os.path.join(script_dir, epub_base),
@@ -9973,7 +9978,7 @@ def validate_epub_structure_gui(self):
         ]
         if override_dir:
             candidates.insert(0, os.path.join(override_dir, epub_base))
-        
+
         output_dir = None
         for candidate in candidates:
             if os.path.isdir(candidate):
@@ -9985,56 +9990,72 @@ def validate_epub_structure_gui(self):
                         break
                 except Exception:
                     continue
-        
+
         if not output_dir:
             self.append_log(f"  ⚠️ No output directory found for {epub_base}")
             all_results.append(f"⚠️ {epub_base}: No output directory found")
+            all_passed = False
             continue
-        
+
         try:
             from TransateKRtoEN import validate_epub_structure, check_epub_readiness
-            
             structure_ok = validate_epub_structure(output_dir)
             readiness_ok = check_epub_readiness(output_dir)
-            
+
             if structure_ok and readiness_ok:
-                self.append_log(f"  ✅ {epub_base}: PASSED — Ready for compilation!")
+                self.append_log(f"  ✅ {epub_base}: PASSED")
                 all_results.append(f"✅ {epub_base}: All structure files present")
             elif structure_ok:
-                self.append_log(f"  ⚠️ {epub_base}: Structure OK, but some issues found")
+                self.append_log(f"  ⚠️ {epub_base}: Structure OK, some issues")
                 all_results.append(f"⚠️ {epub_base}: Structure OK, some issues found")
                 all_passed = False
             else:
-                self.append_log(f"  ❌ {epub_base}: FAILED — Missing critical files")
+                self.append_log(f"  ❌ {epub_base}: Missing critical files")
                 all_results.append(f"❌ {epub_base}: Missing critical EPUB files")
                 all_passed = False
-        except ImportError as e:
-            self.append_log(f"  ❌ Could not import validation functions: {e}")
-            all_results.append(f"❌ {epub_base}: Import error — {e}")
-            all_passed = False
         except Exception as e:
             self.append_log(f"  ❌ Validation error for {epub_base}: {e}")
             all_results.append(f"❌ {epub_base}: {e}")
             all_passed = False
-    
-    # Show summary dialog
-    result_text = "\n".join(all_results)
-    msg_box = QMessageBox()
+
     if all_passed and all_results:
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowTitle("Validation Passed")
-        msg_box.setText(f"✅ All {len(epub_files_to_process)} EPUB(s) validated successfully!\n\n{result_text}")
-    elif all_results:
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle("Validation Results")
-        msg_box.setText(f"Validation results for {len(epub_files_to_process)} EPUB(s):\n\n{result_text}")
+        # Success — animate inline, no messagebox
+        n = len(epub_files_to_process)
+        if btn:
+            btn.setText("✅ All Valid!")
+            btn.setStyleSheet(
+                "QPushButton { background-color: #22c55e; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+            )
+        if status_lbl:
+            status_lbl.setText(f"{n} EPUB(s) passed")
+            status_lbl.setStyleSheet("color: #22c55e; font-size: 10pt; font-weight: bold;")
+        # Reset button after 3 seconds
+        def _reset_btn():
+            if btn:
+                btn.setText("🔍 Validate EPUB Structure")
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #6f42c1; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #5a32a3; }"
+                )
+            if status_lbl:
+                status_lbl.setText("")
+                status_lbl.setStyleSheet("color: gray; font-size: 10pt;")
+        QTimer.singleShot(3000, _reset_btn)
     else:
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle("No Results")
-        msg_box.setText("No output directories found for any selected EPUBs.")
-    msg_box.setWindowIcon(icon)
-    _center_messagebox_buttons(msg_box)
-    msg_box.exec()
+        # Failures — show messagebox
+        result_text = "\n".join(all_results)
+        msg_box = QMessageBox()
+        if all_results:
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Validation Results")
+            msg_box.setText(f"Results for {len(epub_files_to_process)} EPUB(s):\n\n{result_text}")
+        else:
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("No Results")
+            msg_box.setText("No output directories found for any selected EPUBs.")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
 
 def delete_translated_headers_file(self):
     """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
