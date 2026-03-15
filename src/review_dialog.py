@@ -1063,16 +1063,20 @@ class ReviewDialog(QDialog):
                     self.generate_all_btn.setEnabled(True)
                     self.save_btn.setEnabled(True)
 
-                    # Bug fix #4: Sync self.file_path to current combo selection
-                    # so arrow buttons don't early-return on the stale path
+                    # Sync self.file_path and nav button states to current combo selection
+                    # (nav buttons were stale because _on_epub_switched wasn't called during review)
                     try:
                         cur_idx = self._epub_combo.currentIndex()
-                        if 0 <= cur_idx < len(self._all_epub_paths):
+                        n = len(self._all_epub_paths)
+                        if 0 <= cur_idx < n:
                             self.file_path = self._all_epub_paths[cur_idx]
+                            self._nav_prev_btn.setEnabled(cur_idx > 0)
+                            self._nav_next_btn.setEnabled(cur_idx < n - 1)
+                            self._nav_counter.setText(f"{cur_idx + 1} / {n}")
                     except Exception:
                         pass
 
-                    # Bug fix #3: Load the current EPUB's review into the output
+                    # Load the current EPUB's review into the output
                     self._load_existing_review()
                     self._update_restore_btn_visibility()
 
