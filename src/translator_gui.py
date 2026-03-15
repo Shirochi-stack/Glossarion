@@ -911,9 +911,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         
         # Set window properties with comprehensive dark theme styling
-        # Ensure main window never stays on top (child dialogs with WindowStaysOnTopHint
-        # can cause the parent to inherit always-on-top on Windows)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1e1e1e;
@@ -1910,6 +1907,28 @@ Text to analyze:
         except Exception as e:
             print(f"Auto-encryption check failed: {e}")
     
+    def changeEvent(self, event):
+        """Remove always-on-top when window loses focus.
+        
+        Child dialogs with WindowStaysOnTopHint can cause the parent to
+        inherit TOPMOST on Windows. This forces it off when deactivated.
+        """
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange and not self.isActiveWindow():
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                HWND_NOTOPMOST = -2
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOACTIVATE = 0x0010
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                )
+            except Exception:
+                pass
+
     def closeEvent(self, event):
         """Handle window close event properly"""
         try:
