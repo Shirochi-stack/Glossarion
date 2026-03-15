@@ -2967,7 +2967,7 @@ Recent translations to summarize:
         if self.token_limit_disabled:
             self.token_limit_entry.setEnabled(False)
             self.toggle_token_btn.setText("Enable Input Token Limit")
-            self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
+            self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")  # success-outline
             if hasattr(self, 'generate_review_btn'):
                 self.generate_review_btn.setEnabled(False)
         
@@ -4859,7 +4859,7 @@ Recent translations to summarize:
         
         # Set initial button text and style based on current state
         btn_text = "Enable Input Token Limit" if self.token_limit_disabled else "Disable Input Token Limit"
-        btn_style = "background-color: #28a745; color: white; font-weight: bold;" if self.token_limit_disabled else "background-color: #dc3545; color: white; font-weight: bold;"
+        btn_style = ("background-color: #28a745; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }") if self.token_limit_disabled else ("background-color: #dc3545; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
         
         self.toggle_token_btn = QPushButton(btn_text)
         self.toggle_token_btn.clicked.connect(self.toggle_token_limit)
@@ -12384,7 +12384,7 @@ Important rules:
        if not self.token_limit_disabled:
            self.token_limit_entry.setEnabled(False)
            self.toggle_token_btn.setText("Enable Input Token Limit")
-           self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+           self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
            self.token_limit_disabled = True
            # Disable Generate Review button when token limit is off
@@ -12395,12 +12395,12 @@ Important rules:
            if not self.token_limit_entry.text().replace(',', '').strip():
                self.token_limit_entry.setText(f"{self.config.get('token_limit', 1000000):,}")
            self.toggle_token_btn.setText("Disable Input Token Limit")
-           self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+           self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
-           # Re-enable Generate Review button when token limit is on
+           # Re-enable Generate Review button only if no process is running
            if hasattr(self, 'generate_review_btn'):
-               self.generate_review_btn.setEnabled(True)
+               self.generate_review_btn.setEnabled(not self._is_any_process_running())
 
     def _open_review_dialog(self):
        """Open the review generation dialog for the currently selected file."""
@@ -12742,14 +12742,21 @@ Important rules:
            can_review = token_limit_enabled and not any_process_running
            self.generate_review_btn.setEnabled(can_review)
 
-       # Review dialog's Start Review button
+       # Review dialog's Start Review / Review All buttons
        review_dlg = getattr(self, '_review_dialog', None)
        if review_dlg is not None:
            try:
-               if review_dlg.isVisible() and hasattr(review_dlg, 'start_btn'):
-                   review_dlg.start_btn.setEnabled(not any_process_running)
+               if review_dlg.isVisible():
+                   if hasattr(review_dlg, 'start_btn'):
+                       review_dlg.start_btn.setEnabled(not any_process_running)
+                   if hasattr(review_dlg, 'generate_all_btn'):
+                       review_dlg.generate_all_btn.setEnabled(not any_process_running)
            except RuntimeError:
                pass
+
+       # Disable token limit toggle while processes are running
+       if hasattr(self, 'toggle_token_btn'):
+           self.toggle_token_btn.setEnabled(not any_process_running)
 
     def _reset_api_watchdog_progress(self, *, clear_stale_external_files: bool = True) -> None:
         """Reset the API watchdog (and the UI bar) immediately - thread-safe.

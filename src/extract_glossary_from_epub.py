@@ -2667,7 +2667,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                 }, f, indent=2, ensure_ascii=False)
     except (PermissionError, OSError):
         pass  # Non-fatal: payload saving is debug-only
-        
+
+    try:
         # Use send_with_interrupt for API call
         raw, finish_reason, raw_obj = send_with_interrupt(
             messages=msgs,
