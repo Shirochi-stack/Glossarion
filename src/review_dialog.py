@@ -130,14 +130,126 @@ class ReviewDialog(QDialog):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(10)
 
-        # Header
-        header = QLabel(f"📖 Review: {os.path.basename(self.file_path)}")
-        header_font = QFont()
-        header_font.setPointSize(12)
-        header_font.setBold(True)
-        header.setFont(header_font)
-        header.setWordWrap(True)
-        layout.addWidget(header)
+        # Header with EPUB navigator
+        header_container = QHBoxLayout()
+        header_container.setSpacing(6)
+
+        # Gather all EPUB paths from translator GUI
+        self._all_epub_paths = []
+        selected = getattr(self.translator_gui, 'selected_epub_files', None) or \
+                   getattr(self.translator_gui, 'selected_files', None) or []
+        for f in selected:
+            f_str = str(f)
+            if f_str.lower().endswith('.epub') and os.path.exists(f_str):
+                self._all_epub_paths.append(f_str)
+        # Ensure current file is in the list
+        if self.file_path not in self._all_epub_paths:
+            self._all_epub_paths.insert(0, self.file_path)
+
+        nav_arrow_style = (
+            "QPushButton { background-color: #3a3a3a; color: white; border: 1px solid #555; "
+            "border-radius: 3px; padding: 4px 8px; font-size: 11pt; font-weight: bold; "
+            "min-width: 26px; max-width: 26px; }"
+            "QPushButton:hover { background-color: #505050; border-color: #5a9fd4; }"
+            "QPushButton:disabled { color: #555; background-color: #2a2a2a; }"
+        )
+
+        self._nav_prev_btn = QPushButton("◀")
+        self._nav_prev_btn.setStyleSheet(nav_arrow_style)
+        self._nav_prev_btn.setToolTip("Previous EPUB")
+        header_container.addWidget(self._nav_prev_btn)
+
+        from PySide6.QtWidgets import QComboBox
+        self._epub_combo = QComboBox()
+        self._epub_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2b2b2b; color: white; border: 1px solid #555;
+                border-radius: 3px; padding: 4px 8px; font-size: 10pt;
+            }
+            QComboBox:hover { border-color: #5a9fd4; }
+            QComboBox::drop-down { border: none; width: 20px; }
+            QComboBox::down-arrow { image: none; border: none; }
+            QComboBox QAbstractItemView {
+                background-color: #2b2b2b; color: white;
+                selection-background-color: #5a9fd4;
+                border: 1px solid #555;
+            }
+        """)
+        for ep in self._all_epub_paths:
+            self._epub_combo.addItem(f"📖 Review: {os.path.basename(ep)}", ep)
+        # Set current index to match self.file_path
+        try:
+            idx = self._all_epub_paths.index(self.file_path)
+            self._epub_combo.setCurrentIndex(idx)
+        except ValueError:
+            pass
+        header_container.addWidget(self._epub_combo, 1)
+
+        self._nav_next_btn = QPushButton("▶")
+        self._nav_next_btn.setStyleSheet(nav_arrow_style)
+        self._nav_next_btn.setToolTip("Next EPUB")
+        header_container.addWidget(self._nav_next_btn)
+
+        self._nav_counter = QLabel("")
+        self._nav_counter.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        header_container.addWidget(self._nav_counter)
+
+        layout.addLayout(header_container)
+
+        # Hide navigator if only 1 file
+        show_nav = len(self._all_epub_paths) > 1
+        self._nav_prev_btn.setVisible(show_nav)
+        self._nav_next_btn.setVisible(show_nav)
+        self._nav_counter.setVisible(show_nav)
+        if not show_nav:
+            # If single file, just show a plain label instead of combo
+            self._epub_combo.setStyleSheet(self._epub_combo.styleSheet() +
+                "QComboBox::drop-down { width: 0px; }"
+                "QComboBox { border: none; font-size: 12pt; font-weight: bold; padding: 0; }"
+            )
+
+        # Wire up navigation
+        def _on_epub_nav_prev():
+            idx = self._epub_combo.currentIndex()
+            if idx > 0:
+                self._epub_combo.setCurrentIndex(idx - 1)
+
+        def _on_epub_nav_next():
+            idx = self._epub_combo.currentIndex()
+            if idx < self._epub_combo.count() - 1:
+                self._epub_combo.setCurrentIndex(idx + 1)
+
+        def _on_epub_switched(index):
+            if index < 0 or index >= len(self._all_epub_paths):
+                return
+            new_path = self._all_epub_paths[index]
+            if new_path == self.file_path:
+                return
+            self.file_path = new_path
+            self.setWindowTitle(f"Generate Review — {os.path.basename(new_path)}")
+            # Reload review and token count
+            self.log_field.clear()
+            self._load_existing_review()
+            self._update_restore_btn_visibility()
+            self._start_token_count()
+            # Update nav state
+            self._nav_prev_btn.setEnabled(index > 0)
+            self._nav_next_btn.setEnabled(index < len(self._all_epub_paths) - 1)
+            self._nav_counter.setText(f"{index + 1} / {len(self._all_epub_paths)}")
+
+        self._nav_prev_btn.clicked.connect(_on_epub_nav_prev)
+        self._nav_next_btn.clicked.connect(_on_epub_nav_next)
+        self._epub_combo.currentIndexChanged.connect(_on_epub_switched)
+
+        # Initial counter state
+        if show_nav:
+            try:
+                init_idx = self._all_epub_paths.index(self.file_path)
+            except ValueError:
+                init_idx = 0
+            self._nav_prev_btn.setEnabled(init_idx > 0)
+            self._nav_next_btn.setEnabled(init_idx < len(self._all_epub_paths) - 1)
+            self._nav_counter.setText(f"{init_idx + 1} / {len(self._all_epub_paths)}")
 
         # Reset to Default button (right-aligned, above the System Prompt group)
         reset_row = QHBoxLayout()

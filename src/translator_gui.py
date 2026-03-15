@@ -12353,21 +12353,14 @@ Important rules:
                return
            file_path = str(files[0])
            
-           # Reuse existing dialog if it exists (dialog persists on close)
+           # Reuse existing dialog if it exists (dialog has built-in EPUB switcher)
            existing = getattr(self, '_review_dialog', None)
            if existing is not None:
                try:
-                   # If same file, just show it
-                   if getattr(existing, 'file_path', None) == file_path:
-                       existing.show()
-                       existing.raise_()
-                       existing.activateWindow()
-                       return
-                   else:
-                       # Different file — destroy old and create new
-                       existing.setAttribute(Qt.WA_DeleteOnClose, True)
-                       existing.close()
-                       self._review_dialog = None
+                   existing.show()
+                   existing.raise_()
+                   existing.activateWindow()
+                   return
                except RuntimeError:
                    self._review_dialog = None
            

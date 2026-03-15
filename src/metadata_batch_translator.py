@@ -283,6 +283,25 @@ class MetadataBatchTranslatorUI:
             main_layout = QVBoxLayout()
             main_layout.setContentsMargins(20, 20, 20, 20)
             
+            # --- Gather all EPUB paths ---
+            epub_paths = []
+            selected_files = getattr(self.gui, 'selected_epub_files', None) or getattr(self.gui, 'selected_files', None) or []
+            for f in selected_files:
+                f_str = str(f)
+                if f_str.lower().endswith('.epub') and os.path.isfile(f_str):
+                    epub_paths.append(f_str)
+            # Fallback to single entry
+            if not epub_paths:
+                single = None
+                for attr in ['entry_epub', 'file_entry', 'epub_entry']:
+                    if hasattr(self.gui, attr):
+                        w = getattr(self.gui, attr)
+                        if hasattr(w, 'text'):
+                            single = w.text().strip()
+                            break
+                if single and single.lower().endswith('.epub') and os.path.isfile(single):
+                    epub_paths = [single]
+            
             # Title
             title_label = QLabel("Select Metadata Fields to Translate")
             title_font = QFont()
@@ -295,22 +314,81 @@ class MetadataBatchTranslatorUI:
             desc_label = QLabel("These fields will be translated along with or separately from the book title:")
             desc_label.setStyleSheet("color: gray; font-size: 10pt;")
             desc_label.setWordWrap(True)
-            desc_label.setContentsMargins(0, 10, 0, 20)
+            desc_label.setContentsMargins(0, 10, 0, 10)
             main_layout.addWidget(desc_label)
             
-            # Create scroll area for fields
+            # --- EPUB dropdown navigator (only visible when multiple EPUBs) ---
+            nav_widget = QWidget()
+            nav_layout = QHBoxLayout(nav_widget)
+            nav_layout.setContentsMargins(0, 0, 0, 10)
+            nav_layout.setSpacing(6)
+            
+            nav_arrow_style = """
+                QPushButton {
+                    background-color: #3a3a3a; color: white; border: 1px solid #555;
+                    border-radius: 3px; padding: 4px 10px; font-size: 11pt; font-weight: bold;
+                    min-width: 28px; max-width: 28px;
+                }
+                QPushButton:hover { background-color: #505050; border-color: #5a9fd4; }
+                QPushButton:disabled { color: #555; background-color: #2a2a2a; }
+            """
+            
+            prev_btn = QPushButton("◀")
+            prev_btn.setStyleSheet(nav_arrow_style)
+            prev_btn.setToolTip("Previous EPUB")
+            nav_layout.addWidget(prev_btn)
+            
+            from PySide6.QtWidgets import QComboBox
+            epub_combo = QComboBox()
+            epub_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: #2b2b2b; color: white; border: 1px solid #555;
+                    border-radius: 3px; padding: 4px 8px; font-size: 10pt;
+                }
+                QComboBox:hover { border-color: #5a9fd4; }
+                QComboBox::drop-down {
+                    border: none; width: 20px;
+                }
+                QComboBox::down-arrow { image: none; border: none; }
+                QComboBox QAbstractItemView {
+                    background-color: #2b2b2b; color: white;
+                    selection-background-color: #5a9fd4;
+                    border: 1px solid #555;
+                }
+            """)
+            for ep in epub_paths:
+                epub_combo.addItem(os.path.basename(ep), ep)
+            nav_layout.addWidget(epub_combo, 1)
+            
+            next_btn = QPushButton("▶")
+            next_btn.setStyleSheet(nav_arrow_style)
+            next_btn.setToolTip("Next EPUB")
+            nav_layout.addWidget(next_btn)
+            
+            # Counter label
+            counter_label = QLabel("")
+            counter_label.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+            nav_layout.addWidget(counter_label)
+            
+            main_layout.addWidget(nav_widget)
+            
+            # Hide navigator if only 1 (or 0) EPUBs
+            if len(epub_paths) <= 1:
+                nav_widget.hide()
+            
+            # --- Scrollable fields area (rebuilt on EPUB switch) ---
             scroll_area = QScrollArea()
             scroll_area.setWidgetResizable(True)
             scroll_area.setFrameShape(QFrame.NoFrame)
+            main_layout.addWidget(scroll_area)
             
-            fields_container = QWidget()
-            fields_layout = QVBoxLayout(fields_container)
-            fields_layout.setContentsMargins(0, 0, 0, 0)
+            # State tracking
+            per_epub_field_vars = {}  # {epub_path: {field: checkbox}}
+            current_epub_state = {'path': epub_paths[0] if epub_paths else None}
             
-            # Load metadata fields from EPUB
-            all_fields = self._detect_all_metadata_fields()
+            # Get saved per-EPUB settings (or flat dict for backward compat)
+            translate_fields_config = self.gui.config.get('translate_metadata_fields', {})
             
-            # Standard fields
             standard_fields = {
                 'title': ('Title', 'The book title'),
                 'creator': ('Author/Creator', 'The author or creator'),
@@ -323,113 +401,187 @@ class MetadataBatchTranslatorUI:
                 'rights': ('Rights', 'Copyright information')
             }
             
-            field_vars = {}
+            def _get_saved_fields_for_epub(epub_path):
+                """Get saved field selections for a specific EPUB."""
+                basename = os.path.basename(epub_path) if epub_path else ''
+                # Check for per-EPUB config first
+                per_epub = translate_fields_config.get('_per_epub', {})
+                if basename in per_epub:
+                    return per_epub[basename]
+                # Fallback to flat config
+                return translate_fields_config
             
-            # Section for standard fields
-            section_label = QLabel("Standard Metadata Fields:")
-            section_font = QFont()
-            section_font.setPointSize(12)
-            section_font.setBold(True)
-            section_label.setFont(section_font)
-            section_label.setContentsMargins(0, 10, 0, 5)
-            fields_layout.addWidget(section_label)
-            
-            # Get saved settings
-            translate_fields = self.gui.config.get('translate_metadata_fields', {})
-            
-            for field, (label, description) in standard_fields.items():
-                if field in all_fields:
-                    frame = QWidget()
-                    frame_layout = QHBoxLayout(frame)
-                    frame_layout.setContentsMargins(0, 5, 0, 5)
-                    
-                    # Special handling for title field - show note instead of checkbox
-                    if field == 'title':
-                        # Show the title field info but with a note instead of checkbox
-                        label_widget = QLabel(f"{label}:")
-                        label_font = QFont()
-                        label_font.setBold(True)
-                        label_widget.setFont(label_font)
-                        label_widget.setMinimumWidth(200)
-                        frame_layout.addWidget(label_widget)
-                        
-                        # Show current value
-                        current_value = str(all_fields[field])
-                        if len(current_value) > 50:
-                            current_value = current_value[:47] + "..."
-                        value_label = QLabel(current_value)
-                        value_label.setStyleSheet("color: gray; font-size: 9pt;")
-                        frame_layout.addWidget(value_label)
-                        frame_layout.addStretch()
-                        fields_layout.addWidget(frame)
-                        
-                        # Add note explaining title is controlled elsewhere
-                        note_label = QLabel("ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface")
-                        note_label.setStyleSheet("color: #5dade2; font-size: 9pt;")  # Light blue/cyan for better contrast
-                        note_label.setWordWrap(True)
-                        note_label.setContentsMargins(25, 0, 0, 10)
-                        fields_layout.addWidget(note_label)
-                        continue  # Skip to next field
-                    
-                    # Normal handling for other fields
-                    default_value = False  # All other fields default to False
-                    checkbox = self._create_styled_checkbox(f"{label}:")
-                    checkbox.setChecked(translate_fields.get(field, default_value))
-                    checkbox.setMinimumWidth(200)
-                    field_vars[field] = checkbox
-                    frame_layout.addWidget(checkbox)
-                    
-                    # Show current value
-                    current_value = str(all_fields[field])
-                    if len(current_value) > 50:
-                        current_value = current_value[:47] + "..."
-                    value_label = QLabel(current_value)
-                    value_label.setStyleSheet("color: gray; font-size: 9pt;")
-                    frame_layout.addWidget(value_label)
-                    frame_layout.addStretch()
-                    fields_layout.addWidget(frame)
-            
-            # Custom fields section
-            custom_fields = {k: v for k, v in all_fields.items() if k not in standard_fields}
-            
-            if custom_fields:
-                custom_label = QLabel("Custom Metadata Fields:")
-                custom_font = QFont()
-                custom_font.setPointSize(12)
-                custom_font.setBold(True)
-                custom_label.setFont(custom_font)
-                custom_label.setContentsMargins(0, 20, 0, 5)
-                fields_layout.addWidget(custom_label)
+            def _rebuild_fields(epub_path):
+                """Rebuild the fields area for the given EPUB."""
+                # Save current selections before switching
+                _save_current_selections()
                 
-                custom_desc = QLabel("(Non-standard fields found in your EPUB)")
-                custom_desc.setStyleSheet("color: gray; font-size: 10pt;")
-                custom_desc.setContentsMargins(0, 0, 0, 10)
-                fields_layout.addWidget(custom_desc)
+                current_epub_state['path'] = epub_path
                 
-                for field, value in custom_fields.items():
-                    frame = QWidget()
-                    frame_layout = QHBoxLayout(frame)
-                    frame_layout.setContentsMargins(0, 5, 0, 5)
+                # Detect metadata for this EPUB
+                all_fields = self._detect_all_metadata_fields_for_epub(epub_path)
+                saved = _get_saved_fields_for_epub(epub_path)
+                
+                # Create new container
+                fields_container = QWidget()
+                fields_layout = QVBoxLayout(fields_container)
+                fields_layout.setContentsMargins(0, 0, 0, 0)
+                
+                field_vars = {}
+                
+                if not all_fields:
+                    empty_label = QLabel("No metadata fields found in this EPUB.")
+                    empty_label.setStyleSheet("color: gray; font-size: 11pt;")
+                    empty_label.setAlignment(Qt.AlignCenter)
+                    fields_layout.addWidget(empty_label)
+                else:
+                    # Standard fields section
+                    section_label = QLabel("Standard Metadata Fields:")
+                    section_font = QFont()
+                    section_font.setPointSize(12)
+                    section_font.setBold(True)
+                    section_label.setFont(section_font)
+                    section_label.setContentsMargins(0, 10, 0, 5)
+                    fields_layout.addWidget(section_label)
                     
-                    checkbox = self._create_styled_checkbox(f"{field}:")
-                    checkbox.setChecked(translate_fields.get(field, False))
-                    checkbox.setMinimumWidth(200)
-                    field_vars[field] = checkbox
-                    frame_layout.addWidget(checkbox)
+                    for field, (label, description) in standard_fields.items():
+                        if field in all_fields:
+                            frame = QWidget()
+                            frame_layout = QHBoxLayout(frame)
+                            frame_layout.setContentsMargins(0, 5, 0, 5)
+                            
+                            # Title field — info only, no checkbox
+                            if field == 'title':
+                                label_widget = QLabel(f"{label}:")
+                                label_font = QFont()
+                                label_font.setBold(True)
+                                label_widget.setFont(label_font)
+                                label_widget.setMinimumWidth(200)
+                                frame_layout.addWidget(label_widget)
+                                
+                                current_value = str(all_fields[field])
+                                if len(current_value) > 50:
+                                    current_value = current_value[:47] + "..."
+                                value_label = QLabel(current_value)
+                                value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                                frame_layout.addWidget(value_label)
+                                frame_layout.addStretch()
+                                fields_layout.addWidget(frame)
+                                
+                                note_label = QLabel("ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface")
+                                note_label.setStyleSheet("color: #5dade2; font-size: 9pt;")
+                                note_label.setWordWrap(True)
+                                note_label.setContentsMargins(25, 0, 0, 10)
+                                fields_layout.addWidget(note_label)
+                                continue
+                            
+                            # Normal field with checkbox
+                            default_value = False
+                            checkbox = self._create_styled_checkbox(f"{label}:")
+                            checkbox.setChecked(saved.get(field, default_value))
+                            checkbox.setMinimumWidth(200)
+                            field_vars[field] = checkbox
+                            frame_layout.addWidget(checkbox)
+                            
+                            current_value = str(all_fields[field])
+                            if len(current_value) > 50:
+                                current_value = current_value[:47] + "..."
+                            value_label = QLabel(current_value)
+                            value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                            frame_layout.addWidget(value_label)
+                            frame_layout.addStretch()
+                            fields_layout.addWidget(frame)
                     
-                    display_value = str(value)
-                    if len(display_value) > 50:
-                        display_value = display_value[:47] + "..."
-                    value_label = QLabel(display_value)
-                    value_label.setStyleSheet("color: gray; font-size: 9pt;")
-                    frame_layout.addWidget(value_label)
-                    frame_layout.addStretch()
-                    fields_layout.addWidget(frame)
+                    # Custom fields
+                    custom_fields = {k: v for k, v in all_fields.items() if k not in standard_fields}
+                    if custom_fields:
+                        custom_label = QLabel("Custom Metadata Fields:")
+                        custom_font = QFont()
+                        custom_font.setPointSize(12)
+                        custom_font.setBold(True)
+                        custom_label.setFont(custom_font)
+                        custom_label.setContentsMargins(0, 20, 0, 5)
+                        fields_layout.addWidget(custom_label)
+                        
+                        custom_desc = QLabel("(Non-standard fields found in your EPUB)")
+                        custom_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                        custom_desc.setContentsMargins(0, 0, 0, 10)
+                        fields_layout.addWidget(custom_desc)
+                        
+                        for field, value in custom_fields.items():
+                            frame = QWidget()
+                            frame_layout = QHBoxLayout(frame)
+                            frame_layout.setContentsMargins(0, 5, 0, 5)
+                            
+                            checkbox = self._create_styled_checkbox(f"{field}:")
+                            checkbox.setChecked(saved.get(field, False))
+                            checkbox.setMinimumWidth(200)
+                            field_vars[field] = checkbox
+                            frame_layout.addWidget(checkbox)
+                            
+                            display_value = str(value)
+                            if len(display_value) > 50:
+                                display_value = display_value[:47] + "..."
+                            value_label = QLabel(display_value)
+                            value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                            frame_layout.addWidget(value_label)
+                            frame_layout.addStretch()
+                            fields_layout.addWidget(frame)
+                
+                fields_layout.addStretch()
+                scroll_area.setWidget(fields_container)
+                per_epub_field_vars[epub_path] = field_vars
+                
+                # Update counter
+                if len(epub_paths) > 1:
+                    idx = epub_paths.index(epub_path) if epub_path in epub_paths else 0
+                    counter_label.setText(f"{idx + 1} / {len(epub_paths)}")
+                    prev_btn.setEnabled(idx > 0)
+                    next_btn.setEnabled(idx < len(epub_paths) - 1)
             
-            # Add stretch to fields layout
-            fields_layout.addStretch()
-            scroll_area.setWidget(fields_container)
-            main_layout.addWidget(scroll_area)
+            def _save_current_selections():
+                """Save checkbox states for the currently displayed EPUB."""
+                ep = current_epub_state.get('path')
+                if ep and ep in per_epub_field_vars:
+                    saved = {}
+                    for field, cb in per_epub_field_vars[ep].items():
+                        try:
+                            if cb.isChecked():
+                                saved[field] = True
+                        except RuntimeError:
+                            pass
+                    per_epub_field_vars[ep] = None  # Clear widget refs (will be rebuilt)
+                    # Store in translate_fields_config
+                    if len(epub_paths) > 1:
+                        if '_per_epub' not in translate_fields_config:
+                            translate_fields_config['_per_epub'] = {}
+                        translate_fields_config['_per_epub'][os.path.basename(ep)] = saved
+                    else:
+                        translate_fields_config.clear()
+                        translate_fields_config.update(saved)
+            
+            # Nav button handlers
+            def _on_prev():
+                idx = epub_combo.currentIndex()
+                if idx > 0:
+                    epub_combo.setCurrentIndex(idx - 1)
+            
+            def _on_next():
+                idx = epub_combo.currentIndex()
+                if idx < epub_combo.count() - 1:
+                    epub_combo.setCurrentIndex(idx + 1)
+            
+            def _on_combo_changed(index):
+                if index >= 0 and index < len(epub_paths):
+                    _rebuild_fields(epub_paths[index])
+            
+            prev_btn.clicked.connect(_on_prev)
+            next_btn.clicked.connect(_on_next)
+            epub_combo.currentIndexChanged.connect(_on_combo_changed)
+            
+            # Initial build
+            if epub_paths:
+                _rebuild_fields(epub_paths[0])
             
             # Translation mode
             mode_group = QGroupBox("Translation Mode")
@@ -457,14 +609,25 @@ class MetadataBatchTranslatorUI:
             # Buttons
             button_layout = QHBoxLayout()
             button_layout.setSpacing(10)
-            button_layout.addStretch()  # Center buttons
+            button_layout.addStretch()
             
             def save_metadata_config():
-                # Update configuration
-                self.gui.translate_metadata_fields = {}
-                for field, checkbox in field_vars.items():
-                    if checkbox.isChecked():
-                        self.gui.translate_metadata_fields[field] = True
+                # Save current EPUB selections first
+                _save_current_selections()
+                
+                # Build final config
+                if len(epub_paths) > 1:
+                    # Multi-EPUB: merge all per-epub selections into a combined flat dict
+                    # for backward compat, while also keeping per-epub data
+                    combined = {}
+                    per_epub = translate_fields_config.get('_per_epub', {})
+                    for basename, fields in per_epub.items():
+                        combined.update(fields)
+                    combined['_per_epub'] = per_epub
+                    self.gui.translate_metadata_fields = combined
+                else:
+                    # Single EPUB: flat dict
+                    self.gui.translate_metadata_fields = {k: v for k, v in translate_fields_config.items() if k != '_per_epub'}
                 
                 # Get selected translation mode
                 selected_mode = 'together'
@@ -479,20 +642,21 @@ class MetadataBatchTranslatorUI:
                 dialog.hide()
             
             def reset_metadata_config():
-                msg_box = QMessageBox(dialog)  # Set dialog as parent
+                msg_box = QMessageBox(dialog)
                 msg_box.setIcon(QMessageBox.Question)
                 msg_box.setWindowTitle("Reset Metadata Fields")
                 msg_box.setText("Are you sure you want to reset all metadata field selections?\n\nThis will uncheck all fields.")
                 msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                 msg_box.setDefaultButton(QMessageBox.No)
-                msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)  # Force on top
+                msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
                 if os.path.exists(icon_path):
                     msg_box.setWindowIcon(QIcon(icon_path))
                 
                 if msg_box.exec() == QMessageBox.Yes:
-                    for field, checkbox in field_vars.items():
-                        # Since title is no longer in field_vars, all fields default to False
-                        checkbox.setChecked(False)
+                    ep = current_epub_state.get('path')
+                    if ep and ep in per_epub_field_vars and per_epub_field_vars[ep]:
+                        for field, checkbox in per_epub_field_vars[ep].items():
+                            checkbox.setChecked(False)
             
             save_btn = QPushButton("💾 Save")
             save_btn.setMinimumWidth(120)
@@ -550,7 +714,7 @@ class MetadataBatchTranslatorUI:
                 }
             """)
             button_layout.addWidget(cancel_btn)
-            button_layout.addStretch()  # Center buttons
+            button_layout.addStretch()
             
             main_layout.addLayout(button_layout)
             dialog.setLayout(main_layout)
@@ -1441,48 +1605,11 @@ class MetadataBatchTranslatorUI:
         except Exception as e:
             print(f"Error reloading config: {e}")
     
-    def _detect_all_metadata_fields(self) -> Dict[str, str]:
-        """Detect ALL metadata fields in the current EPUB"""
+    def _detect_all_metadata_fields_for_epub(self, epub_path: str) -> Dict[str, str]:
+        """Detect ALL metadata fields in the given EPUB file"""
         metadata_fields = {}
         
-        # Try different possible attribute names for the file path
-        epub_path = None
-        
-        # Common patterns for file path in translator GUIs
-        path_attributes = [
-            'entry_epub',      # Most common
-            'file_entry',      
-            'epub_entry',
-            'input_entry',
-            'file_path_entry',
-            'epub_path',
-            'file_path',
-            'input_file'
-        ]
-        
-        for attr in path_attributes:
-            if hasattr(self.gui, attr):
-                widget = getattr(self.gui, attr)
-                # Try Qt widget methods first
-                if hasattr(widget, 'text'):
-                    epub_path = widget.text()
-                    break
-                # Then try tkinter methods
-                elif hasattr(widget, 'get'):
-                    epub_path = widget.get()
-                    break
-                # Handle if it's a string directly
-                elif isinstance(widget, str):
-                    epub_path = widget
-                    break
-        
-        if not epub_path:
-            # Try to get from config or recent files
-            if hasattr(self.gui, 'config') and 'last_epub_path' in self.gui.config:
-                epub_path = self.gui.config.get('last_epub_path', '')
-        
-        if not epub_path or not epub_path.endswith('.epub'):
-            # Return empty dict if no EPUB loaded
+        if not epub_path or not epub_path.endswith('.epub') or not os.path.isfile(epub_path):
             return metadata_fields
         
         try:
@@ -1522,6 +1649,46 @@ class MetadataBatchTranslatorUI:
             self.gui.append_log(f"Error reading EPUB metadata: {e}")
         
         return metadata_fields
+
+    def _detect_all_metadata_fields(self) -> Dict[str, str]:
+        """Detect ALL metadata fields in the current EPUB"""
+        # Try different possible attribute names for the file path
+        epub_path = None
+        
+        # Common patterns for file path in translator GUIs
+        path_attributes = [
+            'entry_epub',      # Most common
+            'file_entry',      
+            'epub_entry',
+            'input_entry',
+            'file_path_entry',
+            'epub_path',
+            'file_path',
+            'input_file'
+        ]
+        
+        for attr in path_attributes:
+            if hasattr(self.gui, attr):
+                widget = getattr(self.gui, attr)
+                # Try Qt widget methods first
+                if hasattr(widget, 'text'):
+                    epub_path = widget.text()
+                    break
+                # Then try tkinter methods
+                elif hasattr(widget, 'get'):
+                    epub_path = widget.get()
+                    break
+                # Handle if it's a string directly
+                elif isinstance(widget, str):
+                    epub_path = widget
+                    break
+        
+        if not epub_path:
+            # Try to get from config or recent files
+            if hasattr(self.gui, 'config') and 'last_epub_path' in self.gui.config:
+                epub_path = self.gui.config.get('last_epub_path', '')
+        
+        return self._detect_all_metadata_fields_for_epub(epub_path)
 
 class BatchHeaderTranslator:
     """Translate chapter headers in batches"""
