@@ -4756,6 +4756,13 @@ Recent translations to summarize:
             """Auto-format with commas while preserving cursor position."""
             text = self.token_limit_entry.text()
             digits = text.replace(',', '').strip()
+
+            # Disable Generate Review when field is empty or non-numeric
+            if hasattr(self, 'generate_review_btn'):
+                has_valid_value = digits.isdigit() and int(digits) > 0
+                not_busy = not self._is_any_process_running()
+                self.generate_review_btn.setEnabled(has_valid_value and not_busy)
+
             if not digits.isdigit():
                 return
             formatted = f"{int(digits):,}"
