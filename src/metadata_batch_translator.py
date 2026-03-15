@@ -572,8 +572,7 @@ class MetadataBatchTranslatorUI:
                     saved = {}
                     for field, cb in per_epub_field_vars[ep].items():
                         try:
-                            if cb.isChecked():
-                                saved[field] = True
+                            saved[field] = cb.isChecked()
                         except RuntimeError:
                             pass
                     per_epub_field_vars[ep] = None  # Clear widget refs (will be rebuilt)
