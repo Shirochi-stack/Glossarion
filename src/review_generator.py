@@ -473,7 +473,17 @@ def generate_review(
 
         # Show actual model/key info (multi-key aware)
         actual_model = getattr(client, 'model', model)
-        key_count = len(getattr(client, 'api_keys', [api_key])) if hasattr(client, 'api_keys') else 1
+        is_multi = getattr(client, '_multi_key_mode', False)
+        key_count = 1
+        if is_multi:
+            try:
+                pool = getattr(client, '_api_key_pool', None) or client.__class__._api_key_pool
+                if pool and hasattr(pool, 'keys'):
+                    key_count = len(pool.keys)
+                elif pool and hasattr(pool, '_keys'):
+                    key_count = len(pool._keys)
+            except Exception:
+                key_count = 2  # We know it's multi-key, just can't get exact count
         if key_count > 1:
             log_fn(f"📤 Sending {content_tokens:,} tokens to {actual_model} ({key_count} keys)...")
         else:
@@ -515,6 +525,11 @@ def generate_review(
         return review_text.strip()
 
     except Exception as e:
+        # Silently handle user-initiated cancellation (force stop)
+        err_str = str(e).lower()
+        if 'cancelled' in err_str or 'canceled' in err_str:
+            log_fn("🛑 Review cancelled by user")
+            return None
         log_fn(f"❌ API call failed: {e}")
         import traceback
         traceback.print_exc()

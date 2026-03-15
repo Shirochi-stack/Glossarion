@@ -223,7 +223,7 @@ class ReviewDialog(QDialog):
             "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
             "padding: 8px 16px; border-radius: 4px; font-size: 10pt; border: none; }"
         )
-        self.stop_btn.setMinimumWidth(120)
+        self.stop_btn.setMinimumWidth(150)
         self.stop_btn.clicked.connect(self._on_stop)
 
         # Build icon + text layout inside button
@@ -247,8 +247,10 @@ class ReviewDialog(QDialog):
         self._stop_spinner_frames = []
         self._stop_spinner_idx = 0
         try:
-            base_dir = getattr(translator_gui, 'base_dir', os.getcwd())
+            # Try multiple paths for base_dir
+            base_dir = getattr(self.translator_gui, 'base_dir', None) or getattr(translator_gui, 'base_dir', None) or os.path.dirname(os.path.abspath(__file__))
             icon_path = os.path.join(base_dir, 'Halgakos.ico')
+            print(f"[ReviewDialog] Stop icon path: {icon_path} exists={os.path.exists(icon_path)}")
             if os.path.exists(icon_path):
                 from PySide6.QtGui import QPixmap, QTransform
                 from PySide6.QtCore import QSize
@@ -610,6 +612,8 @@ class ReviewDialog(QDialog):
                 pass
         else:
             self._append_log("\n⚠️ No review generated.")
+            # Reload existing review from file (if any) so dialog is refreshed
+            self._load_existing_review()
 
     def _on_stop(self):
         """Stop the review generation — double-click to force stop."""
