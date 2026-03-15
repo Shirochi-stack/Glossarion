@@ -4748,9 +4748,28 @@ Recent translations to summarize:
         token_limit_layout.setSpacing(6)
         
         self.token_limit_entry = QLineEdit()
-        self.token_limit_entry.setText(str(self.config.get('token_limit', 200000)))
-        self.token_limit_entry.setMaximumWidth(80)
+        self.token_limit_entry.setText(f"{self.config.get('token_limit', 200000):,}")
+        self.token_limit_entry.setMaximumWidth(110)
         self.token_limit_entry.setEnabled(not self.token_limit_disabled)
+
+        def _format_token_field():
+            """Auto-format with commas while preserving cursor position."""
+            text = self.token_limit_entry.text()
+            digits = text.replace(',', '').strip()
+            if not digits.isdigit():
+                return
+            formatted = f"{int(digits):,}"
+            if formatted != text:
+                cursor = self.token_limit_entry.cursorPosition()
+                # Adjust cursor for added/removed commas
+                commas_before = text[:cursor].count(',')
+                commas_after = formatted[:cursor].count(',')
+                self.token_limit_entry.blockSignals(True)
+                self.token_limit_entry.setText(formatted)
+                self.token_limit_entry.setCursorPosition(cursor + commas_after - commas_before)
+                self.token_limit_entry.blockSignals(False)
+
+        self.token_limit_entry.textChanged.connect(_format_token_field)
         token_limit_layout.addWidget(self.token_limit_entry)
         
         # Generate Review button
@@ -5685,7 +5704,7 @@ Recent translations to summarize:
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
 
         # Output Token Limit button (row 9, column 0 - below label)
-        self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens}")
+        self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens:,}")
         self.output_btn.clicked.connect(self.prompt_custom_token_limit)
         self.output_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding: 8px 6px;")  # info
         self.output_btn.setMinimumWidth(180)
@@ -10246,7 +10265,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if hasattr(self, 'token_limit_disabled') and self.token_limit_disabled:
                     os.environ['MAX_INPUT_TOKENS'] = ''
                 else:
-                    token_val = self.token_limit_entry.text().strip()
+                    token_val = self.token_limit_entry.text().replace(',', '').strip()
                     if token_val and token_val.isdigit():
                         os.environ['MAX_INPUT_TOKENS'] = token_val
                     else:
@@ -11887,10 +11906,10 @@ Important rules:
                     os.environ['MAX_INPUT_TOKENS'] = ''
                     self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
                 else:
-                    token_val = self.token_limit_entry.text().strip()
+                    token_val = self.token_limit_entry.text().replace(',', '').strip()
                     if token_val and token_val.isdigit():
                         os.environ['MAX_INPUT_TOKENS'] = token_val
-                        self.append_log(f"🎯 Input Token Limit: {token_val}")
+                        self.append_log(f"🎯 Input Token Limit: {int(token_val):,}")
                     else:
                         os.environ['MAX_INPUT_TOKENS'] = '50000'
                         self.append_log(f"🎯 Input Token Limit: 50000 (default)")
@@ -12268,8 +12287,8 @@ Important rules:
                self.generate_review_btn.setEnabled(False)
        else:
            self.token_limit_entry.setEnabled(True)
-           if not self.token_limit_entry.text().strip():
-               self.token_limit_entry.setText(str(self.config.get('token_limit', 1000000)))
+           if not self.token_limit_entry.text().replace(',', '').strip():
+               self.token_limit_entry.setText(f"{self.config.get('token_limit', 1000000):,}")
            self.toggle_token_btn.setText("Disable Input Token Limit")
            self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
@@ -15089,8 +15108,8 @@ Important rules:
        )
        if ok and val:
            self.max_output_tokens = val
-           self.output_btn.setText(f"Output Token Limit: {val}")
-           self.append_log(f"✅ Output token limit set to {val}")
+           self.output_btn.setText(f"Output Token Limit: {val:,}")
+           self.append_log(f"✅ Output token limit set to {val:,}")
            
            # Update compression factor if auto mode is enabled
            if hasattr(self, '_update_auto_compression_factor'):
@@ -17513,7 +17532,7 @@ Important rules:
                 self.config['extraction_mode'] = self.extraction_mode_var
 
             # Token limit
-            _tl = self.token_limit_entry.text().strip()
+            _tl = self.token_limit_entry.text().replace(',', '').strip()
             self.config['token_limit'] = int(_tl) if _tl.isdigit() else None
 
             # Update last update check time

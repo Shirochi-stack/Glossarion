@@ -360,7 +360,7 @@ class ReviewDialog(QDialog):
 
         # Get input token limit
         try:
-            token_limit = int(gui.token_limit_entry.text().strip())
+            token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
         except (ValueError, AttributeError):
             token_limit = 200000
 
