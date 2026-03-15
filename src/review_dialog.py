@@ -443,14 +443,28 @@ class ReviewDialog(QDialog):
         existing = self.log_field.toPlainText().strip()
         if existing and len(existing) > 50:
             from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.warning(
-                self, "Overwrite Review?",
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Overwrite Review?")
+            msg.setText(
                 "A review is already displayed in the output.\n"
                 "Starting a new review will replace it.\n\n"
-                "Continue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                "Continue?"
             )
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            msg.setStyleSheet("""
+                QPushButton {
+                    min-width: 80px;
+                    min-height: 30px;
+                    padding: 6px 20px;
+                    font-size: 10pt;
+                }
+                QDialogButtonBox {
+                    qproperty-centerButtons: true;
+                }
+            """)
+            reply = msg.exec()
             if reply != QMessageBox.Yes:
                 return
 
@@ -494,6 +508,13 @@ class ReviewDialog(QDialog):
         self._stop_spinner_timer.start()
         self.log_field.clear()
         self.save_btn.setEnabled(False)
+
+        # Clear any lingering cancellation from a previous force stop
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_global_cancellation(False)
+        except Exception:
+            pass
 
         # Message queue for thread → main-thread communication
         import queue
@@ -611,10 +632,20 @@ class ReviewDialog(QDialog):
             self._stop_spinner_timer.stop()
             self._append_log("⚡ Double-click detected — forcing immediate stop!")
 
-            # Kill the thread if still running
-            if self._review_thread and self._review_thread.is_alive():
-                # Thread is daemon so it will be cleaned up, but trigger UI reset
-                QTimer.singleShot(500, lambda: self._on_review_done(None))
+            # Hard cancel all in-flight HTTP requests
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.hard_cancel_all()
+                self._append_log("⚡ All HTTP sessions forcefully closed")
+            except Exception as e:
+                self._append_log(f"⚠️ hard_cancel_all error: {e}")
+
+            # Stop the queue poller so late thread results are discarded
+            if hasattr(self, '_review_poll_timer'):
+                self._review_poll_timer.stop()
+
+            # Immediately reset UI
+            self._on_review_done(None)
             return
 
         # First click: graceful stop
