@@ -1132,6 +1132,7 @@ class MetadataBatchTranslatorUI:
             
     def _create_advanced_prompts_tab(self, parent):
         """Create tab for advanced prompt settings"""
+        parent.setStyleSheet("background-color: #2b2b2b;")
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
         
