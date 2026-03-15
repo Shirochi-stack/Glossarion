@@ -3979,7 +3979,7 @@ class RetranslationMixin:
             
             # Count total files for UI decision
             total_files = len(epub_files) + len(text_files) + len(folders) + len(image_files)
-            use_dropdown = total_files > 7
+            use_dropdown = total_files > 3
 
             if use_dropdown:
                 # ── Dropdown + arrows for many files ──
@@ -4079,6 +4079,23 @@ class RetranslationMixin:
                     }
                     QTabBar::tab:hover {
                         background-color: #4a8fc4;
+                    }
+                    QTabBar QToolButton {
+                        background-color: #3a3a3a;
+                        border: 1px solid #5a9fd4;
+                        border-radius: 3px;
+                        color: white;
+                        font-weight: bold;
+                        font-size: 14pt;
+                        width: 36px;
+                        padding: 4px;
+                        margin: 2px 4px;
+                    }
+                    QTabBar QToolButton:hover {
+                        background-color: #4a8fc4;
+                    }
+                    QTabBar::scroller {
+                        width: 52px;
                     }
                 """)
                 dialog_layout.addWidget(notebook)
