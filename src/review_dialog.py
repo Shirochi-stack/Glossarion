@@ -631,11 +631,24 @@ class ReviewDialog(QDialog):
         if error:
             self._append_log(f"\n❌ Error: {error}")
         elif result:
-            # Show only the review in the dialog
+            # Transition: show success flash, then reveal review
             self.log_field.clear()
-            self.log_field.setPlainText(result)
+            self.log_field.setPlainText("✅ Review generated successfully!")
+            self.log_field.setStyleSheet(
+                "QPlainTextEdit { color: #4ade80; font-size: 14pt; font-weight: bold; }"
+            )
             self.delete_btn.setEnabled(True)
             self._update_restore_btn_visibility()
+
+            # After brief delay, swap to actual review text with normal styling
+            def _show_review():
+                try:
+                    self.log_field.setStyleSheet("")
+                    self.log_field.clear()
+                    self.log_field.setPlainText(result)
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(800, _show_review)
 
             # Update the review emoji in the main GUI
             try:

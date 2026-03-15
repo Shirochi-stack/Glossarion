@@ -1803,11 +1803,13 @@ class UnifiedClient:
             cls._force_rotation = force_rotation
             cls._rotation_frequency = rotation_frequency
             
-            # Single debug message
-            if encrypted_keys_fixed > 0:
-                print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
-            else:
-                print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded")
+            # Single debug message (skip if pool already loaded with same count)
+            existing_count = len(getattr(cls._api_key_pool, 'keys', [])) if cls._api_key_pool else 0
+            if existing_count != len(validated_keys):
+                if encrypted_keys_fixed > 0:
+                    print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                else:
+                    print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded")
             
             return True
 
