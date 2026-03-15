@@ -702,9 +702,9 @@ class ReviewDialog(QDialog):
         if self._review_thread and self._review_thread.is_alive():
             return  # Already running
 
-        # Warn if review output already has content
-        existing = self.log_field.toPlainText().strip()
-        if existing and len(existing) > 50:
+        # Warn only if a saved review file exists on disk
+        review_path = self._get_review_path()
+        if review_path and os.path.exists(review_path):
             from PySide6.QtWidgets import QMessageBox
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Warning)
