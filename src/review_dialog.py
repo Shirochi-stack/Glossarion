@@ -521,11 +521,13 @@ class ReviewDialog(QDialog):
         # Save original and replace with a wrapper that also writes to review dialog
         self._original_append_log = self.translator_gui.append_log
         self._review_log_active = True
+        self._review_log_backlog = []
 
         def _hijacked_append_log(message):
-            # During review: send ONLY to review dialog, suppress main GUI log
+            # During review: send ONLY to review dialog, buffer for later main GUI replay
             if self._review_log_active:
                 self._review_queue.put(('log', str(message)))
+                self._review_log_backlog.append(str(message))
 
         self.translator_gui.append_log = _hijacked_append_log
 
@@ -604,13 +606,20 @@ class ReviewDialog(QDialog):
         scrollbar.setValue(scrollbar.maximum())
 
     def _unhijack_log(self):
-        """Restore the original translator_gui.append_log."""
+        """Restore the original translator_gui.append_log and flush backlog."""
         self._review_log_active = False
         if hasattr(self, '_original_append_log'):
             try:
                 self.translator_gui.append_log = self._original_append_log
             except Exception:
                 pass
+            # Flush buffered messages to main GUI log
+            for msg in getattr(self, '_review_log_backlog', []):
+                try:
+                    self._original_append_log(msg)
+                except Exception:
+                    pass
+            self._review_log_backlog = []
 
     def _on_review_done(self, result: str = None, error: str = None):
         """Called on main thread when review generation finishes."""
