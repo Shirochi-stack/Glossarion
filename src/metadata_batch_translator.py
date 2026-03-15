@@ -1930,8 +1930,8 @@ class BatchHeaderTranslator:
         system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
-        print(f"[DEBUG] System prompt: '{system_prompt[:150]}...'")
-        print(f"[DEBUG] User prompt: '{prompt_template[:150]}...'")
+        print(f"[DEBUG] System prompt: '{system_prompt}'")
+        print(f"[DEBUG] User prompt: '{prompt_template}'")
         
         # Add the titles to translate
         user_prompt_template = prompt_template + "\n\nTitles to translate:\n"

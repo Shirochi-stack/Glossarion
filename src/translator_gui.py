@@ -8778,6 +8778,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Update temperature and max output tokens from GUI's current values
                 os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+                # Set batch header translation prompts from config
+                _output_lang = self.config.get('output_language', 'English')
+                os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = self.config.get('batch_header_system_prompt', '').replace('{target_lang}', _output_lang)
+                os.environ['BATCH_HEADER_PROMPT'] = self.config.get('batch_header_prompt', '').replace('{target_lang}', _output_lang)
+                os.environ['OUTPUT_LANGUAGE'] = _output_lang
                 
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
                 auto_glossary_mode = self.config.get('auto_glossary_mode', None)
@@ -10764,6 +10769,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FORCED_SOURCE_LANG': self.config.get('forced_source_lang', 'Korean'),
             'OUTPUT_LANGUAGE': self.config.get('output_language', 'English'),
             'METADATA_BATCH_PROMPT': self.config.get('metadata_batch_prompt', ''),
+            'BATCH_HEADER_SYSTEM_PROMPT': self.config.get('batch_header_system_prompt', ''),
+            'BATCH_HEADER_PROMPT': self.config.get('batch_header_prompt', ''),
             
             # AI Hunter configuration
             'AI_HUNTER_CONFIG': json.dumps(self.config.get('ai_hunter_config', {})),
