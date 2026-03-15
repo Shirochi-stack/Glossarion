@@ -8,7 +8,7 @@ import os
 import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QPlainTextEdit, QCheckBox, QApplication, QGroupBox
+    QPlainTextEdit, QCheckBox, QApplication, QGroupBox, QSplitter
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QIcon
@@ -145,9 +145,7 @@ class ReviewDialog(QDialog):
         prompt_layout.setContentsMargins(8, 8, 8, 8)
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("Enter the system prompt for the review...")
-        self.prompt_edit.setMaximumHeight(220)
         prompt_layout.addWidget(self.prompt_edit)
-        layout.addWidget(prompt_group)
 
         # ── 2. Log / Summary field ──
         log_group = QGroupBox("Review Output")
@@ -157,7 +155,30 @@ class ReviewDialog(QDialog):
         self.log_field.setReadOnly(True)
         self.log_field.setPlaceholderText("Generated review will appear here...")
         log_layout.addWidget(self.log_field)
-        layout.addWidget(log_group, stretch=1)
+
+        # ── Splitter between prompt and output ──
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(prompt_group)
+        splitter.addWidget(log_group)
+        splitter.setStretchFactor(0, 1)  # prompt
+        splitter.setStretchFactor(1, 3)  # output gets more space
+        splitter.setHandleWidth(6)
+        splitter.setStyleSheet("""
+            QSplitter::handle:vertical {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 transparent, stop:0.3 #555, stop:0.5 #888,
+                    stop:0.7 #555, stop:1 transparent);
+                height: 6px;
+                margin: 2px 40px;
+                border-radius: 3px;
+            }
+            QSplitter::handle:vertical:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 transparent, stop:0.3 #4a7ba7, stop:0.5 #6ba3d6,
+                    stop:0.7 #4a7ba7, stop:1 transparent);
+            }
+        """)
+        layout.addWidget(splitter, stretch=1)
 
         # ── Controls row ──
         controls_layout = QHBoxLayout()
@@ -196,14 +217,76 @@ class ReviewDialog(QDialog):
         self.start_btn.clicked.connect(self._on_start_review)
         button_layout.addWidget(self.start_btn)
 
-        # Stop button (hidden initially)
-        self.stop_btn = QPushButton("🛑 Stop")
+        # Stop button with spinning Halgakos icon (hidden initially)
+        self.stop_btn = QPushButton()
         self.stop_btn.setStyleSheet(
-            "background-color: #dc3545; color: white; font-weight: bold; "
-            "padding: 8px 16px; border-radius: 4px; font-size: 10pt;"
+            "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
+            "padding: 8px 16px; border-radius: 4px; font-size: 10pt; border: none; }"
         )
-        self.stop_btn.setMinimumWidth(100)
+        self.stop_btn.setMinimumWidth(120)
         self.stop_btn.clicked.connect(self._on_stop)
+
+        # Build icon + text layout inside button
+        stop_btn_layout = QHBoxLayout(self.stop_btn)
+        stop_btn_layout.setContentsMargins(8, 4, 8, 4)
+        stop_btn_layout.setSpacing(6)
+
+        self._stop_icon_label = QLabel()
+        self._stop_icon_label.setStyleSheet("background-color: transparent;")
+        self._stop_icon_label.setFixedSize(24, 24)
+        self._stop_icon_label.setAlignment(Qt.AlignCenter)
+
+        self._stop_text_label = QLabel("Stop")
+        self._stop_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent; font-size: 10pt;")
+        self._stop_text_label.setAlignment(Qt.AlignCenter)
+
+        stop_btn_layout.addWidget(self._stop_icon_label)
+        stop_btn_layout.addWidget(self._stop_text_label)
+
+        # Load Halgakos.ico and build spinner frames
+        self._stop_spinner_frames = []
+        self._stop_spinner_idx = 0
+        try:
+            base_dir = getattr(translator_gui, 'base_dir', os.getcwd())
+            icon_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtGui import QPixmap, QTransform
+                from PySide6.QtCore import QSize
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                logical_px = 16
+                dev_px = int(logical_px * max(1.0, dpr))
+                icon = QIcon(icon_path)
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    pm = QPixmap(icon_path).scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                self._stop_icon_label.setPixmap(pm)
+                self._stop_icon_base_pm = pm
+
+                # Precompute rotation frames
+                steps = 48
+                for i in range(steps):
+                    angle = (i * 360) / steps
+                    rotated = pm.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+                    try:
+                        rotated.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    self._stop_spinner_frames.append(rotated)
+        except Exception:
+            pass
+
+        # Spinner timer
+        self._stop_spinner_timer = QTimer(self)
+        self._stop_spinner_timer.setInterval(14)
+        self._stop_spinner_timer.timeout.connect(self._advance_stop_spinner)
+
         self.stop_btn.hide()
         button_layout.addWidget(self.stop_btn)
 
@@ -356,6 +439,21 @@ class ReviewDialog(QDialog):
         if self._review_thread and self._review_thread.is_alive():
             return  # Already running
 
+        # Warn if review output already has content
+        existing = self.log_field.toPlainText().strip()
+        if existing and len(existing) > 50:
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.warning(
+                self, "Overwrite Review?",
+                "A review is already displayed in the output.\n"
+                "Starting a new review will replace it.\n\n"
+                "Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
         self._stop_requested = False
         self._force_stop = False
         self._stop_click_times = []
@@ -391,8 +489,9 @@ class ReviewDialog(QDialog):
 
         # UI state
         self.start_btn.hide()
-        self.stop_btn.setText("🛑 Stop")
+        self._stop_text_label.setText("Stop")
         self.stop_btn.show()
+        self._stop_spinner_timer.start()
         self.log_field.clear()
         self.save_btn.setEnabled(False)
 
@@ -469,6 +568,7 @@ class ReviewDialog(QDialog):
     def _on_review_done(self, result: str = None, error: str = None):
         """Called on main thread when review generation finishes."""
         self.stop_btn.hide()
+        self._stop_spinner_timer.stop()
         self.start_btn.show()
 
         if error:
@@ -507,7 +607,8 @@ class ReviewDialog(QDialog):
             self._stop_requested = True
             self._force_stop = True
             self._stop_click_times = []
-            self.stop_btn.setText("⚡ Force Stopped")
+            self._stop_text_label.setText("Force Stopped")
+            self._stop_spinner_timer.stop()
             self._append_log("⚡ Double-click detected — forcing immediate stop!")
 
             # Kill the thread if still running
@@ -522,10 +623,17 @@ class ReviewDialog(QDialog):
         self._force_stop = False
 
         if graceful:
-            self.stop_btn.setText("🛑 Finishing...")
+            self._stop_text_label.setText("Finishing...")
             self._append_log("🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
         else:
             self._append_log("🛑 Stopping...")
+
+    def _advance_stop_spinner(self):
+        """Advance the spinning icon frame."""
+        if not self._stop_spinner_frames:
+            return
+        self._stop_icon_label.setPixmap(self._stop_spinner_frames[self._stop_spinner_idx])
+        self._stop_spinner_idx = (self._stop_spinner_idx + 1) % len(self._stop_spinner_frames)
 
     # ─── Save ────────────────────────────────────────────────────────
 
@@ -730,6 +838,8 @@ class ReviewDialog(QDialog):
             self._token_poll_timer.stop()
         if hasattr(self, '_review_poll_timer'):
             self._review_poll_timer.stop()
+        if hasattr(self, '_stop_spinner_timer'):
+            self._stop_spinner_timer.stop()
         self._save_prompt_to_config()
         super().closeEvent(event)
 

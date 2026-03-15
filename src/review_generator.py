@@ -452,7 +452,6 @@ def generate_review(
 
     full_content = "\n\n".join(content_parts)
     content_tokens = count_tokens(full_content)
-    log_fn(f"📤 Sending {content_tokens:,} tokens to {model}...")
 
     # 5. Build messages
     messages = [
@@ -472,11 +471,24 @@ def generate_review(
 
         client = create_client_with_multi_key_support(api_key, model, output_dir, config)
 
+        # Show actual model/key info (multi-key aware)
+        actual_model = getattr(client, 'model', model)
+        key_count = len(getattr(client, 'api_keys', [api_key])) if hasattr(client, 'api_keys') else 1
+        if key_count > 1:
+            log_fn(f"📤 Sending {content_tokens:,} tokens to {actual_model} ({key_count} keys)...")
+        else:
+            log_fn(f"📤 Sending {content_tokens:,} tokens to {actual_model}...")
+
         log_fn("🚀 Sending API request (single call)...")
         start_time = time.time()
 
         result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
         elapsed = time.time() - start_time
+
+        # Check if force-stopped while waiting for API
+        if stop_check_fn and stop_check_fn():
+            log_fn("🛑 Stopped by user — discarding API response")
+            return None
 
         # Extract content from result
         if isinstance(result, tuple):
