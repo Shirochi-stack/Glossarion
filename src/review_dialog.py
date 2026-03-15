@@ -427,10 +427,10 @@ class ReviewDialog(QDialog):
         spacing_row.addStretch()
 
         self._reset_font_btn = QPushButton("↺ Reset")
-        self._reset_font_btn.setFixedHeight(22)
+        self._reset_font_btn.setFixedHeight(28)
         self._reset_font_btn.setCursor(Qt.PointingHandCursor)
         self._reset_font_btn.setStyleSheet(
-            "QPushButton { color: #ccc; font-size: 9pt; padding: 2px 10px; "
+            "QPushButton { color: #ccc; font-size: 10pt; padding: 4px 16px; "
             "border: 1px solid #555; border-radius: 3px; background: #383838; }"
             "QPushButton:hover { background: #4a4a4a; color: white; border-color: #888; }"
         )
@@ -1914,7 +1914,17 @@ class ReviewDialog(QDialog):
                     except Exception:
                         break
 
-            # Reset UI immediately — no waiting
+            # Sync file_path to current combo selection (combo was updated by nav messages)
+            try:
+                cur_idx = self._epub_combo.currentIndex()
+                n = len(self._all_epub_paths)
+                if 0 <= cur_idx < n:
+                    self.file_path = self._all_epub_paths[cur_idx]
+            except Exception:
+                pass
+            self._epub_combo.setEnabled(True)
+
+            # Reset UI immediately and load existing review for current EPUB
             self._on_review_done(None)
             return
 
