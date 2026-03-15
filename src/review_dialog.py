@@ -1672,9 +1672,9 @@ class ReviewDialog(QDialog):
                 i += 1
                 continue
 
-            # Empty line
+            # Empty line — use spacing-controlled gap
             if not stripped:
-                html_lines.append('<br/>')
+                html_lines.append(f'<div style="margin:0; padding:0; line-height:{max(spacing, 1)}px; font-size:1px;">&nbsp;</div>')
                 i += 1
                 continue
 
