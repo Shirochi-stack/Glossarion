@@ -775,6 +775,8 @@ class ReviewDialog(QDialog):
         self.log_field.clear()
         self._raw_review_md = ''
         self.save_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        self.restore_btn.hide()
 
         # Clear any lingering cancellation from a previous force stop
         try:
@@ -932,6 +934,8 @@ class ReviewDialog(QDialog):
         self.log_field.clear()
         self._raw_review_md = ''
         self.save_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        self.restore_btn.hide()
         # Disable nav during review
         self._nav_prev_btn.setEnabled(False)
         self._nav_next_btn.setEnabled(False)
@@ -1212,11 +1216,11 @@ class ReviewDialog(QDialog):
                 html = html.replace(url, data_uri)
             # Replace failed images with clickable links
             for url in (failed_urls or []):
-                # Match the full <img> tag containing this URL and replace with a link
-                pattern = r'<br/>\s*<img[^>]*src="' + re.escape(url) + r'"[^>]*/?>\s*<br/>'
+                # Match the <img> tag containing this URL and replace with a link
+                pattern = r'<img[^>]*src="' + re.escape(url) + r'"[^>]*/>'
                 link_html = (
-                    f'<br/><a href="{url}" style="color:#5a9fd4;text-decoration:underline;">'
-                    f'🖼️ View Image</a><br/>'
+                    f'<a href="{url}" style="color:#5a9fd4;text-decoration:underline;">'
+                    f'🖼️ View Image</a>'
                 )
                 html = re.sub(pattern, link_html, html)
             self._last_rendered_html = html
