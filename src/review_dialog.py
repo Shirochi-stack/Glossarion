@@ -23,10 +23,10 @@ from review_generator import (
 class ReviewDialog(QDialog):
     """Dialog for generating an AI-powered review/summary of an EPUB."""
 
-    def __init__(self, parent, translator_gui, epub_path: str):
+    def __init__(self, parent, translator_gui, file_path: str):
         super().__init__(parent)
         self.translator_gui = translator_gui
-        self.epub_path = epub_path
+        self.file_path = file_path
         self._stop_requested = False
         self._review_thread = None
         self._counting = False
@@ -65,7 +65,7 @@ class ReviewDialog(QDialog):
         layout.setSpacing(10)
 
         # Header
-        header = QLabel(f"📖 Review: {os.path.basename(self.epub_path)}")
+        header = QLabel(f"📖 Review: {os.path.basename(self.file_path)}")
         header_font = QFont()
         header_font.setPointSize(12)
         header_font.setBold(True)
@@ -198,7 +198,7 @@ class ReviewDialog(QDialog):
     def _get_review_path(self) -> str:
         """Get the review output path for the current EPUB."""
         try:
-            epub_base = os.path.splitext(os.path.basename(self.epub_path))[0]
+            epub_base = os.path.splitext(os.path.basename(self.file_path))[0]
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
                            getattr(self.translator_gui, 'config', {}).get('output_directory')
             if override_dir:
@@ -219,7 +219,7 @@ class ReviewDialog(QDialog):
 
         def _count():
             try:
-                total = count_epub_tokens(self.epub_path)
+                total = count_epub_tokens(self.file_path)
                 QTimer.singleShot(0, lambda: self._on_token_count_done(total))
             except Exception as e:
                 QTimer.singleShot(0, lambda: self._on_token_count_done(-1, str(e)))
@@ -234,7 +234,7 @@ class ReviewDialog(QDialog):
             self.token_label.setText(f"⚠️ Token count failed: {error}")
             self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
         elif total >= 0:
-            self.token_label.setText(f"📊 EPUB tokens: {total:,}")
+            self.token_label.setText(f"📊 File tokens: {total:,}")
             self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
         else:
             self.token_label.setText("⚠️ Could not count tokens")
@@ -268,7 +268,7 @@ class ReviewDialog(QDialog):
         spoiler_mode = self.spoiler_checkbox.isChecked()
 
         # Determine output directory
-        epub_base = os.path.splitext(os.path.basename(self.epub_path))[0]
+        epub_base = os.path.splitext(os.path.basename(self.file_path))[0]
         override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
         if override_dir:
             output_dir = os.path.join(os.path.abspath(override_dir), epub_base)
@@ -290,7 +290,7 @@ class ReviewDialog(QDialog):
         def _run():
             try:
                 result = generate_review(
-                    epub_path=self.epub_path,
+                    epub_path=self.file_path,
                     output_dir=output_dir,
                     api_key=api_key,
                     model=model,

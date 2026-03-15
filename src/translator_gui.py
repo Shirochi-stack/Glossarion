@@ -12276,16 +12276,15 @@ Important rules:
                self.generate_review_btn.setEnabled(True)
 
     def _open_review_dialog(self):
-       """Open the review generation dialog for the currently selected EPUB."""
+       """Open the review generation dialog for the currently selected file."""
        try:
-           # Find selected EPUB
+           # Find selected file (any supported type)
            files = list(getattr(self, 'selected_files', []) or [])
-           epubs = [p for p in files if str(p).lower().endswith('.epub')]
-           if not epubs:
+           if not files:
                # Flash button text instead of popup
                original_text = self.generate_review_btn.text()
                original_style = self.generate_review_btn.styleSheet()
-               self.generate_review_btn.setText("⚠️ No EPUB Selected!")
+               self.generate_review_btn.setText("⚠️ No File Selected!")
                self.generate_review_btn.setStyleSheet(
                    "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
                    "padding: 4px 10px; border-radius: 3px; font-size: 9pt; }"
@@ -12296,7 +12295,7 @@ Important rules:
                    self.generate_review_btn.setStyleSheet(original_style),
                ))
                return
-           epub_path = str(epubs[0])
+           file_path = str(files[0])
            
            # Reuse existing dialog if open
            existing = getattr(self, '_review_dialog', None)
@@ -12310,7 +12309,7 @@ Important rules:
                    pass
            
            from review_dialog import ReviewDialog
-           dialog = ReviewDialog(self, self, epub_path)
+           dialog = ReviewDialog(self, self, file_path)
            self._review_dialog = dialog
            dialog.finished.connect(lambda *_: setattr(self, '_review_dialog', None))
            dialog.show()
@@ -12325,16 +12324,15 @@ Important rules:
            if not hasattr(self, 'review_indicator_label'):
                return
            files = list(getattr(self, 'selected_files', []) or [])
-           epubs = [p for p in files if str(p).lower().endswith('.epub')]
-           if not epubs:
+           if not files:
                self.review_indicator_label.hide()
                return
-           epub_base = os.path.splitext(os.path.basename(str(epubs[0])))[0]
+           file_base = os.path.splitext(os.path.basename(str(files[0])))[0]
            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
            if override_dir:
-               review_path = os.path.join(os.path.abspath(override_dir), epub_base, "review", "review.md")
+               review_path = os.path.join(os.path.abspath(override_dir), file_base, "review", "review.md")
            else:
-               review_path = os.path.join(os.getcwd(), epub_base, "review", "review.md")
+               review_path = os.path.join(os.getcwd(), file_base, "review", "review.md")
            if os.path.exists(review_path):
                self.review_indicator_label.show()
            else:

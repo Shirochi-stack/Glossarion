@@ -190,12 +190,12 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
     return results
 
 
-def extract_chapter_texts(epub_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+def _extract_epub_chapters(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
     """
     Extract all chapters from an EPUB as plain text.
     Returns list of (chapter_name, plain_text) tuples in spine order.
     """
-    html_files = _get_spine_ordered_html_files(epub_path)
+    html_files = _get_spine_ordered_html_files(file_path)
     chapters = []
 
     for fname, html_content in html_files:
@@ -205,6 +205,56 @@ def extract_chapter_texts(epub_path: str, log_fn: Callable = print) -> List[Tupl
 
     log_fn(f"📖 Extracted {len(chapters)} chapters from EPUB")
     return chapters
+
+
+def _extract_text_file(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """Read a plain text or HTML file and return as a single-chapter list."""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except Exception as e:
+        log_fn(f"⚠️ Failed to read file: {e}")
+        return []
+
+    # If it looks like HTML, convert it
+    if content.strip().startswith('<') and ('<html' in content.lower() or '<body' in content.lower()):
+        content = _html_to_plaintext(content)
+
+    if content.strip():
+        log_fn(f"📄 Read text file: {os.path.basename(file_path)}")
+        return [(os.path.basename(file_path), content.strip())]
+    return []
+
+
+def _extract_pdf_file(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """Extract text from a PDF file."""
+    try:
+        from txt_processor import TextFileProcessor
+        processor = TextFileProcessor()
+        text = processor.extract_text_from_file(file_path)
+        if text and text.strip():
+            log_fn(f"📄 Extracted text from PDF: {os.path.basename(file_path)}")
+            return [(os.path.basename(file_path), text.strip())]
+    except Exception as e:
+        log_fn(f"⚠️ Failed to extract PDF text: {e}")
+    return []
+
+
+def extract_chapter_texts(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """
+    Extract text content from any supported file type.
+    Returns list of (section_name, plain_text) tuples.
+    Supported: .epub, .txt, .html, .htm, .xhtml, .pdf, .md
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == '.epub':
+        return _extract_epub_chapters(file_path, log_fn)
+    elif ext == '.pdf':
+        return _extract_pdf_file(file_path, log_fn)
+    else:
+        # Text-based files: .txt, .html, .htm, .xhtml, .md, etc.
+        return _extract_text_file(file_path, log_fn)
 
 
 # ─── Token counting ─────────────────────────────────────────────────────
