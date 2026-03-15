@@ -6661,7 +6661,7 @@ class UnifiedClient:
         # Estimate tokens (rough approximation)
         estimated_tokens = total_chars / 4
         # Only warn if we exceed 150% of the max_tokens limit (more lenient)
-        if estimated_tokens > max_tokens * 1.5:
+        if estimated_tokens > max_tokens * 1.5 and getattr(self, 'context', None) != 'review':
             print(f"⚠️ Request might be too long: ~{estimated_tokens:.1f} tokens vs {max_tokens} max")
         
         # Check for valid roles
