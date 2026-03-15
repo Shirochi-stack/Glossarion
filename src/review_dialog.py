@@ -143,6 +143,21 @@ class ReviewDialog(QDialog):
         prompt_group = QGroupBox("System Prompt")
         prompt_layout = QVBoxLayout(prompt_group)
         prompt_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Reset to Default button (right-aligned above the prompt field)
+        reset_row = QHBoxLayout()
+        reset_row.addStretch()
+        reset_prompt_btn = QPushButton("↺ Reset to Default")
+        reset_prompt_btn.setFixedHeight(24)
+        reset_prompt_btn.setStyleSheet(
+            "QPushButton { background-color: #3a3a3a; color: #aaa; border: 1px solid #555; "
+            "border-radius: 3px; padding: 2px 10px; font-size: 9pt; }"
+            "QPushButton:hover { background-color: #4a4a4a; color: white; }"
+        )
+        reset_prompt_btn.clicked.connect(lambda: self.prompt_edit.setPlainText(DEFAULT_REVIEW_PROMPT))
+        reset_row.addWidget(reset_prompt_btn)
+        prompt_layout.addLayout(reset_row)
+
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("Enter the system prompt for the review...")
         prompt_layout.addWidget(self.prompt_edit)

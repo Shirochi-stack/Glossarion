@@ -911,6 +911,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         
         # Set window properties with comprehensive dark theme styling
+        # Ensure main window never stays on top (child dialogs with WindowStaysOnTopHint
+        # can cause the parent to inherit always-on-top on Windows)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1e1e1e;

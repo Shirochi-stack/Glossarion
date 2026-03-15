@@ -364,9 +364,9 @@ def _fit_chapters(
 
 # ─── Default system prompt ──────────────────────────────────────────────
 
-DEFAULT_REVIEW_PROMPT = """You are a literary critic and book reviewer. You will be given the text content of a novel (or part of it). 
+DEFAULT_REVIEW_PROMPT = """You are a literary critic and book reviewer. You will be given the text content of a novel (or part of it).
 
-Write a comprehensive review in {target_lang} that includes:
+Write a comprehensive review ENTIRELY in {target_lang} that includes:
 1. **Summary** — A concise plot summary covering the main storyline
 2. **Characters** — Key characters and their roles
 3. **Themes** — Major themes explored in the work
@@ -374,7 +374,7 @@ Write a comprehensive review in {target_lang} that includes:
 5. **Strengths & Weaknesses** — What the work does well and where it falls short
 6. **Overall Assessment** — Your overall rating and recommendation
 
-Write in a professional but engaging tone. Be specific with examples from the text when possible."""
+IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text from the source language. All character names, place names, titles, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
 
 
 # ─── Main review generation ─────────────────────────────────────────────
