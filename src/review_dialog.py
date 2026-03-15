@@ -1130,6 +1130,7 @@ class ReviewDialog(QDialog):
 
         original_html = self._last_rendered_html if hasattr(self, '_last_rendered_html') else None
         if not original_html:
+            print('[DEBUG] _load_remote_images: no _last_rendered_html')
             return
 
         urls = re.findall(r'<img[^>]+src="(https?://[^"]+)"', original_html)
@@ -1204,7 +1205,10 @@ class ReviewDialog(QDialog):
                 except Exception:
                     failed_urls.append(url)  # Track for fallback link
             if replacements or failed_urls:
+                print(f'[DEBUG] _fetch_all done: {len(replacements)} ok, {len(failed_urls)} failed')
                 QTimer.singleShot(0, lambda: self._apply_image_data_uris(replacements, failed_urls))
+            else:
+                print('[DEBUG] _fetch_all: nothing to do')
 
         threading.Thread(target=_fetch_all, daemon=True).start()
 
@@ -1226,6 +1230,7 @@ class ReviewDialog(QDialog):
                 html = re.sub(pattern, link_html, html)
             self._last_rendered_html = html
             self.log_field.setHtml(html)
+            print(f'[DEBUG] _apply_image_data_uris: re-rendered with {len(replacements)} images, {len(failed_urls or [])} fallback links')
         except RuntimeError:
             pass  # Widget may have been destroyed
 
@@ -1689,25 +1694,29 @@ class ReviewDialog(QDialog):
             # Animate button: flash green "Saved!"
             original_text = "💾 Save"
             original_style = (
-                "background-color: #28a745; color: white; font-weight: bold; "
-                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+                "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+                "QPushButton:disabled { background-color: #555; color: #888; }"
             )
             self.save_btn.setText("✅ Saved!")
             self.save_btn.setStyleSheet(
-                "background-color: #1a8f3a; color: white; font-weight: bold; "
-                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+                "QPushButton { background-color: #1a8f3a; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+                "QPushButton:disabled { background-color: #555; color: #888; }"
             )
             self._safe_delayed_reset(self.save_btn, original_text, original_style)
 
         except Exception as e:
             self.save_btn.setText("❌ Failed")
             self.save_btn.setStyleSheet(
-                "background-color: #dc3545; color: white; font-weight: bold; "
-                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+                "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+                "QPushButton:disabled { background-color: #555; color: #888; }"
             )
             self._safe_delayed_reset(self.save_btn, "💾 Save",
-                "background-color: #28a745; color: white; font-weight: bold; "
-                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;",
+                "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+                "QPushButton:disabled { background-color: #555; color: #888; }",
                 delay_ms=2000)
 
     # ─── Delete ──────────────────────────────────────────────────────
