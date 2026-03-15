@@ -455,8 +455,9 @@ class ReviewDialog(QDialog):
         # 6. Save
         self.save_btn = QPushButton("💾 Save")
         self.save_btn.setStyleSheet(
-            "background-color: #28a745; color: white; font-weight: bold; "
-            "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
+            "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+            "QPushButton:disabled { background-color: #555; color: #888; }"
         )
         self.save_btn.setMinimumWidth(120)
         self.save_btn.clicked.connect(self._on_save)
