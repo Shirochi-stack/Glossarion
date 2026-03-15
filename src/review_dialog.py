@@ -414,6 +414,16 @@ class ReviewDialog(QDialog):
         self._review_thread = threading.Thread(target=_run, daemon=True)
         self._review_thread.start()
 
+    def _safe_delayed_reset(self, btn, text, style, delay_ms=1500):
+        """Reset a button's text/style after a delay, safely handling deleted widgets."""
+        def _reset():
+            try:
+                btn.setText(text)
+                btn.setStyleSheet(style)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(delay_ms, _reset)
+
     def _append_log(self, msg: str):
         """Append a message to the log field (main thread)."""
         self.log_field.appendPlainText(msg)
@@ -520,10 +530,7 @@ class ReviewDialog(QDialog):
                 "background-color: #1a8f3a; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
             )
-            QTimer.singleShot(1500, lambda: (
-                self.save_btn.setText(original_text),
-                self.save_btn.setStyleSheet(original_style),
-            ))
+            self._safe_delayed_reset(self.save_btn, original_text, original_style)
 
         except Exception as e:
             self.save_btn.setText("❌ Failed")
@@ -531,13 +538,10 @@ class ReviewDialog(QDialog):
                 "background-color: #dc3545; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
             )
-            QTimer.singleShot(2000, lambda: (
-                self.save_btn.setText("💾 Save"),
-                self.save_btn.setStyleSheet(
-                    "background-color: #28a745; color: white; font-weight: bold; "
-                    "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
-                ),
-            ))
+            self._safe_delayed_reset(self.save_btn, "💾 Save",
+                "background-color: #28a745; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;",
+                delay_ms=2000)
 
     # ─── Delete ──────────────────────────────────────────────────────
 
@@ -556,10 +560,7 @@ class ReviewDialog(QDialog):
                 "background-color: #6c757d; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
             )
-            QTimer.singleShot(1500, lambda: (
-                self.delete_btn.setText(original_text),
-                self.delete_btn.setStyleSheet(original_style),
-            ))
+            self._safe_delayed_reset(self.delete_btn, original_text, original_style)
             return
 
         try:
@@ -603,10 +604,7 @@ class ReviewDialog(QDialog):
                 "background-color: #6c757d; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
             )
-            QTimer.singleShot(2000, lambda: (
-                self.delete_btn.setText(original_text),
-                self.delete_btn.setStyleSheet(original_style),
-            ))
+            self._safe_delayed_reset(self.delete_btn, original_text, original_style, delay_ms=2000)
 
         except Exception as e:
             self._append_log(f"❌ Failed to delete review: {e}")
@@ -685,10 +683,7 @@ class ReviewDialog(QDialog):
                 "background-color: #1a8f3a; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
             )
-            QTimer.singleShot(1500, lambda: (
-                self.restore_btn.setText(original_text),
-                self.restore_btn.setStyleSheet(original_style),
-            ))
+            self._safe_delayed_reset(self.restore_btn, original_text, original_style)
 
         except Exception as e:
             self._append_log(f"❌ Failed to restore: {e}")
