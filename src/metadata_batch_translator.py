@@ -1861,6 +1861,7 @@ class BatchHeaderTranslator:
         # Use 'or' to handle None or empty string
         prompt_template = (
             self.config.get('batch_header_prompt') or
+            os.getenv('BATCH_HEADER_PROMPT') or
             "Translate these chapter titles to {target_lang}.\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"

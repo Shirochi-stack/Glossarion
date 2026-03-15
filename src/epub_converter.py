@@ -4904,7 +4904,15 @@ img {
                     self.log(f"🌐 Translating {len(original)} toc.ncx entries in chunks of {toc_ncx_per_batch}...")
                     try:
                         from metadata_batch_translator import BatchHeaderTranslator
-                        tr = BatchHeaderTranslator(self.api_client, {})
+                        # Build config from env vars set by GUI so user's custom prompts are used
+                        _bt_config = {}
+                        if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                            _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                        if os.environ.get('BATCH_HEADER_PROMPT'):
+                            _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                        if os.environ.get('OUTPUT_LANGUAGE'):
+                            _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                        tr = BatchHeaderTranslator(self.api_client, _bt_config)
                         skip_dup_translate = os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1'
                         if skip_dup_translate:
                             unique_original: Dict[int, str] = {}
