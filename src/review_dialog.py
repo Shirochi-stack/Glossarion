@@ -152,7 +152,7 @@ class ReviewDialog(QDialog):
             "border-radius: 3px; padding: 4px 8px; font-size: 11pt; font-weight: bold; "
             "min-width: 26px; max-width: 26px; }"
             "QPushButton:hover { background-color: #505050; border-color: #5a9fd4; }"
-            "QPushButton:disabled { color: #555; background-color: #2a2a2a; }"
+            "QPushButton:disabled { color: #444; background-color: #252525; border-color: #333; }"
         )
 
         self._nav_prev_btn = QPushButton("◀")
@@ -918,6 +918,10 @@ class ReviewDialog(QDialog):
         self._stop_spinner_timer.start()
         self.log_field.clear()
         self.save_btn.setEnabled(False)
+        # Disable nav during review
+        self._nav_prev_btn.setEnabled(False)
+        self._nav_next_btn.setEnabled(False)
+        self._epub_combo.setEnabled(False)
 
         # Clear cancellation
         try:
@@ -1064,7 +1068,6 @@ class ReviewDialog(QDialog):
                     self.save_btn.setEnabled(True)
 
                     # Sync self.file_path and nav button states to current combo selection
-                    # (nav buttons were stale because _on_epub_switched wasn't called during review)
                     try:
                         cur_idx = self._epub_combo.currentIndex()
                         n = len(self._all_epub_paths)
@@ -1075,6 +1078,8 @@ class ReviewDialog(QDialog):
                             self._nav_counter.setText(f"{cur_idx + 1} / {n}")
                     except Exception:
                         pass
+                    # Re-enable combo
+                    self._epub_combo.setEnabled(True)
 
                     # Load the current EPUB's review into the output
                     self._load_existing_review()
@@ -1132,6 +1137,19 @@ class ReviewDialog(QDialog):
         if hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1:
             self.generate_all_btn.show()
             self.generate_all_btn.setEnabled(True)
+
+        # Re-enable nav (may have been disabled during review)
+        try:
+            self._epub_combo.setEnabled(True)
+            cur_idx = self._epub_combo.currentIndex()
+            n = len(self._all_epub_paths)
+            if 0 <= cur_idx < n:
+                self.file_path = self._all_epub_paths[cur_idx]
+                self._nav_prev_btn.setEnabled(cur_idx > 0)
+                self._nav_next_btn.setEnabled(cur_idx < n - 1)
+                self._nav_counter.setText(f"{cur_idx + 1} / {n}")
+        except Exception:
+            pass
 
         if error:
             self._append_log(f"\n❌ Error: {error}")
