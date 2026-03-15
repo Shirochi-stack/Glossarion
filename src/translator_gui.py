@@ -17214,6 +17214,10 @@ Important rules:
                 ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
                 ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], '', str),
 
+                # Review settings
+                ('review_system_prompt', ['review_system_prompt_var'], '', str),
+                ('review_spoiler_mode', ['review_spoiler_mode_var'], False, bool),
+
                 # Image settings
                 ('enable_image_translation', ['enable_image_translation_var'], False, bool),
                 ('process_webnovel_images', ['process_webnovel_images_var'], False, bool),

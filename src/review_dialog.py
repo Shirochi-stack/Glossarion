@@ -39,7 +39,7 @@ class ReviewDialog(QDialog):
         # Sizing
         screen = QApplication.primaryScreen().availableGeometry()
         width = int(screen.width() * 0.40)
-        height = int(screen.height() * 0.55)
+        height = int(screen.height() * 0.65)
         self.setMinimumSize(width, height)
         self.resize(width, height)
 
@@ -143,7 +143,7 @@ class ReviewDialog(QDialog):
         prompt_layout.setContentsMargins(8, 8, 8, 8)
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("Enter the system prompt for the review...")
-        self.prompt_edit.setMaximumHeight(120)
+        self.prompt_edit.setMaximumHeight(160)
         prompt_layout.addWidget(self.prompt_edit)
         layout.addWidget(prompt_group)
 
@@ -210,9 +210,9 @@ class ReviewDialog(QDialog):
         self.save_btn = QPushButton("💾 Save")
         self.save_btn.setStyleSheet(
             "background-color: #28a745; color: white; font-weight: bold; "
-            "padding: 8px 16px; border-radius: 4px; font-size: 10pt;"
+            "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
         )
-        self.save_btn.setMinimumWidth(100)
+        self.save_btn.setMinimumWidth(120)
         self.save_btn.clicked.connect(self._on_save)
         self.save_btn.setEnabled(False)
         button_layout.addWidget(self.save_btn)
@@ -220,9 +220,9 @@ class ReviewDialog(QDialog):
         # 7. Close
         close_btn = QPushButton("Close")
         close_btn.setStyleSheet(
-            "padding: 8px 16px; border-radius: 4px; font-size: 10pt;"
+            "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
         )
-        close_btn.setMinimumWidth(80)
+        close_btn.setMinimumWidth(120)
         close_btn.clicked.connect(self.close)
         button_layout.addWidget(close_btn)
 
@@ -231,16 +231,24 @@ class ReviewDialog(QDialog):
     # ─── Config / persistence ────────────────────────────────────────
 
     def _load_saved_prompt(self):
-        """Load previously saved review prompt from config, or use default."""
+        """Load previously saved review prompt and spoiler mode from config."""
         config = getattr(self.translator_gui, 'config', {})
         saved = config.get('review_system_prompt', '')
         self.prompt_edit.setPlainText(saved if saved else DEFAULT_REVIEW_PROMPT)
+        # Load spoiler mode
+        spoiler = config.get('review_spoiler_mode', False)
+        self.spoiler_checkbox.setChecked(bool(spoiler))
+
+    def _sync_settings_to_gui(self):
+        """Sync current dialog values to translator_gui _var attributes for save_config."""
+        gui = self.translator_gui
+        gui.review_system_prompt_var = self.prompt_edit.toPlainText().strip()
+        gui.review_spoiler_mode_var = self.spoiler_checkbox.isChecked()
 
     def _save_prompt_to_config(self):
-        """Persist the current system prompt to config."""
+        """Persist the current system prompt and spoiler mode to config."""
         try:
-            config = getattr(self.translator_gui, 'config', {})
-            config['review_system_prompt'] = self.prompt_edit.toPlainText()
+            self._sync_settings_to_gui()
             if hasattr(self.translator_gui, 'save_config'):
                 self.translator_gui.save_config(show_message=False)
         except Exception:
@@ -412,30 +420,54 @@ class ReviewDialog(QDialog):
     # ─── Save ────────────────────────────────────────────────────────
 
     def _on_save(self):
-        """Save the current review text to the review subfolder."""
-        review_text = self.log_field.toPlainText().strip()
-        if not review_text:
-            return
-
-        review_path = self._get_review_path()
-        if not review_path:
-            self._append_log("⚠️ Could not determine save path")
-            return
-
+        """Save config with animated button feedback."""
         try:
-            os.makedirs(os.path.dirname(review_path), exist_ok=True)
-            with open(review_path, 'w', encoding='utf-8') as f:
-                f.write(review_text)
-            self._append_log(f"💾 Saved to: {review_path}")
+            self._sync_settings_to_gui()
+            if hasattr(self.translator_gui, 'save_config'):
+                self.translator_gui.save_config(show_message=False)
 
-            # Update indicator
-            try:
-                if hasattr(self.translator_gui, '_update_review_indicator'):
-                    self.translator_gui._update_review_indicator()
-            except Exception:
-                pass
+            # Also save review text to file if present
+            review_text = self.log_field.toPlainText().strip()
+            if review_text:
+                review_path = self._get_review_path()
+                if review_path:
+                    os.makedirs(os.path.dirname(review_path), exist_ok=True)
+                    with open(review_path, 'w', encoding='utf-8') as f:
+                        f.write(review_text)
+
+                    # Update indicator
+                    try:
+                        if hasattr(self.translator_gui, '_update_review_indicator'):
+                            self.translator_gui._update_review_indicator()
+                    except Exception:
+                        pass
+
+            # Animate button: flash green "Saved!"
+            original_text = self.save_btn.text()
+            original_style = self.save_btn.styleSheet()
+            self.save_btn.setText("✅ Saved!")
+            self.save_btn.setStyleSheet(
+                "background-color: #1a8f3a; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            )
+            QTimer.singleShot(1500, lambda: (
+                self.save_btn.setText(original_text),
+                self.save_btn.setStyleSheet(original_style),
+            ))
+
         except Exception as e:
-            self._append_log(f"❌ Failed to save: {e}")
+            self.save_btn.setText("❌ Failed")
+            self.save_btn.setStyleSheet(
+                "background-color: #dc3545; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+            )
+            QTimer.singleShot(2000, lambda: (
+                self.save_btn.setText("💾 Save"),
+                self.save_btn.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; "
+                    "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
+                ),
+            ))
 
     def closeEvent(self, event):
         """Save prompt on close."""
