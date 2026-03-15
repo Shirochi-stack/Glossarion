@@ -1585,15 +1585,15 @@ class ReviewDialog(QDialog):
             )
             th_style = (
                 'border:1px solid #555; padding:6px 10px; '
-                'background-color:#3a4f66; color:#e0e0e0; font-weight:bold;'
+                f'background-color:#3a4f66; color:{font_color}; font-weight:bold;'
             )
             td_style_even = (
                 'border:1px solid #444; padding:5px 10px; '
-                'background-color:#2b2b2b; color:#d0d0d0;'
+                f'background-color:#2b2b2b; color:{font_color};'
             )
             td_style_odd = (
                 'border:1px solid #444; padding:5px 10px; '
-                'background-color:#333333; color:#d0d0d0;'
+                f'background-color:#333333; color:{font_color};'
             )
 
             html = f'<table style="{table_style}">\n'
