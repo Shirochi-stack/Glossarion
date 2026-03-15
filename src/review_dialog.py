@@ -34,7 +34,7 @@ class ReviewDialog(QDialog):
 
         self.setWindowTitle("Generate Review")
         self.setModal(False)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint | Qt.WindowMaximizeButtonHint)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         # Sizing
@@ -396,8 +396,12 @@ class ReviewDialog(QDialog):
         self.log_field.clear()
         self.save_btn.setEnabled(False)
 
+        # Message queue for thread → main-thread communication
+        import queue
+        self._review_queue = queue.Queue()
+
         def _log(msg):
-            QTimer.singleShot(0, lambda: self._append_log(msg))
+            self._review_queue.put(('log', msg))
 
         def _stop_check():
             return self._stop_requested
@@ -418,12 +422,32 @@ class ReviewDialog(QDialog):
                     log_fn=_log,
                     stop_check_fn=_stop_check,
                 )
-                QTimer.singleShot(0, lambda: self._on_review_done(result))
+                self._review_queue.put(('done', result))
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_review_done(None, str(e)))
+                self._review_queue.put(('error', str(e)))
 
         self._review_thread = threading.Thread(target=_run, daemon=True)
         self._review_thread.start()
+
+        # Poll the queue on the main thread every 100ms
+        self._review_poll_timer = QTimer(self)
+        self._review_poll_timer.setInterval(100)
+        def _drain_queue():
+            while not self._review_queue.empty():
+                try:
+                    kind, data = self._review_queue.get_nowait()
+                except Exception:
+                    break
+                if kind == 'log':
+                    self._append_log(data)
+                elif kind == 'done':
+                    self._review_poll_timer.stop()
+                    self._on_review_done(data)
+                elif kind == 'error':
+                    self._review_poll_timer.stop()
+                    self._on_review_done(None, data)
+        self._review_poll_timer.timeout.connect(_drain_queue)
+        self._review_poll_timer.start()
 
     def _safe_delayed_reset(self, btn, text, style, delay_ms=1500):
         """Reset a button's text/style after a delay, safely handling deleted widgets."""
@@ -702,5 +726,19 @@ class ReviewDialog(QDialog):
     def closeEvent(self, event):
         """Save prompt on close."""
         self._stop_requested = True
+        if hasattr(self, '_token_poll_timer'):
+            self._token_poll_timer.stop()
+        if hasattr(self, '_review_poll_timer'):
+            self._review_poll_timer.stop()
         self._save_prompt_to_config()
         super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        """F11 toggles fullscreen."""
+        if event.key() == Qt.Key_F11:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+        else:
+            super().keyPressEvent(event)
