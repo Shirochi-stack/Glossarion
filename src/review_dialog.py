@@ -40,7 +40,7 @@ class ReviewDialog(QDialog):
         # Sizing
         screen = QApplication.primaryScreen().availableGeometry()
         width = int(screen.width() * 0.40)
-        height = int(screen.height() * 0.65)
+        height = int(screen.height() * 0.75)
         self.setMinimumSize(width, height)
         self.resize(width, height)
 
@@ -145,7 +145,7 @@ class ReviewDialog(QDialog):
         prompt_layout.setContentsMargins(8, 8, 8, 8)
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("Enter the system prompt for the review...")
-        self.prompt_edit.setMaximumHeight(160)
+        self.prompt_edit.setMaximumHeight(220)
         prompt_layout.addWidget(self.prompt_edit)
         layout.addWidget(prompt_group)
 
