@@ -12331,21 +12331,27 @@ Important rules:
                return
            file_path = str(files[0])
            
-           # Reuse existing dialog if open
+           # Reuse existing dialog if it exists (dialog persists on close)
            existing = getattr(self, '_review_dialog', None)
            if existing is not None:
                try:
-                   if existing.isVisible():
+                   # If same file, just show it
+                   if getattr(existing, 'file_path', None) == file_path:
+                       existing.show()
                        existing.raise_()
                        existing.activateWindow()
                        return
+                   else:
+                       # Different file — destroy old and create new
+                       existing.setAttribute(Qt.WA_DeleteOnClose, True)
+                       existing.close()
+                       self._review_dialog = None
                except RuntimeError:
-                   pass
+                   self._review_dialog = None
            
            from review_dialog import ReviewDialog
            dialog = ReviewDialog(self, self, file_path)
            self._review_dialog = dialog
-           dialog.finished.connect(lambda *_: setattr(self, '_review_dialog', None))
            dialog.show()
            dialog.raise_()
            dialog.activateWindow()

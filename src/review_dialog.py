@@ -35,7 +35,6 @@ class ReviewDialog(QDialog):
         self.setWindowTitle("Generate Review")
         self.setModal(False)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint | Qt.WindowMaximizeButtonHint)
-        self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         # Sizing
         screen = QApplication.primaryScreen().availableGeometry()
@@ -509,6 +508,7 @@ class ReviewDialog(QDialog):
         self.stop_btn.show()
         self._stop_spinner_timer.start()
         self.log_field.clear()
+        self.log_field.setPlainText("⏳ Generating review... (check main log for progress)")
         self.save_btn.setEnabled(False)
 
         # Clear any lingering cancellation from a previous force stop
@@ -518,12 +518,16 @@ class ReviewDialog(QDialog):
         except Exception:
             pass
 
-        # Message queue for thread → main-thread communication
+        # Message queue for thread → main-thread communication (only done/error)
         import queue
         self._review_queue = queue.Queue()
 
         def _log(msg):
-            self._review_queue.put(('log', msg))
+            # Send ALL progress logs to the main GUI log ONLY — not to review dialog
+            try:
+                self.translator_gui.append_log(f"[Review] {msg}")
+            except Exception:
+                print(f"[Review] {msg}")
 
         def _stop_check():
             return self._stop_requested
@@ -551,7 +555,7 @@ class ReviewDialog(QDialog):
         self._review_thread = threading.Thread(target=_run, daemon=True)
         self._review_thread.start()
 
-        # Poll the queue on the main thread every 100ms
+        # Poll the queue on the main thread every 100ms (only done/error)
         self._review_poll_timer = QTimer(self)
         self._review_poll_timer.setInterval(100)
         def _drain_queue():
@@ -560,9 +564,7 @@ class ReviewDialog(QDialog):
                     kind, data = self._review_queue.get_nowait()
                 except Exception:
                     break
-                if kind == 'log':
-                    self._append_log(data)
-                elif kind == 'done':
+                if kind == 'done':
                     self._review_poll_timer.stop()
                     self._on_review_done(data)
                 elif kind == 'error':
@@ -595,14 +597,17 @@ class ReviewDialog(QDialog):
         self.start_btn.show()
 
         if error:
-            self._append_log(f"\n❌ Error: {error}")
+            self.log_field.clear()
+            try:
+                self.translator_gui.append_log(f"[Review] ❌ Error: {error}")
+            except Exception:
+                pass
         elif result:
-            # Clear log and show only the review
+            # Show only the review in the dialog
             self.log_field.clear()
             self.log_field.setPlainText(result)
             self.delete_btn.setEnabled(True)
             self._update_restore_btn_visibility()
-            self._append_log("")  # Scroll trigger
 
             # Update the review emoji in the main GUI
             try:
@@ -611,7 +616,11 @@ class ReviewDialog(QDialog):
             except Exception:
                 pass
         else:
-            self._append_log("\n⚠️ No review generated.")
+            self.log_field.clear()
+            try:
+                self.translator_gui.append_log("[Review] ⚠️ No review generated.")
+            except Exception:
+                pass
             # Reload existing review from file (if any) so dialog is refreshed
             self._load_existing_review()
 
@@ -634,15 +643,24 @@ class ReviewDialog(QDialog):
             self._stop_click_times = []
             self._stop_text_label.setText("Force Stopped")
             self._stop_spinner_timer.stop()
-            self._append_log("⚡ Double-click detected — forcing immediate stop!")
+            try:
+                self.translator_gui.append_log("[Review] ⚡ Double-click detected — forcing immediate stop!")
+            except Exception:
+                pass
 
             # Hard cancel all in-flight HTTP requests
             try:
                 from unified_api_client import UnifiedClient
                 UnifiedClient.hard_cancel_all()
-                self._append_log("⚡ All HTTP sessions forcefully closed")
+                try:
+                    self.translator_gui.append_log("[Review] ⚡ All HTTP sessions forcefully closed")
+                except Exception:
+                    pass
             except Exception as e:
-                self._append_log(f"⚠️ hard_cancel_all error: {e}")
+                try:
+                    self.translator_gui.append_log(f"[Review] ⚠️ hard_cancel_all error: {e}")
+                except Exception:
+                    pass
 
             # Stop the queue poller so late thread results are discarded
             if hasattr(self, '_review_poll_timer'):
@@ -659,9 +677,15 @@ class ReviewDialog(QDialog):
 
         if graceful:
             self._stop_text_label.setText("Finishing...")
-            self._append_log("🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
+            try:
+                self.translator_gui.append_log("[Review] 🛑 Graceful stop — waiting for API response to complete... (double-click to force)")
+            except Exception:
+                pass
         else:
-            self._append_log("🛑 Stopping...")
+            try:
+                self.translator_gui.append_log("[Review] 🛑 Stopping...")
+            except Exception:
+                pass
 
     def _advance_stop_spinner(self):
         """Advance the spinning icon frame."""
@@ -867,16 +891,10 @@ class ReviewDialog(QDialog):
             self._append_log(f"❌ Failed to restore: {e}")
 
     def closeEvent(self, event):
-        """Save prompt on close."""
-        self._stop_requested = True
-        if hasattr(self, '_token_poll_timer'):
-            self._token_poll_timer.stop()
-        if hasattr(self, '_review_poll_timer'):
-            self._review_poll_timer.stop()
-        if hasattr(self, '_stop_spinner_timer'):
-            self._stop_spinner_timer.stop()
+        """Hide instead of close to preserve state. Generation continues in background."""
         self._save_prompt_to_config()
-        super().closeEvent(event)
+        event.ignore()
+        self.hide()
 
     def keyPressEvent(self, event):
         """F11 toggles fullscreen."""
