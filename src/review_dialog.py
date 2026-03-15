@@ -301,8 +301,8 @@ class ReviewDialog(QDialog):
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(prompt_group)
         splitter.addWidget(log_group)
-        splitter.setStretchFactor(0, 1)  # prompt
-        splitter.setStretchFactor(1, 3)  # output gets more space
+        splitter.setStretchFactor(0, 7)  # prompt (~35%)
+        splitter.setStretchFactor(1, 13)  # output (~65%)
         splitter.setHandleWidth(6)
         splitter.setStyleSheet("""
             QSplitter::handle:vertical {
