@@ -8,7 +8,7 @@ import os
 import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QPlainTextEdit, QCheckBox, QApplication, QGroupBox, QSplitter
+    QPlainTextEdit, QTextEdit, QCheckBox, QApplication, QGroupBox, QSplitter
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QIcon
@@ -33,6 +33,7 @@ class ReviewDialog(QDialog):
         self._review_thread = None
         self._counting = False
         self._token_cache = {}  # {file_path: token_count} — avoids recounting on switch
+        self._raw_review_md = ''  # Raw markdown stored separately for saving
 
         self.setWindowTitle("Generate Review")
         self.setModal(False)
@@ -292,9 +293,10 @@ class ReviewDialog(QDialog):
         log_group = QGroupBox("Review Output")
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(8, 8, 8, 8)
-        self.log_field = QPlainTextEdit()
+        self.log_field = QTextEdit()
         self.log_field.setReadOnly(True)
         self.log_field.setPlaceholderText("Generated review will appear here...")
+        self.log_field.setAcceptRichText(True)
         log_layout.addWidget(self.log_field)
 
         # ── Splitter between prompt and output ──
@@ -610,7 +612,8 @@ class ReviewDialog(QDialog):
                 with open(review_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 if content.strip():
-                    self.log_field.setPlainText(content)
+                    self._raw_review_md = content
+                    self.log_field.setHtml(self._md_to_html(content))
                     self.save_btn.setEnabled(True)
                     self.delete_btn.setEnabled(True)
             except Exception:
@@ -767,6 +770,7 @@ class ReviewDialog(QDialog):
         self.stop_btn.show()
         self._stop_spinner_timer.start()
         self.log_field.clear()
+        self._raw_review_md = ''
         self.save_btn.setEnabled(False)
 
         # Clear any lingering cancellation from a previous force stop
@@ -923,6 +927,7 @@ class ReviewDialog(QDialog):
         self.stop_btn.show()
         self._stop_spinner_timer.start()
         self.log_field.clear()
+        self._raw_review_md = ''
         self.save_btn.setEnabled(False)
         # Disable nav during review
         self._nav_prev_btn.setEnabled(False)
@@ -1110,9 +1115,76 @@ class ReviewDialog(QDialog):
                 pass
         QTimer.singleShot(delay_ms, _reset)
 
+    @staticmethod
+    def _md_to_html(md: str) -> str:
+        """Convert basic markdown to HTML for display in QTextEdit."""
+        import re
+        lines = md.split('\n')
+        html_lines = []
+        in_list = False
+        for line in lines:
+            stripped = line.strip()
+
+            # Close list if we're not on a list item
+            if in_list and not stripped.startswith(('- ', '* ', '• ')):
+                html_lines.append('</ul>')
+                in_list = False
+
+            # Headers
+            m = re.match(r'^(#{1,6})\s+(.*)', stripped)
+            if m:
+                level = len(m.group(1))
+                sizes = {1: '18pt', 2: '15pt', 3: '13pt', 4: '12pt', 5: '11pt', 6: '10pt'}
+                sz = sizes.get(level, '10pt')
+                text = m.group(2)
+                text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+                html_lines.append(
+                    f'<p style="font-size:{sz}; font-weight:bold; margin-top:10px; margin-bottom:4px;">{text}</p>'
+                )
+                continue
+
+            # Unordered list items
+            lm = re.match(r'^[-*•]\s+(.*)', stripped)
+            if lm:
+                if not in_list:
+                    html_lines.append('<ul style="margin-top:2px; margin-bottom:2px;">')
+                    in_list = True
+                item_text = lm.group(1)
+                item_text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', item_text)
+                item_text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', item_text)
+                html_lines.append(f'<li>{item_text}</li>')
+                continue
+
+            # Horizontal rule
+            if re.match(r'^[-*_]{3,}\s*$', stripped):
+                html_lines.append('<hr/>')
+                continue
+
+            # Empty line
+            if not stripped:
+                html_lines.append('<br/>')
+                continue
+
+            # Regular paragraph — apply inline formatting
+            text = stripped
+            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+            text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+            html_lines.append(f'<p style="margin-top:2px; margin-bottom:2px;">{text}</p>')
+
+        if in_list:
+            html_lines.append('</ul>')
+
+        return '\n'.join(html_lines)
+
     def _append_log(self, msg: str):
         """Append a message to the log field (main thread)."""
-        self.log_field.appendPlainText(msg)
+        # Use cursor to insert plain text (QTextEdit has no appendPlainText)
+        cursor = self.log_field.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        if self.log_field.toPlainText():
+            cursor.insertText('\n')
+        cursor.insertText(msg)
+        self.log_field.setTextCursor(cursor)
         # Auto-scroll to bottom
         scrollbar = self.log_field.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -1208,7 +1280,8 @@ class ReviewDialog(QDialog):
         def _swap_and_fade_in():
             try:
                 self.log_field.clear()
-                self.log_field.setPlainText(text)
+                self._raw_review_md = text
+                self.log_field.setHtml(self._md_to_html(text))
                 fade_in = QPropertyAnimation(opacity_effect, b"opacity", self)
                 fade_in.setDuration(2000)
                 fade_in.setStartValue(0.0)
@@ -1319,7 +1392,7 @@ class ReviewDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
 
             # Also save review text to file if present
-            review_text = self.log_field.toPlainText().strip()
+            review_text = (self._raw_review_md or self.log_field.toPlainText()).strip()
             if review_text:
                 review_path = self._get_review_path()
                 if review_path:
@@ -1474,7 +1547,8 @@ class ReviewDialog(QDialog):
             # Load restored content into UI
             with open(review_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            self.log_field.setPlainText(content)
+            self._raw_review_md = content
+            self.log_field.setHtml(self._md_to_html(content))
             self.delete_btn.setEnabled(True)
 
             # Update the review indicator in main GUI
