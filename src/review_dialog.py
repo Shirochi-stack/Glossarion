@@ -232,7 +232,7 @@ class ReviewDialog(QDialog):
 
         self._stop_icon_label = QLabel()
         self._stop_icon_label.setStyleSheet("background-color: transparent;")
-        self._stop_icon_label.setFixedSize(24, 24)
+        self._stop_icon_label.setFixedSize(32, 32)
         self._stop_icon_label.setAlignment(Qt.AlignCenter)
 
         self._stop_text_label = QLabel("Stop")
