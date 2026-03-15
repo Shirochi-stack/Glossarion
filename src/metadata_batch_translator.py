@@ -676,7 +676,7 @@ class MetadataBatchTranslatorUI:
                 msg_box = QMessageBox(dialog)
                 msg_box.setIcon(QMessageBox.Question)
                 msg_box.setWindowTitle("Reset Metadata Fields")
-                msg_box.setText("Are you sure you want to reset all metadata field selections?\n\nThis will uncheck all fields.")
+                msg_box.setText("Are you sure you want to reset all metadata field selections to defaults?\n\nDescription and Subject will be enabled; all others will be unchecked.")
                 msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                 msg_box.setDefaultButton(QMessageBox.No)
                 msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
@@ -684,10 +684,16 @@ class MetadataBatchTranslatorUI:
                     msg_box.setWindowIcon(QIcon(icon_path))
                 
                 if msg_box.exec() == QMessageBox.Yes:
+                    # Reset sync state to defaults
+                    sync_enabled['active'] = False
+                    for f in list(field_sync_state.keys()):
+                        field_sync_state[f] = f in default_enabled_fields
+                    sync_enabled['active'] = True
+                    # Apply to current checkboxes
                     ep = current_epub_state.get('path')
                     if ep and ep in per_epub_field_vars and per_epub_field_vars[ep]:
                         for field, checkbox in per_epub_field_vars[ep].items():
-                            checkbox.setChecked(False)
+                            checkbox.setChecked(field in default_enabled_fields)
             
             save_btn = QPushButton("💾 Save")
             save_btn.setMinimumWidth(120)
