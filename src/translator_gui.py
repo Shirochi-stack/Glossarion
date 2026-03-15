@@ -2091,6 +2091,33 @@ Text to analyze:
                 except:
                     pass
 
+            # Close review dialog and stop its background thread
+            if hasattr(self, '_review_dialog') and self._review_dialog:
+                try:
+                    print("[CLEANUP] Closing review dialog...")
+                    dlg = self._review_dialog
+                    # Signal the review thread to stop
+                    if hasattr(dlg, '_stop_requested'):
+                        dlg._stop_requested = True
+                        dlg._force_stop = True
+                    # Stop poll timer
+                    if hasattr(dlg, '_review_poll_timer'):
+                        try:
+                            dlg._review_poll_timer.stop()
+                        except Exception:
+                            pass
+                    # Stop spinner timer
+                    if hasattr(dlg, '_stop_spinner_timer'):
+                        try:
+                            dlg._stop_spinner_timer.stop()
+                        except Exception:
+                            pass
+                    _force_close_dialog(dlg)
+                    self._review_dialog = None
+                    print("[CLEANUP] Review dialog closed")
+                except Exception:
+                    pass
+
             # Kill stray QtWebEngine child processes that can lock the PyInstaller _MEI temp dir
             try:
                 import psutil, sys
