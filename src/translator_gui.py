@@ -11215,7 +11215,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             thread_name = threading.current_thread().name
             thread_id = threading.current_thread().ident
             thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
-            os.makedirs(thread_dir, exist_ok=True)
+            try:
+                os.makedirs(thread_dir, exist_ok=True)
+            except (PermissionError, OSError):
+                import tempfile
+                thread_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads", "glossary", f"{thread_name}_{thread_id}")
+                try:
+                    os.makedirs(thread_dir, exist_ok=True)
+                except Exception:
+                    pass
             
             # Process each image
             for i, image_path in enumerate(image_files):

@@ -1370,7 +1370,9 @@ class UnifiedClient:
     def _dump_raw_response(self, response, context, finish_reason, provider, request_type):
         """Dump the raw server response to disk for debugging safety filter detection."""
         try:
-            dump_dir = "Payloads/raw_safety_dumps"
+            if _PAYLOADS_DISABLED:
+                return
+            dump_dir = os.path.join(_payloads_dir(), "raw_safety_dumps")
             os.makedirs(dump_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             
@@ -3483,8 +3485,11 @@ class UnifiedClient:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
         unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
         
-        thread_dir = os.path.join("Payloads", context, unique_id)
-        os.makedirs(thread_dir, exist_ok=True)
+        thread_dir = os.path.join(_payloads_dir(), context, unique_id)
+        try:
+            os.makedirs(thread_dir, exist_ok=True)
+        except (PermissionError, OSError):
+            pass
         return thread_dir
 
     def _get_request_hash(self, messages) -> str:
@@ -3951,8 +3956,8 @@ class UnifiedClient:
             # Look for translation_progress.json in common locations
             possible_paths = [
                 'translation_progress.json',
-                os.path.join('Payloads', 'translation_progress.json'),
-                os.path.join(os.getcwd(), 'Payloads', 'translation_progress.json')
+                os.path.join(_payloads_dir(), 'translation_progress.json'),
+                os.path.join(os.getcwd(), 'Payloads', 'translation_progress.json'),
             ]
             
             # Check environment variable for output directory
@@ -6729,9 +6734,14 @@ class UnifiedClient:
     
     def _save_failed_request(self, messages, error, context, response=None):
         """Save failed requests for debugging"""
+        if _PAYLOADS_DISABLED:
+            return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        failed_dir = "Payloads/failed_requests"
-        os.makedirs(failed_dir, exist_ok=True)
+        failed_dir = os.path.join(_payloads_dir(), "failed_requests")
+        try:
+            os.makedirs(failed_dir, exist_ok=True)
+        except (PermissionError, OSError):
+            return
         
         failure_data = {
             'timestamp': timestamp,
@@ -7450,6 +7460,8 @@ class UnifiedClient:
         - Image payloads to Payloads/image/ folder
         - Safety configs to Payloads/safety_configs/ folder
         """
+        if _PAYLOADS_DISABLED:
+            return
         
         # Check if this payload contains images
         has_images = self._payload_has_images(messages)
@@ -7466,8 +7478,11 @@ class UnifiedClient:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
                 unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
                 
-                thread_dir = os.path.join("Payloads", "image", unique_id)
-                os.makedirs(thread_dir, exist_ok=True)
+                thread_dir = os.path.join(_payloads_dir(), "image", unique_id)
+                try:
+                    os.makedirs(thread_dir, exist_ok=True)
+                except (PermissionError, OSError):
+                    pass
                 
                 # Cache it for this thread
                 self._image_thread_dir_cache[thread_id] = thread_dir
@@ -7884,7 +7899,7 @@ class UnifiedClient:
     
     def _save_response(self, content: str, filename: str):
         """Save API response with enhanced thread safety and deduplication"""
-        if not content or not os.getenv("SAVE_PAYLOAD", "1") == "1":
+        if not content or not os.getenv("SAVE_PAYLOAD", "1") == "1" or _PAYLOADS_DISABLED:
             return
         
         # ONLY save JSON files to Payloads folder
@@ -10932,7 +10947,7 @@ class UnifiedClient:
             
     def _save_openrouter_config(self, config_data: dict, response_name: str = None):
         """Save OpenRouter configuration next to the current request payloads (thread-specific directory)"""
-        if not os.getenv("SAVE_PAYLOAD", "1") == "1":
+        if not os.getenv("SAVE_PAYLOAD", "1") == "1" or _PAYLOADS_DISABLED:
             return
         
         # Handle None or empty response_name
@@ -11377,13 +11392,16 @@ class UnifiedClient:
             else:
                 context = 'general'
         
-        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
-        os.makedirs(thread_dir, exist_ok=True)
+        thread_dir = os.path.join(_payloads_dir(), context, f"{thread_name}_{threading.current_thread().ident}")
+        try:
+            os.makedirs(thread_dir, exist_ok=True)
+        except (PermissionError, OSError):
+            pass
         return thread_dir
 
     def _save_gemini_safety_config(self, config_data: dict, response_name: str = None):
         """Save Gemini safety configuration next to the current request payloads"""
-        if not os.getenv("SAVE_PAYLOAD", "1") == "1":
+        if not os.getenv("SAVE_PAYLOAD", "1") == "1" or _PAYLOADS_DISABLED:
             return
         
         # Handle None or empty response_name
@@ -11410,8 +11428,11 @@ class UnifiedClient:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
                 unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
                 
-                thread_dir = os.path.join("Payloads", "image", unique_id)
-                os.makedirs(thread_dir, exist_ok=True)
+                thread_dir = os.path.join(_payloads_dir(), "image", unique_id)
+                try:
+                    os.makedirs(thread_dir, exist_ok=True)
+                except (PermissionError, OSError):
+                    pass
                 
                 # Cache it for this thread
                 self._image_thread_dir_cache[thread_id] = thread_dir
