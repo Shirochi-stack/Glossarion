@@ -662,6 +662,7 @@ class ReviewDialog(QDialog):
 
         # UI state
         self.start_btn.hide()
+        self.generate_all_btn.hide()
         self._stop_text_label.setText("Stop Review")
         self.stop_btn.show()
         self._stop_spinner_timer.start()
@@ -1021,6 +1022,7 @@ class ReviewDialog(QDialog):
         """Fade out the log field, swap text, fade back in."""
         # Disable start button during transition
         self.start_btn.setEnabled(False)
+        self.generate_all_btn.setEnabled(False)
 
         opacity_effect = QGraphicsOpacityEffect(self.log_field)
         self.log_field.setGraphicsEffect(opacity_effect)
@@ -1049,7 +1051,10 @@ class ReviewDialog(QDialog):
                         pass
                 fade_in.finished.connect(_cleanup)
                 # Re-enable start button early (don't wait for full fade-in)
-                QTimer.singleShot(200, lambda: self.start_btn.setEnabled(True))
+                def _reenable_btns():
+                    self.start_btn.setEnabled(True)
+                    self.generate_all_btn.setEnabled(True)
+                QTimer.singleShot(200, _reenable_btns)
                 self._fade_in_anim = fade_in
                 fade_in.start()
             except RuntimeError:
