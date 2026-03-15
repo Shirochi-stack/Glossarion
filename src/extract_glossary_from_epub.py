@@ -2636,26 +2636,37 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
     thread_name = threading.current_thread().name
     thread_id = threading.current_thread().ident
     thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
-    os.makedirs(thread_dir, exist_ok=True)
+    try:
+        os.makedirs(thread_dir, exist_ok=True)
+    except (PermissionError, OSError):
+        import tempfile
+        thread_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads", "glossary", f"{thread_name}_{thread_id}")
+        try:
+            os.makedirs(thread_dir, exist_ok=True)
+        except Exception:
+            thread_dir = None  # Skip payload saving
     
     try:
         # Save request payload before API call
-        payload_file = os.path.join(thread_dir, f"chapter_{idx+1}_request.json")
-        with open(payload_file, 'w', encoding='utf-8') as f:
-            # Clean messages to remove non-serializable objects before saving
-            clean_msgs = []
-            for msg in msgs:
-                clean_msg = {'role': msg.get('role'), 'content': msg.get('content')}
-                # Don't include _raw_content_object in payload as it's not JSON serializable
-                clean_msgs.append(clean_msg)
-            
-            json.dump({
-                'chapter': idx + 1,
-                'messages': clean_msgs,
-                'temperature': temp,
-                'max_tokens': mtoks,
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-            }, f, indent=2, ensure_ascii=False)
+        if thread_dir:
+            payload_file = os.path.join(thread_dir, f"chapter_{idx+1}_request.json")
+            with open(payload_file, 'w', encoding='utf-8') as f:
+                # Clean messages to remove non-serializable objects before saving
+                clean_msgs = []
+                for msg in msgs:
+                    clean_msg = {'role': msg.get('role'), 'content': msg.get('content')}
+                    # Don't include _raw_content_object in payload as it's not JSON serializable
+                    clean_msgs.append(clean_msg)
+                
+                json.dump({
+                    'chapter': idx + 1,
+                    'messages': clean_msgs,
+                    'temperature': temp,
+                    'max_tokens': mtoks,
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                }, f, indent=2, ensure_ascii=False)
+    except (PermissionError, OSError):
+        pass  # Non-fatal: payload saving is debug-only
         
         # Use send_with_interrupt for API call
         raw, finish_reason, raw_obj = send_with_interrupt(
@@ -2697,9 +2708,13 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             resp = ""
         
         # Save the raw response in thread-safe location
-        response_file = os.path.join(thread_dir, f"chapter_{idx+1}_response.txt")
-        with open(response_file, "w", encoding="utf-8", errors="replace") as f:
-            f.write(resp)
+        if thread_dir:
+            try:
+                response_file = os.path.join(thread_dir, f"chapter_{idx+1}_response.txt")
+                with open(response_file, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(resp)
+            except (PermissionError, OSError):
+                pass
         
         # Parse response using the new parser
         data = parse_api_response(resp)
@@ -2927,22 +2942,34 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     thread_name = threading.current_thread().name
     thread_id = threading.current_thread().ident
     thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
-    os.makedirs(thread_dir, exist_ok=True)
+    try:
+        os.makedirs(thread_dir, exist_ok=True)
+    except (PermissionError, OSError):
+        import tempfile
+        thread_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads", "glossary", f"{thread_name}_{thread_id}")
+        try:
+            os.makedirs(thread_dir, exist_ok=True)
+        except Exception:
+            thread_dir = None
     
     start_time = time.time()
     
     try:
         # Save request payload
-        payload_file = os.path.join(thread_dir, f"merged_chapters_{parent_idx+1}_request.json")
-        with open(payload_file, 'w', encoding='utf-8') as f:
-            clean_msgs = [{'role': msg.get('role'), 'content': msg.get('content')} for msg in msgs]
-            json.dump({
-                'chapters': chapter_nums,
-                'messages': clean_msgs,
-                'temperature': temp,
-                'max_tokens': mtoks,
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-            }, f, indent=2, ensure_ascii=False)
+        if thread_dir:
+            try:
+                payload_file = os.path.join(thread_dir, f"merged_chapters_{parent_idx+1}_request.json")
+                with open(payload_file, 'w', encoding='utf-8') as f:
+                    clean_msgs = [{'role': msg.get('role'), 'content': msg.get('content')} for msg in msgs]
+                    json.dump({
+                        'chapters': chapter_nums,
+                        'messages': clean_msgs,
+                        'temperature': temp,
+                        'max_tokens': mtoks,
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                    }, f, indent=2, ensure_ascii=False)
+            except (PermissionError, OSError):
+                pass
         
         # Make API call (use parent chapter idx for logging, pass merged chapter nums for progress bar)
         raw, finish_reason, raw_obj = send_with_interrupt(
@@ -2981,9 +3008,13 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             resp = ""
         
         # Save response
-        response_file = os.path.join(thread_dir, f"merged_chapters_{parent_idx+1}_response.txt")
-        with open(response_file, "w", encoding="utf-8", errors="replace") as f:
-            f.write(resp)
+        if thread_dir:
+            try:
+                response_file = os.path.join(thread_dir, f"merged_chapters_{parent_idx+1}_response.txt")
+                with open(response_file, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(resp)
+            except (PermissionError, OSError):
+                pass
         
         elapsed = time.time() - start_time
         print(f"   ✅ Received merged response ({len(resp):,} chars) in {elapsed:.1f}s")
@@ -4535,10 +4566,22 @@ def main(log_callback=None, stop_callback=None):
                         thread_name = threading.current_thread().name
                         thread_id = threading.current_thread().ident
                         thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
-                        os.makedirs(thread_dir, exist_ok=True)
+                        try:
+                            os.makedirs(thread_dir, exist_ok=True)
+                        except (PermissionError, OSError):
+                            import tempfile
+                            thread_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads", "glossary", f"{thread_name}_{thread_id}")
+                            try:
+                                os.makedirs(thread_dir, exist_ok=True)
+                            except Exception:
+                                thread_dir = None
                         
-                        with open(os.path.join(thread_dir, f"chunk_response_chap{idx+1}_chunk{chunk_idx}.txt"), "w", encoding="utf-8", errors="replace") as f:
-                            f.write(chunk_resp)
+                        if thread_dir:
+                            try:
+                                with open(os.path.join(thread_dir, f"chunk_response_chap{idx+1}_chunk{chunk_idx}.txt"), "w", encoding="utf-8", errors="replace") as f:
+                                    f.write(chunk_resp)
+                            except (PermissionError, OSError):
+                                pass
                         
                         # Extract data from chunk
                         chunk_resp_data = parse_api_response(chunk_resp)
@@ -4694,10 +4737,22 @@ def main(log_callback=None, stop_callback=None):
                     thread_name = threading.current_thread().name
                     thread_id = threading.current_thread().ident
                     thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
-                    os.makedirs(thread_dir, exist_ok=True)
+                    try:
+                        os.makedirs(thread_dir, exist_ok=True)
+                    except (PermissionError, OSError):
+                        import tempfile
+                        thread_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads", "glossary", f"{thread_name}_{thread_id}")
+                        try:
+                            os.makedirs(thread_dir, exist_ok=True)
+                        except Exception:
+                            thread_dir = None
                     
-                    with open(os.path.join(thread_dir, f"response_chap{idx+1}.txt"), "w", encoding="utf-8", errors="replace") as f:
-                        f.write(resp)
+                    if thread_dir:
+                        try:
+                            with open(os.path.join(thread_dir, f"response_chap{idx+1}.txt"), "w", encoding="utf-8", errors="replace") as f:
+                                f.write(resp)
+                        except (PermissionError, OSError):
+                            pass
 
                     # Parse response using the new parser
                     try:
