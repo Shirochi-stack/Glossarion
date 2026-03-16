@@ -4326,8 +4326,9 @@ CRITICAL EXTRACTION RULES:
                 return
             
             count = len(selected)
-            reply = QMessageBox.question(parent, "Confirm Delete", f"Delete {count} selected entries?",
-                                         QMessageBox.Yes | QMessageBox.No)
+            _del_msg = QMessageBox(QMessageBox.Question, "Confirm Delete", f"Delete {count} selected entries?", QMessageBox.Yes | QMessageBox.No, parent)
+            _del_msg.layout().setAlignment(Qt.AlignCenter)
+            reply = _del_msg.exec()
             if reply == QMessageBox.Yes:
                 # automatic backup
                 if not self.create_glossary_backup(f"before_delete_{count}"):
@@ -5174,7 +5175,9 @@ CRITICAL EXTRACTION RULES:
                    self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
                for i in range(self.glossary_tree.topLevelItemCount()):
                    mark_row_updated(self.glossary_tree.topLevelItem(i), False)
-               QMessageBox.information(self.dialog, "Success", "Glossary saved successfully")
+               _ok_msg = QMessageBox(QMessageBox.Information, "Success", "Glossary saved successfully", QMessageBox.Ok, self.dialog)
+               _ok_msg.layout().setAlignment(Qt.AlignCenter)
+               _ok_msg.exec()
                self.append_log(f"✅ Saved glossary to: {self.editor_file_entry.text()}")
                # Update auto-reload baseline so the timer doesn't re-trigger
                try:
