@@ -89,15 +89,16 @@ class GlossaryManagerMixin:
 
     def glossary_manager(self):
         """Open comprehensive glossary management dialog"""
-        # Create standalone PySide6 dialog (no Tkinter parent)
-        # Note: self.master is a Tkinter window, so we use None as parent for PySide6
-        dialog = QDialog(None)
+        # Create PySide6 dialog parented to the main translator window
+        dialog = QDialog(self)
         dialog.setWindowTitle("Glossary Settings")
         dialog.setFont(QFont("Segoe UI", 10))
         
-        # Make non-modal but stay on top
+        # Make non-modal; parenting to self keeps it above the main window
+        # but NOT above other apps (e.g. Notepad++).
+        # Qt.Window flag gives it its own taskbar entry and standard window buttons.
         dialog.setModal(False)
-        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.Window)
         
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
@@ -5110,6 +5111,11 @@ CRITICAL EXTRACTION RULES:
                    mark_row_updated(self.glossary_tree.topLevelItem(i), False)
                QMessageBox.information(self.dialog, "Success", "Glossary saved successfully")
                self.append_log(f"✅ Saved glossary to: {self.editor_file_entry.text()}")
+               # Update auto-reload baseline so the timer doesn't re-trigger
+               try:
+                   self._editor_last_mtime = os.path.getmtime(self.editor_file_entry.text())
+               except Exception:
+                   pass
        
         def save_as_glossary():
            if not self.current_glossary_data:
@@ -5608,6 +5614,68 @@ CRITICAL EXTRACTION RULES:
         QShortcut(QKeySequence.Save, self.dialog, activated=save_edited_glossary)
         QShortcut(QKeySequence.Delete, self.dialog, activated=delete_selected_entries)
         QShortcut(QKeySequence.Find, self.dialog, activated=find_in_tree)
+
+        # Auto-reload timer: detect external file changes every 2 seconds
+        self._editor_last_mtime = 0.0
+
+        def _silent_glossary_reload():
+            try:
+                path = self.editor_file_entry.text()
+                if not path or not os.path.exists(path):
+                    return
+
+                current_mtime = os.path.getmtime(path)
+                if self._editor_last_mtime == 0.0:
+                    # First check — just record the baseline
+                    self._editor_last_mtime = current_mtime
+                    return
+                if current_mtime == self._editor_last_mtime:
+                    return  # No change
+
+                self._editor_last_mtime = current_mtime
+
+                # Save scroll position & selection before reload
+                saved_scroll = None
+                selected_indices = []
+                try:
+                    saved_scroll = self.glossary_tree.verticalScrollBar().value()
+                    selected_indices = [
+                        self.glossary_tree.indexOfTopLevelItem(item)
+                        for item in self.glossary_tree.selectedItems()
+                    ]
+                except (RuntimeError, AttributeError):
+                    pass
+
+                # Suppress the "Loaded N entries" log on auto-reload
+                old_log = getattr(self, '_last_glossary_log', '')
+                load_glossary_for_editing()
+                self._last_glossary_log = old_log  # Keep old log to avoid spam
+
+                # Restore scroll position & selection
+                try:
+                    if saved_scroll is not None:
+                        self.glossary_tree.verticalScrollBar().setValue(saved_scroll)
+                    for idx in selected_indices:
+                        item = self.glossary_tree.topLevelItem(idx)
+                        if item:
+                            item.setSelected(True)
+                except (RuntimeError, AttributeError):
+                    pass
+
+                # Update mtime again after reload (save may have touched the file)
+                try:
+                    self._editor_last_mtime = os.path.getmtime(path)
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+        _auto_reload_timer = QTimer(parent)
+        _auto_reload_timer.setInterval(2000)
+        _auto_reload_timer.timeout.connect(_silent_glossary_reload)
+        _auto_reload_timer.start()
+        self._editor_auto_reload_timer = _auto_reload_timer
 
     def _on_tree_double_click(self, item, column_idx):
        """Handle double-click on treeview item for inline editing"""
