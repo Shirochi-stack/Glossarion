@@ -2988,6 +2988,11 @@ class MetadataTranslator:
                 return None
             
         except Exception as e:
+            # Gracefully handle user-initiated cancellation without traceback
+            error_type = getattr(e, 'error_type', '')
+            if error_type == 'cancelled' or 'stopped by user' in str(e).lower():
+                print(f"⏭️ Metadata translation of '{field_name}' cancelled by user")
+                return None
             print(f"❌ Error translating {field_name}: {repr(e)}")
             import traceback; traceback.print_exc()
             return None
