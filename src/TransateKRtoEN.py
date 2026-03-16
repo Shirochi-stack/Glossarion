@@ -8258,21 +8258,23 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             ]
         else:
             # For AI services, use prompts as before
-            book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
-                "Translate this book title to English while retaining any acronyms. Do not output anything other than the translated text.")
+            book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", "")
             
             # Get the system prompt for book titles, with fallback to default
             book_title_system_prompt = os.getenv("BOOK_TITLE_SYSTEM_PROMPT", 
-                "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content.")
+                "Translate this book title to English while retaining any acronyms. Do not output anything other than the translated text.")
             
             # Replace {target_lang} variable with output language
             output_lang = os.getenv("OUTPUT_LANGUAGE", "English")
             book_title_prompt = book_title_prompt.replace("{target_lang}", output_lang)
             book_title_system_prompt = book_title_system_prompt.replace("{target_lang}", output_lang)
             
+            # Build user content - only include instruction if user prompt is not blank
+            user_content = f"{book_title_prompt}\n\n{title}" if book_title_prompt.strip() else title
+            
             messages = [
                 {"role": "system", "content": book_title_system_prompt},
-                {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
+                {"role": "user", "content": user_content}
             ]
         
         max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))

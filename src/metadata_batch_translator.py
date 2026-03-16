@@ -101,13 +101,13 @@ class MetadataBatchTranslatorUI:
         # Book title system prompt
         if 'book_title_system_prompt' not in self.gui.config:
             self.gui.config['book_title_system_prompt'] = (
-                "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."
+                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
             )
         
         # Book title user prompt
         if 'book_title_prompt' not in self.gui.config:
             self.gui.config['book_title_prompt'] = (
-                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
+                ""
             )
         
         # Batch header system prompt
@@ -1066,7 +1066,7 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt', 
-            "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."))
+            "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
         tab_layout.addWidget(self.title_system_text)
         
         # User prompt
@@ -1099,7 +1099,7 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
-            "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
+            ""))
         tab_layout.addWidget(self.title_user_text)
         
         var_label = QLabel("Variables available: {target_lang} - detected source language")
@@ -1616,9 +1616,9 @@ class MetadataBatchTranslatorUI:
                 del self.gui.config[key]
         
         # Force set book title prompt to new default
-        self.gui.config['book_title_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
+        self.gui.config['book_title_prompt'] = ""
         if hasattr(self.gui, 'book_title_prompt'):
-            self.gui.book_title_prompt = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
+            self.gui.book_title_prompt = ""
         
         # Re-initialize other defaults
         self._initialize_default_prompts()
@@ -1644,10 +1644,10 @@ class MetadataBatchTranslatorUI:
         # Book Title tab
         if hasattr(self, 'title_system_text'):
             self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt',
-                "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."))
+                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
         if hasattr(self, 'title_user_text'):
             self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
-                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
+                ""))
         
         # Chapter Headers tab
         if hasattr(self, 'header_batch_system_text'):

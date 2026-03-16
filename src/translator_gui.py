@@ -2823,7 +2823,7 @@ Recent translations to summarize:
             "Translate this book title to {target_lang} while retaining any acronyms:")
         # Initialize book title system prompt
         if 'book_title_system_prompt' not in self.config:
-            self.config['book_title_system_prompt'] = "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."
+            self.config['book_title_system_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
         
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
@@ -10617,7 +10617,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
-                "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
+                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."),
             'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var else "0",
             'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var) else ("1" if self.config.get('use_rolling_summary') else "0"),
             'SUMMARY_ROLE': self.config.get('summary_role', 'system'),
