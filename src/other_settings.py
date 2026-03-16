@@ -9120,9 +9120,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
         QGuiApplication = None
         QTimer = None
     
-    openai_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline; cursor:pointer;">{openai_url}</span>')
+    openai_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{openai_url}</span>')
     openai_shortcut.setStyleSheet("font-size: 8pt;")
     openai_shortcut.setTextFormat(Qt.RichText)
+    openai_shortcut.setCursor(Qt.PointingHandCursor)
     openai_shortcut.setToolTip("Double-click to paste OpenAI-compatible endpoint")
     _openai_orig_style = openai_shortcut.styleSheet()
     _openai_orig_text = openai_shortcut.text()
@@ -9154,9 +9155,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     separator.setStyleSheet("color: gray; font-size: 8pt;")
     shortcuts_h.addWidget(separator)
     
-    grpc_shortcut = QLabel(f'<span style="color:#ffc107; text-decoration:underline; cursor:pointer;">{grpc_host}</span>')
+    grpc_shortcut = QLabel(f'<span style="color:#ffc107; text-decoration:underline;">{grpc_host}</span>')
     grpc_shortcut.setStyleSheet("font-size: 8pt;")
     grpc_shortcut.setTextFormat(Qt.RichText)
+    grpc_shortcut.setCursor(Qt.PointingHandCursor)
     grpc_shortcut.setToolTip("Double-click to paste raw gRPC endpoint")
     _grpc_orig_style = grpc_shortcut.styleSheet()
     _grpc_orig_text = grpc_shortcut.text()

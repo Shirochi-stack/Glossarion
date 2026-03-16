@@ -5815,7 +5815,8 @@ Recent translations to summarize:
              else "System prompt content will be sent as system message (↕️ mode)") +
             "<br><br>Click to toggle.</p></qt>"
         )
-        self.system_prompt_switch.setStyleSheet("cursor: pointer; font-size: 16pt;")
+        self.system_prompt_switch.setStyleSheet("font-size: 16pt;")
+        self.system_prompt_switch.setCursor(Qt.PointingHandCursor)
         self.system_prompt_switch.mousePressEvent = lambda e: self._toggle_system_prompt_mode()
         prompt_label_layout.addWidget(self.system_prompt_switch)
         prompt_label_layout.addStretch()

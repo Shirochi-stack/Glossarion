@@ -13661,7 +13661,7 @@ def main(log_callback=None, stop_callback=None):
     should_create_pdf = is_text_file or (is_pdf_file and pdf_output_format == 'pdf')
     
     if should_create_pdf:
-        print("📄 Text file translation complete!")
+        # Combine translated sections into final output file
         try:
             # Collect all translated chapters with their metadata
             translated_chapters = []
