@@ -38,11 +38,14 @@ if sys.platform.startswith("win"):
 MODEL = os.getenv("MODEL", "gemini-2.0-flash")
 
 def interruptible_sleep(duration, check_stop_fn, interval=0.1):
-    """Sleep that can be interrupted by stop request"""
+    """Sleep that can be interrupted by stop request or graceful stop"""
     elapsed = 0
     while elapsed < duration:
         if check_stop_fn and check_stop_fn():  # Add safety check for None
             return False  # Interrupted
+        # Also bail on graceful stop — no point sleeping if we'll skip anyway
+        if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+            return False
         sleep_time = min(interval, duration - elapsed)
         time.sleep(sleep_time)
         elapsed += sleep_time
@@ -146,6 +149,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         merged_chapters: Optional list of chapter numbers that were merged into this request
     """
     global _glossary_last_thread_submit, _glossary_thread_submit_lock
+    
+    # Early exit: if stop/graceful-stop is already flagged, skip client init and delays
+    if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+        raise UnifiedClientError("Glossary extraction stopped by user (skipped before API call)")
+    
     # Mark that an API call is now active (for graceful stop logic)
     os.environ['GRACEFUL_STOP_API_ACTIVE'] = '1'
     
@@ -2595,6 +2603,17 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                                   chunk_idx: int = None, total_chunks: int = None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
     
+    # Early exit: skip immediately if stop/graceful-stop is already flagged
+    if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+        return {
+            'idx': idx,
+            'data': [],
+            'resp': "",
+            'chap': chap,
+            'error': "Skipped (stop requested)",
+            'graceful_stop_skip': True,
+        }
+    
     # Ensure the request always contains a user message and no non-serializable blobs
     msgs = _sanitize_messages_for_api(msgs, chap)
     # APPLY INTERRUPTIBLE THREADING DELAY FIRST
@@ -2617,8 +2636,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     elapsed = 0
                     check_interval = 0.1
                     while elapsed < sleep_time:
-                        if stop_check_fn():
-                            # print(f"🛑 Threading delay interrupted by stop flag")  # Redundant
+                        if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
                             raise UnifiedClientError("Glossary extraction stopped by user during threading delay")
                         
                         sleep_chunk = min(check_interval, sleep_time - elapsed)

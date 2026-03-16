@@ -2388,6 +2388,13 @@ class UnifiedClient:
         if self._is_stop_requested():
             self._cancelled = True
             raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        
+        # Also bail on graceful stop — no point initializing clients for threads
+        # that will be skipped anyway. _is_stop_requested() intentionally doesn't
+        # check GRACEFUL_STOP (to let in-flight API responses complete), but here
+        # we're BEFORE the API call, so we should skip immediately.
+        if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+            raise UnifiedClientError("Skipped (graceful stop)", error_type="cancelled")
             
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
@@ -4303,7 +4310,12 @@ class UnifiedClient:
             # (azure for Azure endpoints, openai for generic custom endpoints).
             self.client_type = getattr(self, "client_type", "openai")
             return
-        model_lower = self.model.lower()
+        # Snapshot model and api_key under lock to avoid race conditions with
+        # other threads that may be updating self.model via _ensure_thread_client
+        with self._model_lock:
+            model_snapshot = self.model
+            api_key_snapshot = self.api_key
+        model_lower = model_snapshot.lower()
         tls = self._get_thread_local_client()
         
         # Determine client_type (no lock needed, just reading)
@@ -4333,9 +4345,9 @@ class UnifiedClient:
             if not self.client_type:
                 # No prefix matched - assume it's a custom model that should use OpenAI endpoint
                 self.client_type = 'openai'
-                logger.info(f"Using OpenAI client for custom endpoint with unmatched model: {self.model}")
+                logger.info(f"Using OpenAI client for custom endpoint with unmatched model: {model_snapshot}")
             elif self.client_type == 'openai':
-                logger.info(f"Using custom OpenAI endpoint for OpenAI model: {self.model}")
+                logger.info(f"Using custom OpenAI endpoint for OpenAI model: {model_snapshot}")
             elif self.client_type == 'gemini':
                 # Don't override Gemini - it has its own separate endpoint toggle
                 # Only log if Gemini OpenAI endpoint is not also enabled
@@ -4346,8 +4358,8 @@ class UnifiedClient:
                 # Override other model types to use custom OpenAI endpoint when toggle is enabled
                 original_client_type = self.client_type
                 self.client_type = 'openai'
-                print(f"[DEBUG] Custom endpoint override: {original_client_type} -> openai for model '{self.model}'")
-                logger.info(f"Custom endpoint enabled: Overriding {original_client_type} model {self.model} to use OpenAI client")
+                print(f"[DEBUG] Custom endpoint override: {original_client_type} -> openai for model '{model_snapshot}'")
+                logger.info(f"Custom endpoint enabled: Overriding {original_client_type} model {model_snapshot} to use OpenAI client")
         elif not use_custom_endpoint and custom_base_url and self.client_type == 'openai':
             #logger.info("Custom OpenAI endpoint disabled via toggle, using default endpoint")
             pass
@@ -4360,15 +4372,15 @@ class UnifiedClient:
                 if prefix in model_lower or model_lower[:3] in prefix:
                     suggestions.append(prefix)
             
-            error_msg = f"Unsupported model: {self.model}. "
+            error_msg = f"Unsupported model: {model_snapshot}. "
             if suggestions:
                 error_msg += f"Did you mean to use one of these prefixes? {suggestions}. "
             else:
                 # Check if it might be an aggregator model
                 if any(provider in model_lower for provider in ['yi', 'qwen', 'llama', 'gpt', 'claude']):
-                    error_msg += f"If using ElectronHub, prefix with 'eh/' (e.g., eh/{self.model}). "
-                    error_msg += f"If using OpenRouter, prefix with 'or/' (e.g., or/{self.model}). "
-                    error_msg += f"If using Poe, prefix with 'poe/' (e.g., poe/{self.model}). "
+                    error_msg += f"If using ElectronHub, prefix with 'eh/' (e.g., eh/{model_snapshot}). "
+                    error_msg += f"If using OpenRouter, prefix with 'or/' (e.g., or/{model_snapshot}). "
+                    error_msg += f"If using Poe, prefix with 'poe/' (e.g., poe/{model_snapshot}). "
             error_msg += f"Supported prefixes: {list(self.MODEL_PROVIDERS.keys())}"
             raise ValueError(error_msg)
         
@@ -4438,7 +4450,7 @@ class UnifiedClient:
                 # MICROSECOND LOCK for chutes client
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=chutes_base_url
                     )
                 logger.info(f"chutes client configured with endpoint: {chutes_base_url}")
@@ -4459,7 +4471,7 @@ class UnifiedClient:
                 logger.info("Anthropic SDK not installed, will use HTTP API")
             else:
                 # Store API key for HTTP fallback
-                self.anthropic_api_key = self.api_key
+                self.anthropic_api_key = api_key_snapshot
                 logger.info("Anthropic client configured")
         
         elif self.client_type == 'deepseek':
@@ -4514,7 +4526,7 @@ class UnifiedClient:
             with self._model_lock:
                 # Use regular OpenAI client - individual endpoint will be set later
                 self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
+                    api_key=api_key_snapshot,
                     base_url='https://api.openai.com/v1'  # Default, will be overridden by individual endpoint
                 )
         
@@ -4534,7 +4546,7 @@ class UnifiedClient:
                 # MICROSECOND LOCK for Gemini with OpenAI endpoint
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=base_url
                     )
                     self._original_client_type = 'gemini'
@@ -4550,7 +4562,7 @@ class UnifiedClient:
                     self._grpc_endpoint = gemini_endpoint.strip()  # Store for later
                 if hasattr(tls, 'model'):
                     tls.gemini_configured = True
-                    tls.gemini_api_key = self.api_key
+                    tls.gemini_api_key = api_key_snapshot
                 
             if not (use_gemini_endpoint and gemini_endpoint and not _is_grpc_endpoint) and not _is_grpc_endpoint:
                 # MICROSECOND LOCK for native Gemini client
@@ -4566,29 +4578,29 @@ class UnifiedClient:
                     print(f"[DEBUG] Using default Google credentials: {os.path.basename(google_creds)}")
                 
                 with self._model_lock:
-                    self.gemini_client = genai.Client(api_key=self.api_key)
+                    self.gemini_client = genai.Client(api_key=api_key_snapshot)
                 if hasattr(tls, 'model'):
                     tls.gemini_configured = True
-                    tls.gemini_api_key = self.api_key
+                    tls.gemini_api_key = api_key_snapshot
                     tls.gemini_client = self.gemini_client
                 
-                #print(f"[DEBUG] Created native Gemini client for model: {self.model}")
+                #print(f"[DEBUG] Created native Gemini client for model: {model_snapshot}")
         
         elif self.client_type == 'mistral':
             if MistralClient is not None:
                 # MICROSECOND LOCK for Mistral client
                 if hasattr(self, '_instance_model_lock'):
                     with self._instance_model_lock:
-                        self.mistral_client = MistralClient(api_key=self.api_key)
+                        self.mistral_client = MistralClient(api_key=api_key_snapshot)
                 else:
-                    self.mistral_client = MistralClient(api_key=self.api_key)
+                    self.mistral_client = MistralClient(api_key=api_key_snapshot)
                 logger.info("Mistral client created")
         
         elif self.client_type == 'cohere':
             if cohere is not None:
                 # MICROSECOND LOCK for Cohere client
                 with self._model_lock:
-                    self.cohere_client = cohere.Client(self.api_key)
+                    self.cohere_client = cohere.Client(api_key_snapshot)
                 logger.info("Cohere client created")
         
         elif self.client_type == 'deepseek':
@@ -4599,7 +4611,7 @@ class UnifiedClient:
                 # MICROSECOND LOCK for DeepSeek client
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=base_url
                     )
                 logger.info(f"DeepSeek client configured with endpoint: {base_url}")
@@ -4615,7 +4627,7 @@ class UnifiedClient:
                 # MICROSECOND LOCK for Groq client
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=base_url
                     )
                 logger.info(f"Groq client configured with endpoint: {base_url}")
@@ -4628,7 +4640,7 @@ class UnifiedClient:
                 # MICROSECOND LOCK for Fireworks client
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=base_url
                     )
                 logger.info(f"Fireworks client configured with endpoint: {base_url}")
@@ -4641,7 +4653,7 @@ class UnifiedClient:
                 # MICROSECOND LOCK for xAI client
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=base_url
                     )
                 logger.info(f"xAI client configured with endpoint: {base_url}")
@@ -4652,22 +4664,22 @@ class UnifiedClient:
 
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=api_key_snapshot,
                         base_url=base_url
                     )
                 logger.info(f"NVIDIA client configured with endpoint: {base_url}")
  
-        elif self.client_type == 'deepl' or self.model.startswith('deepl'):
+        elif self.client_type == 'deepl' or model_snapshot.startswith('deepl'):
             self.client_type = 'deepl'
             self.client = None  # No persistent client needed
             return 
             
-        elif self.client_type == 'google_translate_free' or self.model == 'google-translate-free':
+        elif self.client_type == 'google_translate_free' or model_snapshot == 'google-translate-free':
             self.client_type = 'google_translate_free'
             self.client = None  # No persistent client needed
             return
             
-        elif self.client_type == 'google_translate' or self.model.startswith('google-translate'):
+        elif self.client_type == 'google_translate' or model_snapshot.startswith('google-translate'):
             self.client_type = 'google_translate'
             self.client = None  # No persistent client needed
             return
@@ -4730,7 +4742,7 @@ class UnifiedClient:
         # Log retry feature support
         # In multi-key mode, self.model may still be the GUI-selected model until a key is assigned.
         # Prefer logging the effective per-key model to avoid misleading output.
-        log_model = self.model
+        log_model = model_snapshot
         try:
             if getattr(self, '_multi_key_mode', False):
                 # Prefer thread-local model (most accurate)
@@ -4763,11 +4775,13 @@ class UnifiedClient:
                 except Exception:
                     pass
         except Exception:
-            log_model = self.model
+            log_model = model_snapshot
 
         try:
             if getattr(self, '_multi_key_mode', False):
                 logger.info(f"✅ Initialized {self.client_type} client for model: {log_model} (multi-key)")
+            elif log_model != model_snapshot:
+                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
             else:
                 logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
         except Exception:
