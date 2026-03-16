@@ -1779,10 +1779,20 @@ class MetadataBatchTranslatorUI:
 class BatchHeaderTranslator:
     """Translate chapter headers in batches"""
     
-    def __init__(self, client, config: dict = None):
+    def __init__(self, client, config: dict = None, stop_check_fn=None):
         self.client = client
         self.config = config if config is not None else {}
         self.stop_flag = False
+        
+        # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
+        if stop_check_fn is not None:
+            self.stop_check_fn = stop_check_fn
+        else:
+            try:
+                from TransateKRtoEN import is_stop_requested
+                self.stop_check_fn = is_stop_requested
+            except ImportError:
+                self.stop_check_fn = lambda: False
         
         # Use the batch_header_system_prompt, with fallback to env var or default
         # Use 'or' chaining to handle None, empty string, or missing values
@@ -1803,6 +1813,37 @@ class BatchHeaderTranslator:
         
     def set_stop_flag(self, flag: bool):
         self.stop_flag = flag
+    
+    def _send_with_retry(self, messages, temperature, max_tokens, context=None):
+        """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
+        try:
+            from TransateKRtoEN import send_with_interrupt
+            response = send_with_interrupt(
+                messages=messages,
+                client=self.client,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop_check_fn=self.stop_check_fn,
+                context=context,
+            )
+        except ImportError:
+            # Fallback to direct send if send_with_interrupt is not available
+            print("⚠️ send_with_interrupt not available, using direct client.send()")
+            response = self.client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        
+        # Extract content from response - handle both object and tuple formats
+        response_content = None
+        if hasattr(response, 'content'):
+            response_content = response.content
+        elif isinstance(response, tuple):
+            response_content = response[0] if response else ""
+        else:
+            response_content = str(response)
+        return response_content
     
     @staticmethod
     def _auto_batch_size() -> int:
@@ -2011,24 +2052,13 @@ class BatchHeaderTranslator:
                     {"role": "user", "content": user_prompt}
                 ]
                 
-                # Pass temperature and max_tokens explicitly
-                response = self.client.send(
+                # Pass temperature and max_tokens through send_with_retry
+                response_content = self._send_with_retry(
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     context='batch_toc_translation' if translation_type == 'toc' else 'batch_header_translation'
                 )
-                
-                # Extract content from response - handle both object and tuple formats
-                response_content = None
-                if hasattr(response, 'content'):
-                    response_content = response.content
-                elif isinstance(response, tuple):
-                    # If it's a tuple, first element is usually the content
-                    response_content = response[0] if response else ""
-                else:
-                    # Fallback: convert to string
-                    response_content = str(response)
                 
                 if response_content:
                     translations = self._parse_json_response(response_content, batch_headers)
@@ -2672,11 +2702,51 @@ class BatchHeaderTranslator:
 class MetadataTranslator:
     """Translate EPUB metadata fields"""
     
-    def __init__(self, client, config: dict = None):
+    def __init__(self, client, config: dict = None, stop_check_fn=None):
         self.client = client
         self.config = config or {}
         self.system_prompt = os.getenv('BOOK_TITLE_SYSTEM_PROMPT',
             "You are a translator. Respond with only the translated text, nothing else.")
+        # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
+        if stop_check_fn is not None:
+            self.stop_check_fn = stop_check_fn
+        else:
+            try:
+                from TransateKRtoEN import is_stop_requested
+                self.stop_check_fn = is_stop_requested
+            except ImportError:
+                self.stop_check_fn = lambda: False
+    
+    def _send_with_retry(self, messages, temperature, max_tokens, context=None):
+        """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
+        try:
+            from TransateKRtoEN import send_with_interrupt
+            response = send_with_interrupt(
+                messages=messages,
+                client=self.client,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop_check_fn=self.stop_check_fn,
+                context=context,
+            )
+        except ImportError:
+            # Fallback to direct send if send_with_interrupt is not available
+            print("⚠️ send_with_interrupt not available, using direct client.send()")
+            response = self.client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        
+        # Extract content from response - handle both object and tuple formats
+        response_content = None
+        if hasattr(response, 'content'):
+            response_content = response.content
+        elif isinstance(response, tuple):
+            response_content = response[0] if response else ""
+        else:
+            response_content = str(response)
+        return response_content
     
     def translate_metadata(self, 
                           metadata: Dict[str, Any],
@@ -2779,23 +2849,12 @@ class MetadataTranslator:
             temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
             max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
             
-            response = self.client.send(
+            response_content = self._send_with_retry(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 context='metadata_translation'
             )
-            
-            # Extract content from response - handle both object and tuple formats
-            response_content = None
-            if hasattr(response, 'content'):
-                response_content = response.content
-            elif isinstance(response, tuple):
-                # If it's a tuple, first element is usually the content
-                response_content = response[0] if response else ""
-            else:
-                # Fallback: convert to string
-                response_content = str(response)
             
             if response_content:
                 translated = self._parse_metadata_response(response_content, fields_to_send)
@@ -2810,7 +2869,8 @@ class MetadataTranslator:
                 return {}
             
         except Exception as e:
-            print(f"Error translating metadata: {e}")
+            print(f"❌ Error translating metadata: {repr(e)}")
+            import traceback; traceback.print_exc()
             return {}
     
     def _translate_fields_parallel(self,
@@ -2842,7 +2902,8 @@ class MetadataTranslator:
                         translated[field] = result
                         print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
                 except Exception as e:
-                    print(f"❌ Error translating {field}: {e}")
+                    print(f"❌ Error translating {field}: {repr(e)}")
+                    import traceback; traceback.print_exc()
                     
         return translated
     
@@ -2900,23 +2961,12 @@ class MetadataTranslator:
             temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
             max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
             
-            response = self.client.send(
+            response_content = self._send_with_retry(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 context='metadata_field_translation'
             )
-            
-            # Extract content from response - handle both object and tuple formats
-            response_content = None
-            if hasattr(response, 'content'):
-                response_content = response.content
-            elif isinstance(response, tuple):
-                # If it's a tuple, first element is usually the content
-                response_content = response[0] if response else ""
-            else:
-                # Fallback: convert to string
-                response_content = str(response)
             
             if response_content:
                 return response_content.strip()
@@ -2925,7 +2975,8 @@ class MetadataTranslator:
                 return None
             
         except Exception as e:
-            print(f"Error translating {field_name}: {e}")
+            print(f"❌ Error translating {field_name}: {repr(e)}")
+            import traceback; traceback.print_exc()
             return None
     
     def _parse_metadata_response(self, response: str, original_fields: Dict[str, str]) -> Dict[str, str]:
