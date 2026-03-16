@@ -10869,8 +10869,10 @@ def main(log_callback=None, stop_callback=None):
                 print(f"\n❌ ERROR: No chapters found in EPUB to translate!")
                 raise ValueError("No chapters found in EPUB")
         elif not translate_special and total_chapters > 0:
-            print(f"\n⚠️ WARNING: All chapters are special files (chapter 0) and TRANSLATE_SPECIAL_FILES is disabled.")
-            print(f"💡 Enable 'Translate Special Files' in settings if you want to translate these files.")
+            # Only show this warning for EPUBs — "special files" (chapter 0) is an EPUB-specific concept
+            if not is_text_file and not is_pdf_file:
+                print(f"\n⚠️ WARNING: All chapters are special files (chapter 0) and TRANSLATE_SPECIAL_FILES is disabled.")
+                print(f"💡 Enable 'Translate Special Files' in settings if you want to translate these files.")
         elif total_chunks_needed == 0 and total_chapters > 0:
             print(f"\n✅ All chapters already translated - nothing to do!")
         else:
