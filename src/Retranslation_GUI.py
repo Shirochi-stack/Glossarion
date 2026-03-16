@@ -439,9 +439,12 @@ class RetranslationMixin:
                 files = [
                     f for f in os.listdir(output_dir)
                     if os.path.isfile(os.path.join(output_dir, f))
-                    # accept any extension except .epub
+                    # accept any extension except known non-chapter files
                     and not f.lower().endswith("_translated.txt")
+                    and not f.lower().endswith("_translated.pdf")
+                    and not f.lower().endswith("_translated.html")
                     and f != "translation_progress.json"
+                    and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
                     and not f.lower().endswith(".epub")
                     and not f.lower().endswith(".cache")
                 ]
