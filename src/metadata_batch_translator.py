@@ -2705,8 +2705,9 @@ class MetadataTranslator:
     def __init__(self, client, config: dict = None, stop_check_fn=None):
         self.client = client
         self.config = config or {}
-        self.system_prompt = os.getenv('BOOK_TITLE_SYSTEM_PROMPT',
-            "You are a translator. Respond with only the translated text, nothing else.")
+        self.system_prompt = os.getenv('METADATA_SYSTEM_PROMPT',
+            os.getenv('BOOK_TITLE_SYSTEM_PROMPT',
+            "You are a translator. Respond with only the translated text, nothing else."))
         # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
         if stop_check_fn is not None:
             self.stop_check_fn = stop_check_fn
@@ -2840,8 +2841,10 @@ class MetadataTranslator:
                 ]
             else:
                 # For AI services, use prompts as before
+                # Replace {target_lang} in system prompt with output language
+                system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
                 messages = [
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
             
@@ -2952,8 +2955,10 @@ class MetadataTranslator:
                 ]
             else:
                 # For AI services, use prompts as before
+                # Replace {target_lang} in system prompt with output language
+                system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
                 messages = [
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"{prompt}\n\n{field_value}"}
                 ]
             

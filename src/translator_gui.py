@@ -12384,8 +12384,8 @@ Important rules:
             os.environ['BOOK_TITLE_PROMPT'] = book_title_prompt_formatted
             os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = book_title_system_prompt_formatted
             
-            # Set metadata system prompt
-            os.environ['METADATA_SYSTEM_PROMPT'] = self.config.get('metadata_system_prompt', '')
+            # Set metadata system prompt - replace {target_lang} with output language
+            os.environ['METADATA_SYSTEM_PROMPT'] = self.config.get('metadata_system_prompt', '').replace('{target_lang}', output_lang)
             
             # Set prompts
             import large_env
