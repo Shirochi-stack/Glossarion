@@ -162,6 +162,16 @@ class TextFileProcessor:
         cache_dir = os.path.join(self.output_dir, '.cache')
         os.makedirs(cache_dir, exist_ok=True)
         cache_path = os.path.join(cache_dir, cache_name)
+        
+        # Backwards compat: migrate old cache from output_dir root to .cache/
+        old_cache_path = os.path.join(self.output_dir, cache_name)
+        if os.path.exists(old_cache_path) and not os.path.exists(cache_path):
+            try:
+                import shutil
+                shutil.move(old_cache_path, cache_path)
+                print(f"📦 Migrated {cache_name} → .cache/{cache_name}")
+            except Exception:
+                cache_path = old_cache_path  # fallback to old location
         source_hash = self._generate_hash(
             ''.join(ch.get('content', '') for ch in raw_chapters)
         )
