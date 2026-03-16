@@ -13738,7 +13738,6 @@ def main(log_callback=None, stop_callback=None):
                 
                 print(f"\n⏱️ Total translation time: {hours}h {minutes}m {seconds}s")
                 print(f"📊 Chapters completed: {chapters_completed}")
-                print(f"✅ Text file translation complete!")
                 
                 if log_callback:
                     log_callback(f"✅ Text file translation complete! Created {combined_path}")
@@ -13989,7 +13988,6 @@ def main(log_callback=None, stop_callback=None):
             
             print(f"\n⏱️ Total translation time: {hours}h {minutes}m {seconds}s")
             print(f"📊 Chapters completed: {chapters_completed}")
-            print(f"✅ Text file translation complete!")
             
             if log_callback:
                 log_callback(f"✅ Text file translation complete! Created {combined_path}")
