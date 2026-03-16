@@ -5804,12 +5804,13 @@ CRITICAL EXTRACTION RULES:
                     # Orange for added/modified rows
                     for key in added_keys:
                         flash_indices.append((new_content[key], "#f97316"))
-                    # Red flash on the row nearest each deletion point
-                    for key in deleted_keys:
-                        old_idx = old_content[key]
-                        nearest = min(old_idx, new_count - 1) if new_count > 0 else -1
-                        if nearest >= 0 and (nearest, "#dc2626") not in flash_indices:
-                            flash_indices.append((nearest, "#dc2626"))
+                    # Red flash only when rows were actually deleted (count decreased)
+                    if new_count < len(old_rows):
+                        for key in deleted_keys:
+                            old_idx = old_content[key]
+                            nearest = min(old_idx, new_count - 1) if new_count > 0 else -1
+                            if nearest >= 0 and (nearest, "#dc2626") not in flash_indices:
+                                flash_indices.append((nearest, "#dc2626"))
 
                     if flash_indices:
                         # Save and clear selection so flash isn't hidden behind blue
