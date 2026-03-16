@@ -2820,6 +2820,7 @@ class MetadataTranslator:
         
         # Handle output language - check env first (set by GUI), then config
         output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
+        print(f"[DEBUG] MetadataTranslator output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
         
         # Replace variables
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
@@ -2920,7 +2921,7 @@ class MetadataTranslator:
         # Get the specific prompt or default
         prompt_template = field_prompts.get(field_name, 
                                            field_prompts.get('_default', 
-                                                           "Translate this text to English:"))
+                                                           "Translate this text to {target_lang}:"))
         
         # Handle language behavior
         lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
@@ -2935,10 +2936,13 @@ class MetadataTranslator:
         
         # Handle output language - check env first (set by GUI), then config
         output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
+        print(f"[DEBUG] MetadataTranslator._translate_single_field({field_name}) output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
         
         # Replace variables
         prompt = prompt_template.replace('{target_lang}', output_lang)
         prompt = prompt.replace('{field_value}', field_value)
+        print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
+        print(f"[DEBUG] prompt AFTER replace: '{prompt[:200]}'")
         
         # Clean up double spaces
         prompt = ' '.join(prompt.split())
@@ -2960,6 +2964,7 @@ class MetadataTranslator:
                     system_prompt = prompt
                 else:
                     system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
+                print(f"[DEBUG] FINAL system_prompt sent to API: '{system_prompt[:200]}'")
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": field_value}
@@ -3155,6 +3160,20 @@ def enhance_epub_compiler(compiler_instance):
             config['output_language'] = 'English'  # Default
             print(f"[DEBUG] Using default output_language: {config['output_language']}")
         
+        # Get metadata field prompts - GUI passes these via env vars to the subprocess
+        env_field_prompts = os.getenv('METADATA_FIELD_PROMPTS')
+        if env_field_prompts:
+            try:
+                config['metadata_field_prompts'] = json.loads(env_field_prompts)
+                print(f"[DEBUG] Using metadata_field_prompts from GUI (env)")
+            except Exception as e:
+                print(f"[WARNING] Failed to parse METADATA_FIELD_PROMPTS env var: {e}")
+        
+        env_batch_prompt = os.getenv('METADATA_BATCH_PROMPT')
+        if env_batch_prompt:
+            config['metadata_batch_prompt'] = env_batch_prompt
+            print(f"[DEBUG] Using metadata_batch_prompt from GUI (env)")
+        
         try:
             # Create batch header translator if needed
             if batch_translate:
@@ -3168,6 +3187,8 @@ def enhance_epub_compiler(compiler_instance):
                 compiler_instance.metadata_translator = MetadataTranslator(
                     compiler_instance.api_client, config
                 )
+                print(f"[DEBUG] Config metadata_field_prompts: {config.get('metadata_field_prompts', 'NOT IN CONFIG')}")
+                print(f"[DEBUG] Config output_language: {config.get('output_language', 'NOT IN CONFIG')}")
                 print(f"[DEBUG] Created MetadataTranslator for fields: {[k for k, v in translate_metadata_fields.items() if v]}")
                 
                 # Verify the translator was created
