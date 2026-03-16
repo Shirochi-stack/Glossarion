@@ -5321,10 +5321,68 @@ CRITICAL EXTRACTION RULES:
         toolbar_layout.addStretch()
         content_frame_layout.insertWidget(0, toolbar_widget)
 
+        def _open_glossary_in_editor():
+            """Open current glossary file in the best available text editor."""
+            import subprocess
+            import shutil
+
+            file_path = self.editor_file_entry.text()
+            if not file_path or not os.path.exists(file_path):
+                self._show_message('error', "File Missing",
+                                   "No glossary file is currently loaded.",
+                                   parent=getattr(self, 'dialog', self))
+                return
+
+            # Determine line number from selected row (1-indexed)
+            _line_num = 1
+            selected = self.glossary_tree.currentItem()
+            if selected:
+                try:
+                    _line_num = max(1, int(selected.text(0)))
+                except (ValueError, TypeError):
+                    pass
+
+            try:
+                if sys.platform == 'win32':
+                    _npp_paths = [
+                        r'C:\Program Files\Notepad++\notepad++.exe',
+                        r'C:\Program Files (x86)\Notepad++\notepad++.exe',
+                    ]
+                    _npp = next((p for p in _npp_paths if os.path.exists(p)), None)
+                    if _npp:
+                        subprocess.Popen([_npp, f'-n{_line_num}', file_path])
+                    else:
+                        subprocess.Popen(['notepad.exe', file_path])
+                elif sys.platform == 'darwin':
+                    if shutil.which('code'):
+                        subprocess.Popen(['code', '--goto', f'{file_path}:{_line_num}'])
+                    else:
+                        subprocess.Popen(['open', '-t', file_path])
+                else:
+                    if shutil.which('gedit'):
+                        subprocess.Popen(['gedit', f'+{_line_num}', file_path])
+                    elif shutil.which('kate'):
+                        subprocess.Popen(['kate', '-l', str(_line_num), file_path])
+                    elif shutil.which('code'):
+                        subprocess.Popen(['code', '--goto', f'{file_path}:{_line_num}'])
+                    else:
+                        _linux_editors = ['mousepad', 'xed', 'pluma', 'nano', 'xdg-open']
+                        _editor = next((e for e in _linux_editors if shutil.which(e)), 'xdg-open')
+                        subprocess.Popen([_editor, file_path])
+            except Exception as _e:
+                self._show_message('error', "Open Failed",
+                                   f"Could not open editor:\n{_e}",
+                                   parent=getattr(self, 'dialog', self))
+
         def show_tree_context_menu(pos):
             menu = QMenu(self.glossary_tree)
             menu.addAction("Save Changes", save_edited_glossary)
             menu.addAction("Save As...", save_as_glossary)
+            menu.addSeparator()
+            # Edit in external editor (Notepad++ / notepad / platform editor)
+            _glossary_path = self.editor_file_entry.text()
+            if _glossary_path and os.path.exists(_glossary_path):
+                menu.addAction("✏️ Edit in Notepad", _open_glossary_in_editor)
             menu.addSeparator()
             # Edit selected entry using existing inline editor
             current_item = self.glossary_tree.itemAt(pos)
