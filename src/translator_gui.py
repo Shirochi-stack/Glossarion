@@ -3924,7 +3924,7 @@ Recent translations to summarize:
         self.profile_menu.setEditable(True)
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
-        self.profile_menu.setMaximumWidth(380)
+        self.profile_menu.setMaximumWidth(450)
         # Add custom styling with unicode arrow and left padding for cog overlay
         self.profile_menu.setStyleSheet("""
             QComboBox {
@@ -4008,22 +4008,22 @@ Recent translations to summarize:
         # Create a horizontal layout for profile buttons to keep them close together
         profile_buttons_widget = QWidget()
         profile_buttons_layout = QHBoxLayout(profile_buttons_widget)
-        profile_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        profile_buttons_layout.setContentsMargins(8, 0, 0, 0)
         profile_buttons_layout.setSpacing(10)
         
         # Quick new profile "+" button
-        self._new_profile_btn = QPushButton("+")
-        self._new_profile_btn.setFixedSize(28, 28)
+        self._new_profile_btn = QPushButton("+ New Profile")
+        self._new_profile_btn.setFixedHeight(28)
         self._new_profile_btn.setToolTip("Create a new empty profile")
         self._new_profile_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2d5a2d;
                 color: #ffffff;
-                font-size: 16px;
+                font-size: 11px;
                 font-weight: bold;
                 border: 1px solid #3a7a3a;
                 border-radius: 4px;
-                padding: 0px;
+                padding: 0px 8px;
             }
             QPushButton:hover {
                 background-color: #3a7a3a;
