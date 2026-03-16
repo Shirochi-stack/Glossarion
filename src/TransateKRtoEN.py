@@ -9551,8 +9551,8 @@ def main(log_callback=None, stop_callback=None):
                 print("="*50)
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
                 
-                # Get metadata system prompt from environment
-                system_prompt = os.getenv('METADATA_SYSTEM_PROMPT', '')
+                # Get metadata system prompt from environment (fall back to default)
+                system_prompt = os.getenv('METADATA_SYSTEM_PROMPT', '') or "You are a translator. Respond with only the translated text, nothing else."
                 if system_prompt:
                     # Get field-specific prompts
                     field_prompts_str = os.getenv('METADATA_FIELD_PROMPTS', '{}')
@@ -9561,7 +9561,13 @@ def main(log_callback=None, stop_callback=None):
                     except:
                         field_prompts = {}
                     
-                    if not field_prompts and not field_prompts.get('_default'):
+                    if not field_prompts:
+                        output_language = os.getenv('OUTPUT_LANGUAGE', 'English')
+                        field_prompts = {
+                            '_default': f"Translate this text to {output_language}. Do not output anything other than the translated text."
+                        }
+                    
+                    if not field_prompts.get('_default') and not any(k != '_default' for k in field_prompts):
                         print("❌ No field prompts configured, skipping metadata translation")
                     else:
                         # Get language configuration

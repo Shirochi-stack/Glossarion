@@ -10825,6 +10825,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'HEADERS_PER_BATCH': str(self.headers_per_batch_var),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
+            'METADATA_SYSTEM_PROMPT': self.config.get('metadata_system_prompt', '').replace('{target_lang}', self.config.get('output_language', 'English')),
             'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
             'LANG_PROMPT_BEHAVIOR': self.config.get('lang_prompt_behavior', 'auto'),
             'FORCED_SOURCE_LANG': self.config.get('forced_source_lang', 'Korean'),
