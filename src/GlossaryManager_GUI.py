@@ -5483,11 +5483,6 @@ CRITICAL EXTRACTION RULES:
             menu.addAction("Save Changes", save_edited_glossary)
             menu.addAction("Save As...", save_as_glossary)
             menu.addSeparator()
-            # Edit in external editor (Notepad++ / notepad / platform editor)
-            _glossary_path = self.editor_file_entry.text()
-            if _glossary_path and os.path.exists(_glossary_path):
-                menu.addAction("✏️ Edit in Notepad", _open_glossary_in_editor)
-            menu.addSeparator()
             # Edit selected entry using existing inline editor
             current_item = self.glossary_tree.itemAt(pos)
             current_col = self.glossary_tree.columnAt(pos.x())
@@ -5499,6 +5494,11 @@ CRITICAL EXTRACTION RULES:
                 col = self.glossary_tree.currentColumn()
                 if item and col > 0:
                     menu.addAction("Edit", lambda: self._on_tree_double_click(item, col))
+            # Edit in external editor (Notepad++ / notepad / platform editor)
+            _glossary_path = self.editor_file_entry.text()
+            if _glossary_path and os.path.exists(_glossary_path):
+                menu.addAction("✏️ Edit in Notepad", _open_glossary_in_editor)
+            menu.addSeparator()
             menu.addAction("Delete Selected", delete_selected_entries)
             menu.addAction("Reload", load_glossary_for_editing)
             menu.exec(self.glossary_tree.viewport().mapToGlobal(pos))
@@ -5831,7 +5831,7 @@ CRITICAL EXTRACTION RULES:
                             matched_added.add(best_a)
                             matched_deleted.add(d_key)
                             idx = remaining_added[best_a]
-                            flash_indices.append((idx, "#f97316"))  # orange = modified
+                            flash_indices.append((idx, "#ca8a04"))  # yellow = modified
                             _used_positions.add(idx)
 
                     # Green for truly new rows (unmatched adds)
