@@ -5834,7 +5834,7 @@ CRITICAL EXTRACTION RULES:
                             matched_added.add(best_a)
                             matched_deleted.add(d_key)
                             idx = remaining_added[best_a]
-                            flash_indices.append((idx, "#ca8a04"))  # yellow = modified
+                            flash_indices.append((idx, "#eab308"))  # yellow = modified
                             _used_positions.add(idx)
 
                     # Green for truly new rows (unmatched adds)
