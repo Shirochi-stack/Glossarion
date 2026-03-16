@@ -5664,6 +5664,17 @@ CRITICAL EXTRACTION RULES:
 
                 self._editor_last_mtime = current_mtime
 
+                # Snapshot current row data for change detection
+                old_rows = {}
+                try:
+                    for i in range(self.glossary_tree.topLevelItemCount()):
+                        item = self.glossary_tree.topLevelItem(i)
+                        if item:
+                            cols = tuple(item.text(c) for c in range(item.columnCount()))
+                            old_rows[i] = cols
+                except (RuntimeError, AttributeError):
+                    pass
+
                 # Save scroll position & selection before reload
                 saved_scroll = None
                 selected_indices = []
@@ -5692,6 +5703,60 @@ CRITICAL EXTRACTION RULES:
                 except (RuntimeError, AttributeError):
                     pass
 
+                # Detect changed/new rows and flash them yellow
+                changed_indices = []
+                try:
+                    new_count = self.glossary_tree.topLevelItemCount()
+                    for i in range(new_count):
+                        item = self.glossary_tree.topLevelItem(i)
+                        if not item:
+                            continue
+                        new_cols = tuple(item.text(c) for c in range(item.columnCount()))
+                        if i not in old_rows or old_rows[i] != new_cols:
+                            changed_indices.append(i)
+                except (RuntimeError, AttributeError):
+                    pass
+
+                if changed_indices:
+                    _flash_brush = QBrush(QColor("#fbbf24"))  # amber/yellow
+
+                    # Save selection before clearing for flash visibility
+                    _saved_sel = [
+                        self.glossary_tree.indexOfTopLevelItem(item)
+                        for item in self.glossary_tree.selectedItems()
+                    ]
+
+                    # Clear selection so yellow isn't hidden behind blue highlight
+                    self.glossary_tree.clearSelection()
+
+                    # Apply yellow highlight
+                    for idx in changed_indices:
+                        item = self.glossary_tree.topLevelItem(idx)
+                        if item:
+                            for c in range(item.columnCount()):
+                                item.setBackground(c, _flash_brush)
+
+                    # Clear flash after 600ms and restore selection if unchanged
+                    def _clear_flash():
+                        try:
+                            for idx in changed_indices:
+                                item = self.glossary_tree.topLevelItem(idx)
+                                if item:
+                                    for c in range(item.columnCount()):
+                                        # Remove background entirely so Qt uses native default
+                                        item.setData(c, Qt.BackgroundRole, None)
+                            # Restore selection only if user hasn't clicked something new
+                            current_sel = self.glossary_tree.selectedItems()
+                            if not current_sel and _saved_sel:
+                                for idx in _saved_sel:
+                                    item = self.glossary_tree.topLevelItem(idx)
+                                    if item:
+                                        item.setSelected(True)
+                        except (RuntimeError, AttributeError):
+                            pass
+
+                    QTimer.singleShot(600, _clear_flash)
+
                 # Update mtime again after reload (save may have touched the file)
                 try:
                     self._editor_last_mtime = os.path.getmtime(path)
@@ -5702,7 +5767,7 @@ CRITICAL EXTRACTION RULES:
                 pass
 
         _auto_reload_timer = QTimer(parent)
-        _auto_reload_timer.setInterval(2000)
+        _auto_reload_timer.setInterval(500)
         _auto_reload_timer.timeout.connect(_silent_glossary_reload)
         _auto_reload_timer.start()
         self._editor_auto_reload_timer = _auto_reload_timer
