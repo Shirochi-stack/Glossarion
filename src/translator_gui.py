@@ -2988,7 +2988,7 @@ Recent translations to summarize:
         if self.token_limit_disabled:
             self.token_limit_entry.setEnabled(False)
             self.toggle_token_btn.setText("Enable Input Token Limit")
-            self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")  # success-outline
+            self.toggle_token_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")  # success-outline
             if hasattr(self, 'generate_review_btn'):
                 self.generate_review_btn.setEnabled(False)
         
@@ -4880,7 +4880,7 @@ Recent translations to summarize:
         
         # Set initial button text and style based on current state
         btn_text = "Enable Input Token Limit" if self.token_limit_disabled else "Disable Input Token Limit"
-        btn_style = ("background-color: #28a745; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }") if self.token_limit_disabled else ("background-color: #dc3545; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
+        btn_style = ("QPushButton { background-color: #28a745; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }") if self.token_limit_disabled else ("QPushButton { background-color: #dc3545; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
         
         self.toggle_token_btn = QPushButton(btn_text)
         self.toggle_token_btn.clicked.connect(self.toggle_token_limit)
@@ -12405,7 +12405,7 @@ Important rules:
        if not self.token_limit_disabled:
            self.token_limit_entry.setEnabled(False)
            self.toggle_token_btn.setText("Enable Input Token Limit")
-           self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
+           self.toggle_token_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
            self.token_limit_disabled = True
            # Disable Generate Review button when token limit is off
@@ -12416,7 +12416,7 @@ Important rules:
            if not self.token_limit_entry.text().replace(',', '').strip():
                self.token_limit_entry.setText(f"{self.config.get('token_limit', 1000000):,}")
            self.toggle_token_btn.setText("Disable Input Token Limit")
-           self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
+           self.toggle_token_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
            # Re-enable Generate Review button only if no process is running
