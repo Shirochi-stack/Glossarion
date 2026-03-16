@@ -470,6 +470,14 @@ class RetranslationMixin:
 
                     if key in prog.get("chapters", {}):
                         continue
+                    
+                    # Also check if any existing entry already references this output file
+                    already_tracked = any(
+                        ch.get("output_file") == fname
+                        for ch in prog.get("chapters", {}).values()
+                    )
+                    if already_tracked:
+                        continue
 
                     prog.setdefault("chapters", {})[key] = {
                         "actual_num": actual_num,
