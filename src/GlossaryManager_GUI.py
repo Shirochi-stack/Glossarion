@@ -4140,7 +4140,7 @@ CRITICAL EXTRACTION RULES:
                    mark_row_updated(self.glossary_tree.topLevelItem(i), False)
                
            except Exception as e:
-               QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
+               #QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
                self.append_log(f"❌ Failed to load glossary: {e}")
        
         def browse_glossary():

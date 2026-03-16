@@ -9516,8 +9516,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Update progress to "in_progress"
             self.image_progress_manager.update(image_path, content_hash, status="in_progress")
             
-            # Check if image translation is enabled
-            if not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var:
+            # Check if image translation is enabled (always allow for direct image file input)
+            _direct_image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg', '.ico', '.heic', '.heif', '.avif', '.jxl'}
+            _is_direct_image = os.path.splitext(image_path)[1].lower() in _direct_image_exts
+            if not _is_direct_image and (not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var):
                 self.append_log(f"⚠️ Image translation not enabled. Enable it in settings to translate images.")
                 return False
             
@@ -9708,6 +9710,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if auto_glossary_mode is None:
                 auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
             enable_auto_glossary_subprocess = (auto_glossary_mode == 'minimal')
+            
+            # "No Glossary" mode overrides append_glossary for all file types
+            if auto_glossary_mode == 'no_glossary':
+                append_glossary = False
             
             if append_glossary:
                 # Check for manual glossary
@@ -11545,7 +11551,6 @@ Important rules:
                 try:
                     from extract_glossary_from_epub import skip_duplicate_entries, remove_honorifics
                     # Set environment variable for honorifics toggle
-                    import os
                     os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if honorifics_disabled else '0'
                     final_entries = skip_duplicate_entries(all_glossary_entries)
                 except:
@@ -14817,10 +14822,8 @@ Important rules:
         image_files = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
         
         if image_files:
-            # Enable image translation if not already enabled
-            if hasattr(self, 'enable_image_translation_var') and not self.enable_image_translation_var:
-                self.enable_image_translation_var = True
-                self.append_log(f"🖼️ Detected {len(image_files)} image file(s) - automatically enabled image translation")
+            # Image translation runs implicitly for direct image files — no need to toggle the UI checkbox
+            self.append_log(f"🖼️ Detected {len(image_files)} image file(s) for translation")
             
             # Clear auto-loaded glossary (but keep manually loaded ones)
             if hasattr(self, 'auto_loaded_glossary_path') and self.auto_loaded_glossary_path:
