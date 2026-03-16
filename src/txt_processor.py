@@ -159,7 +159,9 @@ class TextFileProcessor:
         # Cache the split result so that changing token limits or
         # compression factor mid-progress doesn't alter chunk counts.
         cache_name = f'split{self.cache_suffix}.cache' if self.cache_suffix else 'split.cache'
-        cache_path = os.path.join(self.output_dir, cache_name)
+        cache_dir = os.path.join(self.output_dir, '.cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, cache_name)
         source_hash = self._generate_hash(
             ''.join(ch.get('content', '') for ch in raw_chapters)
         )
