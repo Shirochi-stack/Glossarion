@@ -5723,6 +5723,16 @@ CRITICAL EXTRACTION RULES:
 
                 self._editor_last_mtime = current_mtime
 
+                # Snapshot current row data for change detection
+                old_rows = {}
+                try:
+                    for i in range(self.glossary_tree.topLevelItemCount()):
+                        item = self.glossary_tree.topLevelItem(i)
+                        if item:
+                            old_rows[i] = tuple(item.text(c) for c in range(item.columnCount()))
+                except (RuntimeError, AttributeError):
+                    pass
+
                 # Save scroll position & selection before reload
                 saved_scroll = None
                 selected_indices = []
@@ -5765,6 +5775,39 @@ CRITICAL EXTRACTION RULES:
                         except (RuntimeError, AttributeError):
                             pass
                     QTimer.singleShot(1500, _restore_stats)
+                except Exception:
+                    pass
+
+                # Orange flash on changed/new rows
+                try:
+                    changed_indices = []
+                    new_count = self.glossary_tree.topLevelItemCount()
+                    for i in range(new_count):
+                        item = self.glossary_tree.topLevelItem(i)
+                        if not item:
+                            continue
+                        new_cols = tuple(item.text(c) for c in range(item.columnCount()))
+                        if i not in old_rows or old_rows[i] != new_cols:
+                            changed_indices.append(i)
+
+                    if changed_indices:
+                        _flash_brush = QBrush(QColor("#f97316"))  # orange
+                        for idx in changed_indices:
+                            item = self.glossary_tree.topLevelItem(idx)
+                            if item:
+                                for c in range(item.columnCount()):
+                                    item.setBackground(c, _flash_brush)
+
+                        def _clear_orange():
+                            try:
+                                for idx in changed_indices:
+                                    item = self.glossary_tree.topLevelItem(idx)
+                                    if item:
+                                        for c in range(item.columnCount()):
+                                            item.setData(c, Qt.BackgroundRole, None)
+                            except (RuntimeError, AttributeError):
+                                pass
+                        QTimer.singleShot(600, _clear_orange)
                 except Exception:
                     pass
 
