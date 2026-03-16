@@ -5792,6 +5792,14 @@ CRITICAL EXTRACTION RULES:
 
                     if changed_indices:
                         _flash_brush = QBrush(QColor("#f97316"))  # orange
+
+                        # Save and clear selection so orange isn't hidden behind blue
+                        _saved_sel = [
+                            self.glossary_tree.indexOfTopLevelItem(it)
+                            for it in self.glossary_tree.selectedItems()
+                        ]
+                        self.glossary_tree.clearSelection()
+
                         for idx in changed_indices:
                             item = self.glossary_tree.topLevelItem(idx)
                             if item:
@@ -5805,6 +5813,12 @@ CRITICAL EXTRACTION RULES:
                                     if item:
                                         for c in range(item.columnCount()):
                                             item.setData(c, Qt.BackgroundRole, None)
+                                # Restore selection only if user hasn't clicked something new
+                                if not self.glossary_tree.selectedItems() and _saved_sel:
+                                    for idx in _saved_sel:
+                                        item = self.glossary_tree.topLevelItem(idx)
+                                        if item:
+                                            item.setSelected(True)
                             except (RuntimeError, AttributeError):
                                 pass
                         QTimer.singleShot(600, _clear_orange)
