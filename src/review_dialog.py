@@ -137,13 +137,14 @@ class ReviewDialog(QDialog):
         header_container = QHBoxLayout()
         header_container.setSpacing(6)
 
-        # Gather all EPUB paths from translator GUI
+        # Gather all file paths from translator GUI (all review-supported formats)
+        _REVIEW_EXTS = ('.epub', '.pdf', '.txt', '.html', '.htm', '.xhtml', '.md')
         self._all_epub_paths = []
         selected = getattr(self.translator_gui, 'selected_epub_files', None) or \
                    getattr(self.translator_gui, 'selected_files', None) or []
         for f in selected:
             f_str = str(f)
-            if f_str.lower().endswith('.epub') and os.path.exists(f_str):
+            if f_str.lower().endswith(_REVIEW_EXTS) and os.path.exists(f_str):
                 self._all_epub_paths.append(f_str)
         # Ensure current file is in the list
         if self.file_path not in self._all_epub_paths:
@@ -648,16 +649,17 @@ class ReviewDialog(QDialog):
     # ─── EPUB list sync ──────────────────────────────────────────────
 
     def refresh_epub_list(self):
-        """Re-read selected EPUBs from translator_gui and update the dropdown."""
+        """Re-read selected files from translator_gui and update the dropdown."""
+        _REVIEW_EXTS = ('.epub', '.pdf', '.txt', '.html', '.htm', '.xhtml', '.md')
         # Build authoritative list from translator_gui — do NOT keep stale file_path
         new_paths = []
         selected = getattr(self.translator_gui, 'selected_epub_files', None) or \
                    getattr(self.translator_gui, 'selected_files', None) or []
         for f in selected:
             f_str = str(f)
-            if f_str.lower().endswith('.epub') and os.path.exists(f_str):
+            if f_str.lower().endswith(_REVIEW_EXTS) and os.path.exists(f_str):
                 new_paths.append(f_str)
-        # If no EPUBs at all, fall back to current file_path if it still exists
+        # If no files at all, fall back to current file_path if it still exists
         if not new_paths and os.path.exists(self.file_path):
             new_paths = [self.file_path]
 

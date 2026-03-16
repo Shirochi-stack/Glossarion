@@ -297,6 +297,46 @@ def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
     return total
 
 
+# ─── Chapter chunking helper ────────────────────────────────────────────
+
+import re
+
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
+
+def _chunk_chapter(name: str, text: str, budget: int) -> Tuple[str, str]:
+    """
+    Truncate a single chapter's text so it fits within *budget* tokens.
+
+    Strategy:
+      1. Split on sentence boundaries and greedily accumulate.
+      2. If even the first sentence exceeds the budget, fall back to a raw
+         character slice (~4 chars per token heuristic, then trim to budget).
+
+    Returns (name_with_suffix, truncated_text).
+    """
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    accumulated = []
+    used = 0
+    for sent in sentences:
+        t = count_tokens(sent)
+        if used + t > budget:
+            break
+        accumulated.append(sent)
+        used += t
+
+    if accumulated:
+        return (name, " ".join(accumulated))
+
+    # Even the first sentence is too large — hard-truncate by characters
+    approx_chars = budget * 4  # rough estimate
+    chunk = text[:approx_chars]
+    # Trim to fit exactly
+    while count_tokens(chunk) > budget and len(chunk) > 10:
+        chunk = chunk[:int(len(chunk) * 0.9)]
+    return (name, chunk)
+
+
 # ─── Chapter fitting logic ──────────────────────────────────────────────
 
 def _fit_chapters(
@@ -306,6 +346,10 @@ def _fit_chapters(
 ) -> Tuple[List[Tuple[str, str]], str]:
     """
     Select which chapters to include based on the token budget.
+
+    If no whole chapter fits, falls back to chunking:
+      - Normal mode:  chunk the first chapter.
+      - Spoiler mode:  chunk the first AND last chapter (each gets half budget).
 
     Returns:
         (selected_chapters, info_message)
@@ -324,6 +368,17 @@ def _fit_chapters(
             selected.append((name, text))
             used += tokens
 
+        if not selected:
+            # Fallback: chunk the first chapter to fit
+            name, text, _ = chapter_tokens[0]
+            chunked_name, chunked_text = _chunk_chapter(name, text, token_budget)
+            chunked_tokens = count_tokens(chunked_text)
+            info = (
+                f"📊 Budget too small for whole chapters — using partial first chapter "
+                f"({chunked_tokens:,} tokens, budget: {token_budget:,})"
+            )
+            return [(chunked_name, chunked_text)], info
+
         info = f"📊 Fitted {len(selected)}/{total_chapters} chapters ({used:,} tokens, budget: {token_budget:,})"
         return selected, info
 
@@ -331,7 +386,24 @@ def _fit_chapters(
         # Spoiler mode: split budget 50/50 between first and last chapters
         half_budget = token_budget // 2
 
-        # First half: greedy from start
+        # Single-chapter content (1-chapter EPUB, .txt, .pdf, etc.)
+        # Split the TEXT itself into first-half and last-half portions.
+        if total_chapters == 1:
+            name, text, tokens = chapter_tokens[0]
+            # Split text roughly in half by characters, then chunk each half to fit
+            mid = len(text) // 2
+            first_text = text[:mid]
+            last_text = text[mid:]
+            fn, ft = _chunk_chapter(f"{name} [first half]", first_text, half_budget)
+            ln, lt = _chunk_chapter(f"{name} [last half]", last_text, half_budget)
+            tok = count_tokens(ft) + count_tokens(lt)
+            info = (
+                f"📊 Spoiler mode (single file): first half + last half "
+                f"({tok:,} tokens, budget: {token_budget:,})"
+            )
+            return [(fn, ft), (ln, lt)], info
+
+        # Multi-chapter: greedy from start
         first_half = []
         used_first = 0
         for name, text, tokens in chapter_tokens:
@@ -351,6 +423,32 @@ def _fit_chapters(
                 break
             last_half.insert(0, (name, text))  # Maintain order
             used_last += tokens
+
+        # Fallback: if either half is empty, chunk the relevant chapter
+        if not first_half and not last_half:
+            # Nothing fits at all — chunk both first and last
+            n1, t1, _ = chapter_tokens[0]
+            n2, t2, _ = chapter_tokens[-1]
+            cn1, ct1 = _chunk_chapter(n1, t1, half_budget)
+            cn2, ct2 = _chunk_chapter(n2, t2, half_budget)
+            tok = count_tokens(ct1) + count_tokens(ct2)
+            info = (
+                f"📊 Spoiler mode: partial first + partial last chapter "
+                f"({tok:,} tokens, budget: {token_budget:,})"
+            )
+            return [(cn1, ct1), (cn2, ct2)], info
+        elif not first_half:
+            # Only the first half couldn't fit — chunk the first chapter
+            n, t, _ = chapter_tokens[0]
+            cn, ct = _chunk_chapter(n, t, half_budget)
+            first_half = [(cn, ct)]
+            used_first = count_tokens(ct)
+        elif not last_half and remaining:
+            # Only the last half couldn't fit — chunk the last chapter
+            n, t, _ = chapter_tokens[-1]
+            cn, ct = _chunk_chapter(n, t, half_budget)
+            last_half = [(cn, ct)]
+            used_last = count_tokens(ct)
 
         selected = first_half + last_half
         total_used = used_first + used_last
