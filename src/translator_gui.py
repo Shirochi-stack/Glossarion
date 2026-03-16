@@ -11399,9 +11399,9 @@ Important rules:
                     self.append_log(f"      📝 Saved request: {os.path.basename(payload_file)}")
                     self.append_log(f"      🌐 Extracting glossary from image...")
                     
-                    # API call with interrupt support
+                    # API call with interrupt support (use 'glossary' context so empty responses are handled correctly)
                     response = self._call_api_with_interrupt(
-                        client, messages, image_base64, temperature, max_tokens
+                        client, messages, image_base64, temperature, max_tokens, context='glossary'
                     )
                     
                     # If the user requested stop *after* this API call returned:
@@ -11802,7 +11802,7 @@ Important rules:
         except Exception as e:
             self.append_log(f"      ⚠️ Could not save intermediate glossary: {e}")
 
-    def _call_api_with_interrupt(self, client, messages, image_base64, temperature, max_tokens):
+    def _call_api_with_interrupt(self, client, messages, image_base64, temperature, max_tokens, context='image_translation'):
         """Make API call with interrupt support and thread safety.
 
         IMPORTANT:
@@ -11817,7 +11817,7 @@ Important rules:
         
         def api_call():
             try:
-                result = client.send_image(messages, image_base64, temperature=temperature, max_tokens=max_tokens)
+                result = client.send_image(messages, image_base64, temperature=temperature, max_tokens=max_tokens, context=context)
                 result_queue.put(('success', result))
             except Exception as e:
                 result_queue.put(('error', e))
