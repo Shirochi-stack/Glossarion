@@ -8284,7 +8284,7 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         
         def _title_api_call():
             try:
-                result = client.send(messages=messages, temperature=temperature, max_tokens=max_tokens)
+                result = client.send(messages=messages, temperature=temperature, max_tokens=max_tokens, context='book_title')
                 if not cancel_event.is_set():
                     result_queue.put(result)
             except Exception as e:

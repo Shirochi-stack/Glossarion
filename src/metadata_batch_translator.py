@@ -2954,12 +2954,15 @@ class MetadataTranslator:
                     {"role": "user", "content": field_value}
                 ]
             else:
-                # For AI services, use prompts as before
-                # Replace {target_lang} in system prompt with output language
-                system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
+                # Replace {target_lang} in prompts with output language
+                # Use field-specific prompt as system prompt if available, otherwise fall back to base
+                if prompt:
+                    system_prompt = prompt
+                else:
+                    system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
                 messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"{prompt}\n\n{field_value}"}
+                    {"role": "user", "content": field_value}
                 ]
             
             # Get temperature and max_tokens from environment or config
