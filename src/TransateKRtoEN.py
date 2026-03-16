@@ -3804,7 +3804,8 @@ class TranslationProcessor:
             self.client._cancelled = False
         
         # Reinitialize Gemini client if it was closed by a previous timeout
-        if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+        # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+        if not getattr(self.client, '_multi_key_mode', False) and hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
             try:
                 self.client._setup_client()
             except Exception:
@@ -4213,20 +4214,22 @@ class TranslationProcessor:
                         timeout_retry_count += 1
                         print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                         # Reinitialize the client if it was closed (check correct client based on type)
-                        client_type = getattr(self.client, 'client_type', 'unknown')
-                        needs_reinit = False
-                        
-                        if client_type == 'gemini':
-                            needs_reinit = hasattr(self.client, 'gemini_client') and self.client.gemini_client is None
-                        elif client_type == 'openai':
-                            needs_reinit = hasattr(self.client, 'openai_client') and self.client.openai_client is None
-                        
-                        if needs_reinit:
-                            try:
-                                print(f"   🔄 Reinitializing {client_type} client...")
-                                self.client._setup_client()
-                            except Exception as reinit_err:
-                                print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                        # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+                        if not getattr(self.client, '_multi_key_mode', False):
+                            client_type = getattr(self.client, 'client_type', 'unknown')
+                            needs_reinit = False
+                            
+                            if client_type == 'gemini':
+                                needs_reinit = hasattr(self.client, 'gemini_client') and self.client.gemini_client is None
+                            elif client_type == 'openai':
+                                needs_reinit = hasattr(self.client, 'openai_client') and self.client.openai_client is None
+                            
+                            if needs_reinit:
+                                try:
+                                    print(f"   🔄 Reinitializing {client_type} client...")
+                                    self.client._setup_client()
+                                except Exception as reinit_err:
+                                    print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
                         # Use SEND_INTERVAL_SECONDS as base, random from half to full
                         import random
                         base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -4468,7 +4471,8 @@ class BatchTranslationProcessor:
         ai_features = None
         
         # Reinitialize Gemini client if it was closed by a previous timeout
-        if hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
+        # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+        if not getattr(self.client, '_multi_key_mode', False) and hasattr(self.client, 'gemini_client') and self.client.gemini_client is None:
             try:
                 self.client._setup_client()
             except Exception:
@@ -4870,20 +4874,22 @@ class BatchTranslationProcessor:
                                 timeout_retry_count += 1
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                                 # Reinitialize the client if it was closed (check correct client based on type)
-                                client_type = getattr(self.client, 'client_type', 'unknown')
-                                needs_reinit = False
-                                
-                                if client_type == 'gemini':
-                                    needs_reinit = hasattr(self.client, 'gemini_client') and self.client.gemini_client is None
-                                elif client_type == 'openai':
-                                    needs_reinit = hasattr(self.client, 'openai_client') and self.client.openai_client is None
-                                
-                                if needs_reinit:
-                                    try:
-                                        print(f"   🔄 Reinitializing {client_type} client...")
-                                        self.client._setup_client()
-                                    except Exception as reinit_err:
-                                        print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                                # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+                                if not getattr(self.client, '_multi_key_mode', False):
+                                    client_type = getattr(self.client, 'client_type', 'unknown')
+                                    needs_reinit = False
+                                    
+                                    if client_type == 'gemini':
+                                        needs_reinit = hasattr(self.client, 'gemini_client') and self.client.gemini_client is None
+                                    elif client_type == 'openai':
+                                        needs_reinit = hasattr(self.client, 'openai_client') and self.client.openai_client is None
+                                    
+                                    if needs_reinit:
+                                        try:
+                                            print(f"   🔄 Reinitializing {client_type} client...")
+                                            self.client._setup_client()
+                                        except Exception as reinit_err:
+                                            print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
                                 # Stagger retries to avoid simultaneous API calls
                                 # Use SEND_INTERVAL_SECONDS as base, random from half to full
                                 import random

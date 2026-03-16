@@ -4576,18 +4576,20 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                                 pass
 
                             # Reinitialize client if needed
-                            client_type = getattr(client, 'client_type', 'unknown')
-                            needs_reinit = False
-                            if client_type == 'gemini':
-                                needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
-                            elif client_type == 'openai':
-                                needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
-                            if needs_reinit:
-                                try:
-                                    print(f"   🔄 Reinitializing {client_type} client...")
-                                    client._setup_client()
-                                except Exception as reinit_err:
-                                    print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                            # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+                            if not getattr(client, '_multi_key_mode', False):
+                                client_type = getattr(client, 'client_type', 'unknown')
+                                needs_reinit = False
+                                if client_type == 'gemini':
+                                    needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                                elif client_type == 'openai':
+                                    needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                                if needs_reinit:
+                                    try:
+                                        print(f"   🔄 Reinitializing {client_type} client...")
+                                        client._setup_client()
+                                    except Exception as reinit_err:
+                                        print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
                             # Stagger retries to avoid simultaneous API calls
                             try:
                                 import random
@@ -6015,18 +6017,20 @@ Provide translations in the same numbered format."""
                             else:
                                 print(f"⚠️ Glossary translation batch {batch_num} timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                             # Reinitialize client if needed
-                            client_type = getattr(client, 'client_type', 'unknown')
-                            needs_reinit = False
-                            if client_type == 'gemini':
-                                needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
-                            elif client_type == 'openai':
-                                needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
-                            if needs_reinit:
-                                try:
-                                    print(f"   🔄 Reinitializing {client_type} client...")
-                                    client._setup_client()
-                                except Exception as reinit_err:
-                                    print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                            # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+                            if not getattr(client, '_multi_key_mode', False):
+                                client_type = getattr(client, 'client_type', 'unknown')
+                                needs_reinit = False
+                                if client_type == 'gemini':
+                                    needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                                elif client_type == 'openai':
+                                    needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                                if needs_reinit:
+                                    try:
+                                        print(f"   🔄 Reinitializing {client_type} client...")
+                                        client._setup_client()
+                                    except Exception as reinit_err:
+                                        print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
                             # Stagger retries
                             try:
                                 import random
