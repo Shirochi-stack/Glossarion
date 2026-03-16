@@ -5317,10 +5317,11 @@ CRITICAL EXTRACTION RULES:
         for text, handler, color in [
             ("Save", save_edited_glossary, "#15803d"),
             ("Save As...", save_as_glossary, "#0f766e"),
-            ("Delete Selected", delete_selected_entries, "#991b1b")
+            ("Delete Selected", delete_selected_entries, "#991b1b"),
+            ("✏️ Edit in Notepad", lambda: _open_glossary_in_editor(), "#1e40af"),
         ]:
             btn = QPushButton(text)
-            btn.setFixedWidth(115)
+            btn.setFixedWidth(135)
             btn.clicked.connect(handler)
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
             toolbar_layout.addWidget(btn)
