@@ -576,7 +576,11 @@ def _extract_raw_title_from_epub(epub_path: str) -> str:
     """Extract the raw untranslated title from the input EPUB."""
     if not epub_path or not os.path.exists(epub_path):
         return None
-        
+    
+    # Skip for non-EPUB files (txt, pdf, etc.)
+    if not epub_path.lower().endswith('.epub'):
+        return None
+    
     print(f"[Metadata] Checking input EPUB for raw title: {epub_path}")
     
     # Try manual parsing first (more robust)

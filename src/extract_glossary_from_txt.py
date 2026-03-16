@@ -39,7 +39,7 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
     available_tokens = int((effective_output - safety_margin_output) / max(compression_factor, 0.01))
     available_tokens = max(available_tokens, 1000)
     chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
-    print(f"📊 Chapter chunk budget: {available_tokens:,} tokens (output limit {effective_output:,}, compression {compression_factor})")
+
     
     text_chapters = []
     
@@ -48,7 +48,7 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
         chapter_tokens = chapter_splitter.count_tokens(chapter['body'])
         
         if chapter_split_enabled and chapter_tokens > available_tokens:
-            print(f"Chapter {idx+1} has {chapter_tokens} tokens, splitting into smaller chunks (budget {available_tokens})...")
+
             
             # Use ChapterSplitter to split the HTML content
             # Pass filename for content type detection
@@ -60,7 +60,7 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
                 text = soup.get_text(strip=True)
                 if text:
                     text_chapters.append(text)
-                    print(f"  Added chunk {chunk_idx}/{total_chunks} ({chapter_splitter.count_tokens(text)} tokens)")
+
         else:
             # Chapter is small enough or splitting disabled, extract text as-is
             soup = BeautifulSoup(chapter['body'], 'html.parser')
