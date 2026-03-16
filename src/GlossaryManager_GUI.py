@@ -5154,6 +5154,9 @@ CRITICAL EXTRACTION RULES:
                if msg.exec() != QMessageBox.Yes:
                    return
 
+           # Pause auto-reload during internal save to prevent flash
+           if hasattr(self, '_editor_auto_reload_timer'):
+               self._editor_auto_reload_timer.stop()
            if save_current_glossary():
                files_updated = 0
                if self.update_html_on_save_checkbox.isChecked() and changes:
@@ -5176,6 +5179,9 @@ CRITICAL EXTRACTION RULES:
                except Exception:
                    pass
        
+           # Resume auto-reload timer
+           if hasattr(self, '_editor_auto_reload_timer'):
+               self._editor_auto_reload_timer.start()
         def save_as_glossary():
            if not self.current_glossary_data:
                QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
@@ -5801,16 +5807,24 @@ CRITICAL EXTRACTION RULES:
                     deleted_keys = old_keys - new_keys  # removed entries
 
                     flash_indices = []  # (index, color)
-                    _orange_positions = set()
-                    # Orange for added/modified rows
-                    for key in added_keys:
-                        idx = new_content[key]
-                        flash_indices.append((idx, "#f97316"))
-                        _orange_positions.add(idx)
-                    # Red flash only for true net deletions (not modifications)
-                    # Modifications produce equal entries in both sets, so
-                    # true deletions = deleted_keys - added_keys count
+                    _used_positions = set()
+                    net_added = max(0, len(added_keys) - len(deleted_keys))
                     net_deleted = max(0, len(deleted_keys) - len(added_keys))
+                    # Green for truly new rows, orange for modified
+                    if net_added > 0:
+                        sorted_added = sorted(added_keys, key=lambda k: new_content[k])
+                        green_set = set(sorted_added[-net_added:])
+                        for key in added_keys:
+                            idx = new_content[key]
+                            color = "#15803d" if key in green_set else "#f97316"
+                            flash_indices.append((idx, color))
+                            _used_positions.add(idx)
+                    else:
+                        for key in added_keys:
+                            idx = new_content[key]
+                            flash_indices.append((idx, "#f97316"))
+                            _used_positions.add(idx)
+                    # Red flash for true net deletions
                     if net_deleted > 0 and new_count > 0:
                         red_count = 0
                         for key in sorted(deleted_keys, key=lambda k: old_content[k]):
@@ -5818,9 +5832,9 @@ CRITICAL EXTRACTION RULES:
                                 break
                             old_idx = old_content[key]
                             nearest = min(old_idx, new_count - 1)
-                            # Skip if this position already has an orange flash (it's a modification)
-                            if nearest not in _orange_positions and (nearest, "#dc2626") not in flash_indices:
+                            if nearest not in _used_positions:
                                 flash_indices.append((nearest, "#dc2626"))
+                                _used_positions.add(nearest)
                                 red_count += 1
 
                     if flash_indices:
