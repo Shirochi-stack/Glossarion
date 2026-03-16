@@ -5840,6 +5840,17 @@ CRITICAL EXTRACTION RULES:
                                 _used_positions.add(nearest)
                                 red_count += 1
 
+                    # Fallback: row count changed but content keys didn't detect it
+                    # (happens with duplicate rows)
+                    if not flash_indices and new_count != len(old_rows):
+                        if new_count > len(old_rows):
+                            # Rows were added — flash the new ones green
+                            for idx in range(len(old_rows), new_count):
+                                flash_indices.append((idx, "#15803d"))
+                        else:
+                            # Rows were removed — flash last row red
+                            flash_indices.append((max(0, new_count - 1), "#dc2626"))
+
                     if flash_indices:
                         # Save and clear selection so flash isn't hidden behind blue
                         _saved_sel = [
