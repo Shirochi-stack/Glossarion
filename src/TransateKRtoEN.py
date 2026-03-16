@@ -9551,217 +9551,40 @@ def main(log_callback=None, stop_callback=None):
                 print("="*50)
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
                 
-                # Get metadata system prompt from environment
-                system_prompt = os.getenv('METADATA_SYSTEM_PROMPT', '')
-                if system_prompt:
-                    # Get field-specific prompts
-                    field_prompts_str = os.getenv('METADATA_FIELD_PROMPTS', '{}')
-                    try:
-                        field_prompts = json.loads(field_prompts_str)
-                    except:
-                        field_prompts = {}
-                    
-                    if not field_prompts and not field_prompts.get('_default'):
-                        print("❌ No field prompts configured, skipping metadata translation")
-                    else:
-                        # Get language configuration
-                        lang_behavior = os.getenv('LANG_PROMPT_BEHAVIOR', 'auto')
-                        forced_source_lang = os.getenv('FORCED_SOURCE_LANG', 'Korean')
-                        output_language = os.getenv('OUTPUT_LANGUAGE', 'English')
-                        
-                        # Determine source language
-                        source_lang = metadata.get('language', '').lower()
-                        if lang_behavior == 'never':
-                            lang_str = ""
-                        elif lang_behavior == 'always':
-                            lang_str = forced_source_lang
-                        else:  # auto
-                            if 'zh' in source_lang or 'chinese' in source_lang:
-                                lang_str = 'Chinese'
-                            elif 'ja' in source_lang or 'japanese' in source_lang:
-                                lang_str = 'Japanese'
-                            elif 'ko' in source_lang or 'korean' in source_lang:
-                                lang_str = 'Korean'
-                            else:
-                                lang_str = ''
-                        
-                        # Check if batch translation is enabled for parallel processing
-                        batch_translate_enabled = os.getenv('BATCH_TRANSLATION', '0') == '1'
-                        batch_size = int(os.getenv('BATCH_SIZE', '50'))  # Default batch size
-                        
-                        if batch_translate_enabled and len(fields_to_translate) > 1:
-                            print(f"⚡ Using parallel metadata translation mode ({len(fields_to_translate)} fields, batch size: {batch_size})...")
-                            
-                            # Import ThreadPoolExecutor for parallel processing
-                            from concurrent.futures import ThreadPoolExecutor, as_completed
-                            import threading
-                            
-                            # Thread-safe results storage
-                            translation_results = {}
-                            results_lock = threading.Lock()
-                            
-                            def translate_metadata_field(field_name, original_value):
-                                """Translate a single metadata field"""
-                                try:
-                                    print(f"\n📋 Translating {field_name}: {original_value[:100]}..." 
-                                          if len(str(original_value)) > 100 else f"\n📋 Translating {field_name}: {original_value}")
-                                    
-                                    # Get field-specific prompt
-                                    prompt_template = field_prompts.get(field_name, field_prompts.get('_default', ''))
-                                    
-                                    if not prompt_template:
-                                        print(f"⚠️ No prompt configured for field '{field_name}', skipping")
-                                        return None
-                                    
-                                    # Replace variables in prompt
-                                    field_prompt = prompt_template.replace('{source_lang}', lang_str)
-                                    field_prompt = field_prompt.replace('{output_lang}', output_language)
-                                    field_prompt = field_prompt.replace('{target_lang}', output_language)
-                                    field_prompt = field_prompt.replace('{field_value}', str(original_value))
-                                    
-                                    # Check if we're using a translation service (not AI)
-                                    client_type = getattr(client, 'client_type', '')
-                                    is_translation_service = client_type in ['deepl', 'google_translate']
-                                    
-                                    if is_translation_service:
-                                        # For translation services, send only the field value without AI prompts
-                                        print(f"🌐 Using translation service ({client_type}) - sending field directly")
-                                        messages = [
-                                            {"role": "user", "content": str(original_value)}
-                                        ]
-                                    else:
-                                        # For AI services, use prompts as before
-                                        messages = [
-                                            {"role": "system", "content": system_prompt},
-                                            {"role": "user", "content": f"{field_prompt}\n\n{original_value}"}
-                                        ]
-                                    
-                                    # Add delay for rate limiting
-                                    if config.DELAY > 0:
-                                        time.sleep(config.DELAY)
-                                    
-                                    # Make API call
-                                    content, finish_reason = client.send(
-                                        messages, 
-                                        temperature=config.TEMP,
-                                        max_tokens=config.MAX_OUTPUT_TOKENS
-                                    )
-                                    translated_value = content.strip()
-                                    
-                                    # Store result thread-safely
-                                    with results_lock:
-                                        translation_results[field_name] = {
-                                            'original': original_value,
-                                            'translated': translated_value,
-                                            'success': True
-                                        }
-                                    
-                                    print(f"✅ Translated {field_name}: {translated_value}")
-                                    return translated_value
-                                    
-                                except Exception as e:
-                                    print(f"❌ Failed to translate {field_name}: {e}")
-                                    with results_lock:
-                                        translation_results[field_name] = {
-                                            'original': original_value,
-                                            'translated': None,
-                                            'success': False,
-                                            'error': str(e)
-                                        }
-                                    return None
-                            
-                            # Execute parallel translations with limited workers
-                            max_workers = min(len(fields_to_translate), batch_size)
-                            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                # Submit all translation tasks
-                                futures = {}
-                                for field_name in fields_to_translate:
-                                    if field_name in metadata and not check_stop():
-                                        original_value = metadata[field_name]
-                                        future = executor.submit(translate_metadata_field, field_name, original_value)
-                                        futures[future] = field_name
-                                
-                                # Wait for completion
-                                for future in as_completed(futures):
-                                    if check_stop():
-                                        print("❌ Metadata translation stopped by user")
-                                        break
-                            
-                            # Apply results to metadata
-                            for field_name, result in translation_results.items():
-                                if result['success'] and result['translated']:
-                                    metadata[f"original_{field_name}"] = result['original']
-                                    metadata[field_name] = result['translated']
-                                    metadata[f"{field_name}_translated"] = True
-                        
-                        else:
-                            # Sequential translation mode (individual translation)
-                            mode_desc = "sequential" if not batch_translate_enabled else "sequential (single field)"
-                            print(f"📝 Using {mode_desc} translation mode...")
-                            
-                            for field_name in fields_to_translate:
-                                if not check_stop() and field_name in metadata:
-                                    original_value = metadata[field_name]
-                                    print(f"\n📋 Translating {field_name}: {original_value[:100]}..." 
-                                          if len(str(original_value)) > 100 else f"\n📋 Translating {field_name}: {original_value}")
-                                    
-                                    # Get field-specific prompt
-                                    prompt_template = field_prompts.get(field_name, field_prompts.get('_default', ''))
-                                    
-                                    if not prompt_template:
-                                        print(f"⚠️ No prompt configured for field '{field_name}', skipping")
-                                        continue
-                                    
-                                    # Replace variables in prompt
-                                    field_prompt = prompt_template.replace('{source_lang}', lang_str)
-                                    field_prompt = field_prompt.replace('{output_lang}', output_language)
-                                    field_prompt = field_prompt.replace('{target_lang}', output_language)
-                                    field_prompt = field_prompt.replace('{field_value}', str(original_value))
-                                    
-                                    # Check if we're using a translation service (not AI)
-                                    client_type = getattr(client, 'client_type', '')
-                                    is_translation_service = client_type in ['deepl', 'google_translate']
-                                    
-                                    if is_translation_service:
-                                        # For translation services, send only the field value without AI prompts
-                                        print(f"🌐 Using translation service ({client_type}) - sending field directly")
-                                        messages = [
-                                            {"role": "user", "content": str(original_value)}
-                                        ]
-                                    else:
-                                        # For AI services, use prompts as before
-                                        messages = [
-                                            {"role": "system", "content": system_prompt},
-                                            {"role": "user", "content": f"{field_prompt}\n\n{original_value}"}
-                                        ]
-                                    
-                                    try:
-                                        # Add delay using the config instance from main()
-                                        if config.DELAY > 0:  # ✅ FIXED - use config.DELAY instead of config.SEND_INTERVAL
-                                            time.sleep(config.DELAY)
-                                        
-                                        # Use the same client instance from main()
-                                        # ✅ FIXED - Properly unpack tuple response and provide max_tokens
-                                        content, finish_reason = client.send(
-                                            messages, 
-                                            temperature=config.TEMP,
-                                            max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
-                                        )
-                                        translated_value = content.strip()  # ✅ FIXED - use content from unpacked tuple
-                                        
-                                        metadata[f"original_{field_name}"] = original_value
-                                        metadata[field_name] = translated_value
-                                        metadata[f"{field_name}_translated"] = True
-                                        
-                                        print(f"✅ Translated {field_name}: {translated_value}")
-                                        
-                                    except Exception as e:
-                                        print(f"❌ Failed to translate {field_name}: {e}")
-
-                                else:
-                                    if check_stop():
-                                        print("❌ Metadata translation stopped by user")
-                                        break
+                # Use MetadataTranslator (same path as EPUB converter)
+                from metadata_batch_translator import MetadataTranslator
+                
+                # Build config from environment variables
+                mt_config = {
+                    'output_language': os.getenv('OUTPUT_LANGUAGE', 'English'),
+                    'lang_prompt_behavior': os.getenv('LANG_PROMPT_BEHAVIOR', 'auto'),
+                    'forced_source_lang': os.getenv('FORCED_SOURCE_LANG', 'Korean'),
+                    'temperature': config.TEMP,
+                    'max_tokens': config.MAX_OUTPUT_TOKENS,
+                }
+                
+                # Load field prompts and batch prompt from env
+                try:
+                    mt_config['metadata_field_prompts'] = json.loads(os.getenv('METADATA_FIELD_PROMPTS', '{}'))
+                except:
+                    mt_config['metadata_field_prompts'] = {}
+                mt_config['metadata_batch_prompt'] = os.getenv('METADATA_BATCH_PROMPT', '')
+                
+                # Determine translation mode from user's toggle
+                metadata_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
+                print(f"📝 Using {metadata_mode} metadata translation mode...")
+                
+                translator = MetadataTranslator(client, mt_config, stop_check_fn=check_stop)
+                translated_metadata = translator.translate_metadata(
+                    metadata, fields_to_translate, mode=metadata_mode
+                )
+                
+                # Apply translated fields back to metadata
+                for field_name, translated_value in translated_metadata.items():
+                    if field_name in fields_to_translate and translated_value != metadata.get(field_name):
+                        metadata[f"original_{field_name}"] = metadata.get(field_name, '')
+                        metadata[field_name] = translated_value
+                        metadata[f"{field_name}_translated"] = True
             else:
                 print("📋 No additional metadata fields to translate")
                 

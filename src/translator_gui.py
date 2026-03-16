@@ -1034,7 +1034,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.0.9"
+        __version__ = "8.0.8"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1109,7 +1109,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.0.9')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.0.8')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -3011,7 +3011,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.0.9 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.0.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -10825,6 +10825,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'HEADERS_PER_BATCH': str(self.headers_per_batch_var),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
+            'METADATA_SYSTEM_PROMPT': self.config.get('metadata_system_prompt', '').replace('{target_lang}', self.config.get('output_language', 'English')),
             'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
             'LANG_PROMPT_BEHAVIOR': self.config.get('lang_prompt_behavior', 'auto'),
             'FORCED_SOURCE_LANG': self.config.get('forced_source_lang', 'Korean'),
@@ -18739,7 +18740,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.0.9...")
+    print("🚀 Starting Glossarion v8.0.8...")
     
     # Initialize splash screen
     splash_manager = None
