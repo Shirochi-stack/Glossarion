@@ -2706,8 +2706,7 @@ class MetadataTranslator:
         self.client = client
         self.config = config or {}
         self.system_prompt = os.getenv('METADATA_SYSTEM_PROMPT',
-            os.getenv('BOOK_TITLE_SYSTEM_PROMPT',
-            "You are a translator. Respond with only the translated text, nothing else."))
+            "You are a translator. Respond with only the translated text, nothing else.")
         # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
         if stop_check_fn is not None:
             self.stop_check_fn = stop_check_fn
@@ -2825,7 +2824,7 @@ class MetadataTranslator:
         # Replace variables
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
-        user_prompt = prompt_template + f"\n\nFields to translate:\n{json.dumps(fields_to_send, ensure_ascii=False, indent=2)}"
+        user_prompt = f"Fields to translate:\n{json.dumps(fields_to_send, ensure_ascii=False, indent=2)}"
         
         # Check if we're using a translation service (not AI)
         client_type = getattr(self.client, 'client_type', '')
@@ -2841,11 +2840,9 @@ class MetadataTranslator:
                     {"role": "user", "content": field_text}
                 ]
             else:
-                # For AI services, use prompts as before
-                # Replace {target_lang} in system prompt with output language
-                system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
+                # Use the batch metadata prompt as the system prompt
                 messages = [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": prompt_template},
                     {"role": "user", "content": user_prompt}
                 ]
             
