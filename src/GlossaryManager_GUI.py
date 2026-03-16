@@ -5778,37 +5778,58 @@ CRITICAL EXTRACTION RULES:
                 except Exception:
                     pass
 
-                # Orange flash on changed/new rows
+                # Flash changed rows: orange for added/modified, red for deletions
                 try:
-                    changed_indices = []
+                    # Build content sets (skip column 0 = row #, it always changes)
+                    def _row_key(item):
+                        return tuple(item.text(c) for c in range(1, item.columnCount()))
+
+                    old_content = {}
+                    for i, cols in old_rows.items():
+                        key = cols[1:]  # skip row # column
+                        old_content[key] = i
+                    new_content = {}
                     new_count = self.glossary_tree.topLevelItemCount()
                     for i in range(new_count):
                         item = self.glossary_tree.topLevelItem(i)
-                        if not item:
-                            continue
-                        new_cols = tuple(item.text(c) for c in range(item.columnCount()))
-                        if i not in old_rows or old_rows[i] != new_cols:
-                            changed_indices.append(i)
+                        if item:
+                            new_content[_row_key(item)] = i
 
-                    if changed_indices:
-                        _flash_brush = QBrush(QColor("#f97316"))  # orange
+                    old_keys = set(old_content.keys())
+                    new_keys = set(new_content.keys())
+                    added_keys = new_keys - old_keys    # new or modified entries
+                    deleted_keys = old_keys - new_keys  # removed entries
 
-                        # Save and clear selection so orange isn't hidden behind blue
+                    flash_indices = []  # (index, color)
+                    # Orange for added/modified rows
+                    for key in added_keys:
+                        flash_indices.append((new_content[key], "#f97316"))
+                    # Red flash on the row nearest each deletion point
+                    for key in deleted_keys:
+                        old_idx = old_content[key]
+                        nearest = min(old_idx, new_count - 1) if new_count > 0 else -1
+                        if nearest >= 0 and (nearest, "#dc2626") not in flash_indices:
+                            flash_indices.append((nearest, "#dc2626"))
+
+                    if flash_indices:
+                        # Save and clear selection so flash isn't hidden behind blue
                         _saved_sel = [
                             self.glossary_tree.indexOfTopLevelItem(it)
                             for it in self.glossary_tree.selectedItems()
                         ]
                         self.glossary_tree.clearSelection()
 
-                        for idx in changed_indices:
+                        for idx, color in flash_indices:
                             item = self.glossary_tree.topLevelItem(idx)
                             if item:
+                                brush = QBrush(QColor(color))
                                 for c in range(item.columnCount()):
-                                    item.setBackground(c, _flash_brush)
+                                    item.setBackground(c, brush)
 
-                        def _clear_orange():
+                        _flash_idx_list = [idx for idx, _ in flash_indices]
+                        def _clear_flash():
                             try:
-                                for idx in changed_indices:
+                                for idx in _flash_idx_list:
                                     item = self.glossary_tree.topLevelItem(idx)
                                     if item:
                                         for c in range(item.columnCount()):
@@ -5821,7 +5842,7 @@ CRITICAL EXTRACTION RULES:
                                             item.setSelected(True)
                             except (RuntimeError, AttributeError):
                                 pass
-                        QTimer.singleShot(600, _clear_orange)
+                        QTimer.singleShot(600, _clear_flash)
                 except Exception:
                     pass
 
