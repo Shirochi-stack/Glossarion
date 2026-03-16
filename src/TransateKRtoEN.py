@@ -7815,6 +7815,60 @@ def cleanup_previous_extraction(output_dir):
     return cleaned_count
 
 # =====================================================
+# SKIP THINKING CONTEXT MANAGER
+# =====================================================
+from contextlib import contextmanager
+
+_THINKING_ENV_KEYS = (
+    'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET', 'ENABLE_GEMINI_THINKING',
+    'ENABLE_GPT_THINKING', 'GPT_EFFORT',
+    'ENABLE_DEEPSEEK_THINKING',
+    'ENABLE_ANTHROPIC_THINKING',
+)
+
+_THINKING_SKIP_VALUES = {
+    'GEMINI_THINKING_LEVEL': 'minimal',
+    'THINKING_BUDGET': '-1',
+    'ENABLE_GEMINI_THINKING': '0',
+    'ENABLE_GPT_THINKING': '0',
+    'GPT_EFFORT': 'none',
+    'ENABLE_DEEPSEEK_THINKING': '0',
+    'ENABLE_ANTHROPIC_THINKING': '0',
+}
+
+@contextmanager
+def _skip_thinking_env(context_key):
+    """Temporarily override thinking env vars to minimal/off for lightweight tasks.
+    
+    context_key: one of 'BOOK_TITLE', 'METADATA', 'TOC'
+    Checks SKIP_{context_key}_THINKING env var; if '1', overrides all thinking settings.
+    """
+    env_var = f'SKIP_{context_key}_THINKING'
+    should_skip = os.environ.get(env_var, '0') == '1'
+    
+    if not should_skip:
+        yield
+        return
+    
+    # Save originals and override
+    _label = context_key.replace('_', ' ').title()
+    print(f"   ⏭️ Skipping thinking for {_label}")
+    saved = {}
+    for key in _THINKING_ENV_KEYS:
+        saved[key] = os.environ.get(key)
+        os.environ[key] = _THINKING_SKIP_VALUES[key]
+    
+    try:
+        yield
+    finally:
+        # Restore originals
+        for key in _THINKING_ENV_KEYS:
+            if saved[key] is not None:
+                os.environ[key] = saved[key]
+            elif key in os.environ:
+                del os.environ[key]
+
+# =====================================================
 # API AND TRANSLATION UTILITIES
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
@@ -8287,14 +8341,15 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
                 return True
             return False
         
-        response = send_with_interrupt(
-            messages=messages,
-            client=client,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop_check_fn=_stop_check,
-            context='book_title',
-        )
+        with _skip_thinking_env('BOOK_TITLE'):
+            response = send_with_interrupt(
+                messages=messages,
+                client=client,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop_check_fn=_stop_check,
+                context='book_title',
+            )
         
         # Extract content from response
         if hasattr(response, 'content'):
