@@ -399,10 +399,12 @@ def _fit_chapters(
             last_text = text[mid:]
             fn, ft = _chunk_chapter(f"{name} [first half]", first_text, half_budget)
             ln, lt = _chunk_chapter(f"{name} [last half]", last_text, half_budget)
-            tok = count_tokens(ft) + count_tokens(lt)
+            tok_first = count_tokens(ft)
+            tok_last = count_tokens(lt)
+            tok = tok_first + tok_last
             info = (
-                f"📊 Spoiler mode (single file): first half + last half "
-                f"({tok:,} tokens, budget: {token_budget:,})"
+                f"📊 Spoiler mode (single file): first half ({tok_first:,}) + last half ({tok_last:,}) "
+                f"= {tok:,} tokens (budget: {token_budget:,})"
             )
             return [(fn, ft), (ln, lt)], info
 
