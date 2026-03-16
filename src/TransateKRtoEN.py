@@ -10391,7 +10391,62 @@ def main(log_callback=None, stop_callback=None):
                 except Exception as e:
                     print(f"❌ Glossary generation failed: {e}")
         else:
-            print("📑 Automatic glossary generation disabled")
+            # Check if the new AUTO_GLOSSARY_MODE is balanced/full
+            # (glossary was pre-extracted by the GUI before translation started)
+            auto_mode = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
+            if auto_mode in ('balanced', 'full'):
+                print(f"📑 Auto glossary mode: {auto_mode} (pre-extracted by GUI)")
+                # The GUI should have set MANUAL_GLOSSARY, but if auto-load failed,
+                # try to find the glossary in the Glossary/ folder as fallback
+                override_dir = os.getenv('OUTPUT_DIRECTORY', '')
+                if override_dir:
+                    glossary_search_dir = os.path.join(override_dir, "Glossary")
+                else:
+                    glossary_search_dir = "Glossary"
+                
+                if os.path.isdir(glossary_search_dir):
+                    input_base = os.path.splitext(os.path.basename(input_path))[0].lower()
+                    best_match = None
+                    best_mtime = 0
+                    try:
+                        for fn in os.listdir(glossary_search_dir):
+                            fp = os.path.join(glossary_search_dir, fn)
+                            if not os.path.isfile(fp):
+                                continue
+                            stem, ext = os.path.splitext(fn)
+                            if ext.lower() not in ('.csv', '.json'):
+                                continue
+                            if '_progress' in stem.lower():
+                                continue
+                            stem_lower = stem.lower()
+                            if input_base in stem_lower or f"{input_base}_glossary" == stem_lower:
+                                mtime = os.path.getmtime(fp)
+                                if mtime > best_mtime:
+                                    best_match = fp
+                                    best_mtime = mtime
+                    except Exception:
+                        pass
+                    
+                    if best_match:
+                        print(f"📑 Found pre-extracted glossary: {os.path.basename(best_match)}")
+                        # Copy to output dir so find_glossary_file() can find it
+                        target_ext = os.path.splitext(best_match)[1]
+                        target_name = f"glossary{target_ext}"
+                        target_path = os.path.join(out, target_name)
+                        if not os.path.exists(target_path):
+                            try:
+                                shutil.copy(best_match, target_path)
+                                print(f"📑 Copied glossary to output: {target_name}")
+                            except Exception as e:
+                                print(f"⚠️ Failed to copy glossary: {e}")
+                        else:
+                            print(f"📑 Glossary already exists in output: {target_name}")
+                    else:
+                        print(f"📑 No matching glossary found in {glossary_search_dir} for '{input_base}'")
+                else:
+                    print(f"📑 Glossary folder not found: {glossary_search_dir}")
+            else:
+                print("📑 Automatic glossary generation disabled")
         # Don't create an empty glossary - let any existing manual glossary remain
 
     glossary_file = find_glossary_file(out)
