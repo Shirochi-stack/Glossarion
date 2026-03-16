@@ -233,12 +233,13 @@ def _extract_text_file(file_path: str, log_fn: Callable = print) -> List[Tuple[s
 def _extract_pdf_file(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
     """Extract text from a PDF file."""
     try:
-        from txt_processor import TextFileProcessor
-        processor = TextFileProcessor()
-        text = processor.extract_text_from_file(file_path)
+        from pdf_extractor import extract_text_from_pdf
+        text = extract_text_from_pdf(file_path)
         if text and text.strip():
             log_fn(f"📄 Extracted text from PDF: {os.path.basename(file_path)}")
             return [(os.path.basename(file_path), text.strip())]
+    except ImportError:
+        log_fn("⚠️ No PDF library available (install PyMuPDF, pypdf, or pdfplumber)")
     except Exception as e:
         log_fn(f"⚠️ Failed to extract PDF text: {e}")
     return []
@@ -528,11 +529,11 @@ def generate_review(
         return None
 
     # 1. Extract chapters
-    log_fn("📖 Extracting EPUB content with html2text...")
+    log_fn(f"📖 Extracting content from {os.path.basename(epub_path)}...")
     chapters = extract_chapter_texts(epub_path, log_fn=log_fn)
 
     if not chapters:
-        log_fn("❌ No chapters found in EPUB")
+        log_fn("❌ No text content found in file")
         return None
 
     # 2. Count system prompt tokens
