@@ -5811,44 +5811,49 @@ CRITICAL EXTRACTION RULES:
 
                     flash_indices = []  # (index, color)
                     _used_positions = set()
-                    net_added = max(0, len(added_keys) - len(deleted_keys))
-                    net_deleted = max(0, len(deleted_keys) - len(added_keys))
-                    # Green for truly new rows, orange for modified
-                    if net_added > 0:
-                        sorted_added = sorted(added_keys, key=lambda k: new_content[k])
-                        green_set = set(sorted_added[-net_added:])
-                        for key in added_keys:
-                            idx = new_content[key]
-                            color = "#15803d" if key in green_set else "#f97316"
-                            flash_indices.append((idx, color))
-                            _used_positions.add(idx)
-                    else:
-                        for key in added_keys:
-                            idx = new_content[key]
-                            flash_indices.append((idx, "#f97316"))
-                            _used_positions.add(idx)
-                    # Red flash for true net deletions
-                    if net_deleted > 0 and new_count > 0:
-                        red_count = 0
-                        for key in sorted(deleted_keys, key=lambda k: old_content[k]):
-                            if red_count >= net_deleted:
-                                break
-                            old_idx = old_content[key]
-                            nearest = min(old_idx, new_count - 1)
-                            if nearest not in _used_positions:
-                                flash_indices.append((nearest, "#dc2626"))
-                                _used_positions.add(nearest)
-                                red_count += 1
 
-                    # Fallback: row count changed but content keys didn't detect it
-                    # (happens with duplicate rows)
+                    # Greedy pair: match each deleted key to nearest added key = modification (orange)
+                    remaining_added = {k: new_content[k] for k in added_keys}
+                    remaining_deleted = {k: old_content[k] for k in deleted_keys}
+                    matched_added = set()
+                    matched_deleted = set()
+                    for d_key in sorted(remaining_deleted, key=lambda k: remaining_deleted[k]):
+                        d_pos = remaining_deleted[d_key]
+                        best_a, best_dist = None, float('inf')
+                        for a_key in remaining_added:
+                            if a_key in matched_added:
+                                continue
+                            dist = abs(remaining_added[a_key] - d_pos)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_a = a_key
+                        if best_a is not None:
+                            matched_added.add(best_a)
+                            matched_deleted.add(d_key)
+                            idx = remaining_added[best_a]
+                            flash_indices.append((idx, "#f97316"))  # orange = modified
+                            _used_positions.add(idx)
+
+                    # Green for truly new rows (unmatched adds)
+                    for key in added_keys - matched_added:
+                        idx = new_content[key]
+                        flash_indices.append((idx, "#15803d"))
+                        _used_positions.add(idx)
+
+                    # Red for truly deleted rows (unmatched deletes)
+                    for key in deleted_keys - matched_deleted:
+                        old_idx = old_content[key]
+                        nearest = min(old_idx, new_count - 1) if new_count > 0 else -1
+                        if nearest >= 0 and nearest not in _used_positions:
+                            flash_indices.append((nearest, "#dc2626"))
+                            _used_positions.add(nearest)
+
+                    # Fallback: duplicate rows (content keys same but count changed)
                     if not flash_indices and new_count != len(old_rows):
                         if new_count > len(old_rows):
-                            # Rows were added — flash the new ones green
                             for idx in range(len(old_rows), new_count):
                                 flash_indices.append((idx, "#15803d"))
                         else:
-                            # Rows were removed — flash last row red
                             flash_indices.append((max(0, new_count - 1), "#dc2626"))
 
                     if flash_indices:
