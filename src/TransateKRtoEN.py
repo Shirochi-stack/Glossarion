@@ -7820,7 +7820,7 @@ def cleanup_previous_extraction(output_dir):
 from contextlib import contextmanager
 
 _THINKING_ENV_KEYS = (
-    'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET',
+    'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET', 'ENABLE_GEMINI_THINKING',
     'ENABLE_GPT_THINKING', 'GPT_EFFORT',
     'ENABLE_DEEPSEEK_THINKING',
     'ENABLE_ANTHROPIC_THINKING',
@@ -7828,7 +7828,8 @@ _THINKING_ENV_KEYS = (
 
 _THINKING_SKIP_VALUES = {
     'GEMINI_THINKING_LEVEL': 'minimal',
-    'THINKING_BUDGET': '0',
+    'THINKING_BUDGET': '-1',
+    'ENABLE_GEMINI_THINKING': '0',
     'ENABLE_GPT_THINKING': '0',
     'GPT_EFFORT': 'none',
     'ENABLE_DEEPSEEK_THINKING': '0',
@@ -7850,6 +7851,8 @@ def _skip_thinking_env(context_key):
         return
     
     # Save originals and override
+    _label = context_key.replace('_', ' ').title()
+    print(f"   ⏭️ Skipping thinking for {_label}")
     saved = {}
     for key in _THINKING_ENV_KEYS:
         saved[key] = os.environ.get(key)
