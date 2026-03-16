@@ -5801,16 +5801,27 @@ CRITICAL EXTRACTION RULES:
                     deleted_keys = old_keys - new_keys  # removed entries
 
                     flash_indices = []  # (index, color)
+                    _orange_positions = set()
                     # Orange for added/modified rows
                     for key in added_keys:
-                        flash_indices.append((new_content[key], "#f97316"))
-                    # Red flash only when rows were actually deleted (count decreased)
-                    if new_count < len(old_rows):
-                        for key in deleted_keys:
+                        idx = new_content[key]
+                        flash_indices.append((idx, "#f97316"))
+                        _orange_positions.add(idx)
+                    # Red flash only for true net deletions (not modifications)
+                    # Modifications produce equal entries in both sets, so
+                    # true deletions = deleted_keys - added_keys count
+                    net_deleted = max(0, len(deleted_keys) - len(added_keys))
+                    if net_deleted > 0 and new_count > 0:
+                        red_count = 0
+                        for key in sorted(deleted_keys, key=lambda k: old_content[k]):
+                            if red_count >= net_deleted:
+                                break
                             old_idx = old_content[key]
-                            nearest = min(old_idx, new_count - 1) if new_count > 0 else -1
-                            if nearest >= 0 and (nearest, "#dc2626") not in flash_indices:
+                            nearest = min(old_idx, new_count - 1)
+                            # Skip if this position already has an orange flash (it's a modification)
+                            if nearest not in _orange_positions and (nearest, "#dc2626") not in flash_indices:
                                 flash_indices.append((nearest, "#dc2626"))
+                                red_count += 1
 
                     if flash_indices:
                         # Save and clear selection so flash isn't hidden behind blue
