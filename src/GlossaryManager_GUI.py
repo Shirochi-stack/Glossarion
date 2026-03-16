@@ -5283,7 +5283,7 @@ CRITICAL EXTRACTION RULES:
                     # Pick first match for this book
                     for cand in candidates:
                         if os.path.exists(cand):
-                            display = f"{base}/{os.path.basename(cand)}"
+                            display = f"{os.path.basename(os.path.dirname(cand))}/{os.path.basename(cand)}"
                             if not any(fp == cand for _, fp in found_glossaries):
                                 found_glossaries.append((display, cand))
                             break
