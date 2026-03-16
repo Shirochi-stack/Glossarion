@@ -1696,13 +1696,15 @@ class MangaTranslator:
     def __del__(self):
         """Restore original print when MangaTranslator is destroyed"""
         # Restore original print function
-        self.restore_print()
-        
-        # Best-effort shutdown in case caller forgot to call shutdown()
         try:
-            self.shutdown()
+            self.restore_print()
         except Exception:
             pass
+        
+        # DO NOT call shutdown() here. During interpreter/GC teardown, frozen
+        # modules (ntpath, pathlib) may be partially unloaded, causing hard
+        # crashes in scan_cache_dir → pathlib.resolve → ntpath.realpath.
+        # Callers should call shutdown() explicitly when done.
 
     def _cleanup_thread_locals(self):
         """Aggressively release thread-local heavy objects (onnx sessions, detectors).
