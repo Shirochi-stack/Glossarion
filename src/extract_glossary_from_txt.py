@@ -16,7 +16,10 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
         glossary_output_dir = os.path.dirname(txt_path)
     os.makedirs(glossary_output_dir, exist_ok=True)
     
-    processor = TextFileProcessor(txt_path, glossary_output_dir, cache_suffix='_glossary')
+    # Include input filename in cache suffix so each file gets its own cache
+    # e.g. split_glossary_MyNovel.cache
+    file_base = os.path.splitext(os.path.basename(txt_path))[0]
+    processor = TextFileProcessor(txt_path, glossary_output_dir, cache_suffix=f'_glossary_{file_base}')
     chapters = processor.extract_chapters()
     
     # Initialize chapter splitter
