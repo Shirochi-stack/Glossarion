@@ -14822,12 +14822,14 @@ Important rules:
                 self.enable_image_translation_var = True
                 self.append_log(f"🖼️ Detected {len(image_files)} image file(s) - automatically enabled image translation")
             
-            # Clear glossary for image files
-            if hasattr(self, 'auto_loaded_glossary_path'):
-                #self.manual_glossary_path = None
+            # Clear auto-loaded glossary (but keep manually loaded ones)
+            if hasattr(self, 'auto_loaded_glossary_path') and self.auto_loaded_glossary_path:
+                if self.manual_glossary_path == self.auto_loaded_glossary_path:
+                    self.manual_glossary_path = None
+                    os.environ.pop('MANUAL_GLOSSARY', None)
                 self.auto_loaded_glossary_path = None
                 self.auto_loaded_glossary_for_file = None
-                self.append_log("📑 Cleared glossary settings (image files selected)")
+                self.append_log("📑 Cleared auto-loaded glossary (new files selected)")
         else:
             # Handle EPUB/TXT/PDF files
             epub_files = [p for p in processed_paths if p.lower().endswith('.epub')]

@@ -3726,7 +3726,8 @@ class RetranslationMixin:
                                     if os.path.exists(full_path):
                                         html_files.append(output_file)
                                     else:
-                                        print(f"⚠️ File in progress but not on disk: {output_file}")
+                                        #print(f"⚠️ File in progress but not on disk: {output_file}")
+                                        pass
                     else:
                         # Older structure: progress_data[hash] = {entry}
                         for key, value in progress_data.items():
@@ -3739,7 +3740,8 @@ class RetranslationMixin:
                                     if os.path.exists(full_path):
                                         html_files.append(output_file)
                                     else:
-                                        print(f"⚠️ File in progress but not on disk: {output_file}")
+                                        #print(f"⚠️ File in progress but not on disk: {output_file}")
+                                        pass
                 except Exception as e:
                     print(f"Failed to load progress file: {e}")
                     has_progress_tracking = False
