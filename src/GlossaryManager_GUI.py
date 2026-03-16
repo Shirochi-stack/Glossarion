@@ -5340,13 +5340,42 @@ CRITICAL EXTRACTION RULES:
                                    parent=getattr(self, 'dialog', self))
                 return
 
-            # Determine line number from selected row (1-indexed)
+            # Determine line number by searching for the selected entry in the file
             _line_num = 1
             selected = self.glossary_tree.currentItem()
             if selected:
                 try:
-                    _line_num = max(1, int(selected.text(0)))
-                except (ValueError, TypeError):
+                    # Skip generic column values that would match section headers
+                    _GENERIC_VALS = {
+                        'character', 'characters', 'terms', 'term', 'title', 'titles',
+                        'organization', 'organizations', 'location', 'locations',
+                        'item', 'items', 'ability', 'abilitys', 'abilities',
+                        'male', 'female', 'unknown', '',
+                    }
+                    # Gather searchable text — prefer unique fields (names) over generic (type/gender)
+                    search_terms = []
+                    # Check UserRole data first (original key for dict format)
+                    user_data = selected.data(0, Qt.UserRole)
+                    if isinstance(user_data, str) and user_data.strip():
+                        search_terms.append(user_data.strip())
+                    # Then check visible columns, skipping generic values
+                    for col_idx in range(1, selected.columnCount()):
+                        val = (selected.text(col_idx) or '').strip()
+                        if val and len(val) >= 2 and val.lower() not in _GENERIC_VALS:
+                            search_terms.append(val)
+
+                    if search_terms:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as _f:
+                            _lines = _f.readlines()
+                        # Find the first line containing any of the search terms
+                        for term in search_terms:
+                            for _i, _ln in enumerate(_lines, 1):
+                                if term in _ln:
+                                    _line_num = _i
+                                    break
+                            if _line_num > 1:
+                                break
+                except Exception:
                     pass
 
             try:
