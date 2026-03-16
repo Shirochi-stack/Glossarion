@@ -1817,15 +1817,16 @@ class BatchHeaderTranslator:
     def _send_with_retry(self, messages, temperature, max_tokens, context=None):
         """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
         try:
-            from TransateKRtoEN import send_with_interrupt
-            response = send_with_interrupt(
-                messages=messages,
-                client=self.client,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop_check_fn=self.stop_check_fn,
-                context=context,
-            )
+            from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
+            with _skip_thinking_env('TOC'):
+                response = send_with_interrupt(
+                    messages=messages,
+                    client=self.client,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop_check_fn=self.stop_check_fn,
+                    context=context,
+                )
         except ImportError:
             # Fallback to direct send if send_with_interrupt is not available
             print("⚠️ send_with_interrupt not available, using direct client.send()")
@@ -2720,15 +2721,16 @@ class MetadataTranslator:
     def _send_with_retry(self, messages, temperature, max_tokens, context=None):
         """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
         try:
-            from TransateKRtoEN import send_with_interrupt
-            response = send_with_interrupt(
-                messages=messages,
-                client=self.client,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop_check_fn=self.stop_check_fn,
-                context=context,
-            )
+            from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
+            with _skip_thinking_env('METADATA'):
+                response = send_with_interrupt(
+                    messages=messages,
+                    client=self.client,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop_check_fn=self.stop_check_fn,
+                    context=context,
+                )
         except ImportError:
             # Fallback to direct send if send_with_interrupt is not available
             print("⚠️ send_with_interrupt not available, using direct client.send()")

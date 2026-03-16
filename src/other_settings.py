@@ -2249,7 +2249,7 @@ def _create_context_management_section(self, parent):
     
     section_v.addWidget(output_dir_row)
 
-    # Halgakos icon at bottom (150x150 HiDPI)
+    # Halgakos icon at bottom (180x180 HiDPI)
     _icon_label = QLabel()
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     if os.path.exists(_icon_path):
@@ -2258,11 +2258,11 @@ def _create_context_management_section(self, parent):
         _pixmap = QPixmap(_icon_path)
         if not _pixmap.isNull():
             _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
-            _target = int(150 * _dpr)
+            _target = int(180 * _dpr)
             _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             _scaled.setDevicePixelRatio(_dpr)
             _icon_label.setPixmap(_scaled)
-            _icon_label.setFixedSize(150, 150)
+            _icon_label.setFixedSize(180, 180)
             _icon_label.setAlignment(Qt.AlignCenter)
             section_v.addWidget(_icon_label)
 
@@ -2784,6 +2784,7 @@ def _create_response_handling_section(self, parent):
 
     # Initialize enabled state for Anthropic controls
     self.toggle_anthropic_thinking_controls()
+
 
     # Parallel Extraction
     parallel_title = QLabel("Parallel Extraction")
@@ -6453,6 +6454,61 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_epub_desc)
+
+    # Skip Thinking for Lightweight Tasks
+    skip_thinking_title = QLabel("Skip Thinking for Lightweight Tasks")
+    skip_thinking_title.setStyleSheet("font-weight: bold; font-size: 11pt; margin-top: 8px;")
+    left_v.addWidget(skip_thinking_title)
+
+    skip_title_cb = self._create_styled_checkbox("Skip Book Title Thinking")
+    try:
+        skip_title_cb.setChecked(bool(getattr(self, 'skip_book_title_thinking_var', True)))
+    except Exception:
+        skip_title_cb.setChecked(True)
+    def _on_skip_title_toggle(checked):
+        try:
+            self.skip_book_title_thinking_var = bool(checked)
+            os.environ['SKIP_BOOK_TITLE_THINKING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_title_cb.toggled.connect(_on_skip_title_toggle)
+    skip_title_cb.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(skip_title_cb)
+
+    skip_metadata_cb = self._create_styled_checkbox("Skip Metadata Thinking")
+    try:
+        skip_metadata_cb.setChecked(bool(getattr(self, 'skip_metadata_thinking_var', True)))
+    except Exception:
+        skip_metadata_cb.setChecked(True)
+    def _on_skip_metadata_toggle(checked):
+        try:
+            self.skip_metadata_thinking_var = bool(checked)
+            os.environ['SKIP_METADATA_THINKING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_metadata_cb.toggled.connect(_on_skip_metadata_toggle)
+    skip_metadata_cb.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(skip_metadata_cb)
+
+    skip_toc_cb = self._create_styled_checkbox("Skip TOC/Header Thinking")
+    try:
+        skip_toc_cb.setChecked(bool(getattr(self, 'skip_toc_thinking_var', False)))
+    except Exception:
+        skip_toc_cb.setChecked(False)
+    def _on_skip_toc_toggle(checked):
+        try:
+            self.skip_toc_thinking_var = bool(checked)
+            os.environ['SKIP_TOC_THINKING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_toc_cb.toggled.connect(_on_skip_toc_toggle)
+    skip_toc_cb.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(skip_toc_cb)
+
+    skip_desc = QLabel("Sets Gemini thinking to minimal, GPT effort to none,\nand disables DeepSeek/Anthropic thinking for these tasks.")
+    skip_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    skip_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(skip_desc)
 
     # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
     empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
