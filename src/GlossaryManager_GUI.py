@@ -3821,7 +3821,10 @@ CRITICAL EXTRACTION RULES:
 
         def mark_row_updated(item, updated):
             for c in range(item.columnCount()):
-                item.setBackground(c, orange_brush if updated else default_brush)
+                if updated:
+                    item.setBackground(c, orange_brush)
+                else:
+                    item.setData(c, Qt.BackgroundRole, None)
 
         def get_baseline_translated(item, col_key):
             if col_key not in ['translated_name', 'translated']:
@@ -5956,9 +5959,12 @@ CRITICAL EXTRACTION RULES:
                    elif self.current_glossary_format == 'dict':
                        baseline = self._original_translated_map.get(item.data(0, Qt.UserRole), '')
                    if baseline is not None:
-                       brush = orange if new_value != baseline else default
-                       for c in range(item.columnCount()):
-                           item.setBackground(c, brush)
+                       if new_value != baseline:
+                           for c in range(item.columnCount()):
+                               item.setBackground(c, orange)
+                       else:
+                           for c in range(item.columnCount()):
+                               item.setData(c, Qt.BackgroundRole, None)
                except Exception:
                    pass
 
