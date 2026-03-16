@@ -8835,8 +8835,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log(f"📑 Auto Glossary Mode: {mode_display}")
                         
                         # Apply invisible hardcoded overrides for Balanced mode
+                        # (text/EPUB-specific; skip for image-only inputs)
                         saved_env = {}
-                        if auto_glossary_mode == 'balanced':
+                        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+                        has_text_files = any(
+                            os.path.splitext(f)[1].lower() not in image_exts
+                            for f in getattr(self, 'selected_files', [])
+                        )
+                        if auto_glossary_mode == 'balanced' and has_text_files:
                             self.append_log(f"📑 Balanced mode: request merging enabled (99), chapter splitting enabled")
                             self.append_log(f"📑 These values are hardcoded for optimal glossary quality")
                             saved_env = {
@@ -8847,8 +8853,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1'
                             os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = '99'
                             os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1'
-                        else:  # full
+                        elif auto_glossary_mode == 'balanced':
+                            self.append_log(f"📑 Balanced mode: image glossary extraction")
+                        elif has_text_files:  # full + text
                             self.append_log(f"📑 Full mode: chapter-by-chapter extraction (most thorough)")
+                        else:  # full + images only
+                            self.append_log(f"📑 Full mode: image glossary extraction")
                         
                         self.append_log(f"📑 Running glossary extraction before translation...")
                         self.append_log(f"{'='*60}")
@@ -10088,6 +10098,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # We already have output_dir defined at the top
                     # Copy original image to the output directory if not using combined output
                     if not combined_output_dir and not os.path.exists(os.path.join(output_dir, image_name)):
+                        os.makedirs(output_dir, exist_ok=True)
                         shutil.copy2(image_path, os.path.join(output_dir, image_name))
                     
                     # Get book title prompt for translating the filename
@@ -11512,10 +11523,47 @@ Important rules:
                                 self._save_intermediate_glossary_with_skip(folder_name, all_glossary_entries)
                             
                         except json.JSONDecodeError as e:
-                            self.append_log(f"      ❌ Failed to parse JSON: {e}")
-                            self.append_log(f"      Response preview: {glossary_json[:200]}...")
-                            self.glossary_progress_manager.update(image_path, content_hash, status="error", error=str(e))
-                            skipped += 1
+                            # Fallback: use the robust parser from extract_glossary_from_epub
+                            # which handles JSON, CSV with headers, and headerless CSV
+                            try:
+                                from extract_glossary_from_epub import parse_api_response
+                                parsed_entries = parse_api_response(glossary_json.strip())
+                                entries_for_this_image = []
+                                for entry in parsed_entries:
+                                    if isinstance(entry, dict) and 'raw_name' in entry:
+                                        entry['raw_name'] = entry['raw_name'].strip()
+                                        if 'translated_name' not in entry:
+                                            entry['translated_name'] = entry.get('name', entry['raw_name'])
+                                        if entry.get('type') == 'character' and 'gender' not in entry:
+                                            entry['gender'] = 'Unknown'
+                                        entries_for_this_image.append(entry)
+                                        all_glossary_entries.append(entry)
+                                
+                                if entries_for_this_image:
+                                    self.append_log(f"      📋 Parsed {len(entries_for_this_image)} entries from CSV response")
+                                    elapsed = time.time() - start_time
+                                    for j, entry in enumerate(entries_for_this_image):
+                                        total_entries_extracted += 1
+                                        entry_name = f"{entry['raw_name']} ({entry.get('translated_name', '')})"
+                                        progress_msg = f'[Image {i+1}/{len(image_files)}] [{j+1}/{len(entries_for_this_image)}] ({elapsed:.1f}s elapsed) → {entry.get("type", "?")}: {entry_name}'
+                                        print(progress_msg)
+                                        self.append_log(progress_msg)
+                                    
+                                    self.append_log(f"      ✅ Extracted {len(entries_for_this_image)} entries (fallback parser)")
+                                    self.glossary_progress_manager.update(
+                                        image_path, content_hash, status="completed",
+                                        extracted_data=entries_for_this_image
+                                    )
+                                    processed += 1
+                                    if all_glossary_entries:
+                                        self._save_intermediate_glossary_with_skip(folder_name, all_glossary_entries)
+                                else:
+                                    raise ValueError("No valid entries found")
+                            except Exception:
+                                self.append_log(f"      ❌ Failed to parse response as JSON or CSV: {e}")
+                                self.append_log(f"      Response preview: {glossary_json[:200]}...")
+                                self.glossary_progress_manager.update(image_path, content_hash, status="error", error=str(e))
+                                skipped += 1
                     else:
                         self.append_log(f"      ⚠️ No glossary data in response")
                         self.glossary_progress_manager.update(image_path, content_hash, status="error", error="No data")
@@ -16277,49 +16325,64 @@ Important rules:
                 self.append_log(f"📑 No Glossary folder found after extraction")
                 return
             
-            # For each selected file, try to find a matching glossary
+            # Build a set of candidate names to match against glossary filenames.
+            # For text/EPUB files: use the file basename (e.g. "MyNovel")
+            # For image files: also include the parent folder name since image
+            # glossaries are named {folder_name}_glossary.json/csv
+            image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            match_names = set()
+            
             for file_path in files:
                 base = os.path.splitext(os.path.basename(file_path))[0]
-                base_cf = base.casefold()
+                match_names.add(base.casefold())
                 
-                # Look for glossary files matching this input
-                best_match = None
-                best_mtime = 0
-                
-                try:
-                    for fn in os.listdir(glossary_base_dir):
-                        full = os.path.join(glossary_base_dir, fn)
-                        if not os.path.isfile(full):
-                            continue
-                        
-                        stem, ext = os.path.splitext(fn)
-                        ext_l = ext.lower()
-                        if ext_l not in ('.csv', '.json'):
-                            continue
-                        
-                        # Skip progress files
-                        if '_progress' in stem.lower():
-                            continue
-                        
-                        # Match by name
-                        stem_cf = stem.casefold()
-                        if base_cf in stem_cf or stem_cf in base_cf or f"{base_cf}_glossary" == stem_cf:
+                # For images, also add the parent folder name
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext in image_extensions:
+                    folder = os.path.dirname(file_path)
+                    folder_name = os.path.basename(folder) if folder else "images"
+                    match_names.add(folder_name.casefold())
+            
+            # Look for glossary files matching any of the candidate names
+            best_match = None
+            best_mtime = 0
+            
+            try:
+                for fn in os.listdir(glossary_base_dir):
+                    full = os.path.join(glossary_base_dir, fn)
+                    if not os.path.isfile(full):
+                        continue
+                    
+                    stem, ext = os.path.splitext(fn)
+                    ext_l = ext.lower()
+                    if ext_l not in ('.csv', '.json'):
+                        continue
+                    
+                    # Skip progress files
+                    if '_progress' in stem.lower():
+                        continue
+                    
+                    # Match against any candidate name
+                    stem_cf = stem.casefold()
+                    for name_cf in match_names:
+                        if name_cf in stem_cf or stem_cf in name_cf or f"{name_cf}_glossary" == stem_cf:
                             mtime = os.path.getmtime(full)
                             # Prefer most recent, and CSV over JSON
                             priority = (1 if ext_l == '.csv' else 0)
                             if mtime > best_mtime or (mtime == best_mtime and priority > 0):
                                 best_match = full
                                 best_mtime = mtime
-                except Exception:
-                    pass
-                
-                if best_match and os.path.exists(best_match):
-                    self.manual_glossary_path = best_match
-                    self.manual_glossary_manually_loaded = False
-                    self.config['manual_glossary_path'] = best_match
-                    os.environ['MANUAL_GLOSSARY'] = best_match
-                    self.append_log(f"📑 Auto-loaded generated glossary: {os.path.basename(best_match)}")
-                    return  # Loaded successfully
+                            break
+            except Exception:
+                pass
+            
+            if best_match and os.path.exists(best_match):
+                self.manual_glossary_path = best_match
+                self.manual_glossary_manually_loaded = False
+                self.config['manual_glossary_path'] = best_match
+                os.environ['MANUAL_GLOSSARY'] = best_match
+                self.append_log(f"📑 Auto-loaded generated glossary: {os.path.basename(best_match)}")
+                return  # Loaded successfully
             
             self.append_log(f"📑 No matching glossary found in {glossary_base_dir}")
         except Exception as e:
