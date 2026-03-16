@@ -7,7 +7,16 @@ from bs4 import BeautifulSoup
 
 def extract_chapters_from_txt(txt_path: str) -> List[str]:
     """Extract chapters from text file for glossary extraction"""
-    processor = TextFileProcessor(txt_path, os.path.dirname(txt_path))
+    # Use glossary output directory so split_glossary.cache doesn't collide
+    # with the translation split.cache
+    output_path = os.getenv("OUTPUT_PATH", "")
+    if output_path:
+        glossary_output_dir = os.path.dirname(output_path)
+    else:
+        glossary_output_dir = os.path.dirname(txt_path)
+    os.makedirs(glossary_output_dir, exist_ok=True)
+    
+    processor = TextFileProcessor(txt_path, glossary_output_dir, cache_suffix='_glossary')
     chapters = processor.extract_chapters()
     
     # Initialize chapter splitter

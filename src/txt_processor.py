@@ -13,10 +13,11 @@ import shutil
 class TextFileProcessor:
     """Process plain text files for translation"""
     
-    def __init__(self, file_path: str, output_dir: str):
+    def __init__(self, file_path: str, output_dir: str, cache_suffix: str = ''):
         self.file_path = file_path
         self.output_dir = output_dir
         self.file_base = os.path.splitext(os.path.basename(file_path))[0]
+        self.cache_suffix = cache_suffix  # e.g. '_glossary' → split_glossary.cache
         
         # Initialize chapter splitter
         model_name = os.getenv("MODEL", "gpt-3.5-turbo")
@@ -157,7 +158,8 @@ class TextFileProcessor:
         # ── Split cache ──────────────────────────────────────────────
         # Cache the split result so that changing token limits or
         # compression factor mid-progress doesn't alter chunk counts.
-        cache_path = os.path.join(self.output_dir, 'split.cache')
+        cache_name = f'split{self.cache_suffix}.cache' if self.cache_suffix else 'split.cache'
+        cache_path = os.path.join(self.output_dir, cache_name)
         source_hash = self._generate_hash(
             ''.join(ch.get('content', '') for ch in raw_chapters)
         )
