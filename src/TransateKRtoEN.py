@@ -7815,60 +7815,6 @@ def cleanup_previous_extraction(output_dir):
     return cleaned_count
 
 # =====================================================
-# SKIP THINKING CONTEXT MANAGER
-# =====================================================
-from contextlib import contextmanager
-
-_THINKING_ENV_KEYS = (
-    'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET', 'ENABLE_GEMINI_THINKING',
-    'ENABLE_GPT_THINKING', 'GPT_EFFORT',
-    'ENABLE_DEEPSEEK_THINKING',
-    'ENABLE_ANTHROPIC_THINKING',
-)
-
-_THINKING_SKIP_VALUES = {
-    'GEMINI_THINKING_LEVEL': 'minimal',
-    'THINKING_BUDGET': '-1',
-    'ENABLE_GEMINI_THINKING': '0',
-    'ENABLE_GPT_THINKING': '0',
-    'GPT_EFFORT': 'none',
-    'ENABLE_DEEPSEEK_THINKING': '0',
-    'ENABLE_ANTHROPIC_THINKING': '0',
-}
-
-@contextmanager
-def _skip_thinking_env(context_key):
-    """Temporarily override thinking env vars to minimal/off for lightweight tasks.
-    
-    context_key: one of 'BOOK_TITLE', 'METADATA', 'TOC'
-    Checks SKIP_{context_key}_THINKING env var; if '1', overrides all thinking settings.
-    """
-    env_var = f'SKIP_{context_key}_THINKING'
-    should_skip = os.environ.get(env_var, '0') == '1'
-    
-    if not should_skip:
-        yield
-        return
-    
-    # Save originals and override
-    _label = context_key.replace('_', ' ').title()
-    print(f"   ⏭️ Skipping thinking for {_label}")
-    saved = {}
-    for key in _THINKING_ENV_KEYS:
-        saved[key] = os.environ.get(key)
-        os.environ[key] = _THINKING_SKIP_VALUES[key]
-    
-    try:
-        yield
-    finally:
-        # Restore originals
-        for key in _THINKING_ENV_KEYS:
-            if saved[key] is not None:
-                os.environ[key] = saved[key]
-            elif key in os.environ:
-                del os.environ[key]
-
-# =====================================================
 # API AND TRANSLATION UTILITIES
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
@@ -8341,15 +8287,14 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
                 return True
             return False
         
-        with _skip_thinking_env('BOOK_TITLE'):
-            response = send_with_interrupt(
-                messages=messages,
-                client=client,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop_check_fn=_stop_check,
-                context='book_title',
-            )
+        response = send_with_interrupt(
+            messages=messages,
+            client=client,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop_check_fn=_stop_check,
+            context='book_title',
+        )
         
         # Extract content from response
         if hasattr(response, 'content'):
@@ -9551,8 +9496,8 @@ def main(log_callback=None, stop_callback=None):
                 print("="*50)
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
                 
-                # Get metadata system prompt from environment (fall back to default)
-                system_prompt = os.getenv('METADATA_SYSTEM_PROMPT', '') or "You are a translator. Respond with only the translated text, nothing else."
+                # Get metadata system prompt from environment
+                system_prompt = os.getenv('METADATA_SYSTEM_PROMPT', '')
                 if system_prompt:
                     # Get field-specific prompts
                     field_prompts_str = os.getenv('METADATA_FIELD_PROMPTS', '{}')
@@ -9561,13 +9506,7 @@ def main(log_callback=None, stop_callback=None):
                     except:
                         field_prompts = {}
                     
-                    if not field_prompts:
-                        output_language = os.getenv('OUTPUT_LANGUAGE', 'English')
-                        field_prompts = {
-                            '_default': f"Translate this text to {output_language}. Do not output anything other than the translated text."
-                        }
-                    
-                    if not field_prompts.get('_default') and not any(k != '_default' for k in field_prompts):
+                    if not field_prompts and not field_prompts.get('_default'):
                         print("❌ No field prompts configured, skipping metadata translation")
                     else:
                         # Get language configuration
@@ -9647,12 +9586,11 @@ def main(log_callback=None, stop_callback=None):
                                         time.sleep(config.DELAY)
                                     
                                     # Make API call
-                                    with _skip_thinking_env('METADATA'):
-                                        content, finish_reason = client.send(
-                                            messages, 
-                                            temperature=config.TEMP,
-                                            max_tokens=config.MAX_OUTPUT_TOKENS
-                                        )
+                                    content, finish_reason = client.send(
+                                        messages, 
+                                        temperature=config.TEMP,
+                                        max_tokens=config.MAX_OUTPUT_TOKENS
+                                    )
                                     translated_value = content.strip()
                                     
                                     # Store result thread-safely
@@ -9749,12 +9687,11 @@ def main(log_callback=None, stop_callback=None):
                                         
                                         # Use the same client instance from main()
                                         # ✅ FIXED - Properly unpack tuple response and provide max_tokens
-                                        with _skip_thinking_env('METADATA'):
-                                            content, finish_reason = client.send(
-                                                messages, 
-                                                temperature=config.TEMP,
-                                                max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
-                                            )
+                                        content, finish_reason = client.send(
+                                            messages, 
+                                            temperature=config.TEMP,
+                                            max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
+                                        )
                                         translated_value = content.strip()  # ✅ FIXED - use content from unpacked tuple
                                         
                                         metadata[f"original_{field_name}"] = original_value
