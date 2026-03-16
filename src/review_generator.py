@@ -387,10 +387,13 @@ def _fit_chapters(
         half_budget = token_budget // 2
 
         # Single-chapter content (1-chapter EPUB, .txt, .pdf, etc.)
-        # Split the TEXT itself into first-half and last-half portions.
+        # If the whole thing fits, just use it all — no split needed.
         if total_chapters == 1:
             name, text, tokens = chapter_tokens[0]
-            # Split text roughly in half by characters, then chunk each half to fit
+            if tokens <= token_budget:
+                info = f"📊 Spoiler mode: entire file included ({tokens:,} tokens, budget: {token_budget:,})"
+                return [(name, text)], info
+            # Doesn't fit whole — split the TEXT into first-half and last-half portions.
             mid = len(text) // 2
             first_text = text[:mid]
             last_text = text[mid:]
