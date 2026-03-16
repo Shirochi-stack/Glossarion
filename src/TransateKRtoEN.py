@@ -9647,11 +9647,12 @@ def main(log_callback=None, stop_callback=None):
                                         time.sleep(config.DELAY)
                                     
                                     # Make API call
-                                    content, finish_reason = client.send(
-                                        messages, 
-                                        temperature=config.TEMP,
-                                        max_tokens=config.MAX_OUTPUT_TOKENS
-                                    )
+                                    with _skip_thinking_env('METADATA'):
+                                        content, finish_reason = client.send(
+                                            messages, 
+                                            temperature=config.TEMP,
+                                            max_tokens=config.MAX_OUTPUT_TOKENS
+                                        )
                                     translated_value = content.strip()
                                     
                                     # Store result thread-safely
@@ -9748,11 +9749,12 @@ def main(log_callback=None, stop_callback=None):
                                         
                                         # Use the same client instance from main()
                                         # ✅ FIXED - Properly unpack tuple response and provide max_tokens
-                                        content, finish_reason = client.send(
-                                            messages, 
-                                            temperature=config.TEMP,
-                                            max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
-                                        )
+                                        with _skip_thinking_env('METADATA'):
+                                            content, finish_reason = client.send(
+                                                messages, 
+                                                temperature=config.TEMP,
+                                                max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
+                                            )
                                         translated_value = content.strip()  # ✅ FIXED - use content from unpacked tuple
                                         
                                         metadata[f"original_{field_name}"] = original_value
