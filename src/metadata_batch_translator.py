@@ -2856,7 +2856,7 @@ class MetadataTranslator:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                context='metadata_translation'
+                context='metadata'
             )
             
             if response_content:
@@ -2970,7 +2970,7 @@ class MetadataTranslator:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                context='metadata_field_translation'
+                context='metadata'
             )
             
             if response_content:

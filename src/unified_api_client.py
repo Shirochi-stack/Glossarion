@@ -11394,7 +11394,7 @@ class UnifiedClient:
         thread_name = threading.current_thread().name
         # Prefer the client's explicit context if available
         explicit = getattr(self, 'context', None)
-        if explicit in ('translation', 'glossary', 'summary', 'review'):
+        if explicit in ('translation', 'glossary', 'summary', 'review', 'metadata'):
             context = explicit
         else:
             if 'Translation' in thread_name:
