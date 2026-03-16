@@ -167,7 +167,6 @@ class TextFileProcessor:
         old_cache_path = os.path.join(self.output_dir, cache_name)
         if os.path.exists(old_cache_path) and not os.path.exists(cache_path):
             try:
-                import shutil
                 shutil.move(old_cache_path, cache_path)
                 print(f"📦 Migrated {cache_name} → .cache/{cache_name}")
             except Exception:
