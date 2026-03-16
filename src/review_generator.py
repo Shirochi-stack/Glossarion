@@ -231,7 +231,29 @@ def _extract_text_file(file_path: str, log_fn: Callable = print) -> List[Tuple[s
 
 
 def _extract_pdf_file(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
-    """Extract text from a PDF file."""
+    """Extract text from a PDF file using fast sequential extraction."""
+    # Use fitz (PyMuPDF) directly in sequential mode to avoid ProcessPoolExecutor
+    # overhead that extract_text_from_pdf uses for large PDFs (spawning 8+ worker
+    # processes on Windows is very slow and causes log spam).
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        text_parts = []
+        for page in doc:
+            text = page.get_text()
+            if text.strip():
+                text_parts.append(text)
+        doc.close()
+        text = "\n\n".join(text_parts)
+        if text.strip():
+            log_fn(f"📄 Extracted text from PDF: {os.path.basename(file_path)}")
+            return [(os.path.basename(file_path), text.strip())]
+    except ImportError:
+        pass
+    except Exception as e:
+        log_fn(f"⚠️ Failed to extract PDF with PyMuPDF: {e}")
+
+    # Fallback to pdf_extractor (may use ProcessPoolExecutor for large files)
     try:
         from pdf_extractor import extract_text_from_pdf
         text = extract_text_from_pdf(file_path)

@@ -489,7 +489,7 @@ def _setup_file_logging():
         
         sys.excepthook = _log_excepthook
 
-        logging.getLogger(__name__).info("File logging initialized at %s", log_file)
+        logging.getLogger(__name__).debug("File logging initialized at %s", log_file)
     except Exception as e:
         # Fallback to basicConfig if anything goes wrong
         try:

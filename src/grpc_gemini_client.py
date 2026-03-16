@@ -59,7 +59,7 @@ try:
         safety_types = None
     
     GRPC_AVAILABLE = True
-    logger.info("gRPC Gemini client: All dependencies available")
+    logger.debug("gRPC Gemini client: All dependencies available")
 except ImportError as e:
     logger.warning(f"gRPC Gemini client: Missing dependencies - {e}")
     GenerativeServiceClient = None
