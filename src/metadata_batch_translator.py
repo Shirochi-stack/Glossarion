@@ -107,7 +107,7 @@ class MetadataBatchTranslatorUI:
         # Book title user prompt
         if 'book_title_prompt' not in self.gui.config:
             self.gui.config['book_title_prompt'] = (
-                "Translate this book title to {target_lang} while retaining any acronyms:"
+                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
             )
         
         # Batch header system prompt
@@ -142,10 +142,10 @@ class MetadataBatchTranslatorUI:
             self.gui.config['metadata_field_prompts'] = {
                 'creator': "Romanize this author name. Do not output anything other than the romanized text.",
                 'publisher': "Romanize this publisher name. Do not output anything other than the romanized text.",
-                'subject': "Translate this book genre/subject to {target_lang}. Do not output anything other than the translated text:",
-                'description': "Translate this book description to {target_lang}. Do not output anything other than the translated text:",
-                'series': "Translate this series name to {target_lang}. Do not output anything other than the translated text:",
-                '_default': "Translate this text to {target_lang}. Do not output anything other than the translated text:"
+                'subject': "Translate this book genre/subject to {target_lang}. Do not output anything other than the translated text.",
+                'description': "Translate this book description to {target_lang}. Do not output anything other than the translated text.",
+                'series': "Translate this series name to {target_lang}. Do not output anything other than the translated text.",
+                '_default': "Translate this text to {target_lang}. Do not output anything other than the translated text."
             }
 
             
@@ -1099,7 +1099,7 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
-            "Translate this book title to {target_lang} while retaining any acronyms:"))
+            "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
         tab_layout.addWidget(self.title_user_text)
         
         var_label = QLabel("Variables available: {target_lang} - detected source language")
@@ -1616,9 +1616,9 @@ class MetadataBatchTranslatorUI:
                 del self.gui.config[key]
         
         # Force set book title prompt to new default
-        self.gui.config['book_title_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms:"
+        self.gui.config['book_title_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
         if hasattr(self.gui, 'book_title_prompt'):
-            self.gui.book_title_prompt = "Translate this book title to {target_lang} while retaining any acronyms:"
+            self.gui.book_title_prompt = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
         
         # Re-initialize other defaults
         self._initialize_default_prompts()
@@ -1647,7 +1647,7 @@ class MetadataBatchTranslatorUI:
                 "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."))
         if hasattr(self, 'title_user_text'):
             self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
-                "Translate this book title to {target_lang} while retaining any acronyms:"))
+                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
         
         # Chapter Headers tab
         if hasattr(self, 'header_batch_system_text'):
@@ -2921,7 +2921,7 @@ class MetadataTranslator:
         # Get the specific prompt or default
         prompt_template = field_prompts.get(field_name, 
                                            field_prompts.get('_default', 
-                                                           "Translate this text to {target_lang}:"))
+                                                           "Translate this text to {target_lang}."))
         
         # Handle language behavior
         lang_behavior = self.config.get('lang_prompt_behavior', 'auto')

@@ -8259,7 +8259,7 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         else:
             # For AI services, use prompts as before
             book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
-                "Translate this book title to English while retaining any acronyms:")
+                "Translate this book title to English while retaining any acronyms. Do not output anything other than the translated text.")
             
             # Get the system prompt for book titles, with fallback to default
             book_title_system_prompt = os.getenv("BOOK_TITLE_SYSTEM_PROMPT", 
