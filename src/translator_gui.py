@@ -2087,6 +2087,27 @@ Text to analyze:
                             print("[CLEANUP] Manga state flushed successfully")
                         except Exception as e:
                             print(f"[CLEANUP] Failed to flush manga state: {e}")
+                    
+                    # Shut down the MangaTranslator instance (frees models, HF cache, torch memory)
+                    if hasattr(self, 'manga_translator') and self.manga_translator:
+                        try:
+                            # Call MangaTranslationTab.cleanup() for timer/worker/state cleanup
+                            if hasattr(self.manga_translator, 'cleanup'):
+                                print("[CLEANUP] Running MangaTranslationTab.cleanup()...")
+                                self.manga_translator.cleanup()
+                            
+                            # Explicitly shutdown the MangaTranslator (models, detectors, torch, HF cache)
+                            translator = getattr(self.manga_translator, 'translator', None)
+                            if translator and hasattr(translator, 'shutdown'):
+                                print("[CLEANUP] Running MangaTranslator.shutdown()...")
+                                translator.shutdown()
+                                print("[CLEANUP] MangaTranslator shutdown complete")
+                            
+                            # Null out the translator to release memory
+                            self.manga_translator.translator = None
+                        except Exception as e:
+                            print(f"[CLEANUP] Manga translator shutdown error: {e}")
+                    
                     self._manga_dialog.close()
                 except:
                     pass

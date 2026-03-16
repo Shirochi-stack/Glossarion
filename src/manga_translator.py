@@ -1767,7 +1767,7 @@ class MangaTranslator:
                     pass
             # Perform deep cleanup if enabled in settings
             try:
-                self._deep_cleanup_models()
+                self._deep_cleanup_models(force=True)
             except Exception:
                 pass
             try:
@@ -1947,15 +1947,20 @@ class MangaTranslator:
         except Exception:
             pass
 
-    def _deep_cleanup_models(self):
+    def _deep_cleanup_models(self, force=False):
         """Release ALL model references and caches to reduce RAM after translation.
         This is the COMPREHENSIVE cleanup that ensures all models are unloaded from RAM.
+        
+        Args:
+            force: If True, bypass the unload_models_after_translation setting check.
+                   Used during app shutdown to always release resources.
         """
         # Check if unload is enabled in settings before proceeding
-        unload_enabled = self.manga_settings.get('advanced', {}).get('unload_models_after_translation', False)
-        if not unload_enabled:
-            self._log("⏭️ Skipping model cleanup - unload is disabled in settings", "info")
-            return
+        if not force:
+            unload_enabled = self.manga_settings.get('advanced', {}).get('unload_models_after_translation', False)
+            if not unload_enabled:
+                self._log("⏭️ Skipping model cleanup - unload is disabled in settings", "info")
+                return
             
         self._log("🧹 Starting comprehensive model cleanup to free RAM...", "info")
         
