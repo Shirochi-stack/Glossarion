@@ -1119,10 +1119,22 @@ class RetranslationMixin:
                 chapter_display_info.append(display_info)
         else:
             # Fallback to original logic if no OPF
+            # Known non-chapter files that should never appear in the progress list
+            _non_chapter_files = {"glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt"}
+            _source_has_translated = "_translated" in os.path.basename(file_path).lower()
             files_to_entries = {}
             for chapter_key, chapter_info in prog.get("chapters", {}).items():
                 output_file = chapter_info.get("output_file", "")
                 status = chapter_info.get("status", "")
+                
+                # Skip known non-chapter files
+                if output_file and output_file.lower() in _non_chapter_files:
+                    continue
+                # Skip combined _translated output files (unless source itself has _translated)
+                if output_file and not _source_has_translated and any(
+                    output_file.lower().endswith(s) for s in ("_translated.txt", "_translated.pdf", "_translated.html")
+                ):
+                    continue
                 
                 # Include chapters with output files OR transient statuses with null output file (legacy)
                 # (composite keys like "0_TOC" should still be represented in the UI)
@@ -3244,10 +3256,22 @@ class RetranslationMixin:
         file_path = data.get('file_path', '')
         show_special = data.get('show_special_files_state', False)
         
+        # Known non-chapter files that should never appear in the progress list
+        _non_chapter_files = {"glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt"}
+        _source_has_translated = "_translated" in os.path.basename(file_path).lower()
         files_to_entries = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             output_file = chapter_info.get("output_file", "")
             status = chapter_info.get("status", "")
+            
+            # Skip known non-chapter files
+            if output_file and output_file.lower() in _non_chapter_files:
+                continue
+            # Skip combined _translated output files (unless source itself has _translated)
+            if output_file and not _source_has_translated and any(
+                output_file.lower().endswith(s) for s in ("_translated.txt", "_translated.pdf", "_translated.html")
+            ):
+                continue
             
             # Include chapters with output files OR in_progress/failed/qa_failed with null output file (legacy)
             if output_file or status in ["in_progress", "failed", "qa_failed"]:
