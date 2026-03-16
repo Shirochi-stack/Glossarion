@@ -436,13 +436,16 @@ class RetranslationMixin:
         def _auto_discover_from_output_dir(output_dir, prog):
             updated = False
             try:
+                # Only exclude _translated.* combined output files when the source
+                # file itself does NOT contain "_translated" in its name
+                source_has_translated = "_translated" in os.path.basename(file_path).lower()
                 files = [
                     f for f in os.listdir(output_dir)
                     if os.path.isfile(os.path.join(output_dir, f))
                     # accept any extension except known non-chapter files
-                    and not f.lower().endswith("_translated.txt")
-                    and not f.lower().endswith("_translated.pdf")
-                    and not f.lower().endswith("_translated.html")
+                    and (source_has_translated or not f.lower().endswith("_translated.txt"))
+                    and (source_has_translated or not f.lower().endswith("_translated.pdf"))
+                    and (source_has_translated or not f.lower().endswith("_translated.html"))
                     and f != "translation_progress.json"
                     and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
                     and not f.lower().endswith(".epub")
