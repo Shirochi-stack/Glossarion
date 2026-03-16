@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
                                 QComboBox, QMenu, QInputDialog)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -3730,7 +3730,66 @@ CRITICAL EXTRACTION RULES:
         stats_layout = QHBoxLayout(stats_widget)
         stats_layout.setContentsMargins(0, 0, 0, 5)
         editor_layout.addWidget(stats_widget)
-        
+
+        # Spinning icon for reload indicator
+        from PySide6.QtGui import QPixmap, QTransform
+        from PySide6.QtCore import QPropertyAnimation
+
+        class SpinningIconLabel(QLabel):
+            """A QLabel that displays an icon and can spin 360° on demand."""
+            def __init__(self, icon_path, size=20, parent=None):
+                super().__init__(parent)
+                self._angle = 0.0
+                # Load with HiDPI scaling
+                dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+                scaled_size = int(size * dpr)
+                self._base_pixmap = QPixmap(icon_path).scaled(
+                    scaled_size, scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                self._base_pixmap.setDevicePixelRatio(dpr)
+                self.setFixedSize(size, size)
+                self._update_pixmap()
+
+            def _update_pixmap(self):
+                if self._base_pixmap.isNull():
+                    return
+                t = QTransform().rotate(self._angle)
+                rotated = self._base_pixmap.transformed(t, Qt.SmoothTransformation)
+                # Center-crop the rotated pixmap back to the original size
+                dpr = rotated.devicePixelRatio()
+                bw, bh = self._base_pixmap.width(), self._base_pixmap.height()
+                rw, rh = rotated.width(), rotated.height()
+                x = (rw - bw) // 2
+                y = (rh - bh) // 2
+                cropped = rotated.copy(x, y, bw, bh)
+                cropped.setDevicePixelRatio(dpr)
+                self.setPixmap(cropped)
+
+            def get_angle(self):
+                return self._angle
+
+            def set_angle(self, value):
+                self._angle = value
+                self._update_pixmap()
+
+            angle = Property(float, get_angle, set_angle)
+
+            def spin(self, duration=600):
+                """Trigger a single 360° spin animation."""
+                anim = QPropertyAnimation(self, b"angle")
+                anim.setStartValue(0.0)
+                anim.setEndValue(360.0)
+                anim.setDuration(duration)
+                anim.finished.connect(lambda: setattr(self, '_angle', 0.0))
+                # Keep reference so it doesn't get garbage collected
+                self._spin_anim = anim
+                anim.start()
+
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        self._reload_icon = SpinningIconLabel(_icon_path, size=20, parent=stats_widget)
+        self._reload_icon.setToolTip("Glossary reload indicator")
+        stats_layout.addWidget(self._reload_icon)
+
         self.stats_label = QLabel("No glossary loaded")
         self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic;")
         stats_layout.addWidget(self.stats_label)
@@ -5664,17 +5723,6 @@ CRITICAL EXTRACTION RULES:
 
                 self._editor_last_mtime = current_mtime
 
-                # Snapshot current row data for change detection
-                old_rows = {}
-                try:
-                    for i in range(self.glossary_tree.topLevelItemCount()):
-                        item = self.glossary_tree.topLevelItem(i)
-                        if item:
-                            cols = tuple(item.text(c) for c in range(item.columnCount()))
-                            old_rows[i] = cols
-                except (RuntimeError, AttributeError):
-                    pass
-
                 # Save scroll position & selection before reload
                 saved_scroll = None
                 selected_indices = []
@@ -5703,59 +5751,22 @@ CRITICAL EXTRACTION RULES:
                 except (RuntimeError, AttributeError):
                     pass
 
-                # Detect changed/new rows and flash them yellow
-                changed_indices = []
+                # Visual indicator: spin icon + brief stats label update
                 try:
-                    new_count = self.glossary_tree.topLevelItemCount()
-                    for i in range(new_count):
-                        item = self.glossary_tree.topLevelItem(i)
-                        if not item:
-                            continue
-                        new_cols = tuple(item.text(c) for c in range(item.columnCount()))
-                        if i not in old_rows or old_rows[i] != new_cols:
-                            changed_indices.append(i)
-                except (RuntimeError, AttributeError):
-                    pass
-
-                if changed_indices:
-                    _flash_brush = QBrush(QColor("#fbbf24"))  # amber/yellow
-
-                    # Save selection before clearing for flash visibility
-                    _saved_sel = [
-                        self.glossary_tree.indexOfTopLevelItem(item)
-                        for item in self.glossary_tree.selectedItems()
-                    ]
-
-                    # Clear selection so yellow isn't hidden behind blue highlight
-                    self.glossary_tree.clearSelection()
-
-                    # Apply yellow highlight
-                    for idx in changed_indices:
-                        item = self.glossary_tree.topLevelItem(idx)
-                        if item:
-                            for c in range(item.columnCount()):
-                                item.setBackground(c, _flash_brush)
-
-                    # Clear flash after 600ms and restore selection if unchanged
-                    def _clear_flash():
+                    if hasattr(self, '_reload_icon'):
+                        self._reload_icon.spin(600)
+                    saved_stats = self.stats_label.text()
+                    self.stats_label.setText("Reloaded externally")
+                    self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic; color: #fbbf24;")
+                    def _restore_stats():
                         try:
-                            for idx in changed_indices:
-                                item = self.glossary_tree.topLevelItem(idx)
-                                if item:
-                                    for c in range(item.columnCount()):
-                                        # Remove background entirely so Qt uses native default
-                                        item.setData(c, Qt.BackgroundRole, None)
-                            # Restore selection only if user hasn't clicked something new
-                            current_sel = self.glossary_tree.selectedItems()
-                            if not current_sel and _saved_sel:
-                                for idx in _saved_sel:
-                                    item = self.glossary_tree.topLevelItem(idx)
-                                    if item:
-                                        item.setSelected(True)
+                            self.stats_label.setText(saved_stats)
+                            self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic;")
                         except (RuntimeError, AttributeError):
                             pass
-
-                    QTimer.singleShot(600, _clear_flash)
+                    QTimer.singleShot(1500, _restore_stats)
+                except Exception:
+                    pass
 
                 # Update mtime again after reload (save may have touched the file)
                 try:
