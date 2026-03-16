@@ -8277,47 +8277,34 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         
         max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         
-        # Run API call on a daemon thread so we can poll for stop signals
-        import queue as _queue
-        result_queue = _queue.Queue()
-        cancel_event = threading.Event()
+        # Use send_with_interrupt for retry/timeout/interrupt support
+        def _stop_check():
+            if os.environ.get('GRACEFUL_STOP') == '1' or is_stop_requested():
+                return True
+            if hasattr(client, 'is_globally_cancelled') and client.is_globally_cancelled():
+                return True
+            return False
         
-        def _title_api_call():
-            try:
-                result = client.send(messages=messages, temperature=temperature, max_tokens=max_tokens, context='book_title')
-                if not cancel_event.is_set():
-                    result_queue.put(result)
-            except Exception as e:
-                if not cancel_event.is_set():
-                    result_queue.put(e)
+        response = send_with_interrupt(
+            messages=messages,
+            client=client,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop_check_fn=_stop_check,
+            context='book_title',
+        )
         
-        api_thread = threading.Thread(target=_title_api_call, daemon=True)
-        api_thread.start()
+        # Extract content from response
+        if hasattr(response, 'content'):
+            translated_title = response.content
+        elif isinstance(response, tuple):
+            translated_title = response[0] if response else ""
+        else:
+            translated_title = str(response)
         
-        # Poll for result while checking stop signals every 0.5s
-        while True:
-            try:
-                result = result_queue.get(timeout=0.5)
-                if isinstance(result, Exception):
-                    raise result
-                translated_title, _ = result
-                break
-            except _queue.Empty:
-                # Check for graceful stop or force stop
-                if os.environ.get('GRACEFUL_STOP') == '1' or is_stop_requested():
-                    cancel_event.set()
-                    if hasattr(client, 'cancel_current_operation'):
-                        client.cancel_current_operation()
-                    print(f"⏭️ Title translation cancelled (stop requested)")
-                    return title
-                # Check for hard cancel
-                hard_cancelled = hasattr(client, 'is_globally_cancelled') and client.is_globally_cancelled()
-                if hard_cancelled:
-                    cancel_event.set()
-                    if hasattr(client, 'cancel_current_operation'):
-                        client.cancel_current_operation()
-                    print(f"⏭️ Title translation cancelled (force stop)")
-                    return title
+        if not translated_title:
+            print(f"⚠️ Empty response for title translation, keeping original")
+            return title
         
         print(f"[DEBUG] Raw API response: '{translated_title}'")
         print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
