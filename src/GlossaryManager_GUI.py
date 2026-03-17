@@ -514,6 +514,7 @@ class GlossaryManagerMixin:
                     ('glossary_auto_compression_checkbox', 'glossary_auto_compression_var'),
                     ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
                     ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
+                    ('skip_identical_entries_checkbox', 'glossary_skip_identical_entries_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -563,6 +564,8 @@ class GlossaryManagerMixin:
                             self.config['glossary_output_legacy_json'] = bool(checked)
                         elif checkbox_name == 'include_all_characters_checkbox':
                             self.config['glossary_include_all_characters'] = bool(checked)
+                        elif checkbox_name == 'skip_identical_entries_checkbox':
+                            self.config['glossary_skip_identical_entries'] = bool(checked)
 
                 # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
                 try:
@@ -975,6 +978,15 @@ class GlossaryManagerMixin:
         filter_combo_layout.addWidget(self.entry_type_filter_combo)
         self._add_combobox_arrow(self.entry_type_filter_combo)
         filter_combo_layout.addStretch()
+
+        # Skip identical entries toggle
+        self.skip_identical_entries_checkbox = self._create_styled_checkbox("Skip identical entries (translated = raw)")
+        self.skip_identical_entries_checkbox.setChecked(self.config.get('glossary_skip_identical_entries', True))
+        self.skip_identical_entries_checkbox.setToolTip(
+            "Skip glossary entries where the translated name is identical to the raw name.\n"
+            "These typically indicate the AI returned the name unchanged (e.g. Amazon → Amazon)."
+        )
+        type_control_layout.addWidget(self.skip_identical_entries_checkbox)
 
         type_control_layout.addStretch()
         

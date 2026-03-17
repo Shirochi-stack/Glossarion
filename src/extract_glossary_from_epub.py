@@ -1680,6 +1680,11 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 if not entry_map.get('raw_name') or not entry_map.get('translated_name'):
                     continue
 
+                # Skip entries where translated_name == raw_name (AI returned unchanged)
+                if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1':
+                    if str(entry_map.get('raw_name', '')).strip() == str(entry_map.get('translated_name', '')).strip():
+                        continue
+
                 entries.append(entry_map)
                 continue
 
@@ -1749,6 +1754,13 @@ def validate_extracted_entry(entry):
         return False
     if 'translated_name' not in entry or not entry['translated_name']:
         return False
+    
+    # Skip entries where translated_name == raw_name (AI returned unchanged)
+    if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1':
+        raw = str(entry.get('raw_name', '')).strip()
+        trans = str(entry.get('translated_name', '')).strip()
+        if raw and trans and raw == trans:
+            return False
     
     return True
 

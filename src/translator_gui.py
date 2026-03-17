@@ -1290,6 +1290,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_output_legacy_json_var = self.config.get('glossary_output_legacy_json', False)
         # Dynamic limit expansion toggle (include all characters)
         self.glossary_include_all_characters_var = self.config.get('glossary_include_all_characters', False)
+        # Skip identical entries toggle (translated_name == raw_name)
+        self.glossary_skip_identical_entries_var = self.config.get('glossary_skip_identical_entries', True)
         # Entry type filter mode
         self.glossary_entry_type_filter_mode_var = self.config.get('glossary_entry_type_filter_mode', 'none')
 
@@ -12037,6 +12039,7 @@ Important rules:
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
                     'COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
+                    'GLOSSARY_SKIP_IDENTICAL_ENTRIES': '1' if getattr(self, 'glossary_skip_identical_entries_var', True) else '0',
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
                     # Ensure fallback key pool is available to UnifiedClient (parity with translation path)
@@ -17543,6 +17546,7 @@ Important rules:
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
                 ('glossary_output_legacy_json', ['glossary_output_legacy_json_var'], False, bool),
                 ('glossary_include_all_characters', ['glossary_include_all_characters_var'], False, bool),
+                ('glossary_skip_identical_entries', ['glossary_skip_identical_entries_var'], True, bool),
                 ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
                 ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
 
@@ -17845,6 +17849,7 @@ Important rules:
                     ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
                     ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
                     ('GLOSSARY_INCLUDE_ALL_CHARACTERS', '1' if self.config.get('glossary_include_all_characters') else '0'),
+                    ('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1' if self.config.get('glossary_skip_identical_entries', True) else '0'),
                     ('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
                     ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
