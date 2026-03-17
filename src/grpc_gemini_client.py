@@ -47,6 +47,11 @@ try:
         SafetySetting,
         HarmCategory,
     )
+    # ThinkingConfig for thinking budget/level support
+    try:
+        from google.ai.generativelanguage_v1beta.types.generative_service import ThinkingConfig as _ThinkingConfig
+    except (ImportError, AttributeError):
+        _ThinkingConfig = None
     # Also try to import the raw protobuf stubs for direct gRPC usage
     try:
         from google.ai.generativelanguage_v1beta.services.generative_service import transports
@@ -409,10 +414,14 @@ class GrpcGeminiClient:
                         elif "PROHIBITED" in fr_str:
                             finish_reason = "prohibited_content"
                     
-                    # Extract text from parts
+                    # Extract text from parts (skip thought parts)
                     if candidate.content and candidate.content.parts:
                         for part in candidate.content.parts:
-                            if part.text:
+                            if getattr(part, 'thought', False):
+                                # Thinking part — estimate tokens from text length
+                                if part.text:
+                                    thinking_tokens += len(part.text) // 4
+                            elif part.text:
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
                                     # Line-buffered streaming output
@@ -454,6 +463,11 @@ class GrpcGeminiClient:
             usage = {}
             if last_response and last_response.usage_metadata:
                 um = last_response.usage_metadata
+                # Fallback: extract thinking tokens from final response if not captured during stream
+                if thinking_tokens == 0 and hasattr(um, 'thoughts_token_count'):
+                    tt = getattr(um, 'thoughts_token_count', 0)
+                    if tt and tt > 0:
+                        thinking_tokens = tt
                 usage = {
                     "prompt_tokens": getattr(um, "prompt_token_count", 0) or 0,
                     "completion_tokens": getattr(um, "candidates_token_count", 0) or 0,
@@ -587,6 +601,29 @@ class GrpcGeminiClient:
             if "frequency_penalty" in anti_dupe_params:
                 config_kwargs["frequency_penalty"] = anti_dupe_params["frequency_penalty"]
         
+        # Apply thinking configuration
+        if _ThinkingConfig is not None and (thinking_budget is not None or thinking_level is not None):
+            thinking_kwargs = {'include_thoughts': True}
+            if thinking_budget is not None and thinking_budget != -1:
+                thinking_kwargs['thinking_budget'] = thinking_budget
+            elif thinking_level is not None:
+                # ThinkingConfig proto only supports thinking_budget (int), not thinking_level
+                # Map level names to approximate budget values
+                level_budget_map = {
+                    'minimal': 1024,
+                    'low': 4096,
+                    'medium': 8192,
+                    'high': 24576,
+                }
+                level_str = thinking_level.lower() if isinstance(thinking_level, str) else str(thinking_level).lower()
+                budget_val = level_budget_map.get(level_str)
+                if budget_val is not None:
+                    thinking_kwargs['thinking_budget'] = budget_val
+            try:
+                config_kwargs['thinking_config'] = _ThinkingConfig(**thinking_kwargs)
+            except Exception as e:
+                logger.debug(f"Failed to set ThinkingConfig: {e}")
+        
         return GenerationConfig(**config_kwargs)
     
     def _build_safety_settings(self, disabled: bool) -> Optional[List]:
@@ -652,14 +689,22 @@ class GrpcGeminiClient:
                 elif "PROHIBITED" in fr_str:
                     finish_reason = "prohibited_content"
             
-            # Extract text from content parts
+            # Extract text from content parts (skip thought parts)
             if candidate.content:
                 raw_content_obj = candidate.content
                 text_parts = []
+                thought_text_len = 0
                 for part in candidate.content.parts:
-                    if part.text:
+                    if getattr(part, 'thought', False):
+                        # This is a thinking/reasoning part — count chars for token estimation
+                        if part.text:
+                            thought_text_len += len(part.text)
+                    elif part.text:
                         text_parts.append(part.text)
                 text_content = "".join(text_parts)
+                # Estimate thinking tokens from thought part text if usage_metadata didn't report them
+                if thought_text_len > 0 and thinking_tokens == 0:
+                    thinking_tokens = thought_text_len // 4  # rough estimate: ~4 chars per token
         
         # Try simple .text accessor
         if not text_content:
@@ -678,9 +723,11 @@ class GrpcGeminiClient:
                 "completion_tokens": getattr(um, "candidates_token_count", 0) or 0,
                 "total_tokens": getattr(um, "total_token_count", 0) or 0,
             }
-            if supports_thinking and hasattr(um, 'thoughts_token_count'):
-                thinking_tokens = um.thoughts_token_count or 0
-                usage["thinking_tokens"] = thinking_tokens
+            # Always extract thinking tokens when available
+            if hasattr(um, 'thoughts_token_count'):
+                thinking_tokens = getattr(um, 'thoughts_token_count', 0) or 0
+                if thinking_tokens > 0:
+                    usage["thinking_tokens"] = thinking_tokens
         
         # Check for prohibited content finish
         if finish_reason == "prohibited_content":

@@ -11885,7 +11885,7 @@ class UnifiedClient:
                             )
                         
                         # Log thinking tokens if available
-                        if supports_thinking and grpc_response.thinking_tokens > 0 and not self._is_stop_requested():
+                        if grpc_response.thinking_tokens > 0 and not self._is_stop_requested():
                             print(f"   💭 Thinking tokens used: {grpc_response.thinking_tokens}")
                         
                         # Convert GrpcGeminiResponse to UnifiedResponse
