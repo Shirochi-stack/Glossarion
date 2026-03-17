@@ -1342,6 +1342,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.system_prompt_to_user_var = self.config.get('system_prompt_to_user', False)
         os.environ['SYSTEM_PROMPT_TO_USER'] = '1' if self.system_prompt_to_user_var else '0'
         
+        # Force native Anthropic format toggle
+        self.force_native_anthropic_var = self.config.get('force_native_anthropic', False)
+        os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if self.force_native_anthropic_var else '0'
+        
         # Initialize compression-related variables
         self.enable_image_compression_var = self.config.get('enable_image_compression', False)
         self.auto_compress_enabled_var = self.config.get('auto_compress_enabled', True)

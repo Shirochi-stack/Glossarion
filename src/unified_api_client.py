@@ -10369,6 +10369,14 @@ class UnifiedClient:
         # This ensures Gemini always uses its native handler even when using OpenAI endpoint
         handler = handlers.get(actual_provider)
         
+        # Force Native Anthropic Format: route Claude models to native handler
+        if (os.getenv('FORCE_NATIVE_ANTHROPIC', '0') == '1'
+                and hasattr(self, 'model') and self.model
+                and 'claude' in self.model.lower()
+                and actual_provider != 'anthropic'):
+            logger.info(f"Force Native Anthropic: routing {self.model} to Anthropic handler")
+            handler = self._send_anthropic
+        
         if not handler:
             # Fallback to client_type if no actual_provider match
             handler = handlers.get(self.client_type)
@@ -12694,9 +12702,22 @@ class UnifiedClient:
         anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
         data = self._build_anthropic_payload(formatted_messages, temperature, max_tokens, anti_dupe_params, system_message)
         
+        # Use custom base_url if set (for Force Native Anthropic on custom endpoints),
+        # otherwise default to the official Anthropic API
+        if hasattr(self, 'base_url') and self.base_url and os.getenv('FORCE_NATIVE_ANTHROPIC', '0') == '1':
+            base = self.base_url.rstrip('/')
+            # Strip trailing /v1/messages, /v1, /chat/completions etc. to get clean base
+            for suffix in ['/v1/messages', '/v1/chat/completions', '/v1', '/chat/completions']:
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
+            api_url = f"{base}/v1/messages"
+        else:
+            api_url = "https://api.anthropic.com/v1/messages"
+        
         resp = self._http_request_with_retries(
             method="POST",
-            url="https://api.anthropic.com/v1/messages",
+            url=api_url,
             headers=headers,
             json=data,
             expected_status=(200,),

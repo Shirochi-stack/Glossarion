@@ -1182,8 +1182,9 @@ class GlossaryManagerMixin:
         algo_layout.addWidget(self.duplicate_algo_combo)
         
         # Info button
-        algo_info_btn = QPushButton("ℹ️ Info")
+        algo_info_btn = QPushButton("ℹ️")
         algo_info_btn.setFixedWidth(80)
+        algo_info_btn.setStyleSheet("QPushButton { background-color: transparent; border: none; font-size: 14pt; } QPushButton:hover { color: #5a9fd4; }")
         
         def show_algorithm_info():
             msg_box = QMessageBox(parent)

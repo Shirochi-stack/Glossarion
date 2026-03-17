@@ -2785,6 +2785,41 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for Anthropic controls
     self.toggle_anthropic_thinking_controls()
 
+    # Force Native Anthropic Format toggle
+    native_anthropic_row = QWidget()
+    native_anthropic_h = QHBoxLayout(native_anthropic_row)
+    native_anthropic_h.setContentsMargins(20, 2, 0, 0)
+
+    if not hasattr(self, 'force_native_anthropic_var'):
+        self.force_native_anthropic_var = bool(
+            self.config.get(
+                'force_native_anthropic',
+                str(os.environ.get('FORCE_NATIVE_ANTHROPIC', '0')) == '1'
+            )
+        )
+    native_anthropic_cb = self._create_styled_checkbox("Force native Anthropic format for Claude models")
+    native_anthropic_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Routes Claude models through the native Anthropic Messages API handler "
+        "instead of OpenAI-compatible format. Enable this if your custom endpoint "
+        "expects the Anthropic message format (system as top-level field, not a message role)."
+        "</p></qt>"
+    )
+    try:
+        native_anthropic_cb.setChecked(bool(self.force_native_anthropic_var))
+    except Exception:
+        pass
+    def _on_force_native_anthropic_toggle(checked):
+        try:
+            self.force_native_anthropic_var = bool(checked)
+            self.config['force_native_anthropic'] = self.force_native_anthropic_var
+            os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if checked else '0'
+        except Exception:
+            pass
+    native_anthropic_cb.toggled.connect(_on_force_native_anthropic_toggle)
+    native_anthropic_h.addWidget(native_anthropic_cb)
+    native_anthropic_h.addStretch()
+    section_v.addWidget(native_anthropic_row)
 
     # Parallel Extraction
     parallel_title = QLabel("Parallel Extraction")
