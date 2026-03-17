@@ -121,7 +121,7 @@ class GlossaryManagerMixin:
         global_stylesheet = """
             /* Global dark mode styling */
             QDialog {
-                background-color: #2d2d2d;
+                background-color: #1e1e1e;
                 color: white;
             }
             QWidget {
