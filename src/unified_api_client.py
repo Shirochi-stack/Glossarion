@@ -11556,15 +11556,8 @@ class UnifiedClient:
                     print("   ⚠️ Gemini 3 Pro does not support disabled thinking; using low instead of 0")
             thinking_budget = -1  # avoid sending 0 budget for Gemini 3
 
-        # Gemini 3 Pro (non-flash):
-        # - "minimal" is not supported; coerce to low.
-        # - "medium" is supported on Gemini 3.1 Pro, but NOT on Gemini 3.0 Pro (e.g., gemini-3-pro-preview).
-        if "gemini-3-pro" in model_lower and "flash" not in model_lower:
-            is_gemini_31 = "gemini-3.1" in model_lower
-            if thinking_level == "medium" and not is_gemini_31:
-                thinking_level = "high"
-                if not self._is_stop_requested():
-                    print("   ⚠️ Gemini 3 Pro (non-3.1) does not support thinking_level=medium; falling back to high")
+        # Gemini 3.x Pro (non-flash) does not support thinking_level=minimal; coerce to low.
+        if "gemini-3" in model_lower and "pro" in model_lower and "flash" not in model_lower:
             if thinking_level == "minimal":
                 thinking_level = "low"
                 if not self._is_stop_requested():
