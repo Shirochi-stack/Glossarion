@@ -7833,9 +7833,9 @@ _GPT_EFFORT_MAP = {1: 'none', 2: 'low', 3: 'medium', 4: 'high', 5: 'xhigh'}
 def _get_thinking_skip_values():
     """Get skip-thinking overrides based on LIGHTWEIGHT_THINKING_LEVEL slider."""
     try:
-        level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '2'))
+        level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '1'))
     except (ValueError, TypeError):
-        level = 2
+        level = 1
     level = max(1, min(5, level))
     return {
         'GEMINI_THINKING_LEVEL': _GEMINI_LEVEL_MAP[level],
@@ -7867,7 +7867,7 @@ def _skip_thinking_env(context_key):
     
     # Save originals and override
     _label = context_key.replace('_', ' ').title()
-    level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '2'))
+    level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '1'))
     print(f"   ⏭️ Reduced thinking for {_label} (level {level}: Gemini={skip_values['GEMINI_THINKING_LEVEL']}, GPT={skip_values['GPT_EFFORT']})")
     saved = {}
     for key in _THINKING_ENV_KEYS:

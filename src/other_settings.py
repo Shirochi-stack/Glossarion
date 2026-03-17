@@ -6505,7 +6505,7 @@ def _create_processing_options_section(self, parent):
     skip_toc_cb.setContentsMargins(20, 0, 0, 0)
     left_v.addWidget(skip_toc_cb)
 
-    skip_desc = QLabel("Reduces thinking for lightweight tasks.\nDisables DeepSeek/Anthropic thinking entirely.")
+    skip_desc = QLabel("Reduces thinking for lightweight tasks.\nDisables DeepSeek R1 and Anthropic extended thinking.")
     skip_desc.setStyleSheet("color: gray; font-size: 10pt;")
     skip_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(skip_desc)
@@ -6532,7 +6532,7 @@ def _create_processing_options_section(self, parent):
     gemini_levels = {1: 'Minimal', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'High'}
     gpt_levels = {1: 'None', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'xHigh'}
 
-    current_val = int(getattr(self, 'lightweight_thinking_level_var', 2))
+    current_val = int(getattr(self, 'lightweight_thinking_level_var', 1))
     think_slider.setValue(current_val)
 
     think_label = QLabel(f"{current_val} — Gemini: {gemini_levels[current_val]}, GPT: {gpt_levels[current_val]}")
