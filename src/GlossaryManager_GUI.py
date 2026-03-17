@@ -124,6 +124,9 @@ class GlossaryManagerMixin:
                 background-color: #2d2d2d;
                 color: white;
             }
+            QWidget {
+                background-color: transparent;
+            }
             QGroupBox {
                 color: white;
                 border: 1px solid #555;
