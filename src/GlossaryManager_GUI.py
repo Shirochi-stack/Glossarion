@@ -982,6 +982,7 @@ class GlossaryManagerMixin:
         self._add_combobox_arrow(self.entry_type_filter_combo)
 
         # Skip identical entries toggle (right of the filter dropdown)
+        filter_combo_layout.addSpacing(15)
         self.skip_identical_entries_checkbox = self._create_styled_checkbox("Skip identical entries (translated = raw)")
         self.skip_identical_entries_checkbox.setChecked(self.config.get('glossary_skip_identical_entries', True))
         self.skip_identical_entries_checkbox.setToolTip(
