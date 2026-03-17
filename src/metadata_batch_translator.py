@@ -2864,7 +2864,7 @@ class MetadataTranslator:
                 
                 for field, value in translated.items():
                     if field in metadata:
-                        print(f"✔ Translated {field}: {metadata[field]} → {value}")
+                        print(f"✔ Translated {field}: {metadata[field]} ↓ {value}")
                         
                 return translated
             else:
