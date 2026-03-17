@@ -13374,6 +13374,25 @@ class UnifiedClient:
                     
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
+
+                    # Claude via OpenAI-compatible proxies (Bedrock, custom endpoints, etc.)
+                    # Claude's Messages API rejects "system" as a role in the messages array;
+                    # it expects the system prompt as a separate top-level field.
+                    # Extract system messages and pass them via extra_body["system"].
+                    _claude_indicators = ('claude', 'sonnet', 'opus', 'haiku')
+                    _effective_lower = effective_model.lower()
+                    if any(ind in _effective_lower for ind in _claude_indicators):
+                        _sys_parts = []
+                        _non_sys_messages = []
+                        for _msg in params.get("messages", []):
+                            if _msg.get("role") == "system":
+                                _sys_parts.append(_msg.get("content", ""))
+                            else:
+                                _non_sys_messages.append(_msg)
+                        if _sys_parts:
+                            params["messages"] = _non_sys_messages
+                            extra_body["system"] = "\n\n".join(_sys_parts)
+
                     enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
                     is_chutes_thinking_endpoint = str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1'
                     
