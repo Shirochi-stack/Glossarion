@@ -594,7 +594,8 @@ class GrpcGeminiClient:
         
         # Apply thinking configuration
         if _ThinkingConfig is not None and (thinking_budget is not None or thinking_level is not None):
-            thinking_kwargs = {'include_thoughts': True}
+            include_thoughts = os.getenv("ENABLE_THOUGHTS", "false").strip().lower() in ("1", "true", "yes", "on")
+            thinking_kwargs = {'include_thoughts': include_thoughts}
             if thinking_budget is not None and thinking_budget != -1:
                 thinking_kwargs['thinking_budget'] = thinking_budget
             elif thinking_level is not None:

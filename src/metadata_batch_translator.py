@@ -2872,6 +2872,10 @@ class MetadataTranslator:
                 return {}
             
         except Exception as e:
+            error_type = getattr(e, 'error_type', '')
+            if error_type == 'cancelled' or 'stopped by user' in str(e).lower():
+                print(f"⏭️ Metadata translation cancelled by user")
+                return {}
             print(f"❌ Error translating metadata: {repr(e)}")
             import traceback; traceback.print_exc()
             return {}
