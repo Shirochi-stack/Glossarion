@@ -438,7 +438,7 @@ class GrpcGeminiClient:
                 if chunk.usage_metadata:
                     if hasattr(chunk.usage_metadata, 'thoughts_token_count'):
                         tt = chunk.usage_metadata.thoughts_token_count
-                        if tt and tt > 0:
+                        if tt is not None and tt > 0:
                             thinking_tokens = tt
             
             # Flush remaining log buffer
@@ -599,7 +599,7 @@ class GrpcGeminiClient:
                 thinking_kwargs['thinking_budget'] = thinking_budget
             elif thinking_level is not None:
                 # Proto only supports thinking_budget (int), not thinking_level
-                level_budget_map = {'minimal': 512, 'low': 4096, 'medium': 12288, 'high': 32768 }
+                level_budget_map = {'minimal': 0, 'low': 4096, 'medium': 12288, 'high': 32768 }
                 level_str = str(thinking_level).lower()
                 budget_val = level_budget_map.get(level_str)
                 if budget_val is not None:

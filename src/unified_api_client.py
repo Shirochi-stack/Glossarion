@@ -11797,7 +11797,7 @@ class UnifiedClient:
                                 print(f"   💭 Thinking tokens used: {thinking_tokens}")
                                 thinking_tokens_displayed = True
                             elif is_gemini_3 and thinking_level:
-                                print(f"   💭 Thinking level '{thinking_level}' requested")
+                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == 0:
                                 print(f"   ✅ Thinking disabled")
@@ -11884,9 +11884,11 @@ class UnifiedClient:
                                 stop_check_fn=self._is_stop_requested,
                             )
                         
-                        # Log thinking tokens if available
-                        if supports_thinking and grpc_response.thinking_tokens > 0 and not self._is_stop_requested():
-                            print(f"   💭 Thinking tokens used: {grpc_response.thinking_tokens}")
+                        if supports_thinking and not self._is_stop_requested():
+                            if grpc_response.thinking_tokens > 0:
+                                print(f"   💭 Thinking tokens used: {grpc_response.thinking_tokens}")
+                            elif is_gemini_3 and thinking_level:
+                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
                         
                         # Convert GrpcGeminiResponse to UnifiedResponse
                         text_content = grpc_response.text
@@ -12307,7 +12309,7 @@ class UnifiedClient:
                                 print(f"   💭 Thinking tokens used: {usage.thoughts_token_count}")
                             else:
                                 if is_gemini_3 and thinking_level:
-                                    print(f"   💭 Thinking level '{thinking_level}' requested")
+                                    print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
                                 else:
                                     print(f"   ✅ Thinking disabled")
                     
