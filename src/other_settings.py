@@ -6538,6 +6538,24 @@ def _create_processing_options_section(self, parent):
     think_label = QLabel(f"{current_val} — Gemini: {gemini_levels[current_val]}, GPT: {gpt_levels[current_val]}")
     think_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
 
+    def _update_slider_state():
+        any_checked = skip_title_cb.isChecked() or skip_metadata_cb.isChecked() or skip_toc_cb.isChecked()
+        think_slider.setEnabled(any_checked)
+        think_slider_title.setEnabled(any_checked)
+        think_label.setEnabled(any_checked)
+        if any_checked:
+            think_slider_title.setStyleSheet("font-weight: bold; font-size: 10pt; margin-top: 4px;")
+            think_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
+        else:
+            think_slider_title.setStyleSheet("font-weight: bold; font-size: 10pt; margin-top: 4px; color: #555;")
+            think_label.setStyleSheet("color: #555; font-size: 9pt;")
+
+    # Connect all 3 checkboxes to update slider state
+    skip_title_cb.toggled.connect(lambda _: _update_slider_state())
+    skip_metadata_cb.toggled.connect(lambda _: _update_slider_state())
+    skip_toc_cb.toggled.connect(lambda _: _update_slider_state())
+    _update_slider_state()  # Set initial state
+
     def _on_think_slider_changed(val):
         try:
             self.lightweight_thinking_level_var = val
