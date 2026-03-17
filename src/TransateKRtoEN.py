@@ -7826,22 +7826,34 @@ _THINKING_ENV_KEYS = (
     'ENABLE_ANTHROPIC_THINKING',
 )
 
-_THINKING_SKIP_VALUES = {
-    'GEMINI_THINKING_LEVEL': 'minimal',
-    'THINKING_BUDGET': '-1',
-    'ENABLE_GEMINI_THINKING': '0',
-    'ENABLE_GPT_THINKING': '0',
-    'GPT_EFFORT': 'none',
-    'ENABLE_DEEPSEEK_THINKING': '0',
-    'ENABLE_ANTHROPIC_THINKING': '0',
-}
+# Mappings for the "Think a little" slider (1-5)
+_GEMINI_LEVEL_MAP = {1: 'minimal', 2: 'low', 3: 'medium', 4: 'high', 5: 'high'}
+_GPT_EFFORT_MAP = {1: 'none', 2: 'low', 3: 'medium', 4: 'high', 5: 'xhigh'}
+
+def _get_thinking_skip_values():
+    """Get skip-thinking overrides based on LIGHTWEIGHT_THINKING_LEVEL slider."""
+    try:
+        level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '2'))
+    except (ValueError, TypeError):
+        level = 2
+    level = max(1, min(5, level))
+    return {
+        'GEMINI_THINKING_LEVEL': _GEMINI_LEVEL_MAP[level],
+        'THINKING_BUDGET': '-1',
+        'ENABLE_GEMINI_THINKING': '0',
+        'ENABLE_GPT_THINKING': '1' if level > 1 else '0',
+        'GPT_EFFORT': _GPT_EFFORT_MAP[level],
+        'ENABLE_DEEPSEEK_THINKING': '0',
+        'ENABLE_ANTHROPIC_THINKING': '0',
+    }
 
 @contextmanager
 def _skip_thinking_env(context_key):
-    """Temporarily override thinking env vars to minimal/off for lightweight tasks.
+    """Temporarily override thinking env vars for lightweight tasks.
     
     context_key: one of 'BOOK_TITLE', 'METADATA', 'TOC'
-    Checks SKIP_{context_key}_THINKING env var; if '1', overrides all thinking settings.
+    Checks SKIP_{context_key}_THINKING env var; if '1', overrides thinking settings
+    based on the LIGHTWEIGHT_THINKING_LEVEL slider (1-5).
     """
     env_var = f'SKIP_{context_key}_THINKING'
     should_skip = os.environ.get(env_var, '0') == '1'
@@ -7850,13 +7862,17 @@ def _skip_thinking_env(context_key):
         yield
         return
     
+    # Get dynamic skip values from slider
+    skip_values = _get_thinking_skip_values()
+    
     # Save originals and override
     _label = context_key.replace('_', ' ').title()
-    print(f"   ⏭️ Skipping thinking for {_label}")
+    level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '2'))
+    print(f"   ⏭️ Reduced thinking for {_label} (level {level}: Gemini={skip_values['GEMINI_THINKING_LEVEL']}, GPT={skip_values['GPT_EFFORT']})")
     saved = {}
     for key in _THINKING_ENV_KEYS:
         saved[key] = os.environ.get(key)
-        os.environ[key] = _THINKING_SKIP_VALUES[key]
+        os.environ[key] = skip_values[key]
     
     try:
         yield

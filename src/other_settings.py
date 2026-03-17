@@ -6505,10 +6505,59 @@ def _create_processing_options_section(self, parent):
     skip_toc_cb.setContentsMargins(20, 0, 0, 0)
     left_v.addWidget(skip_toc_cb)
 
-    skip_desc = QLabel("Sets Gemini thinking to minimal, GPT effort to none,\nand disables DeepSeek/Anthropic thinking for these tasks.")
+    skip_desc = QLabel("Reduces thinking for lightweight tasks.\nDisables DeepSeek/Anthropic thinking entirely.")
     skip_desc.setStyleSheet("color: gray; font-size: 10pt;")
     skip_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(skip_desc)
+
+    # "Lightweight Thinking" slider
+    think_slider_title = QLabel("Lightweight Thinking")
+    think_slider_title.setStyleSheet("font-weight: bold; font-size: 10pt; margin-top: 4px;")
+    think_slider_title.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(think_slider_title)
+
+    think_slider_h = QHBoxLayout()
+    think_slider_h.setContentsMargins(20, 0, 0, 0)
+
+    from PySide6.QtWidgets import QSlider
+    think_slider = QSlider(Qt.Horizontal)
+    think_slider.setMinimum(1)
+    think_slider.setMaximum(5)
+    think_slider.setTickPosition(QSlider.TicksBelow)
+    think_slider.setTickInterval(1)
+    think_slider.setSingleStep(1)
+    think_slider.setPageStep(1)
+    think_slider.setFixedWidth(180)
+
+    gemini_levels = {1: 'Minimal', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'High'}
+    gpt_levels = {1: 'None', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'xHigh'}
+
+    current_val = int(getattr(self, 'lightweight_thinking_level_var', 2))
+    think_slider.setValue(current_val)
+
+    think_label = QLabel(f"{current_val} — Gemini: {gemini_levels[current_val]}, GPT: {gpt_levels[current_val]}")
+    think_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
+
+    def _on_think_slider_changed(val):
+        try:
+            self.lightweight_thinking_level_var = val
+            think_label.setText(f"{val} — Gemini: {gemini_levels[val]}, GPT: {gpt_levels[val]}")
+            os.environ['LIGHTWEIGHT_THINKING_LEVEL'] = str(val)
+        except Exception:
+            pass
+    think_slider.valueChanged.connect(_on_think_slider_changed)
+
+    think_slider.setToolTip(
+        "Controls thinking intensity for lightweight tasks (title, metadata, TOC).\n\n"
+        "Gemini levels:  1=Minimal  2=Low  3=Medium  4=High  5=High\n"
+        "GPT levels:       1=None     2=Low  3=Medium  4=High  5=xHigh\n\n"
+        "Lower = faster & cheaper. Higher = better quality."
+    )
+
+    think_slider_h.addWidget(think_slider)
+    think_slider_h.addWidget(think_label)
+    think_slider_h.addStretch()
+    left_v.addLayout(think_slider_h)
 
     # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
     empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")

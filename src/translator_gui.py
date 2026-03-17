@@ -1253,9 +1253,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.anthropic_force_adaptive_var = self.config.get('anthropic_force_adaptive', False)
         self.anthropic_effort_var = self.config.get('anthropic_effort', 'medium')
         # Skip thinking for lightweight tasks
-        self.skip_book_title_thinking_var = self.config.get('skip_book_title_thinking', False)
-        self.skip_metadata_thinking_var = self.config.get('skip_metadata_thinking', False)
+        self.skip_book_title_thinking_var = self.config.get('skip_book_title_thinking', True)
+        self.skip_metadata_thinking_var = self.config.get('skip_metadata_thinking', True)
         self.skip_toc_thinking_var = self.config.get('skip_toc_thinking', False)
+        self.lightweight_thinking_level_var = self.config.get('lightweight_thinking_level', 2)
         self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.1))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
@@ -10773,9 +10774,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ANTHROPIC_FORCE_ADAPTIVE': "1" if getattr(self, 'anthropic_force_adaptive_var', False) else "0",
             'ANTHROPIC_EFFORT': getattr(self, 'anthropic_effort_var', 'medium'),
             # Skip thinking for lightweight tasks
-            'SKIP_BOOK_TITLE_THINKING': "1" if getattr(self, 'skip_book_title_thinking_var', False) else "0",
-            'SKIP_METADATA_THINKING': "1" if getattr(self, 'skip_metadata_thinking_var', False) else "0",
+            'SKIP_BOOK_TITLE_THINKING': "1" if getattr(self, 'skip_book_title_thinking_var', True) else "0",
+            'SKIP_METADATA_THINKING': "1" if getattr(self, 'skip_metadata_thinking_var', True) else "0",
             'SKIP_TOC_THINKING': "1" if getattr(self, 'skip_toc_thinking_var', False) else "0",
+            'LIGHTWEIGHT_THINKING_LEVEL': str(getattr(self, 'lightweight_thinking_level_var', 2)),
             'OPENROUTER_EXCLUDE': '1',
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
@@ -17505,9 +17507,10 @@ Important rules:
                 ('anthropic_force_adaptive', ['anthropic_force_adaptive_var'], False, bool),
                 ('anthropic_effort', ['anthropic_effort_var'], 'medium', str),
                 # Skip thinking for lightweight tasks
-                ('skip_book_title_thinking', ['skip_book_title_thinking_var'], False, bool),
-                ('skip_metadata_thinking', ['skip_metadata_thinking_var'], False, bool),
+                ('skip_book_title_thinking', ['skip_book_title_thinking_var'], True, bool),
+                ('skip_metadata_thinking', ['skip_metadata_thinking_var'], True, bool),
                 ('skip_toc_thinking', ['skip_toc_thinking_var'], False, bool),
+                ('lightweight_thinking_level', ['lightweight_thinking_level_var'], 2, int),
                 
                 # Chapter processing
                 ('chapter_number_offset', ['chapter_number_offset_var'], 0, lambda v: safe_int(v, 0)),
