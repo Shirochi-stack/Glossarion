@@ -1693,13 +1693,12 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
             avg_chars = total_chars // enhanced_count if enhanced_count > 0 else 0
             print(f"   🚀 Enhanced extraction: {enhanced_count}/{len(chapters)} chapters, {total_chars:,} total chars (avg: {avg_chars:,})")
         
-        # Check for gaps (skip if chapter count covers the full range — duplicates, not gaps)
+        # Check for gaps
         chapter_nums = [c["num"] for c in chapters]
-        expected_range_size = max(chapter_nums) - min(chapter_nums) + 1
-        if len(chapters) < expected_range_size:
-            missing = set(range(min(chapter_nums), max(chapter_nums) + 1)) - set(chapter_nums)
-            if missing:
-                print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
+        expected_nums = list(range(min(chapter_nums), max(chapter_nums) + 1))
+        missing = set(expected_nums) - set(chapter_nums)
+        if missing:
+            print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
     
     # Language detection
     combined_sample = ' '.join(sample_texts) if effective_mode == "smart" else ''
@@ -2169,13 +2168,11 @@ def _print_extraction_summary( chapters, detected_language, extraction_mode, h1_
         print(f"   • Merged chapters: {merged_count}")
     
     # Check for missing chapters (only for integer sequences)
-    expected_range_size = chapters[-1]['num'] - chapters[0]['num'] + 1
-    if len(chapters) < expected_range_size:
-        expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
-        actual_chapters = set(c['num'] for c in chapters)
-        missing = expected_chapters - actual_chapters
-        if missing:
-            print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
+    expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
+    actual_chapters = set(c['num'] for c in chapters)
+    missing = expected_chapters - actual_chapters
+    if missing:
+        print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
     
     if extraction_mode == "smart":
         method_stats = Counter(c['detection_method'] for c in chapters)
