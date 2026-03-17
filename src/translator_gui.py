@@ -16042,12 +16042,14 @@ Important rules:
                 
                 nl = QLabel(name)
                 nl.setFont(QFont("Arial", 11, QFont.Bold))
+                nl.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 nl.setStyleSheet("background:transparent; color:white; border:none;")
                 cl.addWidget(nl)
                 
                 dl = QLabel(desc)
                 dl.setFont(QFont("Arial", 10))
                 dl.setWordWrap(True)
+                dl.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 dl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                 cl.addWidget(dl)
             
@@ -16057,6 +16059,7 @@ Important rules:
                              "Example: eh/gpt-5.4 routes GPT-5.4 through ElectronHub. No prefix = direct API call.")
             pfx_note.setWordWrap(True)
             pfx_note.setAlignment(Qt.AlignCenter)
+            pfx_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
             pfx_note.setFont(QFont("Arial", 9))
             pfx_note.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
             p4_lay.addWidget(pfx_note)
