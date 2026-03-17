@@ -9479,13 +9479,15 @@ def main(log_callback=None, stop_callback=None):
                 config.TEMP
             )
             
-            metadata["original_title"] = original_title
-            metadata["title"] = translated_title
-            metadata["title_translated"] = True
-            
-            print(f"📚 Translated title: {translated_title}")
-        else:
-            print("❌ Title translation skipped due to stop request")
+            # Only mark as translated if the title actually changed
+            # (translate_title returns original on interrupt/error/graceful stop)
+            if translated_title and translated_title != original_title:
+                metadata["original_title"] = original_title
+                metadata["title"] = translated_title
+                metadata["title_translated"] = True
+                print(f"📚 Translated title: {translated_title}")
+            else:
+                print(f"⚠️ Title unchanged (interrupted or failed) — will retry on next run")
             
     # Translate other metadata fields if configured
     translate_metadata_fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
