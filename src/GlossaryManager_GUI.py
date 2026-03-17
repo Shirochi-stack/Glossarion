@@ -980,21 +980,21 @@ class GlossaryManagerMixin:
         self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 2))
         filter_combo_layout.addWidget(self.entry_type_filter_combo)
         self._add_combobox_arrow(self.entry_type_filter_combo)
-        filter_combo_layout.addStretch()
 
-        type_control_layout.addStretch()
-        
-        # Initialize checkboxes
-        update_type_checkboxes()
-
-        # Skip identical entries toggle (below the grid, full-width)
+        # Skip identical entries toggle (right of the filter dropdown)
         self.skip_identical_entries_checkbox = self._create_styled_checkbox("Skip identical entries (translated = raw)")
         self.skip_identical_entries_checkbox.setChecked(self.config.get('glossary_skip_identical_entries', True))
         self.skip_identical_entries_checkbox.setToolTip(
             "Skip glossary entries where the translated name is identical to the raw name.\n"
             "These typically indicate the AI returned the name unchanged (e.g. Amazon → Amazon)."
         )
-        type_filter_layout.addWidget(self.skip_identical_entries_checkbox)
+        filter_combo_layout.addWidget(self.skip_identical_entries_checkbox)
+        filter_combo_layout.addStretch()
+
+        type_control_layout.addStretch()
+        
+        # Initialize checkboxes
+        update_type_checkboxes()
         
         # Custom fields section
         custom_frame = QGroupBox("Custom Fields (Additional Columns)")
