@@ -1183,21 +1183,31 @@ class GlossaryManagerMixin:
         
         # Info button
         algo_info_btn = QPushButton("ℹ️ Info")
-        algo_info_btn.setFixedWidth(60)
+        algo_info_btn.setFixedWidth(80)
         
         def show_algorithm_info():
             msg_box = QMessageBox(parent)
             msg_box.setWindowTitle("Algorithm Information")
             msg_box.setIcon(QMessageBox.Information)
+            msg_box.setStyleSheet("""
+                QMessageBox { background-color: #1e1e1e; }
+                QMessageBox QLabel { color: white; background-color: transparent; }
+                QPushButton {
+                    background-color: #3d3d3d; color: white;
+                    border: 1px solid #4a5568; border-radius: 3px;
+                    padding: 6px 20px; min-width: 60px;
+                }
+                QPushButton:hover { background-color: #4d4d4d; border-color: #5a9fd4; }
+            """)
             msg_box.setText(
                 "<b>Auto</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score.<br><br>"
                 "<b>Strict</b>: Only matches very similar names (95%+ similarity). Keeps more entries, minimal merging. Good if you want to review duplicates manually.<br><br>"
-                "<b>Balanced</b>: Uses token-based and partial matching. Handles word order (‘Park Ji-sung’ = ‘Ji-sung Park’) and substrings. Good middle ground.<br><br>"
-                "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants (‘Catherine’ = ‘Katherine’). May over-merge similar names.<br><br>"
-                "<b>Basic Only</b>: Simple Levenshtein distance. Faster but less accurate. May miss variants like ‘Kim Sang-hyun’ vs ‘Kim Sanghyun’."
+                "<b>Balanced</b>: Uses token-based and partial matching. Handles word order ('Park Ji-sung' = 'Ji-sung Park') and substrings. Good middle ground.<br><br>"
+                "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants ('Catherine' = 'Katherine'). May over-merge similar names.<br><br>"
+                "<b>Basic Only</b>: Simple Levenshtein distance. Faster but less accurate. May miss variants like 'Kim Sang-hyun' vs 'Kim Sanghyun'."
             )
             
-            # Set size using screen ratios: 40% width, 50% height
+            # Set size using screen ratios
             screen_width = self._screen.width()
             screen_height = self._screen.height()
             msg_box.setMinimumWidth(int(screen_width * 0.40))
