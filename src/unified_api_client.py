@@ -10398,6 +10398,9 @@ class UnifiedClient:
             # Always use Gemini handler for Gemini models, regardless of transport
             logger.debug(f"Routing to Gemini handler (actual provider: {actual_provider}, client_type: {self.client_type})")
             return self._send_gemini(messages, temperature, max_tokens, response_name)
+        elif handler == self._send_anthropic and os.getenv('FORCE_NATIVE_ANTHROPIC', '0') == '1':
+            # Force Native Anthropic: dispatch with Anthropic signature (4 args, no max_completion_tokens)
+            return handler(messages, temperature, max_tokens, response_name)
         elif actual_provider == 'nvidia' and os.getenv('USE_NVIDIA_HTTP', '0') == '1':
             # Optional direct HTTP path for NVIDIA NIM if SDK path stalls
             return self._send_nvidia_http(messages, temperature, max_tokens, response_name)
