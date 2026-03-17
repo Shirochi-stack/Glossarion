@@ -5085,30 +5085,54 @@ CRITICAL EXTRACTION RULES:
             if not changes:
                 return 0, 0
             
-            # Derive target directory ONLY from the loaded glossary file path
-            # The glossary is typically at <book_output>/glossary.csv or <book_output>/Glossary/glossary.csv
             glossary_path = self.editor_file_entry.text()
             if not glossary_path or not os.path.exists(glossary_path):
                 self.append_log("⚠️ Cannot update HTML files: no glossary file loaded.")
                 return 0, 0
             
             glossary_dir = os.path.dirname(glossary_path)
-            # If glossary is in a "Glossary" subfolder, go up one level to get book output dir
-            if os.path.basename(glossary_dir).lower() == 'glossary':
-                book_output_dir = os.path.dirname(glossary_dir)
+            glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]  # e.g. "BookName_glossary" or "glossary"
+            parent_of_glossary_dir = os.path.dirname(glossary_dir)
+            is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
+
+            # ----- Determine the book output directory -----
+            # Minimal mode:   <output_dir>/<book>/glossary.csv  OR  <output_dir>/<book>/Glossary/glossary.csv
+            # Balanced/Full:  <output_dir>/Glossary/<book>_glossary.csv
+            book_output_dir = None
+
+            if is_shared_glossary_folder:
+                # Try to extract book name from filename pattern <book>_glossary.<ext>
+                book_name = None
+                for suffix in ('_glossary', '_Glossary'):
+                    if glossary_fname.endswith(suffix):
+                        book_name = glossary_fname[:-len(suffix)]
+                        break
+                if not book_name:
+                    # Also try just the filename as book name (e.g. "BookName.csv" in Glossary/)
+                    book_name = glossary_fname
+
+                if book_name:
+                    candidate = os.path.join(parent_of_glossary_dir, book_name)
+                    if os.path.isdir(candidate):
+                        book_output_dir = candidate
+
+                # Fallback: if we couldn't resolve per-book dir, use parent
+                if not book_output_dir:
+                    book_output_dir = parent_of_glossary_dir
             else:
+                # Glossary is directly in the book output dir (minimal mode without subfolder)
                 book_output_dir = glossary_dir
-            
+
             if not os.path.isdir(book_output_dir):
                 self.append_log(f"⚠️ Cannot update HTML files: directory not found: {book_output_dir}")
                 return 0, 0
 
+            self.append_log(f"📁 Scanning for HTML files in: {book_output_dir}")
+
             files_updated = 0
             total_replacements = 0
             
-            # Excluded files: .csv, .json, metadata files (except glossary files)
             excluded_extensions = {'.csv', '.json'}
-            allowed_names = {'glossary.csv', 'glossary.json'}
             excluded_names = {'metadata.json', 'metadata.opf', 'metadata.xml', 'content.opf', 'toc.ncx'}
 
             # Only process files directly in book_output_dir (no subfolders)
@@ -5117,12 +5141,11 @@ CRITICAL EXTRACTION RULES:
                 if not os.path.isfile(path):
                     continue
                 lower_name = name.lower()
-                # Skip excluded extensions (unless it's an allowed glossary file)
-                if lower_name not in allowed_names:
-                    if any(lower_name.endswith(ext) for ext in excluded_extensions):
-                        continue
-                    if lower_name in excluded_names:
-                        continue
+                # Skip excluded extensions
+                if any(lower_name.endswith(ext) for ext in excluded_extensions):
+                    continue
+                if lower_name in excluded_names:
+                    continue
                 try:
                     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
