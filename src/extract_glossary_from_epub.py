@@ -3295,6 +3295,17 @@ def main(log_callback=None, stop_callback=None):
             os.environ.pop("GEMINI_THINKING_LEVEL", None)
         os.environ.pop("THINKING_BUDGET", None)
     
+    # Skip thinking / lightweight thinking for title & metadata
+    # (env vars may not be set if glossary runs in-process before user opens settings)
+    if os.getenv('SKIP_BOOK_TITLE_THINKING') is None:
+        os.environ['SKIP_BOOK_TITLE_THINKING'] = '1' if config.get('skip_book_title_thinking', True) else '0'
+    if os.getenv('SKIP_METADATA_THINKING') is None:
+        os.environ['SKIP_METADATA_THINKING'] = '1' if config.get('skip_metadata_thinking', True) else '0'
+    if os.getenv('SKIP_TOC_THINKING') is None:
+        os.environ['SKIP_TOC_THINKING'] = '1' if config.get('skip_toc_thinking', False) else '0'
+    if os.getenv('LIGHTWEIGHT_THINKING_LEVEL') is None:
+        os.environ['LIGHTWEIGHT_THINKING_LEVEL'] = str(config.get('lightweight_thinking_level', 1))
+    
     # Retrieve book titles (raw from input, translated from metadata/output)
     global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED, BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE
     BOOK_TITLE_RAW = _extract_raw_title_from_epub(epub_path)

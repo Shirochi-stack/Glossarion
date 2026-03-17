@@ -1034,7 +1034,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.0.8"
+        __version__ = "8.0.9"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1109,7 +1109,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.0.8')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.0.9')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1341,10 +1341,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # System prompt to user message toggle
         self.system_prompt_to_user_var = self.config.get('system_prompt_to_user', False)
         os.environ['SYSTEM_PROMPT_TO_USER'] = '1' if self.system_prompt_to_user_var else '0'
-        
-        # Force native Anthropic format toggle
-        self.force_native_anthropic_var = self.config.get('force_native_anthropic', False)
-        os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if self.force_native_anthropic_var else '0'
         
         # Initialize compression-related variables
         self.enable_image_compression_var = self.config.get('enable_image_compression', False)
@@ -3018,7 +3014,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.0.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.0.9 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -18755,7 +18751,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.0.8...")
+    print("🚀 Starting Glossarion v8.0.9...")
     
     # Initialize splash screen
     splash_manager = None
