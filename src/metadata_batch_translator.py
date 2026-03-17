@@ -1541,10 +1541,10 @@ class MetadataBatchTranslatorUI:
         dropdown_view.clicked.connect(on_view_clicked)
         
         # Debug: Print current state
-        print(f"Dropdown enabled: {self.output_lang_combo.isEnabled()}")
-        print(f"Dropdown view enabled: {dropdown_view.isEnabled()}")
-        print(f"Parent group enabled: {output_group.isEnabled()}")
-        print(f"Parent layout widget enabled: {output_group.parent().isEnabled() if output_group.parent() else 'No parent'}")
+        # print(f"Dropdown enabled: {self.output_lang_combo.isEnabled()}")
+        # print(f"Dropdown view enabled: {dropdown_view.isEnabled()}")
+        # print(f"Parent group enabled: {output_group.isEnabled()}")
+        # print(f"Parent layout widget enabled: {output_group.parent().isEnabled() if output_group.parent() else 'No parent'}")
         
         # Add proper signal connections like the working model dropdown
         def sync_to_main(text):
