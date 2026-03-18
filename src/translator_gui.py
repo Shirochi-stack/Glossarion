@@ -5115,7 +5115,7 @@ Recent translations to summarize:
                     self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.update()
-            # Fuzzy auto-mapping: enable when off_fuzzy_automap, disable when off_no_automap/minimal
+            # Fuzzy auto-mapping: only enable when off_fuzzy_automap, disable for all other modes
             if new_mode == 'off_fuzzy_automap':
                 self.config['fuzzy_auto_mapping'] = True
                 self.fuzzy_auto_mapping_var = True
@@ -5123,7 +5123,7 @@ Recent translations to summarize:
                     self.fuzzy_auto_mapping_checkbox.blockSignals(True)
                     self.fuzzy_auto_mapping_checkbox.setChecked(True)
                     self.fuzzy_auto_mapping_checkbox.blockSignals(False)
-            elif new_mode in ('off_no_automap', 'minimal', 'no_glossary'):
+            else:
                 self.config['fuzzy_auto_mapping'] = False
                 self.fuzzy_auto_mapping_var = False
                 if hasattr(self, 'fuzzy_auto_mapping_checkbox'):

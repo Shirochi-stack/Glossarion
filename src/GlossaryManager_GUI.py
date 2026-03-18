@@ -3183,12 +3183,26 @@ CRITICAL EXTRACTION RULES:
                 self.config['fuzzy_auto_mapping'] = True
                 if hasattr(self, 'fuzzy_auto_mapping_var'):
                     self.fuzzy_auto_mapping_var = True
-            elif mode in ('off', 'balanced', 'full') and hasattr(self, 'fuzzy_auto_mapping_checkbox'):
-                _unlock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
-                if _fuzzy_desc_label:
-                    _fuzzy_desc_label.mousePressEvent = lambda _: self.fuzzy_auto_mapping_checkbox.toggle()
+                # Keep slider interactive (user can adjust threshold)
+                if hasattr(self, 'fuzzy_mapping_slider'):
+                    self.fuzzy_mapping_slider.setEnabled(True)
+                    self.fuzzy_mapping_slider.setStyleSheet("")
+                    self.fuzzy_mapping_slider._mode_locked = False
+                if hasattr(self, 'fuzzy_mapping_value_label'):
+                    self.fuzzy_mapping_value_label.setStyleSheet("color: white; font-size: 9pt; min-width: 30px;")
+                try:
+                    if hasattr(self, 'fuzzy_mapping_slider'):
+                        _slider_parent = self.fuzzy_mapping_slider.parentWidget()
+                        if _slider_parent:
+                            for child in _slider_parent.findChildren(QLabel):
+                                if 'similarity' in (child.text() or '').lower():
+                                    child.setStyleSheet("color: #aaa; font-size: 9pt;")
+                                    child._mode_locked = False
+                                    break
+                except Exception:
+                    pass
             elif hasattr(self, 'fuzzy_auto_mapping_checkbox'):
-                # off_no_automap, minimal, no_glossary — lock fuzzy OFF
+                # All other modes: lock fuzzy OFF
                 if self.fuzzy_auto_mapping_checkbox.isChecked():
                     self.fuzzy_auto_mapping_checkbox.setChecked(False)
                 _lock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
@@ -3197,6 +3211,24 @@ CRITICAL EXTRACTION RULES:
                 self.config['fuzzy_auto_mapping'] = False
                 if hasattr(self, 'fuzzy_auto_mapping_var'):
                     self.fuzzy_auto_mapping_var = False
+                # Lock slider with purple styling
+                if hasattr(self, 'fuzzy_mapping_slider'):
+                    self.fuzzy_mapping_slider.setEnabled(False)
+                    self.fuzzy_mapping_slider.setStyleSheet("QSlider { color: #b388ff; }")
+                    self.fuzzy_mapping_slider._mode_locked = True
+                if hasattr(self, 'fuzzy_mapping_value_label'):
+                    self.fuzzy_mapping_value_label.setStyleSheet("color: #b388ff; font-size: 9pt; min-width: 30px;")
+                try:
+                    if hasattr(self, 'fuzzy_mapping_slider'):
+                        _slider_parent = self.fuzzy_mapping_slider.parentWidget()
+                        if _slider_parent:
+                            for child in _slider_parent.findChildren(QLabel):
+                                if 'similarity' in (child.text() or '').lower():
+                                    child.setStyleSheet("color: #b388ff; font-size: 9pt;")
+                                    child._mode_locked = True
+                                    break
+                except Exception:
+                    pass
 
             # "No Glossary" - lock all three toggles OFF
             if mode == 'no_glossary':
