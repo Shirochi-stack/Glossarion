@@ -5189,6 +5189,15 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
 
+        # Sync forced toggle states to the current auto glossary mode on startup.
+        # The combo's initial index was set above (line ~5033) BEFORE the signal
+        # was connected, so _on_auto_glossary_shortcut_changed never fired.
+        # Fire it once now to ensure toggles match the selected mode.
+        try:
+            _on_auto_glossary_shortcut_changed(self.auto_glossary_shortcut_combo.currentIndex())
+        except Exception:
+            pass
+
         # Delete glossary button (supports multiple EPUBs)
         def _delete_current_glossary():
             try:
@@ -16723,6 +16732,33 @@ Important rules:
 
                 return None
 
+            # Determine output directory (override vs CWD-relative)
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            if override_dir:
+                output_dir = os.path.join(os.path.abspath(override_dir), base)
+            else:
+                output_dir = base
+
+            # When an output override is set, the user explicitly chose a
+            # different output location.  Check the override output paths
+            # FIRST so that glossaries stored next to the EPUBs (source
+            # folder / CWD) don't shadow the correct output-folder ones.
+            if override_dir:
+                # A) Per-book output Glossary/  (override)
+                hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
+                if hit:
+                    return hit
+
+                # B) Per-book output root: generic glossary.* files (override)
+                if os.path.isdir(output_dir):
+                    generic_candidates = [
+                        os.path.join(output_dir, f"glossary{ext}")
+                        for ext in ext_priority  # .csv, .json, .txt, .md
+                    ]
+                    for candidate in generic_candidates:
+                        if os.path.isfile(candidate):
+                            return candidate
+
             # 1) App folder Glossary/
             try:
                 app_glossary_dir = os.path.join(getattr(self, 'base_dir', ''), 'Glossary')
@@ -16741,27 +16777,20 @@ Important rules:
             except Exception:
                 pass
 
-            # 3) Per-book output Glossary/
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-            if override_dir:
-                output_dir = os.path.join(os.path.abspath(override_dir), base)
-            else:
-                output_dir = base
-            hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
-            if hit:
-                return hit
+            # 3-4) Per-book output (no override — not yet checked)
+            if not override_dir:
+                hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
+                if hit:
+                    return hit
 
-            # 4) Per-book output root: generic glossary.* files
-            #    (matches auto_load_glossary_for_file behaviour so multi-EPUB
-            #     auto-mapping can find <output>/<book>/glossary.csv etc.)
-            if os.path.isdir(output_dir):
-                generic_candidates = [
-                    os.path.join(output_dir, f"glossary{ext}")
-                    for ext in ext_priority  # .csv, .json, .txt, .md
-                ]
-                for candidate in generic_candidates:
-                    if os.path.isfile(candidate):
-                        return candidate
+                if os.path.isdir(output_dir):
+                    generic_candidates = [
+                        os.path.join(output_dir, f"glossary{ext}")
+                        for ext in ext_priority  # .csv, .json, .txt, .md
+                    ]
+                    for candidate in generic_candidates:
+                        if os.path.isfile(candidate):
+                            return candidate
 
             return None
         except Exception:
