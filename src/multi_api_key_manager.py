@@ -2184,6 +2184,14 @@ class MultiAPIKeyDialog(QDialog):
         test_all_btn = QPushButton("Test All")
         test_all_btn.clicked.connect(self._test_all_fallbacks)
         fallback_action_layout.addWidget(test_all_btn)
+
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected_fallback)
+        fallback_action_layout.addWidget(enable_selected_btn)
+
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected_fallback)
+        fallback_action_layout.addWidget(disable_selected_btn)
     
         remove_selected_btn = QPushButton("Remove Selected")
         remove_selected_btn.clicked.connect(self._remove_selected_fallback)
@@ -4593,6 +4601,14 @@ class MultiAPIKeyDialog(QDialog):
         test_all_btn = QPushButton("Test All")
         test_all_btn.clicked.connect(self._test_all_glossary)
         glossary_action_layout.addWidget(test_all_btn)
+
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected_glossary)
+        glossary_action_layout.addWidget(enable_selected_btn)
+
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected_glossary)
+        glossary_action_layout.addWidget(disable_selected_btn)
     
         remove_selected_btn = QPushButton("Remove Selected")
         remove_selected_btn.clicked.connect(self._remove_selected_glossary)
