@@ -178,6 +178,19 @@ class RetranslationMixin:
                 msg_box.setIcon(QMessageBox.Question)
                 msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             
+            # Center buttons
+            msg_box.setStyleSheet("""
+                QPushButton {
+                    min-width: 80px;
+                    min-height: 30px;
+                    padding: 6px 20px;
+                    font-size: 10pt;
+                }
+                QDialogButtonBox {
+                    qproperty-centerButtons: true;
+                }
+            """)
+            
             # Try to set Halgakos window icon
             try:
                 from PySide6.QtGui import QIcon
@@ -208,6 +221,36 @@ class RetranslationMixin:
             if msg_type == 'question':
                 return False
             return False
+
+    @staticmethod
+    def _styled_msgbox(icon, parent, title, message, buttons=None):
+        """Create a QMessageBox with centered buttons and return the result.
+        
+        Usage (replaces static convenience methods):
+            QMessageBox.information(p, t, m)  →  self._styled_msgbox(QMessageBox.Information, p, t, m)
+            QMessageBox.warning(p, t, m)      →  self._styled_msgbox(QMessageBox.Warning, p, t, m)
+            QMessageBox.question(p, t, m, b)  →  self._styled_msgbox(QMessageBox.Question, p, t, m, b)
+            QMessageBox.critical(p, t, m)     →  self._styled_msgbox(QMessageBox.Critical, p, t, m)
+        """
+        msg = QMessageBox(parent)
+        msg.setIcon(icon)
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        if buttons is not None:
+            msg.setStandardButtons(buttons)
+        msg.setStyleSheet("""
+            QPushButton {
+                min-width: 80px;
+                min-height: 30px;
+                padding: 6px 20px;
+                font-size: 10pt;
+            }
+            QDialogButtonBox {
+                qproperty-centerButtons: true;
+            }
+        """)
+        result = msg.exec()
+        return result
  
     def _flash_pm_button_green(self, folder_path=None):
         """Flash the Progress Manager button green to indicate a new folder was created.
@@ -1864,7 +1907,7 @@ class RetranslationMixin:
         def remove_qa_failed_mark():
             selected_items = data['listbox'].selectedItems()
             if not selected_items:
-                QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
+                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
 
             # Skip dedup here to avoid merging distinct chapters that share filenames
@@ -1875,12 +1918,12 @@ class RetranslationMixin:
             failed_chapters = [ch for ch in selected_chapters if ch['status'] in ['qa_failed', 'failed']]
             
             if not failed_chapters:
-                QMessageBox.warning(data.get('dialog', self), "No Failed Chapters", 
+                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No Failed Chapters", 
                                      "None of the selected chapters have 'qa_failed' or 'failed' status.")
                 return
             
             count = len(failed_chapters)
-            reply = QMessageBox.question(data.get('dialog', self), "Confirm Remove Failed Mark", 
+            reply = self._styled_msgbox(QMessageBox.Question, data.get('dialog', self), "Confirm Remove Failed Mark", 
                                       f"Remove failed mark from {count} chapters?",
                                       QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
@@ -1925,12 +1968,12 @@ class RetranslationMixin:
             # Auto-refresh the display
             self._refresh_retranslation_data(data)
             
-            QMessageBox.information(data.get('dialog', self), "Success", f"Removed failed mark from {cleared_count} chapters.")
+            self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Success", f"Removed failed mark from {cleared_count} chapters.")
         
         def retranslate_selected():
             selected_items = data['listbox'].selectedItems()
             if not selected_items:
-                QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
+                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
 
             # Do NOT dedup here; it can collapse distinct chapters sharing filenames
@@ -1959,7 +2002,7 @@ class RetranslationMixin:
                     confirm_msg += f"• {existing_count} existing chapters will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
-            reply = QMessageBox.question(data.get('dialog', self), "Confirm Retranslation", confirm_msg,
+            reply = self._styled_msgbox(QMessageBox.Question, data.get('dialog', self), "Confirm Retranslation", confirm_msg,
                                        QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
@@ -2052,9 +2095,9 @@ class RetranslationMixin:
                 if deleted_count > 0 or marked_count > 0 or merged_cleared_count > 0:
                     total_to_translate = len(selected_indices) + merged_cleared_count
                     success_msg += f"\n\nTotal {total_to_translate} chapters ready for translation."
-                QMessageBox.information(data.get('dialog', self), "Success", success_msg)
+                self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Success", success_msg)
             else:
-                QMessageBox.information(data.get('dialog', self), "Info", "No changes made.")
+                self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Info", "No changes made.")
         
         # Add buttons - First row
         btn_select_all = QPushButton("Select All")
@@ -2824,7 +2867,7 @@ class RetranslationMixin:
                             else:
                                 raise
                 except Exception as e:
-                    QMessageBox.warning(data.get('dialog', self), "Progress File Error",
+                    self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "Progress File Error",
                                         f"Could not recreate progress file:\n{e}")
                     return
             
@@ -2961,7 +3004,7 @@ class RetranslationMixin:
         except FileNotFoundError as e:
             print(f"❌ Failed to refresh data - file not found: {e}")
             try:
-                QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
+                self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Output Folder Not Found", 
                                       f"The output folder appears to have been deleted or moved.\n\n"
                                       f"File not found: {os.path.basename(str(e))}")
             except (RuntimeError, AttributeError):
@@ -2974,11 +3017,11 @@ class RetranslationMixin:
                 # Show friendlier error message for common cases
                 error_msg = str(e)
                 if "No such file or directory" in error_msg or "cannot find the path" in error_msg:
-                    QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
+                    self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Output Folder Not Found", 
                                           f"The output folder appears to have been deleted or moved.\n\n"
                                           f"Error: {error_msg}")
                 else:
-                    QMessageBox.warning(data.get('dialog', self), "Refresh Failed", 
+                    self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "Refresh Failed", 
                                       f"Failed to refresh data: {error_msg}")
             except (RuntimeError, AttributeError):
                 # Dialog was also deleted, just print to console
@@ -3951,7 +3994,7 @@ class RetranslationMixin:
                 summary_parts.append(f"{len(folders)} folder(s)")
             
             if not summary_parts:
-                QMessageBox.information(self, "Info", "No valid files selected.")
+                self._styled_msgbox(QMessageBox.Information, self, "Info", "No valid files selected.")
                 return
             
             # Create a unique key for the current selection
@@ -4265,7 +4308,7 @@ class RetranslationMixin:
             
             # If still no tabs were created, show error
             if not tabs_created:
-                QMessageBox.information(self, "Info", 
+                self._styled_msgbox(QMessageBox.Information, self, "Info", 
                     "No translation output found for any of the selected files.\n\n"
                     "Make sure the output folders exist in your script directory.")
                 dialog.close()
@@ -4309,7 +4352,7 @@ class RetranslationMixin:
             print(f"[ERROR] _force_retranslation_multiple_files failed: {e}")
             import traceback
             traceback.print_exc()
-            QMessageBox.critical(self, "Error", f"Failed to open retranslation dialog:\n{str(e)}")
+            self._styled_msgbox(QMessageBox.Critical, self, "Error", f"Failed to open retranslation dialog:\n{str(e)}")
 
     def _add_multi_file_buttons(self, dialog, notebook, tab_data):
         """Placeholder for future multi-file button functionality"""
@@ -4651,7 +4694,7 @@ class RetranslationMixin:
                         pass
         
         if not output_dir:
-            QMessageBox.information(self, "Info", 
+            self._styled_msgbox(QMessageBox.Information, self, "Info", 
                 f"No translation output found for '{folder_name}'.\n\n"
                 f"Selected folder: {folder_path}\n"
                 f"Script directory: {script_dir}\n\n"
@@ -4741,7 +4784,7 @@ class RetranslationMixin:
         print(f"Total files found: {len(html_files)} HTML, {len(image_files)} images")
         
         if not html_files and not image_files:
-            QMessageBox.information(self, "Info", 
+            self._styled_msgbox(QMessageBox.Information, self, "Info", 
                 f"No translated files found in: {output_dir}\n\n"
                 f"Progress tracking: {'Yes' if has_progress_tracking else 'No'}")
             return
@@ -4922,7 +4965,7 @@ class RetranslationMixin:
             """Move selected images to the images folder to be skipped"""
             selected_items = listbox.selectedItems()
             if not selected_items:
-                QMessageBox.warning(dialog, "No Selection", "Please select at least one image to mark as skipped.")
+                self._styled_msgbox(QMessageBox.Warning, dialog, "No Selection", "Please select at least one image to mark as skipped.")
                 return
             
             # Get all selected items
@@ -4935,11 +4978,11 @@ class RetranslationMixin:
             items_to_move = [(i, item) for i, item in items_with_info if item['type'] != 'cover']
             
             if not items_to_move:
-                QMessageBox.information(dialog, "Info", "Selected items are already in the images folder (skipped).")
+                self._styled_msgbox(QMessageBox.Information, dialog, "Info", "Selected items are already in the images folder (skipped).")
                 return
             
             count = len(items_to_move)
-            reply = QMessageBox.question(dialog, "Confirm Mark as Skipped", 
+            reply = self._styled_msgbox(QMessageBox.Question, dialog, "Confirm Mark as Skipped", 
                                       f"Move {count} translated image(s) to the images folder?\n\n"
                                       "This will:\n"
                                       "• Delete the translated HTML files\n"
@@ -5052,18 +5095,18 @@ class RetranslationMixin:
             
             # Show result
             if failed_count > 0:
-                QMessageBox.warning(dialog, "Partial Success", 
+                self._styled_msgbox(QMessageBox.Warning, dialog, "Partial Success", 
                     f"Moved {moved_count} image(s) to be skipped.\n"
                     f"Failed to process {failed_count} item(s).")
             else:
-                QMessageBox.information(dialog, "Success", 
+                self._styled_msgbox(QMessageBox.Information, dialog, "Success", 
                     f"Moved {moved_count} image(s) to the images folder.\n"
                     "They will be skipped in future translations.")
         
         def retranslate_selected():
             selected_items = listbox.selectedItems()
             if not selected_items:
-                QMessageBox.warning(dialog, "No Selection", "Please select at least one file.")
+                self._styled_msgbox(QMessageBox.Warning, dialog, "No Selection", "Please select at least one file.")
                 return
             
             selected_indices = [listbox.row(item) for item in selected_items]
@@ -5083,7 +5126,7 @@ class RetranslationMixin:
             
             confirm_msg = f"This will delete {' and '.join(msg_parts)}.\n\nContinue?"
             
-            reply = QMessageBox.question(dialog, "Confirm Deletion", confirm_msg,
+            reply = self._styled_msgbox(QMessageBox.Question, dialog, "Confirm Deletion", confirm_msg,
                                        QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
@@ -5127,7 +5170,7 @@ class RetranslationMixin:
             if 'refresh_data' in locals():
                 self._refresh_image_folder_data(refresh_data)
             
-            QMessageBox.information(dialog, "Success", 
+            self._styled_msgbox(QMessageBox.Information, dialog, "Success", 
                 f"Deleted {deleted_count} file(s).\n\n"
                 "They will be retranslated on the next run.")
             
