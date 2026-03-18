@@ -1542,6 +1542,10 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['force_key_rotation'] = force_rotation
             self.translator_gui.config['rotation_frequency'] = rotation_freq
             
+            # Save glossary keys toggle
+            use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
+            self.translator_gui.config['use_glossary_keys'] = use_glossary
+            
             # Save config
             self.translator_gui.save_config(show_message=False)
             
@@ -1853,6 +1857,9 @@ class MultiAPIKeyDialog(QDialog):
         
         # Create fallback container (hidden by default)
         self._create_fallback_section(scrollable_layout)
+        
+        # Create glossary keys container (hidden by default)
+        self._create_glossary_section(scrollable_layout)
         
         # Add stretch to fill remaining space in scroll area
         scrollable_layout.addStretch(1)
@@ -4260,6 +4267,1138 @@ class MultiAPIKeyDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
     
+    # ===================================================================
+    # GLOSSARY KEYS SECTION — mirrors fallback keys for glossary API calls
+    # ===================================================================
+
+    def _create_glossary_section(self, parent_layout):
+        """Create the glossary keys section below fallback"""
+        # Container that can be hidden
+        self.glossary_container = QWidget()
+        glossary_container_layout = QVBoxLayout(self.glossary_container)
+        glossary_container_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # Separator
+        self.glossary_separator = QFrame()
+        self.glossary_separator.setFrameShape(QFrame.HLine)
+        self.glossary_separator.setFrameShadow(QFrame.Sunken)
+        glossary_container_layout.addWidget(self.glossary_separator)
+        
+        # Main glossary frame
+        glossary_frame = QGroupBox("Glossary Keys (For Glossary API Calls)")
+        glossary_frame_layout = QVBoxLayout(glossary_frame)
+        glossary_frame_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Description
+        desc_label = QLabel(
+                "Configure dedicated keys for glossary-context API calls.\n"
+                "These keys will be used exclusively when the translation context is 'Glossary'.\n"
+                "If no glossary keys are configured or the pool is disabled, the main key pool is used instead.")
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        glossary_frame_layout.addWidget(desc_label)
+        
+        # Enable checkbox with spinning icon
+        glossary_checkbox_container = QWidget()
+        glossary_checkbox_layout = QHBoxLayout(glossary_checkbox_container)
+        glossary_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        glossary_checkbox_layout.setSpacing(8)
+        
+        self.use_glossary_keys_var = self.translator_gui.config.get('use_glossary_keys', False)
+        self.use_glossary_keys_checkbox = self._create_styled_checkbox("Enable Glossary Keys")
+        self.use_glossary_keys_checkbox.setChecked(self.use_glossary_keys_var)
+        self.use_glossary_keys_checkbox.toggled.connect(self._toggle_glossary_section)
+        
+        # spinning icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.glossary_icon = QLabel()
+        self.glossary_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.glossary_icon.setPixmap(pm)
+        self.glossary_icon.setFixedSize(36, 36)
+        self.glossary_icon.setAlignment(Qt.AlignCenter)
+        self.use_glossary_keys_checkbox.toggled.connect(lambda: animate_icon(self.glossary_icon))
+        
+        glossary_checkbox_layout.addWidget(self.glossary_icon)
+        glossary_checkbox_layout.addWidget(self.use_glossary_keys_checkbox)
+        glossary_checkbox_layout.addStretch()
+        
+        glossary_frame_layout.addWidget(glossary_checkbox_container)
+        
+        # Add glossary key section
+        self.add_glossary_frame = QWidget()
+        add_glossary_grid = QGridLayout(self.add_glossary_frame)
+        add_glossary_grid.setContentsMargins(0, 0, 0, 10)
+        
+        # Row 0: API Key and Model
+        add_glossary_grid.addWidget(QLabel("Glossary API Key:"), 0, 0, Qt.AlignLeft)
+        self.glossary_key_entry = QLineEdit()
+        self.glossary_key_entry.setEchoMode(QLineEdit.Password)
+        add_glossary_grid.addWidget(self.glossary_key_entry, 0, 1)
+        
+        # Toggle visibility
+        self.show_glossary_btn = QPushButton("👁")
+        self.show_glossary_btn.setFixedWidth(40)
+        self.show_glossary_btn.clicked.connect(self._toggle_glossary_visibility)
+        add_glossary_grid.addWidget(self.show_glossary_btn, 0, 2)
+        
+        # Model
+        add_glossary_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        glossary_models = get_model_options()
+        self.glossary_model_combo = QComboBox()
+        self.glossary_model_combo.addItems(glossary_models)
+        self.glossary_model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(self.glossary_model_combo)
+        add_glossary_grid.addWidget(self.glossary_model_combo, 0, 4)
+        
+        # Add button
+        add_glossary_btn = QPushButton("Add Glossary Key")
+        add_glossary_btn.clicked.connect(self._add_glossary_key)
+        add_glossary_grid.addWidget(add_glossary_btn, 0, 5, Qt.AlignRight)
+        
+        add_glossary_grid.setColumnStretch(1, 1)
+        add_glossary_grid.setColumnStretch(4, 1)
+        
+        glossary_frame_layout.addWidget(self.add_glossary_frame)
+        
+        # Row 1: Google Credentials
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
+        add_glossary_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
+        self.glossary_google_creds_entry = QLineEdit()
+        self.glossary_google_creds_entry.setStyleSheet("font-size: 7pt;")
+        add_glossary_grid.addWidget(self.glossary_google_creds_entry, 1, 1)
+        
+        browse_google_btn = QPushButton("📁")
+        browse_google_btn.setFixedWidth(40)
+        browse_google_btn.clicked.connect(self._browse_glossary_google_credentials)
+        add_glossary_grid.addWidget(browse_google_btn, 1, 2)
+        
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_glossary_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
+        self.glossary_google_region_entry = QLineEdit("us-east5")
+        self.glossary_google_region_entry.setStyleSheet("font-size: 7pt;")
+        self.glossary_google_region_entry.setMaximumWidth(100)
+        add_glossary_grid.addWidget(self.glossary_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+        
+        # Row 2: Individual Endpoint Toggle
+        self.glossary_use_individual_endpoint_var = False
+        self.glossary_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        self.glossary_individual_endpoint_toggle.setChecked(False)
+        self.glossary_individual_endpoint_toggle.toggled.connect(self._toggle_glossary_individual_endpoint_fields)
+        add_glossary_grid.addWidget(self.glossary_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+        
+        # Row 3: Individual Endpoint (initially hidden)
+        self.glossary_individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.glossary_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_glossary_grid.addWidget(self.glossary_individual_endpoint_label, 3, 0, Qt.AlignLeft)
+        self.glossary_azure_endpoint_entry = QLineEdit()
+        self.glossary_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        add_glossary_grid.addWidget(self.glossary_azure_endpoint_entry, 3, 1, 1, 2)
+        
+        self.glossary_individual_api_version_label = QLabel("API Ver:")
+        self.glossary_individual_api_version_label.setStyleSheet("color: gray;")
+        add_glossary_grid.addWidget(self.glossary_individual_api_version_label, 3, 3, Qt.AlignLeft)
+        glossary_azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview', 
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.glossary_azure_api_version_combo = QComboBox()
+        self.glossary_azure_api_version_combo.addItems(glossary_azure_versions)
+        self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.glossary_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self.glossary_azure_api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(self.glossary_azure_api_version_combo)
+        add_glossary_grid.addWidget(self.glossary_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+        
+        # Row 4: Output Token Limit
+        glossary_output_label = QLabel("Output Token Limit:")
+        glossary_output_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_glossary_grid.addWidget(glossary_output_label, 4, 0, Qt.AlignLeft)
+        self.glossary_output_token_spinbox = QSpinBox()
+        self.glossary_output_token_spinbox.setRange(0, 2000000)
+        self.glossary_output_token_spinbox.setValue(0)
+        self.glossary_output_token_spinbox.setMaximumWidth(120)
+        self._disable_spinbox_mousewheel(self.glossary_output_token_spinbox)
+        add_glossary_grid.addWidget(self.glossary_output_token_spinbox, 4, 1, Qt.AlignLeft)
+        glossary_output_hint = QLabel("0 = use global limit")
+        glossary_output_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        add_glossary_grid.addWidget(glossary_output_hint, 4, 2, 1, 2, Qt.AlignLeft)
+        
+        # Initially hide endpoint fields
+        self._toggle_glossary_individual_endpoint_fields()
+        
+        # Glossary keys list
+        self._create_glossary_list(glossary_frame_layout)
+        
+        # Add container to parent
+        glossary_container_layout.addWidget(glossary_frame)
+        parent_layout.addWidget(self.glossary_container)
+        
+        # Initially disable if checkbox is unchecked
+        self._toggle_glossary_section()
+
+    def _create_glossary_list(self, parent_layout):
+        """Create the glossary keys list"""
+        self.glossary_list_label = QLabel("Glossary Keys (tried in order):")
+        list_label_font = QFont()
+        list_label_font.setBold(True)
+        self.glossary_list_label.setFont(list_label_font)
+        parent_layout.addWidget(self.glossary_list_label)
+        
+        # Container for tree and buttons
+        self.glossary_tree_container = QWidget()
+        container_layout = QHBoxLayout(self.glossary_tree_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Left side: Move buttons
+        self.glossary_move_frame = QWidget()
+        move_layout = QVBoxLayout(self.glossary_move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+        
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+        
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_glossary_key('top'))
+        move_layout.addWidget(top_btn)
+        
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        up_btn.clicked.connect(lambda: self._move_glossary_key('up'))
+        move_layout.addWidget(up_btn)
+        
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        down_btn.clicked.connect(lambda: self._move_glossary_key('down'))
+        move_layout.addWidget(down_btn)
+        
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_glossary_key('bottom'))
+        move_layout.addWidget(bottom_btn)
+        
+        move_layout.addStretch()
+        container_layout.addWidget(self.glossary_move_frame)
+        
+        # Right side: TreeWidget with drag and drop
+        self.glossary_tree = QTreeWidget()
+        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.glossary_tree.setColumnWidth(0, 125)
+        self.glossary_tree.setColumnWidth(1, 230)
+        self.glossary_tree.setColumnWidth(2, 100)
+        self.glossary_tree.setColumnWidth(3, 100)
+        self.glossary_tree.setColumnWidth(4, 65)
+        self.glossary_tree.setColumnWidth(5, 60)
+        self.glossary_tree.setColumnWidth(6, 90)
+        
+        gl_header = self.glossary_tree.header()
+        gl_header_font = QFont()
+        gl_header_font.setBold(True)
+        gl_header_font.setPointSize(11)
+        gl_header.setFont(gl_header_font)
+        
+        self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.glossary_tree.customContextMenuRequested.connect(self._show_glossary_context_menu)
+        self.glossary_tree.setMinimumHeight(150)
+        
+        self.glossary_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        
+        self.glossary_tree.model().rowsMoved.connect(self._on_glossary_rows_moved)
+        self.glossary_tree.itemDoubleClicked.connect(self._on_glossary_click)
+        
+        container_layout.addWidget(self.glossary_tree)
+        parent_layout.addWidget(self.glossary_tree_container)
+        
+        # Action buttons
+        self.glossary_action_frame = QWidget()
+        glossary_action_layout = QHBoxLayout(self.glossary_action_frame)
+        glossary_action_layout.setContentsMargins(0, 10, 0, 0)
+        
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected_glossary)
+        glossary_action_layout.addWidget(test_selected_btn)
+
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all_glossary)
+        glossary_action_layout.addWidget(test_all_btn)
+    
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected_glossary)
+        glossary_action_layout.addWidget(remove_selected_btn)
+        
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_glossary)
+        glossary_action_layout.addWidget(clear_all_btn)
+        
+        glossary_action_layout.addStretch()
+        self.glossary_status_label = QLabel()
+        self.glossary_status_label.setStyleSheet("color: gray;")
+        glossary_action_layout.addWidget(self.glossary_status_label)
+        parent_layout.addWidget(self.glossary_action_frame)
+        
+        # Load existing glossary keys
+        self._load_glossary_keys()
+
+    def _load_glossary_keys(self):
+        """Load glossary keys from config"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        v_scroll = self.glossary_tree.verticalScrollBar().value()
+        h_scroll = self.glossary_tree.horizontalScrollBar().value()
+        
+        selected_indices = []
+        for item in self.glossary_tree.selectedItems():
+            selected_indices.append(self.glossary_tree.indexOfTopLevelItem(item))
+        
+        self.glossary_tree.clear()
+        
+        for key_data in glossary_keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            times_used = int(key_data.get('times_used', 0))
+            
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+            
+            try:
+                raw_limit = key_data.get('individual_output_token_limit')
+                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
+            except Exception:
+                per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+            
+            test_result = key_data.get('last_test_result')
+            if test_result == 'passed':
+                status = "✅ Passed"
+                color = Qt.darkGreen
+            elif test_result == 'failed':
+                status = "❌ Failed"
+                color = Qt.red
+            elif test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                color = Qt.darkYellow
+            elif test_result == 'error':
+                status = "❌ Error"
+                color = Qt.darkRed
+            else:
+                status = "Not tested"
+                color = Qt.gray
+            
+            success_count = int(key_data.get('success_count', 0))
+            error_count = int(key_data.get('error_count', 0))
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, status, str(success_count), str(error_count), str(times_used)])
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+            
+            if per_key_limit and per_key_limit > 0:
+                tooltip = f"Individual Output Token Limit: {per_key_limit}"
+            else:
+                tooltip = "Using global output token limit"
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+            
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self.glossary_tree.addTopLevelItem(item)
+            
+        for index in selected_indices:
+            if index < self.glossary_tree.topLevelItemCount():
+                item = self.glossary_tree.topLevelItem(index)
+                item.setSelected(True)
+        
+        self.glossary_tree.verticalScrollBar().setValue(v_scroll)
+        self.glossary_tree.horizontalScrollBar().setValue(h_scroll)
+
+    def _add_glossary_key(self):
+        """Add a new glossary key"""
+        api_key = self.glossary_key_entry.text().strip()
+        model = self.glossary_model_combo.currentText().strip()
+        google_credentials = self.glossary_google_creds_entry.text().strip() or None
+        google_region = self.glossary_google_region_entry.text().strip() or None
+        
+        use_individual_endpoint = self.glossary_individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.glossary_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.glossary_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
+        
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+        
+        if not api_key and _model_needs_api_key(model):
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
+            return
+        
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        individual_output_token_limit = None
+        if hasattr(self, 'glossary_output_token_spinbox'):
+            try:
+                val = int(self.glossary_output_token_spinbox.value())
+                if val > 0:
+                    individual_output_token_limit = val
+            except Exception:
+                individual_output_token_limit = None
+        
+        glossary_keys.append({
+            'api_key': api_key,
+            'model': model,
+            'google_credentials': google_credentials,
+            'azure_endpoint': azure_endpoint,
+            'google_region': google_region,
+            'azure_api_version': azure_api_version,
+            'use_individual_endpoint': use_individual_endpoint,
+            'individual_output_token_limit': individual_output_token_limit,
+            'times_used': 0
+        })
+        
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        
+        # Clear inputs
+        self.glossary_key_entry.clear()
+        self.glossary_model_combo.setCurrentText("")
+        self.glossary_google_creds_entry.clear()
+        self.glossary_azure_endpoint_entry.clear()
+        self.glossary_google_region_entry.setText("us-east5")
+        self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.glossary_individual_endpoint_toggle.setChecked(False)
+        if hasattr(self, 'glossary_output_token_spinbox'):
+            self.glossary_output_token_spinbox.setValue(0)
+        self._toggle_glossary_individual_endpoint_fields()
+        
+        self._load_glossary_keys()
+        
+        extras = []
+        if google_credentials:
+            extras.append(f"Google: {os.path.basename(google_credentials)}")
+        if azure_endpoint:
+            extras.append(f"Azure: {azure_endpoint[:30]}...")
+        extra_info = f" ({', '.join(extras)})" if extras else ""
+        self._show_glossary_status(f"Added glossary key for model: {model}{extra_info}")
+        
+        self._notify_authgpt_visibility()
+
+    def _move_glossary_key(self, direction):
+        """Move selected glossary key up or down"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        item = selected[0]
+        index = self.glossary_tree.indexOfTopLevelItem(item)
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        if index >= len(glossary_keys):
+            return
+        
+        new_index = index
+        if direction == 'top' and index > 0:
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(glossary_keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom' and index < len(glossary_keys) - 1:
+            new_index = len(glossary_keys) - 1
+        
+        if new_index != index:
+            key = glossary_keys.pop(index)
+            glossary_keys.insert(new_index, key)
+            
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            
+            self._load_glossary_keys()
+            
+            if new_index < self.glossary_tree.topLevelItemCount():
+                item = self.glossary_tree.topLevelItem(new_index)
+                if item:
+                    self.glossary_tree.setCurrentItem(item)
+                    item.setSelected(True)
+
+    def _test_selected_glossary(self):
+        """Test selected glossary key"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select a glossary key to test")
+            return
+        
+        index = self.glossary_tree.indexOfTopLevelItem(selected[0])
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        if index >= len(glossary_keys):
+            return
+        
+        if index < self.glossary_tree.topLevelItemCount():
+            item = self.glossary_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏳ Testing...")
+        
+        key_data = glossary_keys[index]
+        
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+        
+        QTimer.singleShot(100, lambda: self._test_single_glossary_key(key_data, index))
+
+    def _test_all_glossary(self):
+        """Test all glossary keys in parallel"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        if not glossary_keys:
+            QMessageBox.warning(self, "Warning", "No glossary keys to test")
+            return
+        
+        for i in range(self.glossary_tree.topLevelItemCount()):
+            item = self.glossary_tree.topLevelItem(i)
+            if item:
+                item.setText(3, "⏳ Testing...")
+        
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+        
+        for i, key_data in enumerate(glossary_keys):
+            self._test_single_glossary_key(key_data, i)
+
+    @Slot(int, bool) if HAS_GUI else lambda x: x
+    def _update_glossary_test_result(self, index, success):
+        """Update glossary tree item with test result"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if index < len(glossary_keys):
+            try:
+                glossary_keys[index]['times_used'] = int(glossary_keys[index].get('times_used', 0)) + 1
+                if success:
+                    glossary_keys[index]['success_count'] = int(glossary_keys[index].get('success_count', 0)) + 1
+                else:
+                    glossary_keys[index]['error_count'] = int(glossary_keys[index].get('error_count', 0)) + 1
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+            except Exception:
+                pass
+        
+        if index < self.glossary_tree.topLevelItemCount():
+            item = self.glossary_tree.topLevelItem(index)
+            if item:
+                if success:
+                    item.setText(3, "✅ Passed")
+                    color = Qt.darkGreen
+                else:
+                    item.setText(3, "❌ Failed")
+                    color = Qt.red
+                for col in range(item.columnCount()):
+                    item.setForeground(col, color)
+                try:
+                    if success:
+                        current = int(item.text(4))
+                        item.setText(4, str(current + 1))
+                    else:
+                        current = int(item.text(5))
+                        item.setText(5, str(current + 1))
+                except Exception:
+                    pass
+                try:
+                    current_times = int(item.text(6))
+                    item.setText(6, str(current_times + 1))
+                except Exception:
+                    item.setText(6, "1")
+
+    @Slot(int) if HAS_GUI else lambda x: x
+    def _update_glossary_timeout_status(self, index):
+        """Update glossary tree item with timeout status"""
+        if index < self.glossary_tree.topLevelItemCount():
+            item = self.glossary_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏱️ Timed Out")
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+
+    def _test_single_glossary_key(self, key_data, index):
+        """Test a single glossary key — REAL API TEST"""
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+        
+        print(f"[DEBUG] Starting REAL glossary key test for {model}")
+        
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+        
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+        
+        client_ref = [None]
+        timed_out = [False]
+        
+        def run_api_test():
+            try:
+                client = UnifiedClient(
+                    api_key=api_key,
+                    model=model,
+                    output_dir=None
+                )
+                client_ref[0] = client
+                
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.max_retries_override = 1
+                except Exception:
+                    pass
+                
+                google_credentials = key_data.get('google_credentials')
+                if google_credentials:
+                    client.current_key_google_creds = google_credentials
+                    client.google_creds_path = google_credentials
+                
+                google_region = key_data.get('google_region')
+                if google_region:
+                    client.current_key_google_region = google_region
+                
+                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
+                if use_individual_endpoint:
+                    azure_endpoint = key_data.get('azure_endpoint')
+                    if azure_endpoint:
+                        client.current_key_azure_endpoint = azure_endpoint
+                        client.current_key_use_individual_endpoint = True
+                    azure_api_version = key_data.get('azure_api_version')
+                    if azure_api_version:
+                        client.current_key_azure_api_version = azure_api_version
+                
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                ]
+                
+                response = client.send(messages, temperature=0.7, max_tokens=1000)
+                
+                if response and isinstance(response, tuple):
+                    content, _ = response
+                    if content and "test successful" in content.lower():
+                        print(f"[DEBUG] Glossary key test completed for {model}: PASSED")
+                        if not timed_out[0]:
+                            if HAS_GUI:
+                                QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                            else:
+                                self._update_glossary_test_result(index, True)
+                        return
+                
+                print(f"[DEBUG] Glossary key test completed for {model}: FAILED")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_glossary_test_result(index, False)
+            except Exception as e:
+                print(f"[DEBUG] Glossary key test error for {model}: {e}")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_glossary_test_result(index, False)
+        
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=30)
+                except FuturesTimeout:
+                    timed_out[0] = True
+                    print(f"[DEBUG] Glossary key test TIMED OUT for {model} (30s)")
+                    _client = client_ref[0]
+                    if _client:
+                        try:
+                            _client._cancelled = True
+                            oc = getattr(_client, 'openai_client', None)
+                            if oc and hasattr(oc, 'close'):
+                                oc.close()
+                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                                oc._client.close()
+                        except Exception:
+                            pass
+                    try:
+                        from unified_api_client import _api_watchdog_reset
+                        _api_watchdog_reset()
+                    except Exception:
+                        pass
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_glossary_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
+                    else:
+                        self._update_glossary_timeout_status(index)
+                except Exception:
+                    pass
+        
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
+            thread.start()
+
+    def _remove_selected_glossary(self):
+        """Remove selected glossary key"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        reply = QMessageBox.question(self, "Confirm", "Remove selected glossary key?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            index = self.glossary_tree.indexOfTopLevelItem(selected[0])
+            glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+            
+            if index < len(glossary_keys):
+                del glossary_keys[index]
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status("Removed glossary key")
+                self._notify_authgpt_visibility()
+
+    def _clear_all_glossary(self):
+        """Clear all glossary keys"""
+        if self.glossary_tree.topLevelItemCount() == 0:
+            return
+        
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL glossary keys?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.translator_gui.config['glossary_keys'] = []
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._show_glossary_status("Cleared all glossary keys")
+            self._notify_authgpt_visibility()
+
+    def _toggle_glossary_section(self):
+        """Toggle glossary section visibility"""
+        enabled = self.use_glossary_keys_checkbox.isChecked()
+        
+        if hasattr(self, 'add_glossary_frame'):
+            self.add_glossary_frame.setVisible(enabled)
+        if hasattr(self, 'glossary_list_label'):
+            self.glossary_list_label.setVisible(enabled)
+        if hasattr(self, 'glossary_tree_container'):
+            self.glossary_tree_container.setVisible(enabled)
+        if hasattr(self, 'glossary_action_frame'):
+            self.glossary_action_frame.setVisible(enabled)
+        if hasattr(self, 'glossary_tree') and not enabled:
+            self.glossary_tree.clearSelection()
+        
+        self._show_glossary_status(f"Glossary Keys {'enabled' if enabled else 'disabled'}")
+        if not getattr(self, '_initializing', False):
+            glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+            if enabled:
+                msg = f"🔑 Glossary key pool: {len(glossary_keys)} keys loaded"
+            else:
+                msg = f"🔑 Glossary key pool: disabled"
+            if hasattr(self.translator_gui, 'append_log'):
+                try:
+                    self.translator_gui.append_log(msg)
+                except Exception:
+                    print(msg)
+            else:
+                print(msg)
+        
+        try:
+            import os as _os
+            _os.environ['USE_GLOSSARY_KEYS'] = '1' if enabled else '0'
+        except Exception:
+            pass
+        
+        self._notify_authgpt_visibility()
+
+    def _toggle_glossary_visibility(self):
+        """Toggle glossary key field visibility"""
+        if self.glossary_key_entry.echoMode() == QLineEdit.Password:
+            self.glossary_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_glossary_btn.setText('🔒')
+        else:
+            self.glossary_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_glossary_btn.setText('👁')
+    
+    def _toggle_glossary_individual_endpoint_fields(self):
+        """Toggle visibility of glossary individual endpoint fields"""
+        enabled = self.glossary_individual_endpoint_toggle.isChecked()
+        
+        self.glossary_individual_endpoint_label.setVisible(enabled)
+        self.glossary_azure_endpoint_entry.setVisible(enabled)
+        self.glossary_individual_api_version_label.setVisible(enabled)
+        self.glossary_azure_api_version_combo.setVisible(enabled)
+        
+        self.glossary_azure_endpoint_entry.setEnabled(enabled)
+        self.glossary_azure_api_version_combo.setEnabled(enabled)
+        
+        if not enabled:
+            self.glossary_azure_endpoint_entry.clear()
+            self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+
+    def _show_glossary_context_menu(self, position):
+        """Show context menu for glossary keys"""
+        item = self.glossary_tree.itemAt(position)
+        if not item:
+            return
+        
+        if item not in self.glossary_tree.selectedItems():
+            self.glossary_tree.setCurrentItem(item)
+        
+        menu = QMenu(self)
+        
+        index = self.glossary_tree.indexOfTopLevelItem(item)
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        total = len(glossary_keys)
+        
+        # Reorder submenu
+        if total > 1:
+            reorder_menu = menu.addMenu("Reorder")
+            if index > 0:
+                up_action = reorder_menu.addAction("Move Up")
+                up_action.triggered.connect(lambda: self._move_glossary_key('up'))
+            if index < total - 1:
+                down_action = reorder_menu.addAction("Move Down")
+                down_action.triggered.connect(lambda: self._move_glossary_key('down'))
+            menu.addSeparator()
+        
+        # Change Model
+        selected_count = len(self.glossary_tree.selectedItems())
+        if selected_count > 1:
+            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
+        else:
+            change_model_action = menu.addAction("Change Model")
+        change_model_action.triggered.connect(self._change_glossary_model_for_selected)
+        
+        menu.addSeparator()
+        
+        # Individual Endpoint options
+        if index < len(glossary_keys):
+            key_data = glossary_keys[index]
+            endpoint_enabled = key_data.get('use_individual_endpoint', False)
+            endpoint_url = key_data.get('azure_endpoint', '')
+            
+            if endpoint_enabled and endpoint_url:
+                config_action = menu.addAction("✅ Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_glossary_individual_endpoint(index))
+                disable_action = menu.addAction("Disable Individual Endpoint")
+                disable_action.triggered.connect(lambda: self._toggle_glossary_individual_endpoint(index, False))
+            else:
+                config_action = menu.addAction("🔧 Configure Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_glossary_individual_endpoint(index))
+        
+        menu.addSeparator()
+        
+        # Per-key output token limit options
+        selected_items = self.glossary_tree.selectedItems()
+        selected_count = len(selected_items)
+        if selected_count > 1:
+            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
+        else:
+            set_limit_action = menu.addAction("Set Output Token Limit")
+        set_limit_action.triggered.connect(self._set_glossary_output_token_limit_for_selected)
+        clear_limit_action = menu.addAction("Clear Output Token Limit")
+        clear_limit_action.triggered.connect(self._clear_glossary_output_token_limit_for_selected)
+        
+        menu.addSeparator()
+        
+        test_action = menu.addAction("Test")
+        test_action.triggered.connect(self._test_selected_glossary)
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(self._remove_selected_glossary)
+        
+        if total > 1:
+            clear_action = menu.addAction("Clear All")
+            clear_action.triggered.connect(self._clear_all_glossary)
+        
+        menu.exec_(self.glossary_tree.viewport().mapToGlobal(position))
+
+    def _change_glossary_model_for_selected(self):
+        """Change model name for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Change Model for {len(selected)} Glossary Keys")
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)
+        height = int(screen.height() * 0.13)
+        dialog.resize(width, height)
+        self._set_icon(dialog)
+        
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        label = QLabel("Enter new model name (press Enter to apply):")
+        main_layout.addWidget(label)
+        
+        all_models = get_model_options()
+        model_combo = QComboBox()
+        model_combo.addItems(all_models)
+        model_combo.setEditable(True)
+        main_layout.addWidget(model_combo)
+        
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        if selected_indices and selected_indices[0] < len(glossary_keys):
+            current_model = glossary_keys[selected_indices[0]].get('model', '')
+            model_combo.setCurrentText(current_model)
+            model_combo.lineEdit().selectAll()
+        
+        def apply_change():
+            new_model = model_combo.currentText().strip()
+            if new_model:
+                for item in selected:
+                    idx = self.glossary_tree.indexOfTopLevelItem(item)
+                    if idx < len(glossary_keys):
+                        glossary_keys[idx]['model'] = new_model
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Changed model to '{new_model}' for {len(selected)} glossary keys")
+                dialog.accept()
+        
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(apply_change)
+        apply_btn.setDefault(True)
+        button_layout.addWidget(apply_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        main_layout.addLayout(button_layout)
+        
+        model_combo.setFocus()
+        dialog.exec_()
+
+    def _on_glossary_rows_moved(self):
+        """Sync glossary_keys config with tree order after drag-drop"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        
+        new_order = []
+        for i in range(self.glossary_tree.topLevelItemCount()):
+            item = self.glossary_tree.topLevelItem(i)
+            if item:
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key_data in glossary_keys:
+                    api_key = key_data.get('api_key', '')
+                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                        new_order.append(key_data)
+                        break
+        
+        if len(new_order) == len(glossary_keys):
+            self.translator_gui.config['glossary_keys'] = new_order
+            self.translator_gui.save_config(show_message=False)
+            self._show_glossary_status("Reordered glossary keys")
+
+    def _on_glossary_click(self, item, column):
+        """Handle double-click on glossary tree item for inline editing"""
+        if not item:
+            return
+        
+        index = self.glossary_tree.indexOfTopLevelItem(item)
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if index >= len(glossary_keys):
+            return
+        
+        if column == 1:
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                glossary_keys[index]['model'] = new_value
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated model to: {new_value}")
+
+    def _show_glossary_status(self, message: str):
+        """Show status message in the glossary section."""
+        if hasattr(self, 'glossary_status_label'):
+            self.glossary_status_label.setText(message)
+
+    def _configure_glossary_individual_endpoint(self, glossary_index):
+        """Configure individual endpoint for a glossary key"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if glossary_index >= len(glossary_keys):
+            return
+        
+        key_data = glossary_keys[glossary_index]
+        
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+        )
+        
+        def on_endpoint_configured():
+            glossary_keys[glossary_index]['azure_endpoint'] = temp_key.azure_endpoint
+            glossary_keys[glossary_index]['azure_api_version'] = temp_key.azure_api_version
+            glossary_keys[glossary_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            status = "configured" if temp_key.use_individual_endpoint else "disabled"
+            self._show_glossary_status(f"Individual endpoint {status} for glossary key")
+        
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_glossary_status)
+        dialog.exec_()
+    
+    def _set_glossary_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected glossary keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+        
+        default_val = None
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(glossary_keys):
+            try:
+                raw = glossary_keys[first_idx].get('individual_output_token_limit')
+                if raw not in (None, ""):
+                    iv = int(raw)
+                    if iv > 0:
+                        default_val = iv
+            except Exception:
+                default_val = None
+        if default_val is None:
+            try:
+                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+            except Exception:
+                default_val = 8192
+        
+        value, ok = QInputDialog.getInt(
+            self, "Set Glossary Output Token Limit",
+            "Max output tokens for selected glossary key(s):",
+            default_val, 1, 2000000, 512,
+        )
+        if not ok or value <= 0:
+            return
+        
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['individual_output_token_limit'] = int(value)
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Set glossary output token limit to {value} for {len(selected_indices)} key(s)")
+    
+    def _clear_glossary_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                if 'individual_output_token_limit' in glossary_keys[idx]:
+                    del glossary_keys[idx]['individual_output_token_limit']
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Cleared glossary output token limit for {len(selected_indices)} key(s)")
+    
+    def _toggle_glossary_individual_endpoint(self, glossary_index, enabled):
+        """Quick toggle individual endpoint on/off for glossary key"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if glossary_index >= len(glossary_keys):
+            return
+        
+        glossary_keys[glossary_index]['use_individual_endpoint'] = enabled
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        
+        status = "enabled" if enabled else "disabled"
+        model = glossary_keys[glossary_index].get('model', 'unknown')
+        self._show_glossary_status(f"Individual endpoint {status} for glossary key ({model})")
+
+    def _browse_glossary_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file for glossary keys"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON for Glossary",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if 'type' in creds_data and 'project_id' in creds_data:
+                        self.glossary_google_creds_entry.setText(filename)
+                        self._show_glossary_status(f"Selected glossary Google credentials: {os.path.basename(filename)}")
+                    else:
+                        QMessageBox.critical(
+                            self,
+                            "Error", 
+                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                        )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+    # ===================================================================
+    # END GLOSSARY KEYS SECTION
+    # ===================================================================
+
     def _manage_refusal_patterns(self):
         """Open dialog to manage refusal patterns (non-modal)"""
         # Keep reference to prevent garbage collection
