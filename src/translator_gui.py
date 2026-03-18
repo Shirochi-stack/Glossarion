@@ -5212,8 +5212,8 @@ Recent translations to summarize:
         self.manual_glossary_status_label.setToolTip("Currently loaded glossary file (manual or auto-mapped)")
         _gloss_row_layout.addWidget(self.manual_glossary_status_label)
 
-        self.clear_manual_glossary_btn = QPushButton("✕ Clear")
-        self.clear_manual_glossary_btn.setFixedHeight(20)
+        self.clear_manual_glossary_btn = QPushButton("✕")
+        self.clear_manual_glossary_btn.setFixedSize(20, 20)
         self.clear_manual_glossary_btn.setCursor(Qt.PointingHandCursor)
         self.clear_manual_glossary_btn.setToolTip("Clear the currently loaded glossary")
         self.clear_manual_glossary_btn.setStyleSheet("""
@@ -5579,7 +5579,7 @@ Recent translations to summarize:
         # Wrap status row + auto glossary row in a vertical container
         _batch_right_vbox = QVBoxLayout()
         _batch_right_vbox.setContentsMargins(0, 0, 0, 0)
-        _batch_right_vbox.setSpacing(6)
+        _batch_right_vbox.setSpacing(10)
         _batch_right_vbox.addWidget(self._gloss_status_row)
         _batch_right_vbox.addWidget(batch_right_container)
         _batch_right_wrapper = QWidget()
