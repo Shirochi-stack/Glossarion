@@ -1591,6 +1591,10 @@ class UnifiedClient:
     _api_key_pool: Optional[APIKeyPool] = None
     _pool_lock = threading.Lock()
     
+    # Glossary-dedicated key pool (separate from main multi-key pool)
+    _glossary_key_pool: Optional[APIKeyPool] = None
+    _glossary_pool_lock = threading.Lock()
+    
     # Request tracking
     _global_request_counter = 0
     _counter_lock = threading.Lock()
@@ -1866,6 +1870,84 @@ class UnifiedClient:
         """Clear in-memory multi-key configuration."""
         with cls._in_memory_multi_keys_lock:
             cls._in_memory_multi_keys = None
+
+    # In-memory glossary-key configuration (mirrors multi-key pattern)
+    _in_memory_glossary_keys = None
+    _in_memory_glossary_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_glossary_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure glossary-key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_glossary_keys_lock:
+                cls._in_memory_glossary_keys = keys_list
+        except Exception:
+            pass
+        try:
+            cls.setup_glossary_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    def clear_in_memory_glossary_keys(cls):
+        """Clear in-memory glossary-key configuration."""
+        with cls._in_memory_glossary_keys_lock:
+            cls._in_memory_glossary_keys = None
+        with cls._glossary_pool_lock:
+            cls._glossary_key_pool = None
+
+    @classmethod
+    def setup_glossary_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared glossary API key pool (mirrors setup_multi_key_pool)."""
+        with cls._glossary_pool_lock:
+            if cls._glossary_key_pool is None:
+                cls._glossary_key_pool = APIKeyPool()
+
+            # Initialize rate limit cache if needed
+            if cls._rate_limit_cache is None:
+                cls._rate_limit_cache = RateLimitCache()
+
+            # Validate and fix encrypted keys
+            validated_keys = []
+            encrypted_keys_fixed = 0
+
+            for i, key_data in enumerate(keys_list):
+                if not isinstance(key_data, dict):
+                    continue
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
+                if not api_key and cls._model_needs_api_key(model):
+                    continue
+                # Fix encrypted keys
+                if api_key and api_key.startswith('ENC:'):
+                    try:
+                        from api_key_encryption import get_handler
+                        handler = get_handler()
+                        decrypted_key = handler.decrypt_value(api_key)
+                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
+                            fixed_key_data = key_data.copy()
+                            fixed_key_data['api_key'] = decrypted_key
+                            validated_keys.append(fixed_key_data)
+                            encrypted_keys_fixed += 1
+                    except Exception:
+                        continue
+                else:
+                    validated_keys.append(key_data)
+
+            if not validated_keys:
+                return False
+
+            cls._glossary_key_pool.load_from_list(validated_keys)
+
+            existing_count = len(getattr(cls._glossary_key_pool, 'keys', [])) if cls._glossary_key_pool else 0
+            if existing_count != len(validated_keys):
+                if encrypted_keys_fixed > 0:
+                    print(f"🔑 Glossary key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                else:
+                    print(f"🔑 Glossary key pool: {len(validated_keys)} keys loaded")
+
+            return True
     
     @classmethod
     def initialize_key_pool(cls, key_list: list):
@@ -4173,53 +4255,92 @@ class UnifiedClient:
             
             # Multi-key retry wrapper
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
-            # override the client's api_key/model with the first glossary key so glossary
-            # API calls use dedicated keys as the primary pool.
+            # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
             _glossary_overridden = False
             _original_api_key = None
             _original_model = None
+            _original_multi_key_mode = None
+            _original_api_key_pool = None
             if context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name):
                 try:
                     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                     if use_glossary_keys:
-                        glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
-                        glossary_keys_list = json.loads(glossary_keys_json) if glossary_keys_json != '[]' else []
-                        if glossary_keys_list:
-                            gk = glossary_keys_list[0]
-                            gk_api_key = gk.get('api_key', '')
-                            gk_model = gk.get('model', '')
-                            if gk_model:
-                                _original_api_key = self.api_key
-                                _original_model = self.model
-                                self.api_key = gk_api_key
-                                self.model = gk_model
-                                # Apply per-key settings
-                                gk_google_creds = gk.get('google_credentials')
-                                if gk_google_creds:
-                                    self.current_key_google_creds = gk_google_creds
-                                    self.google_creds_path = gk_google_creds
-                                gk_google_region = gk.get('google_region')
-                                if gk_google_region:
-                                    self.current_key_google_region = gk_google_region
-                                if gk.get('use_individual_endpoint'):
-                                    gk_endpoint = gk.get('azure_endpoint')
-                                    if gk_endpoint:
-                                        self.current_key_azure_endpoint = gk_endpoint
-                                        self.current_key_use_individual_endpoint = True
-                                    gk_api_version = gk.get('azure_api_version')
-                                    if gk_api_version:
-                                        self.current_key_azure_api_version = gk_api_version
-                                gk_output_limit = gk.get('individual_output_token_limit')
-                                if gk_output_limit and int(gk_output_limit) > 0:
+                        # Try in-memory glossary keys first (set by GUI)
+                        glossary_pool = self.__class__._glossary_key_pool
+                        if not glossary_pool or not getattr(glossary_pool, 'keys', []):
+                            # Fallback: try loading from env var
+                            glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
+                            if glossary_keys_json != '[]':
+                                try:
+                                    glossary_keys_list = json.loads(glossary_keys_json)
+                                    if glossary_keys_list:
+                                        self.__class__.setup_glossary_key_pool(glossary_keys_list)
+                                        glossary_pool = self.__class__._glossary_key_pool
+                                except Exception:
+                                    pass
+                        
+                        if glossary_pool and getattr(glossary_pool, 'keys', []):
+                            # Save original state
+                            _original_api_key = self.api_key
+                            _original_model = self.model
+                            _original_multi_key_mode = self._multi_key_mode
+                            _original_api_key_pool = self.__class__._api_key_pool
+                            
+                            # Swap the key pool to the glossary pool
+                            self.__class__._api_key_pool = glossary_pool
+                            self._multi_key_mode = True
+                            self._api_key_pool = glossary_pool
+                            
+                            # Assign first available glossary key to this thread
+                            try:
+                                key_info = self._get_next_available_key()
+                                if key_info:
+                                    key_entry, key_idx = key_info
+                                    self.api_key = key_entry.api_key
+                                    self.model = key_entry.model
+                                    self.current_key_index = key_idx
+                                    self.key_identifier = f"GlossaryKey#{key_idx+1} ({key_entry.model})"
+                                    # Apply per-key settings
+                                    gk_data = None
                                     try:
-                                        tls = self._get_thread_local_client()
-                                        tls.per_key_max_output_tokens = int(gk_output_limit)
+                                        with self.__class__._in_memory_glossary_keys_lock:
+                                            gk_list = self.__class__._in_memory_glossary_keys or []
+                                        if key_idx < len(gk_list):
+                                            gk_data = gk_list[key_idx]
                                     except Exception:
                                         pass
-                                # Re-initialize client for new model/key
-                                self._setup_client()
-                                _glossary_overridden = True
-                                print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool: {gk_model} (key: {gk_api_key[:8]}...)")
+                                    if gk_data:
+                                        gk_google_creds = gk_data.get('google_credentials')
+                                        if gk_google_creds:
+                                            self.current_key_google_creds = gk_google_creds
+                                            self.google_creds_path = gk_google_creds
+                                        gk_google_region = gk_data.get('google_region')
+                                        if gk_google_region:
+                                            self.current_key_google_region = gk_google_region
+                                        if gk_data.get('use_individual_endpoint'):
+                                            gk_endpoint = gk_data.get('azure_endpoint')
+                                            if gk_endpoint:
+                                                self.current_key_azure_endpoint = gk_endpoint
+                                                self.current_key_use_individual_endpoint = True
+                                            gk_api_version = gk_data.get('azure_api_version')
+                                            if gk_api_version:
+                                                self.current_key_azure_api_version = gk_api_version
+                                        gk_output_limit = gk_data.get('individual_output_token_limit')
+                                        if gk_output_limit and int(gk_output_limit) > 0:
+                                            try:
+                                                tls = self._get_thread_local_client()
+                                                tls.per_key_max_output_tokens = int(gk_output_limit)
+                                            except Exception:
+                                                pass
+                                    # Re-initialize client for new model/key
+                                    self._setup_client()
+                                    _glossary_overridden = True
+                                    print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool ({len(glossary_pool.keys)} keys): {self.key_identifier}")
+                            except Exception as e:
+                                print(f"[GLOSSARY KEYS] ⚠️ Failed to get glossary key from pool: {e}")
+                                # Restore state on failure
+                                self.__class__._api_key_pool = _original_api_key_pool
+                                self._multi_key_mode = _original_multi_key_mode
                 except Exception as e:
                     print(f"[GLOSSARY KEYS] ⚠️ Failed to apply glossary key override: {e}")
             
@@ -4312,10 +4433,15 @@ class UnifiedClient:
                 else:
                     return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
-            # Restore original key/model if we overrode them for glossary context
-            if _glossary_overridden and _original_api_key is not None:
-                self.api_key = _original_api_key
-                self.model = _original_model
+            # Restore original key/model and pool if we overrode them for glossary context
+            if _glossary_overridden:
+                if _original_api_key is not None:
+                    self.api_key = _original_api_key
+                    self.model = _original_model
+                if _original_multi_key_mode is not None:
+                    self._multi_key_mode = _original_multi_key_mode
+                if _original_api_key_pool is not None:
+                    self.__class__._api_key_pool = _original_api_key_pool
                 self._setup_client()
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)

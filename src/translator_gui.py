@@ -9815,6 +9815,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             
+            # Configure glossary key pool in memory (mirrors multi-key setup)
+            try:
+                from unified_api_client import UnifiedClient
+                if self.config.get('use_glossary_keys', False) and self.config.get('glossary_keys', []):
+                    UnifiedClient.set_in_memory_glossary_keys(
+                        self.config.get('glossary_keys', []),
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                else:
+                    UnifiedClient.clear_in_memory_glossary_keys()
+            except Exception:
+                pass
+            
             # Initialize API client with output_dir to enable multi-key mode from environment
             try:
                 from unified_api_client import UnifiedClient
@@ -10768,6 +10782,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
             else:
                 UnifiedClient.clear_in_memory_multi_keys()
+            
+            # Configure glossary key pool in memory (mirrors multi-key setup)
+            if self.config.get('use_glossary_keys', False) and self.config.get('glossary_keys', []):
+                UnifiedClient.set_in_memory_glossary_keys(
+                    self.config.get('glossary_keys', []),
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+            else:
+                UnifiedClient.clear_in_memory_glossary_keys()
         except Exception:
             pass
 
