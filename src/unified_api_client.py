@@ -13222,6 +13222,7 @@ class UnifiedClient:
             if raw_resp.status_code != 200:
                 # Non-200 during streaming - check for thinking errors first
                 try:
+                    raw_resp.read()  # httpx requires explicit read before .text on streams
                     err_body = raw_resp.text
                     try:
                         _save_incoming_response("Anthropic", api_url, raw_resp.status_code, dict(raw_resp.headers), err_body, request_id=rid, out_dir=self._get_thread_directory())
@@ -13262,6 +13263,7 @@ class UnifiedClient:
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
                     if raw_resp.status_code != 200:
+                        raw_resp.read()
                         raise UnifiedClientError(f"Anthropic streaming error after thinking removal: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
@@ -13297,6 +13299,7 @@ class UnifiedClient:
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
                     if raw_resp.status_code != 200:
+                        raw_resp.read()
                         raise UnifiedClientError(f"Anthropic streaming error after adaptive fallback: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened with standard thinking (status={raw_resp.status_code})")
