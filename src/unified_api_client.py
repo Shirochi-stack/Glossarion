@@ -2536,8 +2536,10 @@ class UnifiedClient:
                 if key_info:
                     key, key_index = key_info[:2]  # Handle both tuple formats
                     
-                    # Generate key identifier
-                    key_id = f"Key#{key_index+1} ({key.model})"
+                    # Generate key identifier — use GlossaryKey# prefix when using glossary pool
+                    _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+                    _prefix = "GlossaryKey" if _is_glossary_pool else "Key"
+                    key_id = f"{_prefix}#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
                     
@@ -2670,7 +2672,9 @@ class UnifiedClient:
                     self.api_key = key.api_key
                     self.model = key.model
                     self.current_key_index = key_index
-                    self.key_identifier = f"Key#{key_index+1} ({self.model})"
+                    _is_gp = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+                    _pfx = "GlossaryKey" if _is_gp else "Key"
+                    self.key_identifier = f"{_pfx}#{key_index+1} ({self.model})"
                     
                     # Store assignment
                     with self._assignment_lock:
@@ -3246,7 +3250,9 @@ class UnifiedClient:
                 self.current_key_index = key_info[1]
                 
                 # Update key identifier
-                self.key_identifier = f"Key#{key_info[1]+1} ({self.model})"
+                _is_gp = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+                _pfx = "GlossaryKey" if _is_gp else "Key"
+                self.key_identifier = f"{_pfx}#{key_info[1]+1} ({self.model})"
                 
                 # Reset clients (these are instance variables too!)
                 self.openai_client = None
@@ -3490,14 +3496,16 @@ class UnifiedClient:
         self.api_key = key_info[0].api_key
         self.model = key_info[0].model
         self.current_key_index = key_info[1]
-        self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
+        _is_gp = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+        _pfx = "GlossaryKey" if _is_gp else "Key"
+        self.key_identifier = f"{_pfx}#{key_info[1]+1} ({key_info[0].model})"
         
         # MICROSECOND LOCK: Atomic update of all key-related variables
         with self._instance_model_lock:
             self.api_key = key_info[0].api_key
             self.model = key_info[0].model
             self.current_key_index = key_info[1]
-            self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
+            self.key_identifier = f"{_pfx}#{key_info[1]+1} ({key_info[0].model})"
             
             # Reset clients atomically
             self.openai_client = None
@@ -4344,6 +4352,24 @@ class UnifiedClient:
                                     # Re-initialize client for new model/key
                                     self._setup_client()
                                     _glossary_overridden = True
+                                    # Populate thread-local state so _setup_for_multi_key_thread
+                                    # won't re-select a different key from the pool
+                                    try:
+                                        tls = self._get_thread_local_client()
+                                        tls.api_key = key_entry.api_key
+                                        tls.model = key_entry.model
+                                        tls.key_index = key_idx
+                                        tls.key_identifier = self.key_identifier
+                                        tls.google_credentials = getattr(self, 'current_key_google_creds', None)
+                                        tls.azure_endpoint = getattr(self, 'current_key_azure_endpoint', None)
+                                        tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
+                                        tls.google_region = getattr(self, 'current_key_google_region', None)
+                                        tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                                        tls.initialized = True
+                                        tls.last_rotation = time.time()
+                                        tls.request_count = 0
+                                    except Exception:
+                                        pass
                                     print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool ({len(glossary_pool.keys)} keys): {self.key_identifier}")
                             except Exception as e:
                                 print(f"[GLOSSARY KEYS] ⚠️ Failed to get glossary key from pool: {e}")
