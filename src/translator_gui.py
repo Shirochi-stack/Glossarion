@@ -15616,8 +15616,8 @@ Important rules:
             sw, sh = screen.width(), screen.height()
             dialog = QDialog(self)
             dialog.setWindowTitle("Welcome to Glossarion")
-            dialog.resize(int(sw * 0.46), int(sh * 0.65))
-            dialog.setMinimumSize(int(sw * 0.38), int(sh * 0.50))
+            dialog.resize(int(sw * 0.40), int(sh * 0.77))
+            dialog.setMinimumSize(int(sw * 0.34), int(sh * 0.60))
             
             # ── Brighter gradient ──
             dialog.setStyleSheet("""
