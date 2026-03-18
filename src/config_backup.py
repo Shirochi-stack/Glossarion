@@ -9,6 +9,11 @@ import sys
 import time
 import shutil
 import json
+try:
+    import dpi_setup
+    dpi_setup.configure()
+except Exception:
+    pass
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTreeWidget, QTreeWidgetItem, QMessageBox, QFrame, QGroupBox,
@@ -221,8 +226,9 @@ def _manual_restore_config(self):
         app = QApplication.instance()
         if not app:
             try:
-                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-            except:
+                import dpi_setup
+                dpi_setup.configure()
+            except Exception:
                 pass
             app = QApplication(sys.argv)
         

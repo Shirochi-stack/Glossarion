@@ -3,6 +3,14 @@ import sys
 import time
 import atexit
 import threading
+
+# DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
+try:
+    import dpi_setup
+    dpi_setup.configure()
+except Exception as e:
+    print(f"⚠️ DPI setup failed: {e}")
+
 from PySide6.QtWidgets import QApplication, QWidget, QLabel, QProgressBar, QVBoxLayout
 from PySide6.QtCore import Qt, QTimer, QEventLoop, QObject, Signal, QMetaObject, Q_ARG
 from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QFontMetrics
@@ -55,7 +63,7 @@ class SplashManager(QObject):
             
             if os.path.isfile(ico_path):
                 # Set app user model ID immediately
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.0')
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.1')
                 
                 # Set app-level icon
                 if self.app:
@@ -162,7 +170,7 @@ class SplashManager(QObject):
             self._load_icon(layout)
             
             # Title
-            title_label = QLabel("Glossarion v8.1.0")
+            title_label = QLabel("Glossarion v8.1.1")
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title_font = QFont("Arial", int(max(14, 20 * self._ui_scale)), QFont.Weight.Bold)
             title_label.setFont(title_font)
@@ -320,7 +328,7 @@ class SplashManager(QObject):
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.0')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.1')
                         
                         # Load icon from file and set it on the window
                         hwnd = int(self.splash_window.winId())

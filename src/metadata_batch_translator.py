@@ -9,6 +9,11 @@ import json
 
 # GUI imports - optional for non-GUI usage
 try:
+    import dpi_setup
+    dpi_setup.configure()
+except Exception:
+    pass
+try:
     from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
                                    QCheckBox, QRadioButton, QButtonGroup, QWidget, QScrollArea,
                                    QFrame, QGroupBox, QTabWidget, QTextEdit, QLineEdit, QComboBox,
@@ -156,8 +161,9 @@ class MetadataBatchTranslatorUI:
             app = QApplication.instance()
             if not app:
                 try:
-                    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-                except:
+                    import dpi_setup
+                    dpi_setup.configure()
+                except Exception:
                     pass
                 app = QApplication(sys.argv)
 
@@ -764,8 +770,9 @@ class MetadataBatchTranslatorUI:
         app = QApplication.instance()
         if not app:
             try:
-                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-            except:
+                import dpi_setup
+                dpi_setup.configure()
+            except Exception:
                 pass
             app = QApplication(sys.argv)
         

@@ -80,6 +80,12 @@ import faulthandler
 import platform
 
 # PySide6 imports (replacing Tkinter)
+# DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
+try:
+    import dpi_setup
+    dpi_setup.configure()
+except Exception as e:
+    print(f"⚠️ DPI setup failed: {e}")
 try:
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
                                     QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
@@ -1034,7 +1040,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.1.0"
+        __version__ = "8.1.1"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1109,7 +1115,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.0')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.1')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2492,11 +2498,7 @@ Text to analyze:
         # Create or get QApplication instance
         app = QApplication.instance()
         if not app:
-            # Set DPI awareness before creating QApplication
-            try:
-                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-            except:
-                pass
+            # DPI awareness is handled globally by dpi_setup.configure()
             app = QApplication(sys.argv)
         
         # Create PySide6 dialog with standard window controls
@@ -3044,7 +3046,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.1.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.1.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -19212,7 +19214,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.1.0...")
+    print("🚀 Starting Glossarion v8.1.1...")
     
     # Initialize splash screen
     splash_manager = None
@@ -19426,6 +19428,12 @@ if __name__ == "__main__":
         # Check if QApplication already exists
         qapp = QApplication.instance()
         if not qapp:
+            # Safety net: ensure DPI awareness is set before creating QApplication
+            try:
+                import dpi_setup
+                dpi_setup.configure()
+            except Exception:
+                pass
             qapp = QApplication(sys.argv)
         
         # Initialize the app (modules already available)  
