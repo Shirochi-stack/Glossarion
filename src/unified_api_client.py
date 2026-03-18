@@ -13165,8 +13165,17 @@ class UnifiedClient:
             data["stream"] = True
             import time as _t
             start_ts = _t.time()
+            # Log thinking status when starting stream
+            thinking_mode = data.get('thinking', {}).get('type', None) if isinstance(data.get('thinking'), dict) else None
             if not self._is_stop_requested():
-                print(f"🛰️ [anthropic] SSE stream start (model={self.model}, url={api_url})")
+                thinking_label = ""
+                if thinking_mode == 'adaptive':
+                    effort = data.get('output_config', {}).get('effort', 'medium') if isinstance(data.get('output_config'), dict) else 'medium'
+                    thinking_label = f", thinking=adaptive (effort={effort})"
+                elif thinking_mode == 'enabled':
+                    budget = data.get('thinking', {}).get('budget_tokens', 0)
+                    thinking_label = f", thinking=extended (budget={budget:,})"
+                print(f"🛰️ [anthropic] SSE stream start (model={self.model}, url={api_url}{thinking_label})")
 
             try:
                 raw_resp = requests.post(
@@ -13191,7 +13200,7 @@ class UnifiedClient:
                 rid = None
 
             if raw_resp.status_code != 200:
-                # Non-200 during streaming - read body and raise
+                # Non-200 during streaming - check for thinking errors first
                 try:
                     err_body = raw_resp.text
                     try:
@@ -13200,7 +13209,74 @@ class UnifiedClient:
                         pass
                 except Exception:
                     err_body = f"HTTP {raw_resp.status_code}"
-                raise UnifiedClientError(f"Anthropic streaming error: {err_body}", http_status=raw_resp.status_code)
+
+                err_lower = err_body.lower() if isinstance(err_body, str) else ""
+
+                # Handle thinking-unsupported errors (same logic as _http_request_with_retries)
+                if raw_resp.status_code == 400 and "does not support thinking" in err_lower:
+                    print(f"🧠 [anthropic] Model does not support thinking — retrying without thinking")
+                    model_name = data.get('model')
+                    if model_name:
+                        try:
+                            with self.__class__._thinking_unsupported_lock:
+                                self.__class__._thinking_unsupported_models.add(str(model_name))
+                        except Exception:
+                            pass
+                    data.pop('thinking', None)
+                    data.pop('output_config', None)
+                    # Retry without thinking
+                    try:
+                        raw_resp = requests.post(
+                            api_url, headers=headers, json=data,
+                            stream=True, timeout=self.request_timeout
+                        )
+                    except Exception as e:
+                        if self._is_stop_requested():
+                            self._cancelled = True
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
+                    if raw_resp.status_code != 200:
+                        raise UnifiedClientError(f"Anthropic streaming error after thinking removal: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
+                    if not self._is_stop_requested():
+                        print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
+
+                elif raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower:
+                    print(f"🧠 [anthropic] Adaptive thinking not supported — falling back to standard extended thinking")
+                    model_name = data.get('model')
+                    if model_name:
+                        try:
+                            with self.__class__._adaptive_unsupported_lock:
+                                self.__class__._adaptive_unsupported_models.add(str(model_name))
+                        except Exception:
+                            pass
+                    data.pop('thinking', None)
+                    data.pop('output_config', None)
+                    budget_str = os.getenv('ANTHROPIC_THINKING_BUDGET', '10000')
+                    try:
+                        budget = int(budget_str)
+                    except Exception:
+                        budget = 10000
+                    if budget > 0:
+                        data['thinking'] = {'type': 'enabled', 'budget_tokens': budget}
+                        print(f"    🔄 Falling back to extended thinking (budget={budget:,} tokens)")
+                    # Retry with standard thinking
+                    try:
+                        raw_resp = requests.post(
+                            api_url, headers=headers, json=data,
+                            stream=True, timeout=self.request_timeout
+                        )
+                    except Exception as e:
+                        if self._is_stop_requested():
+                            self._cancelled = True
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
+                    if raw_resp.status_code != 200:
+                        raise UnifiedClientError(f"Anthropic streaming error after adaptive fallback: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
+                    if not self._is_stop_requested():
+                        print(f"🛰️ [anthropic] SSE stream re-opened with standard thinking (status={raw_resp.status_code})")
+
+                else:
+                    raise UnifiedClientError(f"Anthropic streaming error: {err_body}", http_status=raw_resp.status_code)
 
             # Register for cleanup
             with self._active_streams_lock:
@@ -13210,6 +13286,8 @@ class UnifiedClient:
             finish_reason = 'stop'
             usage = None
             log_buf = []
+            thinking_tokens_seen = 0
+            current_block_type = None  # track content_block_start type
 
             try:
                 for raw_line in raw_resp.iter_lines(decode_unicode=True):
@@ -13238,10 +13316,19 @@ class UnifiedClient:
 
                     evt_type = evt.get("type", "")
 
-                    # content_block_delta → text fragment
-                    if evt_type == "content_block_delta":
+                    # content_block_start → track block type (thinking vs text)
+                    if evt_type == "content_block_start":
+                        cb = evt.get("content_block", {})
+                        current_block_type = cb.get("type", "")
+                        if current_block_type == "thinking" and thinking_mode:
+                            if thinking_tokens_seen == 0 and not self._is_stop_requested():
+                                print("🧠 [anthropic] Thinking block started...")
+
+                    # content_block_delta → text fragment (skip thinking deltas)
+                    elif evt_type == "content_block_delta":
                         delta = evt.get("delta", {})
-                        if delta.get("type") == "text_delta":
+                        delta_type = delta.get("type", "")
+                        if delta_type == "text_delta":
                             frag = delta.get("text", "")
                             if frag:
                                 text_parts.append(frag)
@@ -13260,6 +13347,15 @@ class UnifiedClient:
                                         if len("".join(log_buf)) > 150:
                                             print("".join(log_buf), end="", flush=True)
                                             log_buf = []
+                        elif delta_type == "thinking_delta":
+                            # Thinking deltas are not included in output, but count them
+                            thinking_tokens_seen += 1
+
+                    # content_block_stop → reset block type
+                    elif evt_type == "content_block_stop":
+                        if current_block_type == "thinking" and thinking_tokens_seen > 0 and not self._is_stop_requested():
+                            print(f"🧠 [anthropic] Thinking block complete ({thinking_tokens_seen} chunks)")
+                        current_block_type = None
 
                     # message_delta → stop reason + usage
                     elif evt_type == "message_delta":
@@ -13278,13 +13374,21 @@ class UnifiedClient:
                             else:
                                 usage = {'prompt_tokens': 0, 'completion_tokens': out_tokens, 'total_tokens': out_tokens}
 
-                    # message_start → input token usage
+                    # message_start → input token usage (including cache tokens)
                     elif evt_type == "message_start":
                         msg = evt.get("message", {})
                         u = msg.get("usage")
                         if u:
                             in_tokens = u.get("input_tokens", 0)
-                            usage = {'prompt_tokens': in_tokens, 'completion_tokens': 0, 'total_tokens': in_tokens}
+                            cache_create = u.get("cache_creation_input_tokens", 0)
+                            cache_read = u.get("cache_read_input_tokens", 0)
+                            usage = {
+                                'prompt_tokens': in_tokens,
+                                'completion_tokens': 0,
+                                'total_tokens': in_tokens,
+                                'cache_creation_input_tokens': cache_create,
+                                'cache_read_input_tokens': cache_read,
+                            }
 
                 # Flush remaining log buffer
                 if log_stream and log_buf and not self._is_stop_requested():
@@ -13311,7 +13415,8 @@ class UnifiedClient:
 
             content = "".join(text_parts)
             if not self._is_stop_requested():
-                print(f"🛰️ [anthropic] SSE stream complete: {len(content)} chars, finish={finish_reason}")
+                thinking_info = f", thinking_chunks={thinking_tokens_seen}" if thinking_tokens_seen > 0 else ""
+                print(f"🛰️ [anthropic] SSE stream complete: {len(content)} chars, finish={finish_reason}{thinking_info}")
 
             return UnifiedResponse(
                 content=content,
@@ -13321,6 +13426,16 @@ class UnifiedClient:
             )
         else:
             # ── Non-streaming path (original) ──
+            # Log thinking status
+            thinking_cfg = data.get('thinking')
+            if isinstance(thinking_cfg, dict) and thinking_cfg.get('type'):
+                t_type = thinking_cfg['type']
+                if t_type == 'adaptive':
+                    effort = data.get('output_config', {}).get('effort', 'medium') if isinstance(data.get('output_config'), dict) else 'medium'
+                    print(f"🛰️ [anthropic] Non-streaming request (thinking=adaptive, effort={effort})")
+                elif t_type == 'enabled':
+                    budget = thinking_cfg.get('budget_tokens', 0)
+                    print(f"🛰️ [anthropic] Non-streaming request (thinking=extended, budget={budget:,})")
             resp = self._http_request_with_retries(
                 method="POST",
                 url=api_url,
