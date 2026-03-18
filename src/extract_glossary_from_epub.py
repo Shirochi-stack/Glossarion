@@ -1415,6 +1415,8 @@ def load_progress() -> Dict:
                     del data["glossary"]
                 if "merged_indices" not in data:
                     data["merged_indices"] = []  # Track which chapters were merged into others
+                if "failed" not in data:
+                    data["failed"] = []  # Track chapters that had errors (will be retried)
                 
                 # Filter text from _raw_content_object in existing history to avoid duplication
                 # This cleans up history that was saved before we added filtering
@@ -3576,6 +3578,14 @@ def main(log_callback=None, stop_callback=None):
 
     prog = load_progress()
     completed = prog['completed']
+    failed = prog.get('failed', [])
+    # Remove failed chapters from completed so they get retried
+    if failed:
+        before = len(completed)
+        completed[:] = [idx for idx in completed if idx not in failed]
+        if before != len(completed):
+            print(f"🔄 {len(failed)} previously failed chapter(s) will be retried: {[i+1 for i in sorted(failed)]}")
+        failed.clear()  # Reset failed list for this run
     # Load existing glossary from output file (if it exists) instead of progress file
     # This preserves manual edits to the glossary
     output_glossary_path = os.path.join(glossary_dir, os.path.basename(args.output))
@@ -3711,7 +3721,7 @@ def main(log_callback=None, stop_callback=None):
                 if glossary:
                     print("\U0001F500 Applying deduplication and sorting before exit...")
                     glossary[:] = skip_duplicate_entries(glossary)
-                    save_progress(completed, glossary, merged_indices)
+                    save_progress(completed, glossary, merged_indices, failed=failed)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 return
@@ -3734,7 +3744,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, merged_indices)
+                    save_progress(completed, glossary, merged_indices, failed=failed)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     print(f"\u2705 Saved {len(glossary)} entries before graceful exit")
@@ -3759,7 +3769,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, merged_indices)
+                    save_progress(completed, glossary, merged_indices, failed=failed)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -3889,7 +3899,8 @@ def main(log_callback=None, stop_callback=None):
                                         stopped_early = True
                                         return
                                     print(f"[Chapter {idx+1}] Error: {error}")
-                                    completed.append(idx)
+                                    if idx not in failed:
+                                        failed.append(idx)
                                     return
                                 
                                 # Process entries
@@ -3930,7 +3941,8 @@ def main(log_callback=None, stop_callback=None):
                                     stopped_early = True
                                     return
                                 print(f"[Chapter {idx+1}] Error: {error}")
-                                completed.append(idx)
+                                if idx not in failed:
+                                    failed.append(idx)
                                 return
                             
                             # Process entries as each chapter completes
@@ -3959,7 +3971,7 @@ def main(log_callback=None, stop_callback=None):
                                 batch_history_map[idx] = (user_prompt, resp, raw_obj)
                         
                         # Save progress after each chapter completes (crash-safe with atomic writes)
-                        save_progress(completed, glossary, merged_indices)
+                        save_progress(completed, glossary, merged_indices, failed=failed)
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
@@ -3970,22 +3982,22 @@ def main(log_callback=None, stop_callback=None):
                             stopped_early = True
                             return
                         if is_merged_mode:
-                            # For merged mode, mark all chapters in the unit as completed on error
+                            # For merged mode, mark all chapters in the unit as failed on error
                             for u_idx, u_chap in unit:
                                 if "stopped by user" in str(e).lower():
                                     print(f"✅ Chapter {u_idx+1} stopped by user")
                                 else:
                                     print(f"Error processing merged chapter {u_idx+1}: {e}")
-                                if u_idx not in completed:
-                                    completed.append(u_idx)
+                                if u_idx not in completed and u_idx not in failed:
+                                    failed.append(u_idx)
                         else:
                             idx, chap = unit[0]
                             if "stopped by user" in str(e).lower():
                                 print(f"✅ Chapter {idx+1} stopped by user")
                             else:
                                 print(f"Error processing chapter {idx+1}: {e}")
-                            if idx not in completed:
-                                completed.append(idx)
+                            if idx not in completed and idx not in failed:
+                                failed.append(idx)
 
                 if aggressive_mode:
                     # Aggressive mode: keep pool full, auto-refill as futures complete.
@@ -4154,7 +4166,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📊 Glossary size: {deduplicated_size} unique entries")
                 
                 # Save final deduplicated and sorted glossary
-                save_progress(completed, glossary, merged_indices)
+                save_progress(completed, glossary, merged_indices, failed=failed)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             
@@ -4182,7 +4194,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, merged_indices)
+                    save_progress(completed, glossary, merged_indices, failed=failed)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -4220,7 +4232,7 @@ def main(log_callback=None, stop_callback=None):
                             x.get('raw_name', '').lower()
                         ))
                         
-                        save_progress(completed, glossary, merged_indices)
+                        save_progress(completed, glossary, merged_indices, failed=failed)
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -4776,11 +4788,15 @@ def main(log_callback=None, stop_callback=None):
                     # NULL CHECK before checking if response is empty
                     if resp is None:
                         print(f"⚠️ Response is None for chapter {idx+1}, skipping...")
+                        if idx not in failed:
+                            failed.append(idx)
                         continue
 
                     # Check if response is empty
                     if not resp or resp.strip() == "":
                         print(f"⚠️ Empty response for chapter {idx+1}, skipping...")
+                        if idx not in failed:
+                            failed.append(idx)
                         continue
 
                     # Save the raw response with thread-safe location
@@ -4810,6 +4826,8 @@ def main(log_callback=None, stop_callback=None):
                     except Exception as e:
                         print(f"❌ Error parsing response for chapter {idx+1}: {e}")
                         print(f"   Response preview: {resp[:200] if resp else 'None'}...")
+                        if idx not in failed:
+                            failed.append(idx)
                         continue
                     
                     # Filter out invalid entries
@@ -4884,7 +4902,7 @@ def main(log_callback=None, stop_callback=None):
                         except Exception as e:
                             print(f"⚠️ Failed to save history for chapter {idx+1}: {e}")
 
-                save_progress(completed, glossary, merged_indices)
+                save_progress(completed, glossary, merged_indices, failed=failed)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 
@@ -4914,6 +4932,8 @@ def main(log_callback=None, stop_callback=None):
                 print(f"Error at chapter {idx+1}: {e}")
                 import traceback
                 print(f"Full traceback: {traceback.format_exc()}")
+                if idx not in failed:
+                    failed.append(idx)
                 # Check for stop even after error
                 if check_stop():
                     print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
@@ -4932,6 +4952,11 @@ def main(log_callback=None, stop_callback=None):
         # Clear the list
         _skipped_chapters = []
     
+    # Print failed chapters summary
+    if failed:
+        print(f"\n⚠️ {len(failed)} chapter(s) failed and will be retried on next run: {[i+1 for i in sorted(failed)]}")
+        save_progress(completed, glossary, merged_indices, failed=failed)
+    
     print(f"\nDone. Glossary saved to {args.output}")
     
     # Also save as CSV format for compatibility
@@ -4943,11 +4968,11 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None):
     """Save progress to JSON file (history is now managed separately)
     
     NOTE: We no longer save the glossary itself in the progress file to avoid
-    overwriting manual edits. The progress file only tracks which chapters are completed.
+    overwriting manual edits. The progress file only tracks which chapters are completed/failed.
     The actual glossary data is saved separately in the output JSON/CSV files.
     """
     global _progress_lock
@@ -4982,6 +5007,10 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         # Add merged_indices if provided
         if merged_indices is not None:
             progress_data["merged_indices"] = merged_indices
+        
+        # Add failed chapters list
+        if failed is not None:
+            progress_data["failed"] = failed
         
         try:
             # Use atomic write with proper temp file handling
