@@ -2274,6 +2274,12 @@ def _create_context_management_section(self, parent):
     def _on_scale_changed(val):
         try:
             self.gui_scale_factor_var = val
+            # Save immediately so dpi_setup reads the new value on next launch
+            try:
+                self.config['gui_scale_factor'] = val
+                self.save_config(show_message=False)
+            except Exception:
+                pass
         except Exception:
             pass
     scale_spin.valueChanged.connect(_on_scale_changed)

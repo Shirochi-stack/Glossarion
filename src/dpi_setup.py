@@ -24,7 +24,13 @@ DEFAULT_SCALE_FACTOR = 1.75
 def _read_scale_factor():
     """Read gui_scale_factor from config.json (stdlib only, no PySide6)."""
     try:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        # In frozen (PyInstaller) builds, __file__ points to _MEIPASS temp dir.
+        # config.json lives next to the executable, not inside the bundle.
+        if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        cfg_path = os.path.join(base_dir, "config.json")
         if os.path.isfile(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)

@@ -15691,15 +15691,15 @@ Important rules:
                 ui_s = min(1.0, max(0.75, min(sw / 1600.0, sh / 900.0)))
             except Exception:
                 ui_s = 1.0
-            emoji_px = max(32, int(42 * ui_s))
-            title_pt = max(14, int(18 * ui_s))
-            sub_pt = max(9, int(11 * ui_s))
-            feat_pt = max(9, int(10 * ui_s))
+            emoji_px = max(22, int(28 * ui_s))
+            title_pt = max(12, int(14 * ui_s))
+            sub_pt = max(8, int(10 * ui_s))
+            feat_pt = max(8, int(9 * ui_s))
             
             # ── Layout ──
             main_layout = QVBoxLayout(dialog)
-            main_layout.setContentsMargins(15, 10, 15, 10)
-            main_layout.setSpacing(6)
+            main_layout.setContentsMargins(12, 6, 12, 6)
+            main_layout.setSpacing(4)
             
             # Header row: mascot + title + subtitle
             header = QHBoxLayout()
@@ -15737,16 +15737,14 @@ Important rules:
             page1 = QWidget()
             page1.setStyleSheet("background: transparent;")
             p1_lay = QVBoxLayout(page1)
-            p1_lay.setContentsMargins(0, 6, 0, 0)
-            p1_lay.setSpacing(6)
+            p1_lay.setContentsMargins(0, 2, 0, 0)
+            p1_lay.setSpacing(2)
             
             mode_data = [
                 {
                     "value": "off", "emoji": "🚫", "title": "OFF",
                     "subtitle": "Manual control + Auto-Mapping ON",
-                    "features": ["✓ No automatic extraction", "✓ Enables Auto-Mapping (auto-fill)",
-                                 "✓ Load your own glossary CSV",
-                                 "✓ Best for pre-made glossaries",
+                    "features": ["✓ No automatic extraction", "✓ Enables Auto-Mapping",
                                  "✓ Zero extra API cost"],
                     "bg": "#1e2636", "hover": "#506888", "border": "#90a8c8", "accent": "#c8d8f0",
                     "rec": None,
@@ -15754,9 +15752,7 @@ Important rules:
                 {
                     "value": "off_fuzzy_automap", "emoji": "🔍", "title": "OFF (Fuzzy Mapping)",
                     "subtitle": "Auto-Mapping + Fuzzy name matching",
-                    "features": ["✓ No automatic extraction", "✓ Enables Auto-Mapping + Fuzzy matching",
-                                 "✓ Matches glossaries with similar filenames",
-                                 "✓ Best when filenames differ slightly",
+                    "features": ["✓ No automatic extraction", "✓ Fuzzy filename matching",
                                  "✓ Zero extra API cost"],
                     "bg": "#2e2618", "hover": "#886830", "border": "#c8a048", "accent": "#f0d888",
                     "rec": None,
@@ -15764,19 +15760,15 @@ Important rules:
                 {
                     "value": "off_no_automap", "emoji": "🔒", "title": "OFF (No Auto-Mapping)",
                     "subtitle": "Off + disables auto-mapping",
-                    "features": ["✓ No automatic extraction", "✓ Disables Glossary subfolder → Output Automapping",
-                                 "✓ No glossary auto-fill on file select",
-                                 "✓ Fully manual glossary workflow",
-                                 "✓ Zero extra API cost"],
+                    "features": ["✓ No automatic extraction", "✓ No auto-mapping",
+                                 "✓ Fully manual workflow"],
                     "bg": "#261e2e", "hover": "#684888", "border": "#b090c8", "accent": "#d8c0f0",
                     "rec": None,
                 },
                 {
                     "value": "no_glossary", "emoji": "📭", "title": "NO GLOSSARY",
                     "subtitle": "Translate without any glossary",
-                    "features": ["✓ Skips glossary entirely", "✓ Doesn't change Append toggle",
-                                 "✓ Fastest possible translation",
-                                 "✓ Good for simple/short texts",
+                    "features": ["✓ Skips glossary entirely", "✓ Fastest translation",
                                  "✓ Zero extra API cost"],
                     "bg": "#262020", "hover": "#885050", "border": "#c89090", "accent": "#f0c8c8",
                     "rec": None,
@@ -15784,10 +15776,8 @@ Important rules:
                 {
                     "value": "minimal", "emoji": "⚡", "title": "MINIMAL",
                     "subtitle": "Compact batch extraction",
-                    "features": ["✓ Filters all names & terms from text",
-                                 "✓ Sends into as few API calls as possible",
+                    "features": ["✓ Batch extracts names & terms",
                                  "✓ Lightweight and cost-efficient",
-                                 "✓ Good for straightforward novels",
                                  "⚠ May miss uncommon terms"],
                     "bg": "#162820", "hover": "#3e7858", "border": "#40e8b0", "accent": "#70ffd8",
                     "rec": None,
@@ -15795,9 +15785,7 @@ Important rules:
                 {
                     "value": "balanced", "emoji": "⭐", "title": "BALANCED",
                     "subtitle": "Glossary merging + splitting",
-                    "features": ["✓ Merges up to 99 chapters per request",
-                                 "✓ Splits long chapters automatically",
-                                 "✓ Runs extraction before translation",
+                    "features": ["✓ Merges chapters, splits long ones",
                                  "✓ Best quality-to-cost ratio",
                                  "✓ Smart deduplication"],
                     "bg": "#162848", "hover": "#4070c8", "border": "#6aadff", "accent": "#a0d0ff",
@@ -15806,10 +15794,8 @@ Important rules:
                 {
                     "value": "full", "emoji": "🔬", "title": "FULL",
                     "subtitle": "Per-chapter extraction",
-                    "features": ["✓ Processes every chapter individually",
-                                 "✓ Maximum term capture rate",
-                                 "✓ Most thorough analysis possible",
-                                 "✓ Catches rare names & terms",
+                    "features": ["✓ Per-chapter extraction",
+                                 "✓ Maximum term capture",
                                  "💰 Higher API cost"],
                     "bg": "#2c2414", "hover": "#726238", "border": "#ffc830", "accent": "#ffe070",
                     "rec": "⚡ Best for important novels",
@@ -15822,7 +15808,7 @@ Important rules:
             modes_w = QWidget()
             modes_w.setStyleSheet("background: transparent;")
             modes_lay = QGridLayout(modes_w)
-            modes_lay.setSpacing(8)
+            modes_lay.setSpacing(4)
             for c in range(2):
                 modes_lay.setColumnStretch(c, 1)
             
@@ -15849,8 +15835,8 @@ Important rules:
                     card.setStyleSheet(f"QFrame {{ background-color: #111520; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; border-color: {mi['accent']}; }}")
                 
                 cl = QVBoxLayout(card)
-                m = max(6, int(10 * ui_s))
-                cl.setContentsMargins(m, m, m, max(3, int(5 * ui_s)))
+                m = max(4, int(6 * ui_s))
+                cl.setContentsMargins(m, m, m, max(2, int(3 * ui_s)))
                 
                 el = QLabel(mi["emoji"])
                 el.setFont(QFont("Arial", emoji_px))
@@ -15871,7 +15857,7 @@ Important rules:
                 sl.setAlignment(Qt.AlignCenter)
                 sl.setStyleSheet(f"background:transparent; color:{mi['accent']}; border:none;")
                 cl.addWidget(sl)
-                cl.addSpacing(6)
+                cl.addSpacing(2)
                 
                 for feat in mi["features"]:
                     fl = QLabel(feat)
