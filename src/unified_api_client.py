@@ -13094,7 +13094,12 @@ class UnifiedClient:
         headers = {
             "X-API-Key": self.api_key,
             "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
+            # Disable response compression so SSE events stream in real-time.
+            # Without this, requests auto-sends Accept-Encoding: gzip/deflate
+            # and the server compresses the response, causing decompression
+            # to deliver chunks in large batches instead of token-by-token.
+            "Accept-Encoding": "identity",
         }
         
         # Format messages for Anthropic
