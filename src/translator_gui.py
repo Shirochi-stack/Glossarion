@@ -5199,6 +5199,50 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
 
+        # ── Manual glossary status label + clear button ──
+        self._gloss_status_sep = QLabel("│")
+        self._gloss_status_sep.setStyleSheet("color: #555; font-size: 11pt; margin: 0 2px;")
+        self._gloss_status_sep.hide()
+        batch_right_layout.addWidget(self._gloss_status_sep)
+
+        self.manual_glossary_status_label = QLabel("")
+        self.manual_glossary_status_label.setStyleSheet("""
+            color: #888; font-size: 9pt; font-style: italic;
+            padding: 0 2px;
+        """)
+        self.manual_glossary_status_label.setToolTip("Currently loaded glossary file (manual or auto-mapped)")
+        self.manual_glossary_status_label.hide()
+        batch_right_layout.addWidget(self.manual_glossary_status_label)
+
+        self.clear_manual_glossary_btn = QPushButton("✕")
+        self.clear_manual_glossary_btn.setFixedSize(22, 22)
+        self.clear_manual_glossary_btn.setToolTip("Clear the currently loaded glossary")
+        self.clear_manual_glossary_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #ff6b6b; border: 1px solid #ff6b6b;
+                border-radius: 3px; font-size: 10pt; font-weight: bold; padding: 0;
+            }
+            QPushButton:hover { background: #ff6b6b; color: #1a1a2e; }
+        """)
+        self.clear_manual_glossary_btn.hide()  # hidden when no glossary loaded
+
+        def _clear_manual_glossary():
+            _prev = getattr(self, 'manual_glossary_path', None)
+            self.manual_glossary_path = None
+            self.manual_glossary_manually_loaded = False
+            self.auto_loaded_glossary_path = None
+            self.auto_loaded_glossary_for_file = None
+            try:
+                self.config['manual_glossary_path'] = ''
+                os.environ.pop('MANUAL_GLOSSARY', None)
+            except Exception:
+                pass
+            if _prev:
+                self.append_log(f"📑 Cleared glossary: {os.path.basename(_prev)}")
+            self._update_manual_glossary_status()
+        self.clear_manual_glossary_btn.clicked.connect(_clear_manual_glossary)
+        batch_right_layout.addWidget(self.clear_manual_glossary_btn)
+
         # Sync forced toggle states to the current auto glossary mode on startup.
         # The combo's initial index was set above (line ~5033) BEFORE the signal
         # was connected, so _on_auto_glossary_shortcut_changed never fired.
@@ -5215,6 +5259,9 @@ Recent translations to summarize:
         self._automap_refresh_timer.setInterval(2000)
         self._automap_refresh_timer.timeout.connect(self._periodic_automap_refresh)
         self._automap_refresh_timer.start()
+
+        # Deferred status label update (after startup file restore + auto-mapping)
+        _QTimer.singleShot(1500, self._update_manual_glossary_status)
 
         # Delete glossary button (supports multiple EPUBs)
         def _delete_current_glossary():
@@ -14684,6 +14731,7 @@ Important rules:
                     if getattr(self, '_last_glossary_log', '') != _log_msg:
                         self.append_log(_log_msg)
                         self._last_glossary_log = _log_msg
+                    self._update_manual_glossary_status()
                     return True
 
                 # TXT / MD: accept as-is
@@ -14696,6 +14744,7 @@ Important rules:
                     if getattr(self, '_last_glossary_log', '') != _log_msg:
                         self.append_log(_log_msg)
                         self._last_glossary_log = _log_msg
+                    self._update_manual_glossary_status()
                     return True
 
                 # JSON: validate parse before accepting
@@ -14709,6 +14758,7 @@ Important rules:
                 if getattr(self, '_last_glossary_log', '') != _log_msg:
                     self.append_log(_log_msg)
                     self._last_glossary_log = _log_msg
+                self._update_manual_glossary_status()
                 return True
 
             except Exception:
@@ -16600,6 +16650,36 @@ Important rules:
         except Exception:
             pass
     
+    def _update_manual_glossary_status(self):
+        """Update the manual glossary status label and clear button visibility."""
+        try:
+            gp = getattr(self, 'manual_glossary_path', None)
+            has_label = hasattr(self, 'manual_glossary_status_label')
+            has_btn = hasattr(self, 'clear_manual_glossary_btn')
+            has_sep = hasattr(self, '_gloss_status_sep')
+            if gp:
+                basename = os.path.basename(gp)
+                is_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                prefix = "📑 Manual" if is_manual else "📑 Auto"
+                if has_label:
+                    self.manual_glossary_status_label.setText(f"{prefix}: {basename}")
+                    self.manual_glossary_status_label.setToolTip(gp)
+                    self.manual_glossary_status_label.show()
+                if has_btn:
+                    self.clear_manual_glossary_btn.show()
+                if has_sep:
+                    self._gloss_status_sep.show()
+            else:
+                if has_label:
+                    self.manual_glossary_status_label.setText("")
+                    self.manual_glossary_status_label.hide()
+                if has_btn:
+                    self.clear_manual_glossary_btn.hide()
+                if has_sep:
+                    self._gloss_status_sep.hide()
+        except Exception:
+            pass
+
     def _autofill_glossary_for_current_selection(self) -> int:
         """Auto-fill glossary selection/mapping for the currently selected input files.
 
@@ -16682,6 +16762,7 @@ Important rules:
                             self._last_automap_log_file = _gp_base
                 except Exception:
                     pass
+                self._update_manual_glossary_status()
                 return 1
 
             return 0
@@ -17473,6 +17554,7 @@ Important rules:
         self.manual_glossary_path = path
         self.manual_glossary_manually_loaded = True
         self.append_log(f"📑 Loaded manual glossary: {path}")
+        self._update_manual_glossary_status()
         
         # Save the file extension for later reference
         self.manual_glossary_file_extension = file_extension
