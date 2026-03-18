@@ -2268,9 +2268,9 @@ def _create_context_management_section(self, parent):
     scale_spin.setFocusPolicy(Qt.StrongFocus)
     scale_spin.wheelEvent = lambda e: e.ignore()
     try:
-        scale_spin.setValue(float(getattr(self, 'gui_scale_factor_var', 1.75)))
+        scale_spin.setValue(float(getattr(self, 'gui_scale_factor_var', 1.7)))
     except Exception:
-        scale_spin.setValue(1.75)
+        scale_spin.setValue(1.7)
     def _on_scale_changed(val):
         try:
             self.gui_scale_factor_var = val
@@ -2288,7 +2288,7 @@ def _create_context_management_section(self, parent):
     section_v.addWidget(scale_row)
 
     scale_desc = QLabel(
-        "Controls the overall GUI size (default 1.75).\n"
+        "Controls the overall GUI size (default 1.7).\n"
         "Lower values = smaller UI, higher values = larger UI.\n"
         "⚠️ Requires restart to take effect."
     )

@@ -18,7 +18,7 @@ import sys
 _configured = False
 
 # Default scale factor when config.json has no value
-DEFAULT_SCALE_FACTOR = 1.75
+DEFAULT_SCALE_FACTOR = 1.67
 
 
 def _read_scale_factor():
