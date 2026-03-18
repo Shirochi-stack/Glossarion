@@ -1183,7 +1183,7 @@ class GlossaryManagerMixin:
         
         # Info button
         algo_info_btn = QPushButton("ℹ️")
-        algo_info_btn.setFixedWidth(80)
+        algo_info_btn.setFixedWidth(42)
         algo_info_btn.setStyleSheet("QPushButton { background-color: transparent; border: none; font-size: 14pt; } QPushButton:hover { color: #5a9fd4; }")
         
         def show_algorithm_info():
