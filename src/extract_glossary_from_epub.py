@@ -2784,6 +2784,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'resp': resp,
             'chap': chap,  # Include the chapter text in the result
             'raw_obj': raw_obj,  # Include raw object for history (from send_with_interrupt)
+            'finish_reason': finish_reason,  # Track truncation ('length'/'MAX_TOKENS' = truncated)
             'error': None
         }
             
@@ -2874,6 +2875,7 @@ def process_single_chapter_with_split(idx: int,
     aggregated_data = []
     last_resp = ""
     last_raw_obj = None
+    any_chunk_truncated = False
     for chunk_html, chunk_idx, total_chunks in chunks:
         if stop_check_fn():
             print(f"❌ Glossary extraction stopped during chunk {chunk_idx}/{total_chunks} of chapter {idx+1}")
@@ -2917,6 +2919,10 @@ def process_single_chapter_with_split(idx: int,
         last_resp = result.get("resp", last_resp)
         if result.get("raw_obj"):
             last_raw_obj = result.get("raw_obj")
+        # Track truncation: if any chunk was truncated, the whole chapter is truncated
+        chunk_finish = result.get("finish_reason", "stop")
+        if chunk_finish in ("length", "MAX_TOKENS", "max_tokens"):
+            any_chunk_truncated = True
 
     return {
         'idx': idx,
@@ -2924,6 +2930,7 @@ def process_single_chapter_with_split(idx: int,
         'resp': last_resp,
         'chap': chap,
         'raw_obj': last_raw_obj,
+        'finish_reason': 'length' if any_chunk_truncated else 'stop',
         'error': None
     }
 
@@ -3086,6 +3093,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                     'resp': resp,
                     'chap': chap,
                     'raw_obj': raw_obj,
+                    'finish_reason': finish_reason,
                     'error': None
                 })
             else:
@@ -3918,6 +3926,13 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 completed.append(idx)
                                 
+                                # Mark truncated chapters as failed so they get retried
+                                ch_finish = result.get('finish_reason', 'stop')
+                                if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                    print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                    if idx not in failed:
+                                        failed.append(idx)
+                                
                                 # Store history for parent chapter only
                                 if contextual_enabled and resp and chap and 'merged_into' not in result:
                                     system_prompt, user_prompt = build_prompt(chap)
@@ -3964,6 +3979,13 @@ def main(log_callback=None, stop_callback=None):
                                     glossary.append(entry)
                             
                             completed.append(idx)
+                            
+                            # Mark truncated chapters as failed so they get retried
+                            ch_finish = result.get('finish_reason', 'stop')
+                            if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                if idx not in failed:
+                                    failed.append(idx)
                             
                             # Store history entry for this chapter (will be added after batch completes)
                             if contextual_enabled and resp and chap:
@@ -4868,6 +4890,14 @@ def main(log_callback=None, stop_callback=None):
                 glossary.extend(data)
                 glossary[:] = skip_duplicate_entries(glossary)
                 completed.append(idx)
+                
+                # Mark truncated chapters as failed so they get retried
+                # finish_reason comes from single-chapter mode, chunk_finish_reason from chunked mode
+                _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
+                if _fr in ('length', 'MAX_TOKENS', 'max_tokens'):
+                    print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                    if idx not in failed:
+                        failed.append(idx)
                 
                 # If this was a merged request, also mark child chapters as completed
                 if idx in merge_groups:
