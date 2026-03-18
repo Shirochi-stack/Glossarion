@@ -510,6 +510,52 @@ Use markdown ### headers for each section title (e.g. ### 1. Summary) to make th
 
 IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text from the source language. All character names, place names, titles, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
 
+DEFAULT_CHUNK_PROMPT = DEFAULT_REVIEW_PROMPT  # Per-chunk prompt is the same as the main review prompt
+
+DEFAULT_FINAL_REVIEW_PROMPT = """You are an expert literary critic and book reviewer. Below you will find multiple individual review segments, each covering a different section (chunk) of the same novel. These chunk reviews were generated independently by reviewing consecutive chapter ranges.
+
+Your task is to synthesize ALL of the chunk reviews below into a single, comprehensive, cohesive, and polished final review. Follow these guidelines carefully:
+
+1. **Merge and Deduplicate** — Combine overlapping information. If multiple chunks mention the same characters, themes, or plot points, merge them into unified descriptions rather than repeating.
+2. **Resolve Contradictions** — If chunk reviews disagree on quality assessments or interpretations, weigh the evidence and provide a balanced final judgment. Note significant shifts in quality across the novel if relevant.
+3. **Maintain Chronological Awareness** — Since chunks cover sequential portions of the novel, your summary should reflect the full narrative arc from beginning to end.
+4. **Comprehensive Coverage** — Ensure no significant plot points, characters, or themes from any chunk review are lost in the synthesis.
+
+Your final review MUST include these sections, using markdown ### headers:
+
+### 1. Summary
+A complete plot summary covering the entire novel's storyline from start to finish, synthesized from all chunk summaries.
+
+### 2. Characters
+All key characters mentioned across all chunks, with their roles and development throughout the story.
+
+### 3. Themes
+All major themes explored across the entire work, noting how they evolve or deepen across different sections.
+
+### 4. Writing Style
+A holistic assessment of the author's writing style, pacing, and narrative technique across the full novel. Note any changes in quality or style between early and later sections.
+
+### 5. Strengths & Weaknesses
+A consolidated list of what the work does well and where it falls short, drawn from all chunk assessments.
+
+### 6. Originality Score
+Create a markdown comparison table scoring how unique vs generic the novel is across these categories: Plot, Setting/World-Building, Characters, Power System/Magic, Themes, Prose Style, and Overall. Use a 1-10 scale (1 = completely generic/derivative, 10 = highly original/unique). Include a brief note for each score explaining your reasoning.
+
+| Category | Score | Notes |
+|----------|:-----:|-------|
+| Plot | ?/10 | ... |
+| Setting/World-Building | ?/10 | ... |
+| Characters | ?/10 | ... |
+| Power System/Magic | ?/10 | ... |
+| Themes | ?/10 | ... |
+| Prose Style | ?/10 | ... |
+| **Overall** | ?/10 | ... |
+
+### 7. Overall Assessment
+Your final rating and recommendation for the novel as a whole, considering all sections reviewed.
+
+IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text. All names, places, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
+
 
 # ─── Main review generation ─────────────────────────────────────────────
 
@@ -667,3 +713,336 @@ def generate_review(
         import traceback
         traceback.print_exc()
         return None
+
+
+# ─── Chunked review generation ──────────────────────────────────────────
+
+def _split_into_chunks(
+    chapters: List[Tuple[str, str]],
+    token_budget: int,
+    spoiler_mode: bool,
+) -> List[List[Tuple[str, str]]]:
+    """
+    Split a full chapter list into multiple chunk groups, each fitting
+    within the token budget. In spoiler mode, each chunk applies 50/50
+    first/last splitting logic.
+
+    Returns a list of chunk groups, where each group is a list of
+    (chapter_name, chapter_text) tuples.
+    """
+    if not chapters:
+        return []
+
+    # Count tokens per chapter
+    chapter_tokens = [(name, text, count_tokens(text)) for name, text in chapters]
+
+    chunks = []
+    remaining = list(chapter_tokens)
+
+    while remaining:
+        current_chunk = []
+        used = 0
+
+        if not spoiler_mode:
+            # Greedy: pack as many consecutive chapters as possible
+            while remaining:
+                name, text, tokens = remaining[0]
+                if used + tokens > token_budget and current_chunk:
+                    break  # This chapter doesn't fit, start a new chunk
+                if used + tokens > token_budget and not current_chunk:
+                    # Single chapter too large — chunk it down
+                    cn, ct = _chunk_chapter(name, text, token_budget)
+                    current_chunk.append((cn, ct))
+                    remaining.pop(0)
+                    break
+                current_chunk.append((name, text))
+                used += tokens
+                remaining.pop(0)
+        else:
+            # Spoiler mode: take chapters from front and back of remaining
+            half_budget = token_budget // 2
+
+            # Front half
+            front = []
+            front_used = 0
+            while remaining:
+                name, text, tokens = remaining[0]
+                if front_used + tokens > half_budget and front:
+                    break
+                if front_used + tokens > half_budget and not front:
+                    cn, ct = _chunk_chapter(name, text, half_budget)
+                    front.append((cn, ct))
+                    remaining.pop(0)
+                    break
+                front.append((name, text))
+                front_used += tokens
+                remaining.pop(0)
+
+            # Back half (from end of remaining)
+            back = []
+            back_used = 0
+            while remaining:
+                name, text, tokens = remaining[-1]
+                if back_used + tokens > half_budget and back:
+                    break
+                if back_used + tokens > half_budget and not back:
+                    cn, ct = _chunk_chapter(name, text, half_budget)
+                    back.insert(0, (cn, ct))
+                    remaining.pop()
+                    break
+                back.insert(0, (name, text))
+                back_used += tokens
+                remaining.pop()
+
+            current_chunk = front + back
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+    return chunks
+
+
+def generate_chunked_review(
+    epub_path: str,
+    output_dir: str,
+    api_key: str,
+    model: str,
+    endpoint: str,
+    system_prompt: str,
+    final_review_prompt: str,
+    input_token_limit: int,
+    spoiler_mode: bool,
+    wrap_chunks: bool,
+    temperature: float,
+    config: dict,
+    log_fn: Callable = print,
+    stop_check_fn: Callable = None,
+) -> Optional[str]:
+    """
+    Generate a review by splitting content into chunks, reviewing each
+    chunk separately, then synthesizing all chunk reviews into one final review.
+
+    Args:
+        epub_path: Path to the file
+        output_dir: Output directory
+        api_key: API key
+        model: Model name
+        endpoint: API endpoint URL
+        system_prompt: System prompt for per-chunk reviews
+        final_review_prompt: System prompt for the final synthesis review
+        input_token_limit: Maximum input tokens per API call
+        spoiler_mode: If True, apply 50/50 first/last logic per chunk
+        wrap_chunks: If True, wrap chunk reviews with header/footer markers
+        temperature: API temperature
+        config: Full config dict
+        log_fn: Logging callback
+        stop_check_fn: Stop check callback
+
+    Returns:
+        The final synthesized review text, or None on failure.
+    """
+    if stop_check_fn and stop_check_fn():
+        return None
+
+    # 1. Extract chapters
+    log_fn(f"📖 Extracting content from {os.path.basename(epub_path)}...")
+    chapters = extract_chapter_texts(epub_path, log_fn=log_fn)
+
+    if not chapters:
+        log_fn("❌ No text content found in file")
+        return None
+
+    # 2. Compute token budget for content (subtract system prompt tokens)
+    prompt_tokens = count_tokens(system_prompt)
+    available_budget = input_token_limit - prompt_tokens
+    if available_budget <= 0:
+        log_fn(f"❌ System prompt ({prompt_tokens:,} tokens) exceeds input token limit ({input_token_limit:,})")
+        return None
+
+    log_fn(f"📊 Input token limit: {input_token_limit:,} | System prompt: {prompt_tokens:,} tokens | Available per chunk: {available_budget:,} tokens")
+
+    # 3. Split into chunks
+    chunk_groups = _split_into_chunks(chapters, available_budget, spoiler_mode)
+    total_chunks = len(chunk_groups)
+
+    if total_chunks == 0:
+        log_fn("❌ No chunks could be created from the content")
+        return None
+
+    # If only 1 chunk, fall back to normal single-call review
+    if total_chunks == 1:
+        log_fn("📦 Only 1 chunk needed — falling back to single-call review")
+        return generate_review(
+            epub_path=epub_path,
+            output_dir=output_dir,
+            api_key=api_key,
+            model=model,
+            endpoint=endpoint,
+            system_prompt=system_prompt,
+            input_token_limit=input_token_limit,
+            spoiler_mode=spoiler_mode,
+            temperature=temperature,
+            config=config,
+            log_fn=log_fn,
+            stop_check_fn=stop_check_fn,
+        )
+
+    log_fn(f"📦 Chunk Mode: splitting into {total_chunks} chunks")
+
+    if stop_check_fn and stop_check_fn():
+        log_fn("🛑 Stopped by user")
+        return None
+
+    # 4. Create API client
+    try:
+        from unified_api_client import UnifiedClient
+        from extract_glossary_from_epub import create_client_with_multi_key_support
+
+        if endpoint:
+            os.environ['ENDPOINT'] = endpoint
+        os.environ['MODEL'] = model
+
+        client = create_client_with_multi_key_support(api_key, model, output_dir, config)
+    except Exception as e:
+        log_fn(f"❌ Failed to create API client: {e}")
+        return None
+
+    # 5. Send each chunk as a separate API call
+    chunk_reviews = []
+    total_elapsed = 0.0
+
+    for ci, chunk_chapters in enumerate(chunk_groups):
+        if stop_check_fn and stop_check_fn():
+            log_fn("🛑 Stopped by user")
+            return None
+
+        # Determine chapter range label
+        first_ch = chunk_chapters[0][0]
+        last_ch = chunk_chapters[-1][0]
+        if first_ch == last_ch:
+            range_label = first_ch
+        else:
+            range_label = f"{first_ch} → {last_ch}"
+
+        log_fn(f"\n{'─'*40}")
+        log_fn(f"📄 Chunk {ci+1}/{total_chunks}: {range_label} ({len(chunk_chapters)} chapter(s))")
+        log_fn(f"{'─'*40}")
+
+        # Build content for this chunk
+        content_parts = []
+        for name, text in chunk_chapters:
+            content_parts.append(f"--- Chapter: {name} ---\n{text}")
+        full_content = "\n\n".join(content_parts)
+        content_tokens = count_tokens(full_content)
+
+        log_fn(f"📤 Sending {content_tokens:,} tokens...")
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": full_content},
+        ]
+
+        try:
+            start_time = time.time()
+            result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
+            elapsed = time.time() - start_time
+            total_elapsed += elapsed
+
+            if stop_check_fn and stop_check_fn():
+                log_fn("🛑 Stopped by user — discarding chunk response")
+                return None
+
+            if isinstance(result, tuple):
+                chunk_text, finish_reason = result
+            else:
+                chunk_text = result
+                finish_reason = 'stop'
+
+            if not chunk_text or not chunk_text.strip():
+                log_fn(f"⚠️ Empty response for chunk {ci+1}, skipping")
+                continue
+
+            log_fn(f"✅ Chunk {ci+1} done in {elapsed:.1f}s (finish_reason: {finish_reason})")
+
+            # Wrap with header/footer if enabled
+            chunk_review = chunk_text.strip()
+            if wrap_chunks:
+                header = f"=== CHUNK REVIEW: {range_label} ==="
+                footer = f"=== END CHUNK REVIEW: {range_label} ==="
+                chunk_review = f"{header}\n\n{chunk_review}\n\n{footer}"
+
+            chunk_reviews.append(chunk_review)
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if 'cancelled' in err_str or 'canceled' in err_str:
+                log_fn("🛑 Chunk review cancelled by user")
+                return None
+            log_fn(f"⚠️ Chunk {ci+1} failed: {e}")
+            continue
+
+    if not chunk_reviews:
+        log_fn("❌ No chunk reviews were generated")
+        return None
+
+    log_fn(f"\n{'═'*40}")
+    log_fn(f"📊 {len(chunk_reviews)}/{total_chunks} chunk reviews collected ({total_elapsed:.1f}s total)")
+    log_fn(f"{'═'*40}")
+
+    if stop_check_fn and stop_check_fn():
+        log_fn("🛑 Stopped by user")
+        return None
+
+    # 6. Final synthesis call
+    log_fn(f"\n🔄 Sending Final Review synthesis prompt...")
+    combined_chunks = "\n\n".join(chunk_reviews)
+    combined_tokens = count_tokens(combined_chunks)
+    log_fn(f"📤 Sending {combined_tokens:,} tokens of chunk reviews for synthesis...")
+
+    final_messages = [
+        {"role": "system", "content": final_review_prompt},
+        {"role": "user", "content": combined_chunks},
+    ]
+
+    try:
+        start_time = time.time()
+        result = client.send(final_messages, temperature=temperature, max_tokens=None, context='review')
+        elapsed = time.time() - start_time
+
+        if stop_check_fn and stop_check_fn():
+            log_fn("🛑 Stopped by user — discarding final review response")
+            return None
+
+        if isinstance(result, tuple):
+            final_text, finish_reason = result
+        else:
+            final_text = result
+            finish_reason = 'stop'
+
+        if not final_text or not final_text.strip():
+            log_fn("❌ Empty response from final synthesis")
+            # Fall back to concatenated chunk reviews
+            final_text = combined_chunks
+            log_fn("📝 Using concatenated chunk reviews as fallback")
+
+        log_fn(f"✅ Final review synthesized in {elapsed:.1f}s (finish_reason: {finish_reason})")
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if 'cancelled' in err_str or 'canceled' in err_str:
+            log_fn("🛑 Final review cancelled by user")
+            return None
+        log_fn(f"⚠️ Final synthesis failed: {e}")
+        log_fn("📝 Using concatenated chunk reviews as fallback")
+        final_text = combined_chunks
+
+    # 7. Save
+    review_dir = os.path.join(output_dir, "review")
+    os.makedirs(review_dir, exist_ok=True)
+    review_path = os.path.join(review_dir, "review.md")
+
+    with open(review_path, 'w', encoding='utf-8') as f:
+        f.write(final_text.strip())
+
+    log_fn(f"💾 Review saved to: {review_path}")
+    return final_text.strip()

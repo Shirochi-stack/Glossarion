@@ -17,8 +17,10 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 from review_generator import (
     DEFAULT_REVIEW_PROMPT,
+    DEFAULT_FINAL_REVIEW_PROMPT,
     count_epub_tokens,
     generate_review,
+    generate_chunked_review,
 )
 
 
@@ -487,6 +489,51 @@ class ReviewDialog(QDialog):
         self.spoiler_checkbox.setChecked(False)
         controls_layout.addWidget(self.spoiler_checkbox)
 
+        # Chunk Mode toggle
+        self.chunk_mode_checkbox = self._create_styled_checkbox("Chunk Mode")
+        self.chunk_mode_checkbox.setToolTip(
+            "When enabled, splits the book into multiple chunks and reviews each\n"
+            "separately, then sends a Final Review prompt to synthesize all chunk\n"
+            "reviews into one comprehensive review.\n\n"
+            "This allows reviewing the ENTIRE book regardless of token limits.\n"
+            "Works with Spoiler Mode enabled (spoiler logic applies per-chunk)."
+        )
+        self.chunk_mode_checkbox.setChecked(False)
+        controls_layout.addWidget(self.chunk_mode_checkbox)
+
+        # Wrap Chunks toggle
+        self.chunk_wrap_checkbox = self._create_styled_checkbox("Wrap Chunks")
+        self.chunk_wrap_checkbox.setToolTip(
+            "When enabled, each chunk review is wrapped with header/footer markers\n"
+            "indicating the chapter range (e.g. === CHUNK REVIEW: ch1 → ch5 ===).\n"
+            "Disable to send raw chunk reviews without markers."
+        )
+        self.chunk_wrap_checkbox.setChecked(True)
+        controls_layout.addWidget(self.chunk_wrap_checkbox)
+
+        # Final Review Prompt button
+        self._final_prompt_btn = QPushButton("📝 Final Prompt")
+        self._final_prompt_btn.setFixedHeight(26)
+        self._final_prompt_btn.setCursor(Qt.PointingHandCursor)
+        self._final_prompt_btn.setStyleSheet(
+            "QPushButton { background-color: #2b3a4a; color: #5a9fd4; border: 1px solid #3d5a73; "
+            "border-radius: 3px; padding: 2px 8px; font-size: 9pt; font-weight: 600; }"
+            "QPushButton:hover { background-color: #3a4f66; color: #7ab8e8; border-color: #5a9fd4; }"
+        )
+        self._final_prompt_btn.setToolTip("Edit the Final Review synthesis prompt used in Chunk Mode")
+        self._final_prompt_btn.clicked.connect(self._open_final_prompt_dialog)
+        controls_layout.addWidget(self._final_prompt_btn)
+
+        # Toggle visibility of chunk-related controls based on chunk mode
+        def _on_chunk_mode_toggled(state):
+            is_on = bool(state)
+            self.chunk_wrap_checkbox.setVisible(is_on)
+            self._final_prompt_btn.setVisible(is_on)
+        self.chunk_mode_checkbox.stateChanged.connect(_on_chunk_mode_toggled)
+        # Initial visibility
+        self.chunk_wrap_checkbox.setVisible(False)
+        self._final_prompt_btn.setVisible(False)
+
         # 5. Token count
         self.token_label = QLabel("⏳ Counting tokens...")
         self.token_label.setStyleSheet("color: #94a3b8; font-size: 10pt;")
@@ -733,28 +780,98 @@ class ReviewDialog(QDialog):
     # ─── Config / persistence ────────────────────────────────────────
 
     def _load_saved_prompt(self):
-        """Load previously saved review prompt and spoiler mode from config."""
+        """Load previously saved review prompt, spoiler mode, and chunk mode settings from config."""
         config = getattr(self.translator_gui, 'config', {})
         saved = config.get('review_system_prompt', '')
         self.prompt_edit.setPlainText(saved if saved else DEFAULT_REVIEW_PROMPT)
         # Load spoiler mode
         spoiler = config.get('review_spoiler_mode', False)
         self.spoiler_checkbox.setChecked(bool(spoiler))
+        # Load chunk mode settings
+        chunk_mode = config.get('review_chunk_mode', False)
+        self.chunk_mode_checkbox.setChecked(bool(chunk_mode))
+        chunk_wrap = config.get('review_chunk_wrap', True)
+        self.chunk_wrap_checkbox.setChecked(bool(chunk_wrap))
+        # Load final review prompt (stored separately from the main system prompt)
+        self._final_review_prompt = config.get('review_final_prompt', '') or DEFAULT_FINAL_REVIEW_PROMPT
 
     def _sync_settings_to_gui(self):
         """Sync current dialog values to translator_gui _var attributes for save_config."""
         gui = self.translator_gui
         gui.review_system_prompt_var = self.prompt_edit.toPlainText().strip()
         gui.review_spoiler_mode_var = self.spoiler_checkbox.isChecked()
+        gui.review_chunk_mode_var = self.chunk_mode_checkbox.isChecked()
+        gui.review_chunk_wrap_var = self.chunk_wrap_checkbox.isChecked()
+        gui.review_final_prompt_var = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
 
     def _save_prompt_to_config(self):
-        """Persist the current system prompt and spoiler mode to config."""
+        """Persist the current system prompt, spoiler mode, and chunk mode settings to config."""
         try:
             self._sync_settings_to_gui()
             if hasattr(self.translator_gui, 'save_config'):
                 self.translator_gui.save_config(show_message=False)
         except Exception:
             pass
+
+    def _open_final_prompt_dialog(self):
+        """Open a dialog to edit the Final Review synthesis prompt."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Final Review Prompt")
+        dialog.setModal(True)
+        dialog.setMinimumSize(600, 400)
+        dialog.resize(700, 500)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        info_label = QLabel(
+            "This prompt is sent as the system prompt for the final synthesis call.\n"
+            "It receives all chunk reviews as user content and produces the combined review."
+        )
+        info_label.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        prompt_edit = QPlainTextEdit()
+        prompt_edit.setPlainText(getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT))
+        prompt_edit.setPlaceholderText("Enter the final review synthesis prompt...")
+        layout.addWidget(prompt_edit, stretch=1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        reset_btn = QPushButton("↺ Reset to Default")
+        reset_btn.setCursor(Qt.PointingHandCursor)
+        reset_btn.setStyleSheet(
+            "QPushButton { background-color: #2b3a4a; color: #5a9fd4; border: 1px solid #3d5a73; "
+            "border-radius: 3px; padding: 6px 16px; font-size: 9pt; }"
+            "QPushButton:hover { background-color: #3a4f66; color: #7ab8e8; border-color: #5a9fd4; }"
+        )
+        reset_btn.clicked.connect(lambda: prompt_edit.setPlainText(DEFAULT_FINAL_REVIEW_PROMPT))
+        btn_row.addWidget(reset_btn)
+
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("padding: 6px 20px; border-radius: 3px; font-size: 10pt;")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("✅ Save")
+        ok_btn.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
+            "padding: 6px 20px; border-radius: 3px; font-size: 10pt; }"
+            "QPushButton:hover { background-color: #2dbc4e; }"
+        )
+        ok_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(ok_btn)
+
+        layout.addLayout(btn_row)
+
+        if dialog.exec() == QDialog.Accepted:
+            self._final_review_prompt = prompt_edit.toPlainText().strip() or DEFAULT_FINAL_REVIEW_PROMPT
+            self._save_prompt_to_config()
 
     def _load_existing_review(self):
         """If a review already exists, load it into the log field."""
@@ -969,22 +1086,46 @@ class ReviewDialog(QDialog):
         def _stop_check():
             return self._stop_requested
 
+        chunk_mode = self.chunk_mode_checkbox.isChecked()
+        wrap_chunks = self.chunk_wrap_checkbox.isChecked()
+        final_review_prompt = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
+        # Replace {target_lang} in final prompt too
+        final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
+
         def _run():
             try:
-                result = generate_review(
-                    epub_path=self.file_path,
-                    output_dir=output_dir,
-                    api_key=api_key,
-                    model=model,
-                    endpoint=endpoint,
-                    system_prompt=system_prompt,
-                    input_token_limit=token_limit,
-                    spoiler_mode=spoiler_mode,
-                    temperature=temperature,
-                    config=config,
-                    log_fn=_log,
-                    stop_check_fn=_stop_check,
-                )
+                if chunk_mode:
+                    result = generate_chunked_review(
+                        epub_path=self.file_path,
+                        output_dir=output_dir,
+                        api_key=api_key,
+                        model=model,
+                        endpoint=endpoint,
+                        system_prompt=system_prompt,
+                        final_review_prompt=final_review_prompt,
+                        input_token_limit=token_limit,
+                        spoiler_mode=spoiler_mode,
+                        wrap_chunks=wrap_chunks,
+                        temperature=temperature,
+                        config=config,
+                        log_fn=_log,
+                        stop_check_fn=_stop_check,
+                    )
+                else:
+                    result = generate_review(
+                        epub_path=self.file_path,
+                        output_dir=output_dir,
+                        api_key=api_key,
+                        model=model,
+                        endpoint=endpoint,
+                        system_prompt=system_prompt,
+                        input_token_limit=token_limit,
+                        spoiler_mode=spoiler_mode,
+                        temperature=temperature,
+                        config=config,
+                        log_fn=_log,
+                        stop_check_fn=_stop_check,
+                    )
                 self._review_queue.put(('done', result))
             except Exception as e:
                 self._review_queue.put(('error', str(e)))
@@ -1067,6 +1208,10 @@ class ReviewDialog(QDialog):
         output_lang = getattr(gui, 'lang_var', 'English')
         system_prompt = system_prompt_template.replace('{target_lang}', output_lang)
         spoiler_mode = self.spoiler_checkbox.isChecked()
+        chunk_mode = self.chunk_mode_checkbox.isChecked()
+        wrap_chunks = self.chunk_wrap_checkbox.isChecked()
+        final_review_prompt = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
+        final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
 
         # Respect batch mode toggle for parallelism
         # batch_translation_var is the on/off toggle; batch_size_var is the worker count
@@ -1148,20 +1293,39 @@ class ReviewDialog(QDialog):
 
                 out_dir = _get_output_dir(epub_path)
                 try:
-                    result = generate_review(
-                        epub_path=epub_path,
-                        output_dir=out_dir,
-                        api_key=api_key,
-                        model=model,
-                        endpoint=endpoint,
-                        system_prompt=system_prompt,
-                        input_token_limit=token_limit,
-                        spoiler_mode=spoiler_mode,
-                        temperature=temperature,
-                        config=config,
-                        log_fn=lambda msg, _bn=basename: self._review_queue.put(('log', f"[{_bn}] {msg}")),
-                        stop_check_fn=_stop_check,
-                    )
+                    _log_single = lambda msg, _bn=basename: self._review_queue.put(('log', f"[{_bn}] {msg}"))
+                    if chunk_mode:
+                        result = generate_chunked_review(
+                            epub_path=epub_path,
+                            output_dir=out_dir,
+                            api_key=api_key,
+                            model=model,
+                            endpoint=endpoint,
+                            system_prompt=system_prompt,
+                            final_review_prompt=final_review_prompt,
+                            input_token_limit=token_limit,
+                            spoiler_mode=spoiler_mode,
+                            wrap_chunks=wrap_chunks,
+                            temperature=temperature,
+                            config=config,
+                            log_fn=_log_single,
+                            stop_check_fn=_stop_check,
+                        )
+                    else:
+                        result = generate_review(
+                            epub_path=epub_path,
+                            output_dir=out_dir,
+                            api_key=api_key,
+                            model=model,
+                            endpoint=endpoint,
+                            system_prompt=system_prompt,
+                            input_token_limit=token_limit,
+                            spoiler_mode=spoiler_mode,
+                            temperature=temperature,
+                            config=config,
+                            log_fn=_log_single,
+                            stop_check_fn=_stop_check,
+                        )
                     self._review_queue.put(('log', f"✅ Done: {basename}"))
                     return idx, result, None
                 except Exception as e:
