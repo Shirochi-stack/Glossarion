@@ -1375,6 +1375,21 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.fuzzy_auto_mapping_var = self.config.get('fuzzy_auto_mapping', False)
         self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 80)
 
+        # Force-sync auto-mapping/fuzzy states based on auto_glossary_mode
+        _agm = self.config.get('auto_glossary_mode', 'off')
+        if _agm in ('off', 'off_fuzzy_automap', 'balanced', 'full'):
+            self.append_glossary_auto_load_var = True
+            self.config['append_glossary_auto_load'] = True
+        elif _agm in ('off_no_automap', 'minimal'):
+            self.append_glossary_auto_load_var = False
+            self.config['append_glossary_auto_load'] = False
+        if _agm == 'off_fuzzy_automap':
+            self.fuzzy_auto_mapping_var = True
+            self.config['fuzzy_auto_mapping'] = True
+        elif _agm != 'off_fuzzy_automap':
+            self.fuzzy_auto_mapping_var = False
+            self.config['fuzzy_auto_mapping'] = False
+
         self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
