@@ -11341,6 +11341,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     failed += 1
             
             # Process text files individually
+            # Enable async extraction for PDFs to prevent GUI freezing
+            os.environ['USE_ASYNC_CHAPTER_EXTRACTION'] = '1'
             for text_file in text_files:
                 if self.stop_requested:
                     break
@@ -12305,6 +12307,8 @@ Important rules:
                         '1' if self.config.get('glossary_enable_chapter_split', False) else '0'),
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
+                    # Subprocess PDF extraction to prevent GUI lag
+                    'USE_ASYNC_CHAPTER_EXTRACTION': '1',
                 }
                 
                 # Add project ID for Vertex AI
