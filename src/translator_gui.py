@@ -1286,6 +1286,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         os.environ['AZURE_API_VERSION'] = azure_version
         print(f"🔧 Initial Azure API Version set: {azure_version}")
         self.use_fallback_keys_var = self.config.get('use_fallback_keys', False)
+        self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
@@ -3496,6 +3497,11 @@ Recent translations to summarize:
                         return True
             if self.config.get('use_fallback_keys', False):
                 for key_data in self.config.get('fallback_keys', []):
+                    m = key_data.get('model', '')
+                    if m.startswith('authgpt/') or m.startswith('authgpt'):
+                        return True
+            if self.config.get('use_glossary_keys', False):
+                for key_data in self.config.get('glossary_keys', []):
                     m = key_data.get('model', '')
                     if m.startswith('authgpt/') or m.startswith('authgpt'):
                         return True
@@ -10744,6 +10750,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_FALLBACK_KEYS'] = '1'
             else:
                 os.environ['USE_FALLBACK_KEYS'] = '0'
+            if self.config.get('use_glossary_keys', False):
+                os.environ['USE_GLOSSARY_KEYS'] = '1'
+            else:
+                os.environ['USE_GLOSSARY_KEYS'] = '0'
         except Exception:
             pass
 
@@ -10885,6 +10895,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
+            'USE_GLOSSARY_KEYS': '1' if self.config.get('use_glossary_keys', False) else '0',
+            'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
 
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
@@ -12209,6 +12221,8 @@ Important rules:
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
                     # Ensure fallback key pool is available to UnifiedClient (parity with translation path)
                     'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
+                    'USE_GLOSSARY_KEYS': '1' if getattr(self, 'use_glossary_keys_var', False) else '0',
+                    'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
                     
                     # Glossary-specific overrides (with fallback to global settings)
                     # Check os.environ first to respect balanced mode hardcoded overrides
@@ -12251,6 +12265,10 @@ Important rules:
                         os.environ['USE_FALLBACK_KEYS'] = '1'
                     else:
                         os.environ['USE_FALLBACK_KEYS'] = '0'
+                    if self.config.get('use_glossary_keys', False):
+                        os.environ['USE_GLOSSARY_KEYS'] = '1'
+                    else:
+                        os.environ['USE_GLOSSARY_KEYS'] = '0'
                 except Exception:
                     # Keep going even if we can't set env for some reason
                     pass
@@ -17839,6 +17857,7 @@ Important rules:
                 ('synthetic_merge_headers', ['synthetic_merge_headers_var'], True, bool),
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], True, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
+                ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('ignore_header', ['ignore_header_var'], False, bool),
                 ('use_title', ['use_title_var'], False, bool),
@@ -18938,6 +18957,8 @@ Important rules:
                 ('USE_FALLBACK_KEYS', '1' if self.config.get('use_fallback_keys', False) else '0'),
                 ('USE_MAIN_KEY_FALLBACK', '1' if self.config.get('use_main_key_fallback', True) else '0'),
                 ('FALLBACK_KEYS', _json.dumps(self.config.get('fallback_keys', []))),
+                ('USE_GLOSSARY_KEYS', '1' if self.config.get('use_glossary_keys', False) else '0'),
+                ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '1'))),
 
                 # Metadata and batch header settings

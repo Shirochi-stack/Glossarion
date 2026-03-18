@@ -4172,6 +4172,57 @@ class UnifiedClient:
             watchdog_started = True
             
             # Multi-key retry wrapper
+            # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
+            # override the client's api_key/model with the first glossary key so glossary
+            # API calls use dedicated keys as the primary pool.
+            _glossary_overridden = False
+            _original_api_key = None
+            _original_model = None
+            if context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name):
+                try:
+                    use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+                    if use_glossary_keys:
+                        glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
+                        glossary_keys_list = json.loads(glossary_keys_json) if glossary_keys_json != '[]' else []
+                        if glossary_keys_list:
+                            gk = glossary_keys_list[0]
+                            gk_api_key = gk.get('api_key', '')
+                            gk_model = gk.get('model', '')
+                            if gk_model:
+                                _original_api_key = self.api_key
+                                _original_model = self.model
+                                self.api_key = gk_api_key
+                                self.model = gk_model
+                                # Apply per-key settings
+                                gk_google_creds = gk.get('google_credentials')
+                                if gk_google_creds:
+                                    self.current_key_google_creds = gk_google_creds
+                                    self.google_creds_path = gk_google_creds
+                                gk_google_region = gk.get('google_region')
+                                if gk_google_region:
+                                    self.current_key_google_region = gk_google_region
+                                if gk.get('use_individual_endpoint'):
+                                    gk_endpoint = gk.get('azure_endpoint')
+                                    if gk_endpoint:
+                                        self.current_key_azure_endpoint = gk_endpoint
+                                        self.current_key_use_individual_endpoint = True
+                                    gk_api_version = gk.get('azure_api_version')
+                                    if gk_api_version:
+                                        self.current_key_azure_api_version = gk_api_version
+                                gk_output_limit = gk.get('individual_output_token_limit')
+                                if gk_output_limit and int(gk_output_limit) > 0:
+                                    try:
+                                        tls = self._get_thread_local_client()
+                                        tls.per_key_max_output_tokens = int(gk_output_limit)
+                                    except Exception:
+                                        pass
+                                # Re-initialize client for new model/key
+                                self._setup_client()
+                                _glossary_overridden = True
+                                print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool: {gk_model} (key: {gk_api_key[:8]}...)")
+                except Exception as e:
+                    print(f"[GLOSSARY KEYS] ⚠️ Failed to apply glossary key override: {e}")
+            
             if self._multi_key_mode:
                 # Check if indefinite retry is enabled for multi-key mode too
                 indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
@@ -4261,6 +4312,11 @@ class UnifiedClient:
                 else:
                     return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
+            # Restore original key/model if we overrode them for glossary context
+            if _glossary_overridden and _original_api_key is not None:
+                self.api_key = _original_api_key
+                self.model = _original_model
+                self._setup_client()
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
             if not batch_mode:
@@ -5258,8 +5314,25 @@ class UnifiedClient:
                                 except Exception:
                                     pass
                         else:
-                            # Single-key mode: try fallback keys if enabled
+                            # Single-key mode: try glossary keys first if context is glossary, then regular fallback keys
+                            use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                             use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                            
+                            # Try glossary keys first if context is glossary
+                            if use_glossary_keys and context == 'glossary':
+                                print(f"[GLOSSARY DIRECT] Safety filter detected - trying glossary keys")
+                                try:
+                                    retry_res = self._try_glossary_keys_direct(
+                                        messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                                    )
+                                    if retry_res:
+                                        res_content, res_fr = retry_res
+                                        if res_content and res_content.strip():
+                                            print(f"✅ Glossary key succeeded for safety filter")
+                                            return res_content, res_fr
+                                except Exception as e:
+                                    print(f"❌ Glossary key retry failed: {e}")
+                            
                             if use_fallback_keys:
                                 print(f"[FALLBACK DIRECT] Safety filter detected in empty response - trying fallback keys")
                                 try:
@@ -5546,8 +5619,21 @@ class UnifiedClient:
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
                     else:
-                        # Single-key mode: Check if fallback keys are enabled
+                        # Single-key mode: Try glossary keys first if context is glossary, then regular fallback keys
+                        use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                        
+                        # Try glossary keys first if context is glossary
+                        if use_glossary_keys and context == 'glossary':
+                            print(f"[GLOSSARY DIRECT] Using glossary keys for prohibited content retry")
+                            retry_res = self._try_glossary_keys_direct(
+                                messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                            )
+                            if retry_res:
+                                res_content, res_fr = retry_res
+                                if res_content and res_content.strip():
+                                    return res_content, res_fr
+                        
                         if use_fallback_keys:
                             print(f"[FALLBACK DIRECT] Using fallback keys")
                             # Try fallback keys directly without retrying main key
@@ -5558,8 +5644,9 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                        else:
-                            print(f"[SINGLE-KEY MODE] Fallback keys disabled - no retry available")
+                        
+                        if not use_glossary_keys and not use_fallback_keys:
+                            print(f"[SINGLE-KEY MODE] No glossary or fallback keys available - no retry")
                     
                     # Fallthrough: record and return generic fallback
                     self._save_failed_request(messages, e, context)
@@ -6455,6 +6542,206 @@ class UnifiedClient:
             # Clean up per-request tracking when done
             if hasattr(tls, 'tried_fallback_direct_per_request') and request_id in tls.tried_fallback_direct_per_request:
                 del tls.tried_fallback_direct_per_request[request_id]
+    
+    def _try_glossary_keys_direct(self, messages, temperature=None, max_tokens=None, 
+                                   max_completion_tokens=None, context=None, 
+                                   request_id=None, image_data=None) -> Optional[Tuple[str, str]]:
+        """
+        Try glossary-dedicated API keys when the context is 'glossary'.
+        Mirrors _try_fallback_keys_direct but reads from GLOSSARY_API_KEYS env var.
+        """
+        if self._is_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+        # PER-REQUEST TRACKING: Prevent infinite loops
+        tls = self._get_thread_local_client()
+        
+        # Generate request_id if not provided
+        if not request_id:
+            import hashlib
+            msg_str = json.dumps([m.get('content', '')[:100] for m in messages], sort_keys=True)
+            request_id = hashlib.sha256(msg_str.encode()).hexdigest()[:16]
+        
+        # Initialize per-request tracking if not exists
+        if not hasattr(tls, 'tried_glossary_direct_per_request'):
+            tls.tried_glossary_direct_per_request = {}
+        
+        # Check if we've already tried direct glossary for this request
+        if request_id in tls.tried_glossary_direct_per_request:
+            print(f"[GLOSSARY DIRECT] Request {request_id[:8]}... already attempted glossary keys, preventing loop")
+            return None
+        
+        # Mark this request as having attempted glossary keys
+        tls.tried_glossary_direct_per_request[request_id] = True
+        
+        # Check if glossary keys are enabled
+        use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+        if not use_glossary_keys:
+            print(f"[GLOSSARY DIRECT] Glossary keys not enabled, skipping")
+            del tls.tried_glossary_direct_per_request[request_id]
+            return None
+        
+        # Load glossary keys from environment
+        glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
+        if glossary_keys_json == '[]':
+            print(f"[GLOSSARY DIRECT] No glossary keys configured")
+            del tls.tried_glossary_direct_per_request[request_id]
+            return None
+        
+        try:
+            configured_glossary_keys = json.loads(glossary_keys_json)
+            print(f"[GLOSSARY DIRECT] 🔑 Loaded {len(configured_glossary_keys)} glossary keys")
+            
+            # Try each glossary key (all of them, no arbitrary limit)
+            max_attempts = len(configured_glossary_keys)
+            for idx, gk in enumerate(configured_glossary_keys):
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                gk_key = gk.get('api_key')
+                gk_model = gk.get('model')
+                gk_google_creds = gk.get('google_credentials')
+                gk_azure_endpoint = gk.get('azure_endpoint')
+                gk_google_region = gk.get('google_region')
+                gk_azure_api_version = gk.get('azure_api_version')
+                use_individual_endpoint = gk.get('use_individual_endpoint', False)
+                
+                if not gk_key or not gk_model:
+                    print(f"[GLOSSARY DIRECT {idx+1}] Invalid key data, skipping")
+                    continue
+                
+                print(f"[GLOSSARY DIRECT {idx+1}/{max_attempts}] Trying {gk_model}")
+                
+                try:
+                    # Create temporary client for glossary key
+                    temp_client = UnifiedClient(
+                        api_key=gk_key,  
+                        model=gk_model,   
+                        output_dir=self.output_dir
+                    )
+                    
+                    # Apply per-key output token limit for this glossary key, if configured
+                    try:
+                        gk_output_limit = gk.get('individual_output_token_limit')
+                        if gk_output_limit and int(gk_output_limit) > 0:
+                            temp_tls = temp_client._get_thread_local_client()
+                            temp_tls.per_key_max_output_tokens = int(gk_output_limit)
+                    except Exception:
+                        pass
+                    
+                    # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
+                    temp_client._is_retry_client = True
+                    
+                    # CRITICAL: Disable retries for glossary keys - they should only try once
+                    temp_client._max_retries = 1
+                    temp_client._retry_count = 0
+                    
+                    if gk_google_creds:
+                        temp_client.current_key_google_creds = gk_google_creds
+                        temp_client.google_creds_path = gk_google_creds
+                        print(f"[GLOSSARY DIRECT {idx+1}] Using Google credentials: {os.path.basename(gk_google_creds)}")
+                    
+                    if gk_google_region:
+                        temp_client.current_key_google_region = gk_google_region
+                        print(f"[GLOSSARY DIRECT {idx+1}] Using Google region: {gk_google_region}")
+                    
+                    # Apply individual endpoint if configured
+                    if use_individual_endpoint and gk_azure_endpoint:
+                        temp_client.current_key_azure_endpoint = gk_azure_endpoint
+                        temp_client.current_key_use_individual_endpoint = True
+                        temp_client.current_key_azure_api_version = gk_azure_api_version or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
+                        if hasattr(temp_client, 'is_azure'):
+                            temp_client.is_azure = True
+                        temp_client.azure_endpoint = gk_azure_endpoint
+                        temp_client.api_version = temp_client.current_key_azure_api_version
+                        print(f"[GLOSSARY DIRECT {idx+1}] Using Azure endpoint: {gk_azure_endpoint}")
+                    elif hasattr(self, 'is_azure') and self.is_azure and not gk_azure_endpoint:
+                        # Inherit Azure settings from parent client
+                        if hasattr(self, 'azure_endpoint'):
+                            temp_client.azure_endpoint = self.azure_endpoint
+                        if hasattr(self, 'api_version'):
+                            temp_client.api_version = self.api_version
+                        temp_client.is_azure = True
+                    
+                    temp_client.key_identifier = f"GLOSSARY KEY ({gk_model})"
+                    
+                    # Propagate session context
+                    temp_client.context = context
+                    temp_client.current_session_context = self.current_session_context
+                    
+                    # Copy chapter context for proper file naming
+                    try:
+                        src_ctx = getattr(self._get_thread_local_client(), 'chapter_context', None)
+                        if src_ctx:
+                            temp_client.set_chapter_context(
+                                chapter=src_ctx.get('chapter'), chunk=src_ctx.get('chunk'), total_chunks=src_ctx.get('total_chunks'))
+                    except Exception:
+                        pass
+                    
+                    # Reinitialize client for the glossary key
+                    temp_client._setup_client()
+                    
+                    # Make the API call
+                    payload_name, response_name = self._get_file_names(messages, context=context)
+                    
+                    if image_data is not None:
+                        result = temp_client._send_image_internal(
+                            messages, image_data, temperature, max_tokens, max_completion_tokens,
+                            context=context,
+                            retry_reason=f"glossary_key_{idx+1}",
+                            request_id=request_id
+                        )
+                    else:
+                        result = temp_client._send_internal(
+                            messages, temperature, max_tokens, max_completion_tokens,
+                            context=context,
+                            retry_reason=f"glossary_key_{idx+1}",
+                            request_id=request_id
+                        )
+                    
+                    if result:
+                        content, finish_reason = result
+                        if content and content.strip():
+                            # Check for OCR-like translations (is the response actually translated?)
+                            is_ocr_context = context and ('ocr' in context.lower() or 'translation' in context.lower())
+                            min_len = 20 if is_ocr_context else 10
+                            
+                            if len(content.strip()) >= min_len:
+                                print(f"✅ [GLOSSARY DIRECT {idx+1}] Success with {gk_model}")
+                                return content, finish_reason
+                            else:
+                                print(f"⚠️ [GLOSSARY DIRECT {idx+1}] Response too short ({len(content.strip())} chars), trying next key")
+                        else:
+                            print(f"⚠️ [GLOSSARY DIRECT {idx+1}] Empty response, trying next key")
+                    else:
+                        print(f"⚠️ [GLOSSARY DIRECT {idx+1}] No result from {gk_model}, trying next key")
+                        
+                except UnifiedClientError as uce:
+                    if uce.error_type == "cancelled":
+                        raise
+                    print(f"❌ [GLOSSARY DIRECT {idx+1}] UnifiedClientError with {gk_model}: {uce}")
+                    # Mark that a glossary key was used (even on failure for stats)
+                    self._used_glossary_key = True
+                    continue
+                except Exception as e:
+                    print(f"❌ [GLOSSARY DIRECT {idx+1}] Error with {gk_model}: {str(e)[:200]}")
+                    continue
+            
+            print(f"[GLOSSARY DIRECT] All glossary keys failed")
+            return None
+            
+        except UnifiedClientError as ue:
+            # Propagate cancellation up to the caller
+            if ue.error_type == "cancelled":
+                raise ue
+            print(f"[GLOSSARY DIRECT] UnifiedClientError: {ue}")
+            return None
+            
+        except Exception as e:
+            print(f"[GLOSSARY DIRECT] Failed to parse glossary keys: {e}")
+            return None
+        finally:
+            # Clean up per-request tracking when done
+            if hasattr(tls, 'tried_glossary_direct_per_request') and request_id in tls.tried_glossary_direct_per_request:
+                del tls.tried_glossary_direct_per_request[request_id]
     
     # Image handling methods
     def send_image(self, messages: List[Dict[str, Any]], image_data: Any,
