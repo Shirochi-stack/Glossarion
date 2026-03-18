@@ -6,20 +6,43 @@
 # What this does:
 #   1. Sets QT_ENABLE_HIGHDPI_SCALING=0  → disables Qt6 automatic DPI scaling
 #   2. Sets QT_FONT_DPI=96              → forces logical 96 DPI (1:1 rendering)
-#   3. Sets QT_SCALE_FACTOR=1           → explicit 1× scale factor
+#   3. Sets QT_SCALE_FACTOR=<value>     → applies the user's chosen scale factor
 #
-# The net effect is that the GUI renders at a consistent physical-pixel size
-# regardless of the Windows display scaling percentage (100%, 125%, 150%, etc).
+# The scale factor is read from config.json ("gui_scale_factor" key).
+# If the file is missing or unreadable the default 1.75 is used.
 
+import json
 import os
 import sys
 
 _configured = False
 
+# Default scale factor when config.json has no value
+DEFAULT_SCALE_FACTOR = 1.75
+
+
+def _read_scale_factor():
+    """Read gui_scale_factor from config.json (stdlib only, no PySide6)."""
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            val = cfg.get("gui_scale_factor", DEFAULT_SCALE_FACTOR)
+            factor = float(val)
+            # Clamp to sane range
+            if factor < 0.5:
+                factor = 0.5
+            elif factor > 3.0:
+                factor = 3.0
+            return factor
+    except Exception:
+        pass
+    return DEFAULT_SCALE_FACTOR
+
 
 def configure():
-    """Disable Qt6 automatic DPI scaling so the GUI size is independent of
-    the Windows display-scaling percentage.
+    """Disable Qt6 automatic DPI scaling and apply the user's scale factor.
 
     Must be called *before* importing any PySide6/Qt modules.
     Idempotent — subsequent calls are harmless no-ops.
@@ -30,19 +53,13 @@ def configure():
     _configured = True
 
     # ── Disable Qt's built-in high-DPI scaling ────────────────────────────
-    # Qt6 enables high-DPI scaling by default. Setting this to "0" tells Qt
-    # not to apply any scale factor to widgets or painter coordinates.
-    # A 1-pixel line stays 1 physical pixel regardless of monitor DPI.
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
 
     # ── Lock font DPI to the traditional 96 ──────────────────────────────
-    # Without this, fonts may still scale up on high-DPI screens even when
-    # widget scaling is disabled.  96 is the baseline Windows DPI.
     os.environ["QT_FONT_DPI"] = "96"
 
-    # ── Explicit 1.25× scale factor ────────────────────────────────────────
-    # With auto-scaling disabled, 1.0 renders too compact on most screens.
-    # 1.25 provides a comfortable default size across resolutions.
-    os.environ["QT_SCALE_FACTOR"] = "1.76"
+    # ── Apply user-configured scale factor ────────────────────────────────
+    factor = _read_scale_factor()
+    os.environ["QT_SCALE_FACTOR"] = str(factor)
 
-    print("✅ DPI scaling disabled (QT_ENABLE_HIGHDPI_SCALING=0, QT_FONT_DPI=96, QT_SCALE_FACTOR=1)")
+    print(f"✅ DPI scaling configured (QT_SCALE_FACTOR={factor})")

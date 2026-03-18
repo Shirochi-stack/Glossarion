@@ -2249,6 +2249,47 @@ def _create_context_management_section(self, parent):
     
     section_v.addWidget(output_dir_row)
 
+    # ── GUI Scale Factor ──
+    section_v.addSpacing(6)
+    scale_row = QWidget()
+    scale_h = QHBoxLayout(scale_row)
+    scale_h.setContentsMargins(0, 0, 0, 0)
+    scale_h.setSpacing(6)
+    scale_label = QLabel("🔍 GUI Scale Factor:")
+    scale_h.addWidget(scale_label)
+
+    from PySide6.QtWidgets import QDoubleSpinBox
+    scale_spin = QDoubleSpinBox()
+    scale_spin.setRange(0.50, 3.00)
+    scale_spin.setSingleStep(0.05)
+    scale_spin.setDecimals(2)
+    scale_spin.setFixedWidth(80)
+    # Mousewheel lock
+    scale_spin.setFocusPolicy(Qt.StrongFocus)
+    scale_spin.wheelEvent = lambda e: e.ignore()
+    try:
+        scale_spin.setValue(float(getattr(self, 'gui_scale_factor_var', 1.75)))
+    except Exception:
+        scale_spin.setValue(1.75)
+    def _on_scale_changed(val):
+        try:
+            self.gui_scale_factor_var = val
+        except Exception:
+            pass
+    scale_spin.valueChanged.connect(_on_scale_changed)
+    scale_h.addWidget(scale_spin)
+    scale_h.addStretch()
+    section_v.addWidget(scale_row)
+
+    scale_desc = QLabel(
+        "Controls the overall GUI size (default 1.75).\n"
+        "Lower values = smaller UI, higher values = larger UI.\n"
+        "⚠️ Requires restart to take effect."
+    )
+    scale_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    scale_desc.setContentsMargins(0, 0, 0, 0)
+    section_v.addWidget(scale_desc)
+
     # Halgakos icon at bottom (180x180 HiDPI)
     _icon_label = QLabel()
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
