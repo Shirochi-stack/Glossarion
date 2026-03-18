@@ -13365,7 +13365,13 @@ Important rules:
                     self.glossary_text_label.setText("Finishing...")
                 else:
                     self.glossary_text_label.setText("Stopping...")
-            self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+            self.glossary_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 6px;
+                }
+            """)
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -13543,7 +13549,13 @@ Important rules:
                     self.epub_text_label.setText("Finishing...")
                 else:
                     self.epub_text_label.setText("Stopping...")
-            self.epub_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+            self.epub_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 6px;
+                }
+            """)
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
@@ -13596,7 +13608,13 @@ Important rules:
             # Update text label instead of button text
             if hasattr(self, 'qa_text_label'):
                 self.qa_text_label.setText("Stopping...")
-            self.qa_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+            self.qa_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 6px;
+                }
+            """)
         
         self.stop_requested = True
         try:
