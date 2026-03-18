@@ -16751,7 +16751,7 @@ Important rules:
                 is_manual = getattr(self, 'manual_glossary_manually_loaded', False)
                 prefix = "📑 Manual" if is_manual else "📑 Auto"
                 # Truncate long filenames for display; full path in tooltip
-                display_name = basename if len(basename) <= 30 else basename[:27] + "..."
+                display_name = basename if len(basename) <= 20 else basename[:17] + "..."
                 if has_label:
                     self.manual_glossary_status_label.setText(f"{prefix}: {display_name}")
                     self.manual_glossary_status_label.setToolTip(gp)
