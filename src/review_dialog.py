@@ -2397,7 +2397,7 @@ class ReviewDialog(QDialog):
                 "background-color: #6c757d; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
             )
-            self._safe_delayed_reset(self.delete_btn, original_text, original_style, delay_ms=1500)
+            self._safe_delayed_reset(self.delete_btn, original_text, original_style, delay_ms=1000)
 
         except Exception as e:
             self._append_log(f"❌ Failed to delete review: {e}")
