@@ -15036,7 +15036,7 @@ Important rules:
                             if hasattr(self, '_autofill_glossary_for_current_selection'):
                                 filled = int(self._autofill_glossary_for_current_selection() or 0)
                                 if not filled:
-                                    self.append_log("📑 Auto-mapping enabled, but no matching glossary was found")
+                                    pass  # self.append_log("📑 Auto-mapping enabled, but no matching glossary was found")
                     except Exception:
                         pass
             elif len(epub_files) > 1:
