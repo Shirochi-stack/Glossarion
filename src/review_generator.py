@@ -95,9 +95,12 @@ def _html_to_plaintext(html_content: str) -> str:
 def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
     """
     Read an EPUB and return a list of (filename, html_content) tuples
-    in spine reading order, filtering out special files.
+    in spine reading order, filtering out special files unless
+    TRANSLATE_SPECIAL_FILES is enabled.
     """
     results = []
+    # Respect the translate_special_files toggle — when ON, include special files
+    include_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
     try:
         # Try ebooklib first
@@ -111,7 +114,7 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
                 if item is None:
                     continue
                 fname = item.get_name()
-                if _is_special_file(fname):
+                if not include_special and _is_special_file(fname):
                     continue
                 try:
                     content = item.get_content().decode('utf-8', errors='replace')
@@ -139,7 +142,7 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
                 html_files = sorted(
                     n for n in zf.namelist()
                     if n.lower().endswith(('.xhtml', '.html', '.htm'))
-                    and not _is_special_file(n)
+                    and (include_special or not _is_special_file(n))
                 )
                 for fname in html_files:
                     content = zf.read(fname).decode('utf-8', errors='replace')
@@ -175,7 +178,7 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
             for href in spine_refs:
                 # Resolve path relative to OPF
                 full_path = os.path.normpath(os.path.join(opf_dir, href)).replace('\\', '/')
-                if _is_special_file(href):
+                if not include_special and _is_special_file(href):
                     continue
                 try:
                     content = zf.read(full_path).decode('utf-8', errors='replace')
