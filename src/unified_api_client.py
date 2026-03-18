@@ -13351,9 +13351,6 @@ class UnifiedClient:
                     if evt_type == "content_block_start":
                         cb = evt.get("content_block", {})
                         current_block_type = cb.get("type", "")
-                        if current_block_type == "thinking" and thinking_mode:
-                            if thinking_tokens_seen == 0 and not self._is_stop_requested():
-                                print("🧠 [anthropic] Thinking block started...")
 
                     # content_block_delta → text fragment (skip thinking deltas)
                     elif evt_type == "content_block_delta":
@@ -13366,7 +13363,8 @@ class UnifiedClient:
                                     first_text_ts = _t.time()
                                     ttft = first_text_ts - start_ts
                                     if not self._is_stop_requested():
-                                        print(f"🛰️ [anthropic] First text token received in {ttft:.1f}s")
+                                        thinking_note = f" (after {thinking_tokens_seen} thinking chunks)" if thinking_tokens_seen > 0 else ""
+                                        print(f"🛰️ [anthropic] First text token in {ttft:.1f}s{thinking_note}")
                                 text_parts.append(frag)
                                 if log_stream and not self._is_stop_requested():
                                     combined = "".join(log_buf) + frag
@@ -13389,8 +13387,6 @@ class UnifiedClient:
 
                     # content_block_stop → reset block type
                     elif evt_type == "content_block_stop":
-                        if current_block_type == "thinking" and thinking_tokens_seen > 0 and not self._is_stop_requested():
-                            print(f"🧠 [anthropic] Thinking block complete ({thinking_tokens_seen} chunks)")
                         current_block_type = None
 
                     # message_delta → stop reason + usage
