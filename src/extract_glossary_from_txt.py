@@ -20,75 +20,7 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
     # e.g. split_glossary_MyNovel.cache
     file_base = os.path.splitext(os.path.basename(txt_path))[0]
     processor = TextFileProcessor(txt_path, glossary_output_dir, cache_suffix=f'_glossary_{file_base}')
-    
-    # For PDF files, use subprocess extraction to prevent GUI lag
-    if txt_path.lower().endswith('.pdf') and os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1":
-        try:
-            import json as _json
-            from pdf_extraction_manager import PdfExtractionManager
-            
-            _pdf_ext_config = {
-                "pdf_path": txt_path,
-                "output_dir": glossary_output_dir,
-                "render_mode": os.getenv("PDF_RENDER_MODE", "xhtml").lower(),
-                "extract_images": os.getenv("PDF_EXTRACT_IMAGES", "1") == "1",
-                "generate_css": os.getenv("PDF_GENERATE_CSS", "1") == "1",
-                "html2text": os.getenv("USE_HTML2TEXT", "0") == "1",
-                "css_override_path": os.getenv("EPUB_CSS_OVERRIDE_PATH", "").strip(),
-                "attach_css_enabled": os.getenv("ATTACH_CSS_TO_CHAPTERS", "0") == "1"
-            }
-            _config_path = os.path.join(glossary_output_dir, '_pdf_glossary_extraction_config.json')
-            with open(_config_path, 'w', encoding='utf-8') as f:
-                _json.dump(_pdf_ext_config, f, ensure_ascii=False)
-            
-            _mgr = PdfExtractionManager(log_callback=print)
-            _result = _mgr.extract_pdf_sync(_config_path, timeout=600)
-            
-            if _result and _result.get("success"):
-                _result_path = _result.get("result_path")
-                if _result_path and os.path.exists(_result_path):
-                    with open(_result_path, 'r', encoding='utf-8') as f:
-                        _ext_data = _json.load(f)
-                    
-                    _content = _ext_data.get("content", [])
-                    render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
-                    
-                    if _ext_data.get("is_page_list") and isinstance(_content, list):
-                        raw_chapters = []
-                        for item in _content:
-                            page_num = item[0] if isinstance(item, list) else item
-                            page_html = item[1] if isinstance(item, list) else ""
-                            raw_chapters.append({
-                                'num': page_num,
-                                'title': f"{file_base} - Page {page_num}",
-                                'content': page_html,
-                                'is_html': True,
-                                'images_info': {},
-                                'has_images': True if render_mode == 'image' else False,
-                                'image_count': 1 if render_mode == 'image' else 0
-                            })
-                        chapters = processor._process_chapters_for_splitting(raw_chapters)
-                    else:
-                        chapters = [{'num': 1, 'title': file_base, 'body': _content if isinstance(_content, str) else '', 'filename': 'section_1.html', 'source_file': txt_path, 'content_hash': '', 'file_size': 0, 'has_images': False, 'image_count': 0, 'is_chunk': False}]
-                    
-                    # Clean up temp files
-                    for p in [_config_path, _result_path]:
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
-                else:
-                    print("⚠️ Subprocess extraction succeeded but result file not found, falling back to in-process...")
-                    chapters = processor.extract_chapters()
-            else:
-                _err = _result.get("error", "Unknown") if _result else "No result"
-                print(f"⚠️ Subprocess PDF extraction failed ({_err}), falling back to in-process...")
-                chapters = processor.extract_chapters()
-        except Exception as e:
-            print(f"⚠️ Subprocess PDF extraction error ({e}), falling back to in-process...")
-            chapters = processor.extract_chapters()
-    else:
-        chapters = processor.extract_chapters()
+    chapters = processor.extract_chapters()
     
     # Initialize chapter splitter
     model_name = os.getenv("MODEL", "gpt-3.5-turbo")
