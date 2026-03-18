@@ -10603,8 +10603,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set environment variables
                 env_vars = self._get_environment_variables(file_path, api_key)
                 
-                # Enable async chapter extraction for EPUBs to prevent GUI freezing
-                if file_path.lower().endswith('.epub'):
+                # Enable async chapter extraction for EPUBs and PDFs to prevent GUI freezing
+                if file_path.lower().endswith(('.epub', '.pdf')):
                     env_vars['USE_ASYNC_CHAPTER_EXTRACTION'] = '1'
                     self.append_log("🚀 Using async chapter extraction (subprocess mode)")
                 
