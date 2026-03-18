@@ -15701,23 +15701,16 @@ Important rules:
             main_layout.setContentsMargins(12, 6, 12, 6)
             main_layout.setSpacing(4)
             
-            # Header row: mascot + title + subtitle
+            # Header row: mascot + title
             header = QHBoxLayout()
             header.addStretch()
-            header.addWidget(_make_mascot(40))
-            title_col = QVBoxLayout()
+            header.addWidget(_make_mascot(32))
             title_lbl = QLabel("Choose Your Glossary Mode")
-            title_lbl.setFont(QFont("Arial", 20, QFont.Bold))
+            title_lbl.setFont(QFont("Arial", 16, QFont.Bold))
             title_lbl.setStyleSheet("color: #f0f0f0;")
             title_lbl.setAlignment(Qt.AlignCenter)
-            title_col.addWidget(title_lbl)
-            subtitle_lbl = QLabel("Select how glossary extraction runs when you translate")
-            subtitle_lbl.setFont(QFont("Arial", 11))
-            subtitle_lbl.setStyleSheet("color: #d0d0d0;")
-            subtitle_lbl.setAlignment(Qt.AlignCenter)
-            title_col.addWidget(subtitle_lbl)
-            header.addLayout(title_col)
-            header.addWidget(_make_mascot(40))
+            header.addWidget(title_lbl)
+            header.addWidget(_make_mascot(32))
             header.addStretch()
             main_layout.addLayout(header)
             
@@ -15808,7 +15801,7 @@ Important rules:
             modes_w = QWidget()
             modes_w.setStyleSheet("background: transparent;")
             modes_lay = QGridLayout(modes_w)
-            modes_lay.setSpacing(4)
+            modes_lay.setSpacing(3)
             for c in range(2):
                 modes_lay.setColumnStretch(c, 1)
             
@@ -15884,6 +15877,33 @@ Important rules:
                 card.mousePressEvent = _click()
             
             p1_lay.addWidget(modes_w, 1)
+            
+            # Halgakos mascot in the empty bottom-right grid cell (row 3, col 1)
+            try:
+                from PySide6.QtGui import QPixmap
+                _mascot_path = os.path.join(self.base_dir, "Halgakos.ico")
+                if os.path.isfile(_mascot_path):
+                    _pm = QPixmap(_mascot_path)
+                    if not _pm.isNull():
+                        _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+                        _dev_sz = int(140 * _dpr)
+                        _scaled = _pm.scaled(_dev_sz, _dev_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        _scaled.setDevicePixelRatio(_dpr)
+                        _mascot_lbl = QLabel()
+                        _mascot_lbl.setPixmap(_scaled)
+                        _mascot_lbl.setFixedSize(140, 140)
+                        _mascot_lbl.setAlignment(Qt.AlignCenter)
+                        _mascot_lbl.setStyleSheet("background: transparent; border: none;")
+                        _mascot_container = QWidget()
+                        _mascot_container.setStyleSheet("background: transparent;")
+                        _mc_lay = QVBoxLayout(_mascot_container)
+                        _mc_lay.setContentsMargins(0, 0, 0, 0)
+                        _mc_lay.addStretch()
+                        _mc_lay.addWidget(_mascot_lbl, 0, Qt.AlignCenter)
+                        _mc_lay.addStretch()
+                        modes_lay.addWidget(_mascot_container, 3, 1)
+            except Exception:
+                pass
             
             note1 = QLabel("⚠️ AI models may produce smaller glossaries due to training biases. Full mode captures the most terms but costs more.")
             note1.setWordWrap(True)
@@ -16441,7 +16461,6 @@ Important rules:
                 total = stack.count()
                 back_btn.setVisible(ci > 0)
                 title_lbl.setText(page_titles[ci][0])
-                subtitle_lbl.setText(page_titles[ci][1])
                 page_indicator.setText(f"Page {ci + 1} of {total}")
                 if ci == total - 1:
                     next_btn.setText("✅ Get Started")
