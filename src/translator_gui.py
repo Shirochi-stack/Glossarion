@@ -5150,12 +5150,7 @@ Recent translations to summarize:
                     epub_path = epubs[0]
                 if epub_path:
                     # Clear current glossary state for a clean switch
-                    _prev_automap = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                    if _prev_automap and not getattr(self, 'manual_glossary_manually_loaded', False):
-                        try:
-                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev_automap)}")
-                        except Exception:
-                            pass
+                    # (don't log here — _autofill / auto_load_glossary_for_file will log the new mapping)
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
@@ -16614,21 +16609,19 @@ Important rules:
                     # If user manually loaded this glossary, don't override it
                     if getattr(self, 'manual_glossary_manually_loaded', False):
                         return 0
-                    # Before clearing, peek at what the new guess would be.
-                    # If it's the same file, skip the clear+re-map cycle entirely
-                    # (avoids log spam from periodic timer).
+                    # Check what auto-mapping would assign.
+                    # Only clear+re-map if there's a DIFFERENT glossary to replace with.
+                    # If guess is None (no candidate) or same file, leave the current glossary alone.
                     try:
                         _peek = self._guess_glossary_for_input_file(epubs[0])
-                        if _peek and os.path.normpath(os.path.abspath(_peek)) == os.path.normpath(os.path.abspath(self.manual_glossary_path)):
-                            return 1  # Already mapped to the right glossary
                     except Exception:
-                        pass
-                    # Auto-filled glossary from a previous file — clear it so we can re-map
+                        _peek = None
+                    if not _peek:
+                        return 0  # No auto-mapping candidate — don't clear what's already loaded
+                    if os.path.normpath(os.path.abspath(_peek)) == os.path.normpath(os.path.abspath(self.manual_glossary_path)):
+                        return 1  # Already mapped to the right glossary
+                    # Auto-mapping found a different glossary — clear the old one
                     _prev = self.manual_glossary_path
-                    try:
-                        self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
-                    except Exception:
-                        pass
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
