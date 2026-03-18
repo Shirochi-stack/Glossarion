@@ -218,9 +218,17 @@ class ReviewDialog(QDialog):
             msg.setIcon(QMessageBox.Warning)
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg.setDefaultButton(QMessageBox.No)
-            btn_box = msg.findChild(QDialogButtonBox)
-            if btn_box:
-                btn_box.setCenterButtons(True)
+            msg.setStyleSheet("""
+                QPushButton {
+                    min-width: 80px;
+                    min-height: 30px;
+                    padding: 6px 20px;
+                    font-size: 10pt;
+                }
+                QDialogButtonBox {
+                    qproperty-centerButtons: true;
+                }
+            """)
             if msg.exec() == QMessageBox.Yes:
                 self.prompt_edit.setPlainText(DEFAULT_REVIEW_PROMPT)
         reset_prompt_btn.clicked.connect(_confirm_reset_prompt)
@@ -848,7 +856,28 @@ class ReviewDialog(QDialog):
             "border-radius: 3px; padding: 6px 16px; font-size: 9pt; }"
             "QPushButton:hover { background-color: #3a4f66; color: #7ab8e8; border-color: #5a9fd4; }"
         )
-        reset_btn.clicked.connect(lambda: prompt_edit.setPlainText(DEFAULT_FINAL_REVIEW_PROMPT))
+        def _confirm_reset_final_prompt():
+            from PySide6.QtWidgets import QMessageBox, QDialogButtonBox
+            msg = QMessageBox(dialog)
+            msg.setWindowTitle("Reset Final Prompt")
+            msg.setText("Reset final review prompt to default?")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            msg.setStyleSheet("""
+                QPushButton {
+                    min-width: 80px;
+                    min-height: 30px;
+                    padding: 6px 20px;
+                    font-size: 10pt;
+                }
+                QDialogButtonBox {
+                    qproperty-centerButtons: true;
+                }
+            """)
+            if msg.exec() == QMessageBox.Yes:
+                prompt_edit.setPlainText(DEFAULT_FINAL_REVIEW_PROMPT)
+        reset_btn.clicked.connect(_confirm_reset_final_prompt)
         btn_row.addWidget(reset_btn)
 
         btn_row.addStretch()
@@ -2309,7 +2338,7 @@ class ReviewDialog(QDialog):
             os.makedirs(backups_dir, exist_ok=True)
 
             # Timestamped backup filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             backup_name = f"review_{timestamp}.md"
             backup_path = os.path.join(backups_dir, backup_name)
 
@@ -2401,28 +2430,13 @@ class ReviewDialog(QDialog):
             if not review_path:
                 return
 
-            # Warn if there's a current review that would be overwritten
-            # Warn only when the displayed review differs from what's on disk
-            # (i.e., there's a newly generated/unsaved review that would be lost)
-            has_unsaved_review = False
-            if self._raw_review_md and self._raw_review_md.strip():
-                try:
-                    if os.path.exists(review_path):
-                        with open(review_path, 'r', encoding='utf-8') as f:
-                            on_disk = f.read()
-                        has_unsaved_review = on_disk.strip() != self._raw_review_md.strip()
-                    else:
-                        # No file on disk but we have content displayed → unsaved
-                        has_unsaved_review = True
-                except Exception:
-                    has_unsaved_review = True
-
-            if has_unsaved_review:
+            # Warn if there's a current review.md that would be overwritten
+            if os.path.exists(review_path):
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Warning)
                 msg.setWindowTitle("Restore Backup")
                 msg.setText(
-                    "You have an unsaved review that will be overwritten.\n\n"
+                    "Your current review will be overwritten.\n\n"
                     "Restoring will replace it with the previous backup:\n"
                     f"{backups[0]}\n\n"
                     "Are you sure you want to restore?"
