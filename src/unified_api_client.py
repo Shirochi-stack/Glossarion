@@ -13186,11 +13186,22 @@ class UnifiedClient:
                     thinking_label = f", thinking=extended (budget={budget:,})"
                 print(f"🛰️ [anthropic] SSE stream start (model={self.model}, url={api_url}{thinking_label})")
 
+            # Use httpx for streaming — requests/urllib3 buffers at the TLS
+            # record level (~16 KB), causing SSE events to arrive in bursts.
+            # httpx delivers lines as they arrive from the server.
+            import httpx as _httpx
+
+            _httpx_timeout = _httpx.Timeout(
+                connect=30.0,
+                read=self.request_timeout if isinstance(self.request_timeout, (int, float)) else 300.0,
+                write=30.0,
+                pool=30.0,
+            )
+
             try:
-                raw_resp = requests.post(
-                    api_url, headers=headers, json=data,
-                    stream=True, timeout=self.request_timeout
-                )
+                _hx_client = _httpx.Client(timeout=_httpx_timeout)
+                _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
+                raw_resp = _hx_client.send(_hx_req, stream=True)
             except Exception as e:
                 if self._is_stop_requested():
                     self._cancelled = True
@@ -13219,6 +13230,13 @@ class UnifiedClient:
                 except Exception:
                     err_body = f"HTTP {raw_resp.status_code}"
 
+                # Close the failed stream before retrying
+                try:
+                    raw_resp.close()
+                    _hx_client.close()
+                except Exception:
+                    pass
+
                 err_lower = err_body.lower() if isinstance(err_body, str) else ""
 
                 # Handle thinking-unsupported errors (same logic as _http_request_with_retries)
@@ -13235,10 +13253,9 @@ class UnifiedClient:
                     data.pop('output_config', None)
                     # Retry without thinking
                     try:
-                        raw_resp = requests.post(
-                            api_url, headers=headers, json=data,
-                            stream=True, timeout=self.request_timeout
-                        )
+                        _hx_client = _httpx.Client(timeout=_httpx_timeout)
+                        _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
+                        raw_resp = _hx_client.send(_hx_req, stream=True)
                     except Exception as e:
                         if self._is_stop_requested():
                             self._cancelled = True
@@ -13271,10 +13288,9 @@ class UnifiedClient:
                         print(f"    🔄 Falling back to extended thinking (budget={budget:,} tokens)")
                     # Retry with standard thinking
                     try:
-                        raw_resp = requests.post(
-                            api_url, headers=headers, json=data,
-                            stream=True, timeout=self.request_timeout
-                        )
+                        _hx_client = _httpx.Client(timeout=_httpx_timeout)
+                        _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
+                        raw_resp = _hx_client.send(_hx_req, stream=True)
                     except Exception as e:
                         if self._is_stop_requested():
                             self._cancelled = True
@@ -13302,7 +13318,7 @@ class UnifiedClient:
             first_text_ts = None  # timestamp of first text delta
 
             try:
-                for raw_line in raw_resp.iter_lines(chunk_size=1, decode_unicode=True):
+                for raw_line in raw_resp.iter_lines():
                     # Cancellation check
                     if self._is_stop_requested():
                         self._cancelled = True
@@ -13417,6 +13433,10 @@ class UnifiedClient:
                 # Cleanup
                 try:
                     raw_resp.close()
+                except Exception:
+                    pass
+                try:
+                    _hx_client.close()
                 except Exception:
                     pass
                 with self._active_streams_lock:
