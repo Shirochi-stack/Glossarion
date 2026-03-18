@@ -4685,6 +4685,10 @@ class MultiAPIKeyDialog(QDialog):
         
         self.glossary_tree.verticalScrollBar().setValue(v_scroll)
         self.glossary_tree.horizontalScrollBar().setValue(h_scroll)
+        
+        # Auto-refresh the in-memory pool so changes take effect immediately
+        if not getattr(self, '_initializing', False):
+            self._refresh_glossary_pool()
 
     def _add_glossary_key(self):
         """Add a new glossary key"""
@@ -5123,8 +5127,17 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
         
-        # Clear in-memory glossary pool when disabled to prevent stale pool usage
-        if not enabled:
+        if enabled:
+            # Setup in-memory glossary pool so keys work immediately without restart
+            try:
+                from unified_api_client import UnifiedClient
+                gk_list = self.translator_gui.config.get('glossary_keys', []) or []
+                if gk_list:
+                    UnifiedClient.set_in_memory_glossary_keys(gk_list)
+            except Exception:
+                pass
+        else:
+            # Clear in-memory glossary pool when disabled to prevent stale pool usage
             try:
                 from unified_api_client import UnifiedClient
                 UnifiedClient.clear_in_memory_glossary_keys()
@@ -5132,6 +5145,22 @@ class MultiAPIKeyDialog(QDialog):
                 pass
         
         self._notify_authgpt_visibility()
+
+    def _refresh_glossary_pool(self):
+        """Refresh the in-memory glossary key pool after any change (add/remove/enable/disable).
+        Mirrors how multi-key pool is refreshed via set_in_memory_multi_keys."""
+        try:
+            use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
+            if not use_glossary:
+                return
+            from unified_api_client import UnifiedClient
+            gk_list = self.translator_gui.config.get('glossary_keys', []) or []
+            if gk_list:
+                UnifiedClient.set_in_memory_glossary_keys(gk_list)
+            else:
+                UnifiedClient.clear_in_memory_glossary_keys()
+        except Exception:
+            pass
 
     def _toggle_glossary_visibility(self):
         """Toggle glossary key field visibility"""
