@@ -5202,7 +5202,7 @@ Recent translations to summarize:
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
         _gloss_row_layout = QHBoxLayout(self._gloss_status_row)
-        _gloss_row_layout.setContentsMargins(100, 0, 0, 0)
+        _gloss_row_layout.setContentsMargins(20, 0, 0, 0)
         _gloss_row_layout.setSpacing(6)
 
         self.manual_glossary_status_label = QLabel("")
@@ -5576,15 +5576,9 @@ Recent translations to summarize:
 
         batch_right_layout.addStretch()
         
-        # Wrap status row + auto glossary row in a vertical container
-        _batch_right_vbox = QVBoxLayout()
-        _batch_right_vbox.setContentsMargins(0, 0, 0, 0)
-        _batch_right_vbox.setSpacing(10)
-        _batch_right_vbox.addWidget(self._gloss_status_row)
-        _batch_right_vbox.addWidget(batch_right_container)
-        _batch_right_wrapper = QWidget()
-        _batch_right_wrapper.setLayout(_batch_right_vbox)
-        self.frame.addWidget(_batch_right_wrapper, 7, 3, Qt.AlignLeft)
+        
+        self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
+        self.frame.addWidget(self._gloss_status_row, 6, 4, Qt.AlignLeft)
 
         # Output Token Limit tooltip (main output)
         try:
