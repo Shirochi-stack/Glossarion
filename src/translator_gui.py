@@ -18357,12 +18357,6 @@ Important rules:
             if google_creds_path:
                 encrypted_config['google_cloud_credentials'] = google_creds_path
             
-            # Debug: trace api_key persistence
-            _saved_key = encrypted_config.get('api_key', '')
-            _key_len = len(_saved_key)
-            _key_prefix = _saved_key[:15] if _saved_key else '(empty)'
-            print(f"[SAVE_CONFIG] api_key being written: len={_key_len}, starts_with={_key_prefix}")
-            
             json.dumps(encrypted_config, ensure_ascii=False, indent=2) # Validation check
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)

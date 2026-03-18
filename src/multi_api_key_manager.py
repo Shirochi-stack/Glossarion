@@ -5026,9 +5026,8 @@ class MultiAPIKeyDialog(QDialog):
         self._show_glossary_status(f"Glossary Keys {'enabled' if enabled else 'disabled'}")
         
         # Update in-memory config immediately so glossary extraction reads the correct value
-        # (save_config is called when the dialog is closed/saved via the normal save handler)
+        # (config is also saved when the dialog is closed/saved via the normal save handler)
         self.translator_gui.config['use_glossary_keys'] = enabled
-        # Also update the GUI variable
         if hasattr(self.translator_gui, 'use_glossary_keys_var'):
             self.translator_gui.use_glossary_keys_var = enabled
         
