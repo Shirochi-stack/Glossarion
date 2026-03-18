@@ -2716,6 +2716,10 @@ class UnifiedClient:
         # If we've exhausted all retries, raise error
         raise UnifiedClientError(f"No available API keys for thread after {max_retries} retries", error_type="no_keys")
 
+    def _get_next_available_key(self) -> Optional[Tuple]:
+        """Get next available key from the pool (delegates to thread-safe version)"""
+        return self._get_next_available_key_for_thread()
+
     def _get_next_available_key_for_thread(self) -> Optional[Tuple]:
         """Get next available key for thread assignment with proper thread safety"""
         if not self._api_key_pool:
