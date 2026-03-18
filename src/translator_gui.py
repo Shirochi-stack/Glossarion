@@ -16632,13 +16632,15 @@ Important rules:
                         # Include fuzzy match percentage when present
                         _fuzzy_pct = getattr(self, '_last_fuzzy_match_pct', None)
                         self._last_fuzzy_match_pct = None  # consume it
+                        _gp_base = os.path.basename(gp)
                         if _fuzzy_pct:
-                            _log_msg = f"📑 Auto-mapped glossary (fuzzy {_fuzzy_pct}%): {os.path.basename(gp)}"
+                            _log_msg = f"📑 Auto-mapped glossary (fuzzy {_fuzzy_pct}%): {_gp_base}"
                         else:
-                            _log_msg = f"📑 Auto-mapped glossary: {os.path.basename(gp)}"
-                        if getattr(self, '_last_automap_log', '') != _log_msg:
+                            _log_msg = f"📑 Auto-mapped glossary: {_gp_base}"
+                        # Deduplicate by glossary file basename (ignore fuzzy tag differences)
+                        if getattr(self, '_last_automap_log_file', '') != _gp_base:
                             self.append_log(_log_msg)
-                            self._last_automap_log = _log_msg
+                            self._last_automap_log_file = _gp_base
                 except Exception:
                     pass
                 return 1
@@ -16736,6 +16738,10 @@ Important rules:
         - Ignore progress files like `*_glossary_progress.*`
         """
         try:
+            # Clear stale fuzzy score from any previous call so exact matches
+            # aren't incorrectly tagged as fuzzy.
+            self._last_fuzzy_match_pct = None
+
             if not input_path:
                 return None
 
