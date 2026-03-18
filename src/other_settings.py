@@ -2288,7 +2288,7 @@ def _create_context_management_section(self, parent):
     section_v.addWidget(scale_row)
 
     scale_desc = QLabel(
-        "Controls the overall GUI size (default 1.7).\n"
+        "Controls the overall GUI size (default 1.70).\n"
         "Lower values = smaller UI, higher values = larger UI.\n"
         "⚠️ Requires restart to take effect."
     )
