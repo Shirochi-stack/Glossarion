@@ -1373,7 +1373,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.config['append_glossary_auto_load'] = False
         self.append_glossary_auto_load_var = self.config.get('append_glossary_auto_load', False)
         self.fuzzy_auto_mapping_var = self.config.get('fuzzy_auto_mapping', False)
-        self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
+        self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 80)
 
         self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
@@ -10766,7 +10766,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FORCE_NATIVE_ANTHROPIC': '1' if getattr(self, 'force_native_anthropic_var', False) else '0',
             'ANTHROPIC_BASE_URL': getattr(self, 'anthropic_base_url_var', '') or '',
             'FUZZY_AUTO_MAPPING': '1' if getattr(self, 'fuzzy_auto_mapping_var', False) else '0',
-            'FUZZY_AUTO_MAPPING_THRESHOLD': str(getattr(self, 'fuzzy_auto_mapping_threshold_var', 50)),
+            'FUZZY_AUTO_MAPPING_THRESHOLD': str(getattr(self, 'fuzzy_auto_mapping_threshold_var', 80)),
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
@@ -16749,9 +16749,9 @@ Important rules:
             # Check if fuzzy auto-mapping is enabled
             _fuzzy_enabled = os.environ.get('FUZZY_AUTO_MAPPING', '0') == '1'
             try:
-                _fuzzy_threshold = int(os.environ.get('FUZZY_AUTO_MAPPING_THRESHOLD', '50')) / 100.0
+                _fuzzy_threshold = int(os.environ.get('FUZZY_AUTO_MAPPING_THRESHOLD', '80')) / 100.0
             except (ValueError, TypeError):
-                _fuzzy_threshold = 0.50
+                _fuzzy_threshold = 0.80
 
             def _find_in_dir(glossary_dir: str):
                 if not glossary_dir or not os.path.isdir(glossary_dir):
@@ -17712,7 +17712,7 @@ Important rules:
                 ('force_native_anthropic', ['force_native_anthropic_var'], False, bool),
                 ('anthropic_base_url', ['anthropic_base_url_var'], '', str),
                 ('fuzzy_auto_mapping', ['fuzzy_auto_mapping_var'], False, bool),
-                ('fuzzy_auto_mapping_threshold', ['fuzzy_auto_mapping_threshold_var'], 50, lambda v: safe_int(v, 50)),
+                ('fuzzy_auto_mapping_threshold', ['fuzzy_auto_mapping_threshold_var'], 80, lambda v: safe_int(v, 80)),
 
                 # Review settings
                 ('review_system_prompt', ['review_system_prompt_var'], '', str),
@@ -18752,7 +18752,7 @@ Important rules:
                 ('FORCE_NATIVE_ANTHROPIC', '1' if getattr(self, 'force_native_anthropic_var', False) else '0'),
                 ('ANTHROPIC_BASE_URL', getattr(self, 'anthropic_base_url_var', '')),
                 ('FUZZY_AUTO_MAPPING', '1' if getattr(self, 'fuzzy_auto_mapping_var', False) else '0'),
-                ('FUZZY_AUTO_MAPPING_THRESHOLD', str(getattr(self, 'fuzzy_auto_mapping_threshold_var', 50))),
+                ('FUZZY_AUTO_MAPPING_THRESHOLD', str(getattr(self, 'fuzzy_auto_mapping_threshold_var', 80))),
 
                 # PDF output
                 ('ENABLE_PDF_OUTPUT', '1' if getattr(self, 'enable_pdf_output_var', False) else '0'),
