@@ -14935,6 +14935,17 @@ Important rules:
             txt_files = [p for p in processed_paths if p.lower().endswith('.txt')]
             
             if len(epub_files) == 1:
+                # Log + clear any previous auto-mapped glossary before re-mapping
+                _prev_glossary = getattr(self, 'manual_glossary_path', None)
+                if _prev_glossary and not getattr(self, 'manual_glossary_manually_loaded', False):
+                    try:
+                        self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev_glossary)}")
+                    except Exception:
+                        pass
+                    self.manual_glossary_path = None
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
+
                 # Single EPUB - auto-load glossary (from the book's output folder)
                 # When auto-mapping is enabled, skip output-folder auto-load so
                 # _autofill_glossary_for_current_selection can find the Glossary
@@ -16469,7 +16480,18 @@ Important rules:
         if len(epubs) == 1:
             try:
                 if getattr(self, 'manual_glossary_path', None):
-                    return 0
+                    # If user manually loaded this glossary, don't override it
+                    if getattr(self, 'manual_glossary_manually_loaded', False):
+                        return 0
+                    # Auto-filled glossary from a previous file — clear it so we can re-map
+                    _prev = self.manual_glossary_path
+                    try:
+                        self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
+                    except Exception:
+                        pass
+                    self.manual_glossary_path = None
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
             except Exception:
                 pass
 
