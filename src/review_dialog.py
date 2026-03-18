@@ -902,6 +902,11 @@ class ReviewDialog(QDialog):
         def _save_and_close():
             self._final_review_prompt = prompt_edit.toPlainText().strip() or DEFAULT_FINAL_REVIEW_PROMPT
             self._save_prompt_to_config()
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
             dialog.close()
         ok_btn.clicked.connect(_save_and_close)
         btn_row.addWidget(ok_btn)
