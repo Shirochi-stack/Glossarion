@@ -2495,7 +2495,10 @@ class UnifiedClient:
                 if tls.request_count >= self._rotation_frequency:
                     should_rotate = True
                     tls.request_count = 0
-                    print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
+                    # Only log rotation for non-glossary keys (glossary rotation is too noisy)
+                    _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+                    if not _is_glossary_pool:
+                        print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
                 # Release previous thread assignment to avoid stale usage tracking
@@ -2579,7 +2582,9 @@ class UnifiedClient:
                     else:
                         masked_key = "***"
                     
-                    print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                    # Only log key assignment for non-glossary keys (glossary rotation is too noisy)
+                    if not _is_glossary_pool:
+                        print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
                     # Setup client with new key (might need lock if it modifies instance state)
                     self._setup_client()
@@ -4370,7 +4375,10 @@ class UnifiedClient:
                                         tls.request_count = 0
                                     except Exception:
                                         pass
-                                    print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool ({len(glossary_pool.keys)} keys): {self.key_identifier}")
+                                    # Log glossary pool activation once (without key identifier — it rotates anyway)
+                                    if not getattr(self.__class__, '_glossary_pool_logged', False):
+                                        print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool ({len(glossary_pool.keys)} keys)")
+                                        self.__class__._glossary_pool_logged = True
                             except Exception as e:
                                 print(f"[GLOSSARY KEYS] ⚠️ Failed to get glossary key from pool: {e}")
                                 # Restore state on failure
