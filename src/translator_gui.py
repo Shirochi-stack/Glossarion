@@ -234,6 +234,30 @@ if '--run-pdf-worker' in sys.argv:
     finally:
         sys.exit(0)
 
+# Support worker-mode dispatch for PDF extraction subprocess
+if '--run-pdf-extraction' in sys.argv:
+    try:
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        # Remove the flag so worker's argv aligns (config path is argv[1])
+        try:
+            _new_argv = [sys.argv[0]]
+            for _a in sys.argv[1:]:
+                if _a != '--run-pdf-extraction':
+                    _new_argv.append(_a)
+            sys.argv = _new_argv
+        except Exception:
+            pass
+        from _pdf_extraction_worker import main as _pdf_extract_main
+        _pdf_extract_main()
+    except Exception as _e:
+        try:
+            print(f"[ERROR] PDF extraction worker failed: {_e}")
+        except Exception:
+            pass
+    finally:
+        sys.exit(0)
+
+
 # The frozen check can stay here for other purposes
 if getattr(sys, 'frozen', False):
     # Any other frozen-specific setup

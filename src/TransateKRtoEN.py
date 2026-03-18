@@ -9198,9 +9198,103 @@ def main(log_callback=None, stop_callback=None):
     if is_pdf_file:
         print("📄 Processing PDF file...")
         try:
-            txt_processor = TextFileProcessor(input_path, out)
-            chapters = txt_processor.extract_chapters()
-            txt_processor.save_original_structure()
+            # Use subprocess extraction in GUI mode to prevent GUI freezing
+            use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" and log_callback
+            
+            if use_async:
+                print("🚀 Using subprocess PDF extraction (prevents GUI lag)...")
+                from pdf_extraction_manager import PdfExtractionManager
+                
+                # Write config JSON for the subprocess worker
+                _pdf_ext_config = {
+                    "pdf_path": input_path,
+                    "output_dir": out,
+                    "render_mode": os.getenv("PDF_RENDER_MODE", "xhtml").lower(),
+                    "extract_images": os.getenv("PDF_EXTRACT_IMAGES", "1") == "1",
+                    "generate_css": os.getenv("PDF_GENERATE_CSS", "1") == "1",
+                    "html2text": os.getenv("USE_HTML2TEXT", "0") == "1",
+                    "css_override_path": os.getenv("EPUB_CSS_OVERRIDE_PATH", "").strip(),
+                    "attach_css_enabled": os.getenv("ATTACH_CSS_TO_CHAPTERS", "0") == "1"
+                }
+                _pdf_ext_config_path = os.path.join(out, '_pdf_extraction_config.json')
+                with open(_pdf_ext_config_path, 'w', encoding='utf-8') as f:
+                    json.dump(_pdf_ext_config, f, ensure_ascii=False)
+                
+                # Run extraction in subprocess
+                _pdf_ext_mgr = PdfExtractionManager(log_callback=log_callback)
+                _pdf_ext_result = _pdf_ext_mgr.extract_pdf_sync(_pdf_ext_config_path, timeout=600)
+                
+                if _pdf_ext_result and _pdf_ext_result.get("success"):
+                    # Load results from the output JSON
+                    _result_path = _pdf_ext_result.get("result_path")
+                    if _result_path and os.path.exists(_result_path):
+                        with open(_result_path, 'r', encoding='utf-8') as f:
+                            _ext_data = json.load(f)
+                        
+                        # Convert results back to the format txt_processor expects
+                        _content = _ext_data.get("content", [])
+                        _is_page_list = _ext_data.get("is_page_list", False)
+                        
+                        # Build chapters from extracted content
+                        file_base = os.path.splitext(os.path.basename(input_path))[0]
+                        txt_processor = TextFileProcessor(input_path, out)
+                        
+                        if _is_page_list and isinstance(_content, list):
+                            # Content is list of [page_num, html] pairs
+                            render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
+                            raw_chapters = []
+                            for item in _content:
+                                page_num = item[0] if isinstance(item, list) else item
+                                page_html = item[1] if isinstance(item, list) else ""
+                                raw_chapters.append({
+                                    'num': page_num,
+                                    'title': f"{file_base} - Page {page_num}",
+                                    'content': page_html,
+                                    'is_html': True,
+                                    'images_info': {},
+                                    'has_images': True if render_mode == 'image' else False,
+                                    'image_count': 1 if render_mode == 'image' else 0
+                                })
+                            # Process chapters for splitting (reuse txt_processor's logic)
+                            chapters = txt_processor._process_chapters_for_splitting(raw_chapters)
+                        else:
+                            # Single string content, treat as one chapter
+                            chapters = [{
+                                'num': 1,
+                                'title': file_base,
+                                'body': _content if isinstance(_content, str) else '',
+                                'filename': 'section_1.html',
+                                'source_file': input_path,
+                                'content_hash': '',
+                                'file_size': len(_content) if isinstance(_content, str) else 0,
+                                'has_images': False,
+                                'image_count': 0,
+                                'is_chunk': False
+                            }]
+                        
+                        txt_processor.save_original_structure()
+                        
+                        # Clean up config and result files
+                        for _cleanup_path in [_pdf_ext_config_path, _result_path]:
+                            try:
+                                if os.path.exists(_cleanup_path):
+                                    os.remove(_cleanup_path)
+                            except Exception:
+                                pass
+                    else:
+                        raise RuntimeError("Subprocess succeeded but result file not found")
+                else:
+                    _error = _pdf_ext_result.get("error", "Unknown error") if _pdf_ext_result else "No result"
+                    print(f"⚠️ Subprocess extraction failed ({_error}), falling back to in-process...")
+                    # Fall back to in-process extraction
+                    txt_processor = TextFileProcessor(input_path, out)
+                    chapters = txt_processor.extract_chapters()
+                    txt_processor.save_original_structure()
+            else:
+                # Non-GUI mode: use in-process extraction
+                txt_processor = TextFileProcessor(input_path, out)
+                chapters = txt_processor.extract_chapters()
+                txt_processor.save_original_structure()
             
             metadata = {
                 "title": os.path.splitext(os.path.basename(input_path))[0],
