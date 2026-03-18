@@ -5165,8 +5165,14 @@ Recent translations to summarize:
                             self._autofill_glossary_for_current_selection()
                     else:
                         self.auto_load_glossary_for_file(epub_path)
-                    # Refresh editor path
-                    if hasattr(self, 'editor_file_entry'):
+                    # Refresh editor path (only if glossary manager tab is visible)
+                    _glossary_tab_visible = False
+                    try:
+                        if hasattr(self, 'tab_widget') and hasattr(self, 'glossary_manager_widget'):
+                            _glossary_tab_visible = self.tab_widget.currentWidget() == self.glossary_manager_widget
+                    except Exception:
+                        pass
+                    if _glossary_tab_visible and hasattr(self, 'editor_file_entry'):
                         new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
