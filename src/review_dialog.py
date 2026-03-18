@@ -1121,10 +1121,20 @@ class ReviewDialog(QDialog):
 
         def _log(msg):
             # Send through the hijacked append_log (reaches both main GUI and review dialog)
+            # Prefix each line with [Review], but skip separator-only and blank lines
+            lines = str(msg).split('\n')
+            prefixed = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or all(c in '─═' for c in stripped):
+                    prefixed.append(line)
+                else:
+                    prefixed.append(f"[Review] {line}")
+            full = '\n'.join(prefixed)
             try:
-                self.translator_gui.append_log(f"[Review] {msg}")
+                self.translator_gui.append_log(full)
             except Exception:
-                print(f"[Review] {msg}")
+                print(full)
 
         def _stop_check():
             return self._stop_requested
