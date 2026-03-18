@@ -1903,6 +1903,7 @@ class UnifiedClient:
         with cls._glossary_pool_lock:
             if cls._glossary_key_pool is None:
                 cls._glossary_key_pool = APIKeyPool()
+            cls._glossary_pool_logged = False  # Reset so the one-time log shows once per run
 
             # Initialize rate limit cache if needed
             if cls._rate_limit_cache is None:
