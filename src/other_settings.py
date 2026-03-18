@@ -2290,7 +2290,7 @@ def _create_context_management_section(self, parent):
     scale_desc.setContentsMargins(0, 0, 0, 0)
     section_v.addWidget(scale_desc)
 
-    # Halgakos icon at bottom (180x180 HiDPI)
+    # Halgakos icon at bottom (150x150 HiDPI)
     _icon_label = QLabel()
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     if os.path.exists(_icon_path):
@@ -2299,11 +2299,11 @@ def _create_context_management_section(self, parent):
         _pixmap = QPixmap(_icon_path)
         if not _pixmap.isNull():
             _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
-            _target = int(180 * _dpr)
+            _target = int(150 * _dpr)
             _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             _scaled.setDevicePixelRatio(_dpr)
             _icon_label.setPixmap(_scaled)
-            _icon_label.setFixedSize(180, 180)
+            _icon_label.setFixedSize(150, 150)
             _icon_label.setAlignment(Qt.AlignCenter)
             section_v.addWidget(_icon_label)
 
