@@ -753,6 +753,50 @@ def generate_review(
 
 # ─── Chunked review generation ──────────────────────────────────────────
 
+
+def _split_text_into_segments(
+    name: str, text: str, token_budget: int
+) -> List[Tuple[str, str]]:
+    """Split a single oversized chapter/text into sequential segments
+    that each fit within the token budget. Splits on sentence boundaries."""
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    segments: List[Tuple[str, str]] = []
+    current_sents: List[str] = []
+    current_tokens = 0
+
+    for sent in sentences:
+        t = count_tokens(sent)
+        if current_tokens + t > token_budget and current_sents:
+            # Flush the current segment
+            seg_idx = len(segments) + 1
+            seg_text = " ".join(current_sents)
+            segments.append((f"{name} [part {seg_idx}]", seg_text))
+            current_sents = []
+            current_tokens = 0
+        # If a single sentence exceeds budget, hard-truncate it
+        if t > token_budget and not current_sents:
+            approx_chars = token_budget * 4
+            chunk = sent[:approx_chars]
+            while count_tokens(chunk) > token_budget and len(chunk) > 10:
+                chunk = chunk[:int(len(chunk) * 0.9)]
+            seg_idx = len(segments) + 1
+            segments.append((f"{name} [part {seg_idx}]", chunk))
+            continue
+        current_sents.append(sent)
+        current_tokens += t
+
+    # Flush remaining
+    if current_sents:
+        seg_idx = len(segments) + 1
+        seg_text = " ".join(current_sents)
+        segments.append((f"{name} [part {seg_idx}]", seg_text))
+
+    # If only 1 segment, return without part suffix
+    if len(segments) == 1:
+        segments = [(name, segments[0][1])]
+
+    return segments
+
 def _split_into_chunks(
     chapters: List[Tuple[str, str]],
     token_budget: int,
@@ -786,10 +830,15 @@ def _split_into_chunks(
                 if used + tokens > token_budget and current_chunk:
                     break  # This chapter doesn't fit, start a new chunk
                 if used + tokens > token_budget and not current_chunk:
-                    # Single chapter too large — chunk it down
-                    cn, ct = _chunk_chapter(name, text, token_budget)
-                    current_chunk.append((cn, ct))
+                    # Single chapter too large — split into sequential segments
                     remaining.pop(0)
+                    segments = _split_text_into_segments(name, text, token_budget)
+                    # First segment goes into current_chunk
+                    current_chunk.append(segments[0])
+                    # Remaining segments become new "chapters" at the front of remaining
+                    for seg_name, seg_text in reversed(segments[1:]):
+                        seg_tokens = count_tokens(seg_text)
+                        remaining.insert(0, (seg_name, seg_text, seg_tokens))
                     break
                 current_chunk.append((name, text))
                 used += tokens
