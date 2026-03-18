@@ -123,6 +123,7 @@ app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
     ('splash_utils.py', '.'),
+    ('dpi_setup.py', '.'),
     ('other_settings.py', '.'),
     ('GlossaryManager.py', '.'),
     ('GlossaryManager_GUI.py', '.'),
@@ -402,6 +403,7 @@ app_modules = [
     'check_epub_directory',
     'direct_imports',
     'splash_utils',
+    'dpi_setup',
     'other_settings',      # Other Settings module
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
     'manga_translator',    # Manga translator module
