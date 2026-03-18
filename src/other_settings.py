@@ -346,7 +346,7 @@ def setup_other_settings_methods(gui_instance):
         'on_extraction_method_change', 'on_extraction_mode_change',
         # Toggle methods
         'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
-        'toggle_custom_endpoint_ui', 'toggle_more_endpoints',
+        'toggle_custom_endpoint_ui', 'toggle_more_endpoints', 'toggle_anthropic_endpoint',
         '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
         '_toggle_anti_duplicate_controls', 'toggle_image_translation_section',
         'toggle_anti_duplicate_section',
@@ -2785,41 +2785,7 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for Anthropic controls
     self.toggle_anthropic_thinking_controls()
 
-    # Force Native Anthropic Format toggle
-    native_anthropic_row = QWidget()
-    native_anthropic_h = QHBoxLayout(native_anthropic_row)
-    native_anthropic_h.setContentsMargins(20, 2, 0, 0)
 
-    if not hasattr(self, 'force_native_anthropic_var'):
-        self.force_native_anthropic_var = bool(
-            self.config.get(
-                'force_native_anthropic',
-                str(os.environ.get('FORCE_NATIVE_ANTHROPIC', '0')) == '1'
-            )
-        )
-    native_anthropic_cb = self._create_styled_checkbox("Force native Anthropic format for Claude models")
-    native_anthropic_cb.setToolTip(
-        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "Routes Claude models through the native Anthropic Messages API handler "
-        "instead of OpenAI-compatible format. Enable this if your custom endpoint "
-        "expects the Anthropic message format (system as top-level field, not a message role)."
-        "</p></qt>"
-    )
-    try:
-        native_anthropic_cb.setChecked(bool(self.force_native_anthropic_var))
-    except Exception:
-        pass
-    def _on_force_native_anthropic_toggle(checked):
-        try:
-            self.force_native_anthropic_var = bool(checked)
-            self.config['force_native_anthropic'] = self.force_native_anthropic_var
-            os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if checked else '0'
-        except Exception:
-            pass
-    native_anthropic_cb.toggled.connect(_on_force_native_anthropic_toggle)
-    native_anthropic_h.addWidget(native_anthropic_cb)
-    native_anthropic_h.addStretch()
-    section_v.addWidget(native_anthropic_row)
 
     # Parallel Extraction
     parallel_title = QLabel("Parallel Extraction")
@@ -9346,6 +9312,137 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     shortcuts_h.addStretch()
     additional_v.addWidget(shortcuts_widget)
+
+    # ── Anthropic Custom Endpoint ──
+    anthropic_sep = QFrame()
+    anthropic_sep.setFrameShape(QFrame.HLine)
+    anthropic_sep.setStyleSheet("color: #444;")
+    additional_v.addWidget(anthropic_sep)
+
+    if not hasattr(self, 'force_native_anthropic_var'):
+        self.force_native_anthropic_var = bool(
+            self.config.get(
+                'force_native_anthropic',
+                str(os.environ.get('FORCE_NATIVE_ANTHROPIC', '0')) == '1'
+            )
+        )
+    anthropic_cb = self._create_styled_checkbox("Enable Anthropic Custom Endpoint")
+    anthropic_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Routes Claude models through the native Anthropic Messages API handler "
+        "instead of OpenAI-compatible format. Use this when your endpoint speaks "
+        "native Anthropic protocol (system as top-level field, /v1/messages path)."
+        "</p></qt>"
+    )
+    try:
+        anthropic_cb.setChecked(bool(self.force_native_anthropic_var))
+    except Exception:
+        pass
+    def _on_anthropic_endpoint_toggle(checked):
+        try:
+            self.force_native_anthropic_var = bool(checked)
+            self.config['force_native_anthropic'] = self.force_native_anthropic_var
+            os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if checked else '0'
+            self.toggle_anthropic_endpoint()
+        except Exception:
+            pass
+    anthropic_cb.toggled.connect(_on_anthropic_endpoint_toggle)
+    anthropic_cb.setContentsMargins(0, 5, 0, 5)
+    additional_v.addWidget(anthropic_cb)
+
+    # Anthropic Base URL input
+    anthropic_url_row = QWidget()
+    anthropic_url_h = QHBoxLayout(anthropic_url_row)
+    anthropic_url_h.setContentsMargins(0, 5, 0, 5)
+    anthropic_url_h.addWidget(QLabel("Anthropic Base URL:"))
+
+    if not hasattr(self, 'anthropic_base_url_var'):
+        self.anthropic_base_url_var = self.config.get('anthropic_base_url', '')
+    self.anthropic_base_url_entry = QLineEdit()
+    self.anthropic_base_url_entry.setPlaceholderText("https://api.anthropic.com  (leave blank for default)")
+    try:
+        self.anthropic_base_url_entry.setText(str(self.anthropic_base_url_var))
+    except Exception:
+        pass
+    def _on_anthropic_url_changed(text):
+        try:
+            self.anthropic_base_url_var = text
+            os.environ['ANTHROPIC_BASE_URL'] = text
+        except Exception:
+            pass
+    self.anthropic_base_url_entry.textChanged.connect(_on_anthropic_url_changed)
+    anthropic_url_h.addWidget(self.anthropic_base_url_entry)
+
+    self.anthropic_clear_button = QPushButton("Clear")
+    self.anthropic_clear_button.setFixedWidth(80)
+    def _clear_anthropic_url():
+        self.anthropic_base_url_var = ""
+        self.anthropic_base_url_entry.setText("")
+        os.environ['ANTHROPIC_BASE_URL'] = ''
+    self.anthropic_clear_button.clicked.connect(_clear_anthropic_url)
+    anthropic_url_h.addWidget(self.anthropic_clear_button)
+    additional_v.addWidget(anthropic_url_row)
+
+    anthropic_help = QLabel(
+        "Routes Claude models to the native Anthropic Messages API format.\n"
+        "• System prompt sent as top-level 'system' field (not a message role)\n"
+        "• Requests go to [base_url]/v1/messages instead of /v1/chat/completions\n"
+        "• Use for Anthropic-native proxies, reverse proxies, or the official API\n"
+        "• Leave URL blank to use the official Anthropic API (api.anthropic.com)"
+    )
+    anthropic_help.setStyleSheet("color: gray; font-size: 8pt;")
+    anthropic_help.setWordWrap(True)
+    anthropic_help.setContentsMargins(0, 0, 0, 3)
+    additional_v.addWidget(anthropic_help)
+
+    # Quick-paste shortcuts for Anthropic URLs
+    anthropic_shortcuts_widget = QWidget()
+    anthropic_shortcuts_h = QHBoxLayout(anthropic_shortcuts_widget)
+    anthropic_shortcuts_h.setContentsMargins(0, 0, 0, 5)
+    anthropic_shortcuts_h.addWidget(QLabel("Quick paste (double-click):"))
+
+    anthropic_official_url = "https://api.anthropic.com"
+
+    try:
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QTimer
+    except ImportError:
+        QGuiApplication = None
+        QTimer = None
+
+    anthropic_official_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{anthropic_official_url}</span>')
+    anthropic_official_shortcut.setStyleSheet("font-size: 8pt;")
+    anthropic_official_shortcut.setTextFormat(Qt.RichText)
+    anthropic_official_shortcut.setCursor(Qt.PointingHandCursor)
+    anthropic_official_shortcut.setToolTip("Double-click to paste official Anthropic API URL")
+    _anth_orig_style = anthropic_official_shortcut.styleSheet()
+    _anth_orig_text = anthropic_official_shortcut.text()
+    def _paste_anthropic_official(event):
+        self.anthropic_base_url_entry.setText(anthropic_official_url)
+        self.anthropic_base_url_var = anthropic_official_url
+        os.environ['ANTHROPIC_BASE_URL'] = anthropic_official_url
+        try:
+            if QGuiApplication:
+                QGuiApplication.clipboard().setText(anthropic_official_url)
+        except Exception:
+            pass
+        try:
+            anthropic_official_shortcut.setStyleSheet(_anth_orig_style + " color: #00d084;")
+            anthropic_official_shortcut.setTextFormat(Qt.PlainText)
+            anthropic_official_shortcut.setText(f"\u2713 Pasted: {anthropic_official_url}")
+            if QTimer:
+                QTimer.singleShot(900, lambda: (
+                    anthropic_official_shortcut.setStyleSheet(_anth_orig_style),
+                    anthropic_official_shortcut.setTextFormat(Qt.RichText),
+                    anthropic_official_shortcut.setText(_anth_orig_text),
+                ))
+        except Exception:
+            pass
+    anthropic_official_shortcut.mouseDoubleClickEvent = _paste_anthropic_official
+    anthropic_shortcuts_h.addWidget(anthropic_official_shortcut)
+
+    anthropic_shortcuts_h.addStretch()
+    additional_v.addWidget(anthropic_shortcuts_widget)
     
     # Add the additional endpoints frame to the main section
     section_v.addWidget(self.additional_endpoints_frame)
@@ -9367,6 +9464,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     # Set initial states
     self.toggle_custom_endpoint_ui()
     self.toggle_gemini_endpoint()
+    self.toggle_anthropic_endpoint()
 
 def _check_azure_endpoint(self, *args):
     """Check if endpoint is Azure and update UI (Qt version)"""
@@ -9418,6 +9516,17 @@ def toggle_gemini_endpoint(self):
             self.gemini_endpoint_entry.setEnabled(enabled)
         if hasattr(self, 'gemini_clear_button'):
             self.gemini_clear_button.setEnabled(enabled)
+    except Exception:
+        pass
+
+def toggle_anthropic_endpoint(self):
+    """Enable/disable Anthropic endpoint entry based on toggle (Qt version)"""
+    try:
+        enabled = bool(self.force_native_anthropic_var)
+        if hasattr(self, 'anthropic_base_url_entry'):
+            self.anthropic_base_url_entry.setEnabled(enabled)
+        if hasattr(self, 'anthropic_clear_button'):
+            self.anthropic_clear_button.setEnabled(enabled)
     except Exception:
         pass
 

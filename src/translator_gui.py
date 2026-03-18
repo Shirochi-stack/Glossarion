@@ -1278,6 +1278,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', True)
         self.gemini_openai_endpoint_var = self.config.get('gemini_openai_endpoint', 'generativelanguage.googleapis.com')
+        self.force_native_anthropic_var = self.config.get('force_native_anthropic', False)
+        self.anthropic_base_url_var = self.config.get('anthropic_base_url', '')
         self.azure_api_version_var = self.config.get('azure_api_version', '2025-01-01-preview')
         # Set initial Azure API version environment variable
         azure_version = self.config.get('azure_api_version', '2025-01-01-preview')
@@ -10714,6 +10716,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else 'generativelanguage.googleapis.com',
+            'FORCE_NATIVE_ANTHROPIC': '1' if getattr(self, 'force_native_anthropic_var', False) else '0',
+            'ANTHROPIC_BASE_URL': getattr(self, 'anthropic_base_url_var', '') or '',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
@@ -17472,6 +17476,8 @@ Important rules:
                 ('groq_base_url', ['groq_base_url_var'], '', str),
                 ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
                 ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], 'generativelanguage.googleapis.com', str),
+                ('force_native_anthropic', ['force_native_anthropic_var'], False, bool),
+                ('anthropic_base_url', ['anthropic_base_url_var'], '', str),
 
                 # Review settings
                 ('review_system_prompt', ['review_system_prompt_var'], '', str),
@@ -18508,6 +18514,8 @@ Important rules:
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
                 ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', True) else '0'),
                 ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', 'generativelanguage.googleapis.com')),
+                ('FORCE_NATIVE_ANTHROPIC', '1' if getattr(self, 'force_native_anthropic_var', False) else '0'),
+                ('ANTHROPIC_BASE_URL', getattr(self, 'anthropic_base_url_var', '')),
 
                 # PDF output
                 ('ENABLE_PDF_OUTPUT', '1' if getattr(self, 'enable_pdf_output_var', False) else '0'),

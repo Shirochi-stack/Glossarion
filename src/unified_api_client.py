@@ -12705,9 +12705,20 @@ class UnifiedClient:
         anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
         data = self._build_anthropic_payload(formatted_messages, temperature, max_tokens, anti_dupe_params, system_message)
         
-        # Use custom base_url if set (for Force Native Anthropic on custom endpoints),
-        # otherwise default to the official Anthropic API
-        if hasattr(self, 'base_url') and self.base_url and os.getenv('FORCE_NATIVE_ANTHROPIC', '0') == '1':
+        # Determine Anthropic API URL in priority order:
+        # 1. User-configured ANTHROPIC_BASE_URL (from custom endpoint field)
+        # 2. self.base_url when Force Native Anthropic is on (derive from custom endpoint)
+        # 3. Default official Anthropic API
+        custom_anthropic_base = os.getenv('ANTHROPIC_BASE_URL', '').strip()
+        if custom_anthropic_base:
+            base = custom_anthropic_base.rstrip('/')
+            # Strip trailing API paths to get clean base
+            for suffix in ['/v1/messages', '/v1/chat/completions', '/v1', '/chat/completions']:
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
+            api_url = f"{base}/v1/messages"
+        elif hasattr(self, 'base_url') and self.base_url and os.getenv('FORCE_NATIVE_ANTHROPIC', '0') == '1':
             base = self.base_url.rstrip('/')
             # Strip trailing /v1/messages, /v1, /chat/completions etc. to get clean base
             for suffix in ['/v1/messages', '/v1/chat/completions', '/v1', '/chat/completions']:
@@ -15894,9 +15905,20 @@ class UnifiedClient:
             data["system"] = system_message
             
         try:
+            # Determine Anthropic API URL (same priority as _send_anthropic)
+            custom_anthropic_base = os.getenv('ANTHROPIC_BASE_URL', '').strip()
+            if custom_anthropic_base:
+                _base = custom_anthropic_base.rstrip('/')
+                for _sfx in ['/v1/messages', '/v1/chat/completions', '/v1', '/chat/completions']:
+                    if _base.endswith(_sfx):
+                        _base = _base[:-len(_sfx)]
+                        break
+                _anthropic_api_url = f"{_base}/v1/messages"
+            else:
+                _anthropic_api_url = "https://api.anthropic.com/v1/messages"
             resp = self._http_request_with_retries(
                 method="POST",
-                url="https://api.anthropic.com/v1/messages",
+                url=_anthropic_api_url,
                 headers=headers,
                 json=data,
                 expected_status=(200,),
