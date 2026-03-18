@@ -92,7 +92,7 @@ def _html_to_plaintext(html_content: str) -> str:
         return soup.get_text(separator='\n')
 
 
-def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
+def _get_spine_ordered_html_files(epub_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
     """
     Read an EPUB and return a list of (filename, html_content) tuples
     in spine reading order, filtering out special files unless
@@ -115,6 +115,7 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
                     continue
                 fname = item.get_name()
                 if not include_special and _is_special_file(fname):
+                    log_fn(f"⏭️ Skipping special file: {fname}")
                     continue
                 try:
                     content = item.get_content().decode('utf-8', errors='replace')
@@ -144,6 +145,11 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
                     if n.lower().endswith(('.xhtml', '.html', '.htm'))
                     and (include_special or not _is_special_file(n))
                 )
+                # Log skipped special files
+                if not include_special:
+                    for n in zf.namelist():
+                        if n.lower().endswith(('.xhtml', '.html', '.htm')) and _is_special_file(n):
+                            log_fn(f"⏭️ Skipping special file: {n}")
                 for fname in html_files:
                     content = zf.read(fname).decode('utf-8', errors='replace')
                     results.append((fname, content))
@@ -179,6 +185,7 @@ def _get_spine_ordered_html_files(epub_path: str) -> List[Tuple[str, str]]:
                 # Resolve path relative to OPF
                 full_path = os.path.normpath(os.path.join(opf_dir, href)).replace('\\', '/')
                 if not include_special and _is_special_file(href):
+                    log_fn(f"⏭️ Skipping special file: {href}")
                     continue
                 try:
                     content = zf.read(full_path).decode('utf-8', errors='replace')
@@ -202,7 +209,7 @@ def _extract_epub_chapters(file_path: str, log_fn: Callable = print) -> List[Tup
     Extract all chapters from an EPUB as plain text.
     Returns list of (chapter_name, plain_text) tuples in spine order.
     """
-    html_files = _get_spine_ordered_html_files(file_path)
+    html_files = _get_spine_ordered_html_files(file_path, log_fn=log_fn)
     chapters = []
 
     for fname, html_content in html_files:
@@ -818,6 +825,7 @@ def generate_chunked_review(
     wrap_chunks: bool,
     temperature: float,
     config: dict,
+    batch_size: int = 1,
     log_fn: Callable = print,
     stop_check_fn: Callable = None,
 ) -> Optional[str]:
@@ -838,6 +846,7 @@ def generate_chunked_review(
         wrap_chunks: If True, wrap chunk reviews with header/footer markers
         temperature: API temperature
         config: Full config dict
+        batch_size: Number of parallel chunk workers (1 = sequential)
         log_fn: Logging callback
         stop_check_fn: Stop check callback
 
@@ -890,7 +899,7 @@ def generate_chunked_review(
             stop_check_fn=stop_check_fn,
         )
 
-    log_fn(f"📦 Chunk Mode: splitting into {total_chunks} chunks")
+    log_fn(f"📦 Chunk Mode: splitting into {total_chunks} chunks (batch_size={batch_size})")
 
     if stop_check_fn and stop_check_fn():
         log_fn("🛑 Stopped by user")
@@ -910,35 +919,32 @@ def generate_chunked_review(
         log_fn(f"❌ Failed to create API client: {e}")
         return None
 
-    # 5. Send each chunk as a separate API call
-    chunk_reviews = []
-    total_elapsed = 0.0
+    # 5. Send chunk API calls (parallel when batch_size > 1)
+    import threading as _threading
+    _log_lock = _threading.Lock()
 
-    for ci, chunk_chapters in enumerate(chunk_groups):
+    def _safe_log(msg):
+        with _log_lock:
+            log_fn(msg)
+
+    def _review_chunk(ci, chunk_chapters):
+        """Process a single chunk — returns (index, review_text_or_None, elapsed)."""
         if stop_check_fn and stop_check_fn():
-            log_fn("🛑 Stopped by user")
-            return None
+            return ci, None, 0.0
 
-        # Determine chapter range label
         first_ch = chunk_chapters[0][0]
         last_ch = chunk_chapters[-1][0]
-        if first_ch == last_ch:
-            range_label = first_ch
-        else:
-            range_label = f"{first_ch} → {last_ch}"
+        range_label = first_ch if first_ch == last_ch else f"{first_ch} → {last_ch}"
 
-        log_fn(f"\n{'─'*40}")
-        log_fn(f"📄 Chunk {ci+1}/{total_chunks}: {range_label} ({len(chunk_chapters)} chapter(s))")
-        log_fn(f"{'─'*40}")
+        _safe_log(f"\n{'─'*40}")
+        _safe_log(f"📄 Chunk {ci+1}/{total_chunks}: {range_label} ({len(chunk_chapters)} chapter(s))")
+        _safe_log(f"{'─'*40}")
 
-        # Build content for this chunk
-        content_parts = []
-        for name, text in chunk_chapters:
-            content_parts.append(f"--- Chapter: {name} ---\n{text}")
+        content_parts = [f"--- Chapter: {name} ---\n{text}" for name, text in chunk_chapters]
         full_content = "\n\n".join(content_parts)
         content_tokens = count_tokens(full_content)
 
-        log_fn(f"📤 Sending {content_tokens:,} tokens...")
+        _safe_log(f"📤 Chunk {ci+1}: Sending {content_tokens:,} tokens...")
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -949,11 +955,10 @@ def generate_chunked_review(
             start_time = time.time()
             result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
             elapsed = time.time() - start_time
-            total_elapsed += elapsed
 
             if stop_check_fn and stop_check_fn():
-                log_fn("🛑 Stopped by user — discarding chunk response")
-                return None
+                _safe_log(f"🛑 Chunk {ci+1}: Stopped by user — discarding response")
+                return ci, None, elapsed
 
             if isinstance(result, tuple):
                 chunk_text, finish_reason = result
@@ -962,27 +967,69 @@ def generate_chunked_review(
                 finish_reason = 'stop'
 
             if not chunk_text or not chunk_text.strip():
-                log_fn(f"⚠️ Empty response for chunk {ci+1}, skipping")
-                continue
+                _safe_log(f"⚠️ Chunk {ci+1}: Empty response, skipping")
+                return ci, None, elapsed
 
-            log_fn(f"✅ Chunk {ci+1} done in {elapsed:.1f}s (finish_reason: {finish_reason})")
+            _safe_log(f"✅ Chunk {ci+1} done in {elapsed:.1f}s (finish_reason: {finish_reason})")
 
-            # Wrap with header/footer if enabled
             chunk_review = chunk_text.strip()
             if wrap_chunks:
                 header = f"=== CHUNK REVIEW: {range_label} ==="
                 footer = f"=== END CHUNK REVIEW: {range_label} ==="
                 chunk_review = f"{header}\n\n{chunk_review}\n\n{footer}"
 
-            chunk_reviews.append(chunk_review)
+            return ci, chunk_review, elapsed
 
         except Exception as e:
             err_str = str(e).lower()
             if 'cancelled' in err_str or 'canceled' in err_str:
-                log_fn("🛑 Chunk review cancelled by user")
-                return None
-            log_fn(f"⚠️ Chunk {ci+1} failed: {e}")
-            continue
+                return ci, '__CANCELLED__', 0.0
+            _safe_log(f"⚠️ Chunk {ci+1} failed: {e}")
+            return ci, None, 0.0
+
+    # Use ThreadPoolExecutor for parallel chunk processing
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    workers = max(1, batch_size)
+    chunk_results = [None] * total_chunks  # Preserve order
+    total_elapsed = 0.0
+    cancelled = False
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ChunkReview") as pool:
+        futures = {
+            pool.submit(_review_chunk, ci, chunk_chapters): ci
+            for ci, chunk_chapters in enumerate(chunk_groups)
+        }
+        for future in as_completed(futures):
+            ci = futures[future]
+            try:
+                idx, review_text, elapsed = future.result()
+                total_elapsed += elapsed
+
+                if review_text == '__CANCELLED__':
+                    log_fn("🛑 Chunk review cancelled by user")
+                    cancelled = True
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
+                    break
+
+                chunk_results[idx] = review_text
+            except Exception as e:
+                log_fn(f"⚠️ Chunk {ci+1} future failed: {e}")
+
+            if stop_check_fn and stop_check_fn():
+                log_fn("🛑 Stopped by user")
+                cancelled = True
+                for f in futures:
+                    f.cancel()
+                break
+
+    if cancelled:
+        return None
+
+    # Filter out None results (failed/empty chunks) while preserving order
+    chunk_reviews = [r for r in chunk_results if r is not None]
 
     if not chunk_reviews:
         log_fn("❌ No chunk reviews were generated")

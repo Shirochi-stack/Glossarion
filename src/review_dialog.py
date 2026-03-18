@@ -1092,6 +1092,18 @@ class ReviewDialog(QDialog):
         # Replace {target_lang} in final prompt too
         final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
 
+        # Compute batch size for parallel chunk processing
+        chunk_batch_size = 1
+        if chunk_mode:
+            batch_on = bool(getattr(gui, 'batch_translation_var', False))
+            if batch_on:
+                try:
+                    chunk_batch_size = int(getattr(gui, 'batch_size_var', 1))
+                    if chunk_batch_size < 1:
+                        chunk_batch_size = 1
+                except (ValueError, TypeError):
+                    chunk_batch_size = 1
+
         def _run():
             try:
                 if chunk_mode:
@@ -1108,6 +1120,7 @@ class ReviewDialog(QDialog):
                         wrap_chunks=wrap_chunks,
                         temperature=temperature,
                         config=config,
+                        batch_size=chunk_batch_size,
                         log_fn=_log,
                         stop_check_fn=_stop_check,
                     )
@@ -1308,6 +1321,7 @@ class ReviewDialog(QDialog):
                             wrap_chunks=wrap_chunks,
                             temperature=temperature,
                             config=config,
+                            batch_size=batch_size,
                             log_fn=_log_single,
                             stop_check_fn=_stop_check,
                         )
@@ -2367,6 +2381,7 @@ class ReviewDialog(QDialog):
     def _on_restore(self):
         """Restore the most recent backup to review.md."""
         import shutil
+        from PySide6.QtWidgets import QMessageBox
 
         backups_dir = self._get_backups_dir()
         if not backups_dir or not os.path.isdir(backups_dir):
@@ -2385,6 +2400,33 @@ class ReviewDialog(QDialog):
             review_path = self._get_review_path()
             if not review_path:
                 return
+
+            # Warn if there's a current review that would be overwritten
+            if self._raw_review_md and self._raw_review_md.strip():
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("Restore Backup")
+                msg.setText(
+                    "You currently have a review displayed.\n\n"
+                    "Restoring will overwrite it with the previous backup:\n"
+                    f"{backups[0]}\n\n"
+                    "Are you sure you want to restore?"
+                )
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg.setDefaultButton(QMessageBox.No)
+                msg.setStyleSheet("""
+                    QPushButton {
+                        min-width: 80px;
+                        min-height: 30px;
+                        padding: 6px 20px;
+                        font-size: 10pt;
+                    }
+                    QDialogButtonBox {
+                        qproperty-centerButtons: true;
+                    }
+                """)
+                if msg.exec() != QMessageBox.Yes:
+                    return
 
             os.makedirs(os.path.dirname(review_path), exist_ok=True)
             shutil.copy2(latest, review_path)
