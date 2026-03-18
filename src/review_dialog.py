@@ -2402,13 +2402,28 @@ class ReviewDialog(QDialog):
                 return
 
             # Warn if there's a current review that would be overwritten
+            # Warn only when the displayed review differs from what's on disk
+            # (i.e., there's a newly generated/unsaved review that would be lost)
+            has_unsaved_review = False
             if self._raw_review_md and self._raw_review_md.strip():
+                try:
+                    if os.path.exists(review_path):
+                        with open(review_path, 'r', encoding='utf-8') as f:
+                            on_disk = f.read()
+                        has_unsaved_review = on_disk.strip() != self._raw_review_md.strip()
+                    else:
+                        # No file on disk but we have content displayed → unsaved
+                        has_unsaved_review = True
+                except Exception:
+                    has_unsaved_review = True
+
+            if has_unsaved_review:
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Warning)
                 msg.setWindowTitle("Restore Backup")
                 msg.setText(
-                    "You currently have a review displayed.\n\n"
-                    "Restoring will overwrite it with the previous backup:\n"
+                    "You have an unsaved review that will be overwritten.\n\n"
+                    "Restoring will replace it with the previous backup:\n"
                     f"{backups[0]}\n\n"
                     "Are you sure you want to restore?"
                 )

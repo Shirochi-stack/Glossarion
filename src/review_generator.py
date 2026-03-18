@@ -694,20 +694,33 @@ def generate_review(
         log_fn("🚀 Sending API request (single call)...")
         start_time = time.time()
 
-        result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
-        elapsed = time.time() - start_time
+        try:
+            from TransateKRtoEN import send_with_interrupt
+            result_tuple = send_with_interrupt(
+                messages, client, temperature=temperature, max_tokens=None,
+                stop_check_fn=stop_check_fn, context='review',
+            )
+            elapsed = time.time() - start_time
+            if isinstance(result_tuple, tuple) and len(result_tuple) == 3:
+                review_text, finish_reason, raw_obj = result_tuple
+            elif isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                review_text, finish_reason = result_tuple
+            else:
+                review_text = result_tuple
+                finish_reason = 'stop'
+        except ImportError:
+            result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
+            elapsed = time.time() - start_time
+            if isinstance(result, tuple):
+                review_text, finish_reason = result
+            else:
+                review_text = result
+                finish_reason = 'stop'
 
         # Check if force-stopped while waiting for API
         if stop_check_fn and stop_check_fn():
             log_fn("🛑 Stopped by user — discarding API response")
             return None
-
-        # Extract content from result
-        if isinstance(result, tuple):
-            review_text, finish_reason = result
-        else:
-            review_text = result
-            finish_reason = 'stop'
 
         if not review_text or not review_text.strip():
             log_fn("❌ Empty response from API")
@@ -978,18 +991,29 @@ def generate_chunked_review(
 
         try:
             start_time = time.time()
-            result = thread_client.send(messages, temperature=temperature, max_tokens=None, context='review')
-            elapsed = time.time() - start_time
 
-            if stop_check_fn and stop_check_fn():
-                _safe_log(f"🛑 Chunk {ci+1}: Stopped by user — discarding response")
-                return ci, None, elapsed
-
-            if isinstance(result, tuple):
-                chunk_text, finish_reason = result
-            else:
-                chunk_text = result
-                finish_reason = 'stop'
+            try:
+                from TransateKRtoEN import send_with_interrupt
+                result_tuple = send_with_interrupt(
+                    messages, thread_client, temperature=temperature, max_tokens=None,
+                    stop_check_fn=stop_check_fn, context='review',
+                )
+                elapsed = time.time() - start_time
+                if isinstance(result_tuple, tuple) and len(result_tuple) == 3:
+                    chunk_text, finish_reason, _ = result_tuple
+                elif isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                    chunk_text, finish_reason = result_tuple
+                else:
+                    chunk_text = result_tuple
+                    finish_reason = 'stop'
+            except ImportError:
+                result = thread_client.send(messages, temperature=temperature, max_tokens=None, context='review')
+                elapsed = time.time() - start_time
+                if isinstance(result, tuple):
+                    chunk_text, finish_reason = result
+                else:
+                    chunk_text = result
+                    finish_reason = 'stop'
 
             if not chunk_text or not chunk_text.strip():
                 _safe_log(f"⚠️ Chunk {ci+1}: Empty response, skipping")
@@ -1020,6 +1044,11 @@ def generate_chunked_review(
     total_elapsed = 0.0
     cancelled = False
 
+    # Signal batch mode to the API client so streaming log toggles are respected
+    _prev_batch_translation = os.environ.get('BATCH_TRANSLATION')
+    if workers > 1:
+        os.environ['BATCH_TRANSLATION'] = '1'
+
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ChunkReview") as pool:
         futures = {
             pool.submit(_review_chunk, ci, chunk_chapters): ci
@@ -1049,6 +1078,12 @@ def generate_chunked_review(
                 for f in futures:
                     f.cancel()
                 break
+
+    # Restore BATCH_TRANSLATION env var
+    if _prev_batch_translation is None:
+        os.environ.pop('BATCH_TRANSLATION', None)
+    else:
+        os.environ['BATCH_TRANSLATION'] = _prev_batch_translation
 
     if cancelled:
         return None
@@ -1082,18 +1117,29 @@ def generate_chunked_review(
     try:
         synthesis_client = _make_client()
         start_time = time.time()
-        result = synthesis_client.send(final_messages, temperature=temperature, max_tokens=None, context='review')
-        elapsed = time.time() - start_time
 
-        if stop_check_fn and stop_check_fn():
-            log_fn("🛑 Stopped by user — discarding final review response")
-            return None
-
-        if isinstance(result, tuple):
-            final_text, finish_reason = result
-        else:
-            final_text = result
-            finish_reason = 'stop'
+        try:
+            from TransateKRtoEN import send_with_interrupt
+            result_tuple = send_with_interrupt(
+                final_messages, synthesis_client, temperature=temperature, max_tokens=None,
+                stop_check_fn=stop_check_fn, context='review',
+            )
+            elapsed = time.time() - start_time
+            if isinstance(result_tuple, tuple) and len(result_tuple) == 3:
+                final_text, finish_reason, _ = result_tuple
+            elif isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                final_text, finish_reason = result_tuple
+            else:
+                final_text = result_tuple
+                finish_reason = 'stop'
+        except ImportError:
+            result = synthesis_client.send(final_messages, temperature=temperature, max_tokens=None, context='review')
+            elapsed = time.time() - start_time
+            if isinstance(result, tuple):
+                final_text, finish_reason = result
+            else:
+                final_text = result
+                finish_reason = 'stop'
 
         if not final_text or not final_text.strip():
             log_fn("❌ Empty response from final synthesis")
