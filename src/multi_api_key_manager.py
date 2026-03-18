@@ -2299,9 +2299,13 @@ class MultiAPIKeyDialog(QDialog):
         
         menu.addSeparator()
         
-        # Test and Remove options
+        # Test, Enable/Disable, and Remove options
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected_fallback)
+        enable_action = menu.addAction("Enable")
+        enable_action.triggered.connect(self._enable_selected_fallback)
+        disable_action = menu.addAction("Disable")
+        disable_action.triggered.connect(self._disable_selected_fallback)
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(self._remove_selected_fallback)
@@ -2435,8 +2439,12 @@ class MultiAPIKeyDialog(QDialog):
                 output_limit_str = "global"
             
             # Determine status and coloring (match multi-key tree style)
+            enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
-            if test_result == 'passed':
+            if not enabled:
+                status = "Disabled"
+                color = Qt.gray
+            elif test_result == 'passed':
                 status = "✅ Passed"
                 color = Qt.darkGreen
             elif test_result == 'failed':
@@ -2864,6 +2872,36 @@ class MultiAPIKeyDialog(QDialog):
                 
                 # Re-evaluate AuthGPT login button visibility
                 self._notify_authgpt_visibility()
+
+    def _enable_selected_fallback(self):
+        """Enable selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        for item in selected:
+            index = self.fallback_tree.indexOfTopLevelItem(item)
+            if index < len(fallback_keys):
+                fallback_keys[index]['enabled'] = True
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_status(f"Enabled {len(selected)} fallback key(s)")
+
+    def _disable_selected_fallback(self):
+        """Disable selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        for item in selected:
+            index = self.fallback_tree.indexOfTopLevelItem(item)
+            if index < len(fallback_keys):
+                fallback_keys[index]['enabled'] = False
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_status(f"Disabled {len(selected)} fallback key(s)")
 
     def _clear_all_fallbacks(self):
         """Clear all fallback keys"""
@@ -4603,8 +4641,12 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 output_limit_str = "global"
             
+            enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
-            if test_result == 'passed':
+            if not enabled:
+                status = "Disabled"
+                color = Qt.gray
+            elif test_result == 'passed':
                 status = "✅ Passed"
                 color = Qt.darkGreen
             elif test_result == 'failed':
@@ -4994,6 +5036,36 @@ class MultiAPIKeyDialog(QDialog):
                 self._show_glossary_status("Removed glossary key")
                 self._notify_authgpt_visibility()
 
+    def _enable_selected_glossary(self):
+        """Enable selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        for item in selected:
+            index = self.glossary_tree.indexOfTopLevelItem(item)
+            if index < len(glossary_keys):
+                glossary_keys[index]['enabled'] = True
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Enabled {len(selected)} glossary key(s)")
+
+    def _disable_selected_glossary(self):
+        """Disable selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        for item in selected:
+            index = self.glossary_tree.indexOfTopLevelItem(item)
+            if index < len(glossary_keys):
+                glossary_keys[index]['enabled'] = False
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Disabled {len(selected)} glossary key(s)")
+
     def _clear_all_glossary(self):
         """Clear all glossary keys"""
         if self.glossary_tree.topLevelItemCount() == 0:
@@ -5154,6 +5226,10 @@ class MultiAPIKeyDialog(QDialog):
         
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected_glossary)
+        enable_action = menu.addAction("Enable")
+        enable_action.triggered.connect(self._enable_selected_glossary)
+        disable_action = menu.addAction("Disable")
+        disable_action.triggered.connect(self._disable_selected_glossary)
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(self._remove_selected_glossary)

@@ -4296,6 +4296,11 @@ class UnifiedClient:
                             self._api_key_pool = glossary_pool
                             
                             # Assign first available glossary key to this thread
+                            # Release any previous assignment so the pool rotates properly
+                            try:
+                                glossary_pool.release_thread_assignment()
+                            except Exception:
+                                pass
                             try:
                                 key_info = self._get_next_available_key()
                                 if key_info:
