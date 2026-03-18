@@ -13142,23 +13142,202 @@ class UnifiedClient:
         else:
             api_url = "https://api.anthropic.com/v1/messages"
         
-        resp = self._http_request_with_retries(
-            method="POST",
-            url=api_url,
-            headers=headers,
-            json=data,
-            expected_status=(200,),
-            max_retries=max_retries,
-            provider_name="Anthropic"
-        )
-        json_resp = resp.json()
-        content, finish_reason, usage = self._parse_anthropic_json(json_resp)
-        return UnifiedResponse(
-            content=content,
-            finish_reason=finish_reason,
-            usage=usage,
-            raw_response=json_resp
-        )
+        # Check streaming toggle (same pattern as OpenAI-compatible path)
+        env_stream = os.getenv("ENABLE_STREAMING", "0")
+        cfg_stream = False
+        try:
+            cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
+        except Exception:
+            pass
+        var_stream = bool(getattr(self, 'enable_streaming_var', False))
+        use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
+
+        # Streaming log toggle
+        log_stream = False
+        if use_streaming:
+            log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+            allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+            if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
+                log_stream = False
+
+        if use_streaming:
+            # ── Anthropic SSE streaming path ──
+            data["stream"] = True
+            import time as _t
+            start_ts = _t.time()
+            if not self._is_stop_requested():
+                print(f"🛰️ [anthropic] SSE stream start (model={self.model}, url={api_url})")
+
+            try:
+                raw_resp = requests.post(
+                    api_url, headers=headers, json=data,
+                    stream=True, timeout=self.request_timeout
+                )
+            except Exception as e:
+                if self._is_stop_requested():
+                    self._cancelled = True
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                raise UnifiedClientError(f"Anthropic streaming request failed: {e}")
+
+            dur = _t.time() - start_ts
+            if not self._is_stop_requested():
+                print(f"🛰️ [anthropic] SSE stream opened in {dur:.1f}s (status={raw_resp.status_code})")
+
+            # Save outgoing request snapshot
+            try:
+                rid = _make_request_id(api_url, data)
+                _save_outgoing_request("Anthropic", "POST", api_url, headers, data, request_id=rid, out_dir=self._get_thread_directory())
+            except Exception:
+                rid = None
+
+            if raw_resp.status_code != 200:
+                # Non-200 during streaming - read body and raise
+                try:
+                    err_body = raw_resp.text
+                    try:
+                        _save_incoming_response("Anthropic", api_url, raw_resp.status_code, dict(raw_resp.headers), err_body, request_id=rid, out_dir=self._get_thread_directory())
+                    except Exception:
+                        pass
+                except Exception:
+                    err_body = f"HTTP {raw_resp.status_code}"
+                raise UnifiedClientError(f"Anthropic streaming error: {err_body}", http_status=raw_resp.status_code)
+
+            # Register for cleanup
+            with self._active_streams_lock:
+                self._active_streams.add(raw_resp)
+
+            text_parts = []
+            finish_reason = 'stop'
+            usage = None
+            log_buf = []
+
+            try:
+                for raw_line in raw_resp.iter_lines(decode_unicode=True):
+                    # Cancellation check
+                    if self._is_stop_requested():
+                        self._cancelled = True
+                        try:
+                            raw_resp.close()
+                        except Exception:
+                            pass
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                    if not raw_line:
+                        continue
+                    # SSE format: "data: {...}" lines
+                    if not raw_line.startswith("data: "):
+                        continue
+                    json_str = raw_line[6:]  # strip "data: " prefix
+                    if json_str.strip() == "[DONE]":
+                        break
+
+                    try:
+                        evt = __import__('json').loads(json_str)
+                    except Exception:
+                        continue
+
+                    evt_type = evt.get("type", "")
+
+                    # content_block_delta → text fragment
+                    if evt_type == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            frag = delta.get("text", "")
+                            if frag:
+                                text_parts.append(frag)
+                                if log_stream and not self._is_stop_requested():
+                                    combined = "".join(log_buf) + frag
+                                    temp_combined = combined
+                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                        temp_combined = temp_combined.replace(tag, tag + '\n')
+                                    if "\n" in temp_combined:
+                                        parts = temp_combined.split("\n")
+                                        for p in parts[:-1]:
+                                            print(p)
+                                        log_buf = [parts[-1]]
+                                    else:
+                                        log_buf.append(frag)
+                                        if len("".join(log_buf)) > 150:
+                                            print("".join(log_buf), end="", flush=True)
+                                            log_buf = []
+
+                    # message_delta → stop reason + usage
+                    elif evt_type == "message_delta":
+                        delta = evt.get("delta", {})
+                        sr = delta.get("stop_reason")
+                        if sr == "max_tokens":
+                            finish_reason = "length"
+                        elif sr:
+                            finish_reason = "stop"
+                        u = evt.get("usage")
+                        if u:
+                            out_tokens = u.get("output_tokens", 0)
+                            if usage:
+                                usage['completion_tokens'] = out_tokens
+                                usage['total_tokens'] = usage.get('prompt_tokens', 0) + out_tokens
+                            else:
+                                usage = {'prompt_tokens': 0, 'completion_tokens': out_tokens, 'total_tokens': out_tokens}
+
+                    # message_start → input token usage
+                    elif evt_type == "message_start":
+                        msg = evt.get("message", {})
+                        u = msg.get("usage")
+                        if u:
+                            in_tokens = u.get("input_tokens", 0)
+                            usage = {'prompt_tokens': in_tokens, 'completion_tokens': 0, 'total_tokens': in_tokens}
+
+                # Flush remaining log buffer
+                if log_stream and log_buf and not self._is_stop_requested():
+                    remaining = "".join(log_buf)
+                    if remaining:
+                        print(remaining)
+
+            finally:
+                # Cleanup
+                try:
+                    raw_resp.close()
+                except Exception:
+                    pass
+                with self._active_streams_lock:
+                    self._active_streams.discard(raw_resp)
+
+            # Save response snapshot
+            try:
+                full_content = "".join(text_parts)
+                snapshot = {"content": [{"type": "text", "text": full_content}], "stop_reason": finish_reason, "usage": usage}
+                _save_incoming_response("Anthropic", api_url, 200, {}, snapshot, request_id=rid, out_dir=self._get_thread_directory())
+            except Exception:
+                pass
+
+            content = "".join(text_parts)
+            if not self._is_stop_requested():
+                print(f"🛰️ [anthropic] SSE stream complete: {len(content)} chars, finish={finish_reason}")
+
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                usage=usage,
+                raw_response={"content": [{"type": "text", "text": content}], "stop_reason": finish_reason, "usage": usage}
+            )
+        else:
+            # ── Non-streaming path (original) ──
+            resp = self._http_request_with_retries(
+                method="POST",
+                url=api_url,
+                headers=headers,
+                json=data,
+                expected_status=(200,),
+                max_retries=max_retries,
+                provider_name="Anthropic"
+            )
+            json_resp = resp.json()
+            content, finish_reason, usage = self._parse_anthropic_json(json_resp)
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                usage=usage,
+                raw_response=json_resp
+            )
     
     def _send_mistral(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Mistral API"""
