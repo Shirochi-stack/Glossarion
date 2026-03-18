@@ -14983,6 +14983,18 @@ Important rules:
         self.selected_files = processed_paths
         self.current_file_index = 0
 
+        # Clear stale EPUB tracking — the EPUB branch re-sets it below if needed
+        if hasattr(self, 'selected_epub_files'):
+            self.selected_epub_files = []
+
+        # Notify open review dialog of the file change
+        try:
+            review_dlg = getattr(self, '_review_dialog', None)
+            if review_dlg is not None and review_dlg.isVisible():
+                review_dlg.refresh_epub_list()
+        except Exception:
+            pass
+
         # Clear any per-input glossary mapping on new selection
         # (mappings are specific to the currently selected input set)
         try:
