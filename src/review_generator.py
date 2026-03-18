@@ -740,10 +740,10 @@ def generate_review(
         return review_text.strip()
 
     except Exception as e:
-        # Silently handle user-initiated cancellation (force stop)
+        # Silently handle user-initiated cancellation / stop
         err_str = str(e).lower()
-        if 'cancelled' in err_str or 'canceled' in err_str:
-            log_fn("🛑 Review cancelled by user")
+        if 'cancelled' in err_str or 'canceled' in err_str or 'stopped by user' in err_str:
+            log_fn("🛑 Review stopped by user")
             return None
         log_fn(f"❌ API call failed: {e}")
         import traceback
@@ -1029,7 +1029,7 @@ def generate_chunked_review(
 
         except Exception as e:
             err_str = str(e).lower()
-            if 'cancelled' in err_str or 'canceled' in err_str:
+            if 'cancelled' in err_str or 'canceled' in err_str or 'stopped by user' in err_str:
                 return ci, '__CANCELLED__', 0.0
             _safe_log(f"⚠️ Chunk {ci+1} failed: {e}")
             return ci, None, 0.0
@@ -1147,8 +1147,8 @@ def generate_chunked_review(
 
     except Exception as e:
         err_str = str(e).lower()
-        if 'cancelled' in err_str or 'canceled' in err_str:
-            log_fn("🛑 Final review cancelled by user")
+        if 'cancelled' in err_str or 'canceled' in err_str or 'stopped by user' in err_str:
+            log_fn("🛑 Final review stopped by user")
             return None
         log_fn(f"⚠️ Final synthesis failed: {e}")
         log_fn("📝 Using concatenated chunk reviews as fallback")
