@@ -3141,6 +3141,100 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         }
 
 
+def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
+    """Extract text chapters from a PDF for glossary extraction.
+
+    Uses subprocess extraction when USE_ASYNC_CHAPTER_EXTRACTION=1 to prevent
+    GUI lag. Falls back to in-process extraction otherwise.
+    """
+    import tempfile
+
+    tmp_dir = tempfile.mkdtemp(prefix="glossarion_pdf_extract_")
+
+    # Force XHTML for glossary extraction (no expensive image paths)
+    previous_render_mode = os.environ.get("PDF_RENDER_MODE")
+    if not previous_render_mode:
+        os.environ["PDF_RENDER_MODE"] = "xhtml"
+
+    page_list = None
+
+    try:
+        use_subprocess = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+
+        if use_subprocess:
+            try:
+                import json as _json
+                from pdf_extraction_manager import PdfExtractionManager
+
+                _cfg = {
+                    "pdf_path": pdf_path,
+                    "output_dir": tmp_dir,
+                    "render_mode": os.environ.get("PDF_RENDER_MODE", "xhtml"),
+                    "extract_images": False,
+                    "generate_css": False,
+                    "html2text": False,
+                    "css_override_path": "",
+                    "attach_css_enabled": False
+                }
+                _cfg_path = os.path.join(tmp_dir, '_pdf_glossary_cfg.json')
+                with open(_cfg_path, 'w', encoding='utf-8') as f:
+                    _json.dump(_cfg, f, ensure_ascii=False)
+
+                _mgr = PdfExtractionManager(log_callback=print)
+                _result = _mgr.extract_pdf_sync(_cfg_path, timeout=600)
+
+                if _result and _result.get("success"):
+                    _rp = _result.get("result_path")
+                    if _rp and os.path.exists(_rp):
+                        with open(_rp, 'r', encoding='utf-8') as f:
+                            _data = _json.load(f)
+                        _content = _data.get("content", [])
+                        if _data.get("is_page_list") and isinstance(_content, list):
+                            page_list = [(item[0], item[1]) if isinstance(item, list) else (item, "")
+                                         for item in _content]
+                        # Clean up
+                        for p in [_cfg_path, _rp]:
+                            try:
+                                os.remove(p)
+                            except Exception:
+                                pass
+                    else:
+                        print("⚠️ Subprocess result file not found, falling back to in-process...")
+                else:
+                    _err = _result.get("error", "Unknown") if _result else "No result"
+                    print(f"⚠️ Subprocess PDF extraction failed ({_err}), falling back to in-process...")
+            except Exception as e:
+                print(f"⚠️ Subprocess PDF extraction error ({e}), falling back to in-process...")
+
+        # Fallback: in-process extraction
+        if page_list is None:
+            from pdf_extractor import extract_pdf_with_formatting
+            page_list, _ = extract_pdf_with_formatting(
+                pdf_path=pdf_path,
+                output_dir=tmp_dir,
+                extract_images=False,
+                page_by_page=True
+            )
+
+    finally:
+        if not previous_render_mode:
+            os.environ.pop("PDF_RENDER_MODE", None)
+
+    # Convert pages to text chapters
+    chapters = []
+    for page_num, page_html in (page_list or []):
+        if check_stop and check_stop():
+            return chapters
+        try:
+            page_text = BeautifulSoup(page_html, 'html.parser').get_text("\n", strip=True)
+        except Exception:
+            page_text = str(page_html)
+        if page_text and page_text.strip():
+            chapters.append(page_text)
+
+    return chapters
+
+
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
     # Declare global variables at the very start of the function
@@ -3199,43 +3293,8 @@ def main(log_callback=None, stop_callback=None):
         chapters = extract_chapters_from_txt(epub_path)
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
     elif is_pdf_file:
-        # PDF: extract page-by-page using the existing pdf_extractor logic
-        try:
-            from pdf_extractor import extract_pdf_with_formatting
-        except Exception as e:
-            print(f"[Fatal] Failed to import pdf_extractor: {e}")
-            chapters = []
-        else:
-            import tempfile
-            tmp_dir = tempfile.mkdtemp(prefix="glossarion_pdf_extract_")
-
-            # Avoid expensive image extraction paths for glossary; use MuPDF XHTML by default
-            previous_render_mode = os.environ.get("PDF_RENDER_MODE")
-            if not previous_render_mode:
-                os.environ["PDF_RENDER_MODE"] = "xhtml"
-
-            try:
-                page_list, _ = extract_pdf_with_formatting(
-                    pdf_path=epub_path,
-                    output_dir=tmp_dir,
-                    extract_images=False,
-                    page_by_page=True
-                )
-
-                chapters = []
-                for page_num, page_html in page_list:
-                    if check_stop():
-                        return
-                    try:
-                        page_text = BeautifulSoup(page_html, 'html.parser').get_text("\n", strip=True)
-                    except Exception:
-                        page_text = str(page_html)
-                    if page_text and page_text.strip():
-                        chapters.append(page_text)
-
-            finally:
-                if not previous_render_mode:
-                    os.environ.pop("PDF_RENDER_MODE", None)
+        # PDF: extract page-by-page using subprocess to prevent GUI lag
+        chapters = _extract_pdf_chapters_for_glossary(epub_path, check_stop)
 
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
     else:
@@ -3542,37 +3601,8 @@ def main(log_callback=None, stop_callback=None):
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(args.epub)
     elif args.epub.lower().endswith('.pdf'):
-        # PDF: extract page-by-page using the existing pdf_extractor logic
-        from pdf_extractor import extract_pdf_with_formatting
-        import tempfile
-
-        tmp_dir = tempfile.mkdtemp(prefix="glossarion_pdf_extract_")
-
-        previous_render_mode = os.environ.get("PDF_RENDER_MODE")
-        if not previous_render_mode:
-            os.environ["PDF_RENDER_MODE"] = "xhtml"
-
-        try:
-            page_list, _ = extract_pdf_with_formatting(
-                pdf_path=args.epub,
-                output_dir=tmp_dir,
-                extract_images=False,
-                page_by_page=True
-            )
-
-            chapters = []
-            for page_num, page_html in page_list:
-                if check_stop():
-                    return
-                try:
-                    page_text = BeautifulSoup(page_html, 'html.parser').get_text("\n", strip=True)
-                except Exception:
-                    page_text = str(page_html)
-                if page_text and page_text.strip():
-                    chapters.append(page_text)
-        finally:
-            if not previous_render_mode:
-                os.environ.pop("PDF_RENDER_MODE", None)
+        # PDF: extract page-by-page using subprocess to prevent GUI lag
+        chapters = _extract_pdf_chapters_for_glossary(args.epub, check_stop)
     else:
         chapters = extract_chapters_from_epub(args.epub)
     
