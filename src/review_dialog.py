@@ -2386,8 +2386,12 @@ class ReviewDialog(QDialog):
             except Exception:
                 pass
 
-            original_text = self.delete_btn.text()
-            original_style = self.delete_btn.styleSheet()
+            original_text = "🗑️ Delete"
+            original_style = (
+                "QPushButton { background-color: #dc3545; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
+                "QPushButton:disabled { background-color: #555; color: #888; }"
+            )
             self.delete_btn.setText("✅ Moved to backups")
             self.delete_btn.setStyleSheet(
                 "background-color: #6c757d; color: white; font-weight: bold; "
