@@ -16553,7 +16553,13 @@ Important rules:
                 try:
                     if hasattr(self, 'append_log'):
                         # This is Auto-Fill filename matching (not output-folder auto-load)
-                        _log_msg = f"📑 Auto-mapped glossary: {os.path.basename(gp)}"
+                        # Include fuzzy match percentage when present
+                        _fuzzy_pct = getattr(self, '_last_fuzzy_match_pct', None)
+                        self._last_fuzzy_match_pct = None  # consume it
+                        if _fuzzy_pct:
+                            _log_msg = f"📑 Auto-mapped glossary (fuzzy {_fuzzy_pct}%): {os.path.basename(gp)}"
+                        else:
+                            _log_msg = f"📑 Auto-mapped glossary: {os.path.basename(gp)}"
                         if getattr(self, '_last_automap_log', '') != _log_msg:
                             self.append_log(_log_msg)
                             self._last_automap_log = _log_msg
@@ -16722,10 +16728,9 @@ Important rules:
                             best_path = cand_path
                             best_ext_rank = cand_ext_rank
                     if best_score >= _fuzzy_threshold and best_path:
+                        # Store fuzzy score so the caller can include it in its log line
                         try:
-                            if hasattr(self, 'append_log'):
-                                pct = int(best_score * 100)
-                                self.append_log(f"📑 Fuzzy-mapped glossary ({pct}%): {os.path.basename(best_path)}")
+                            self._last_fuzzy_match_pct = int(best_score * 100)
                         except Exception:
                             pass
                         return best_path
@@ -16744,7 +16749,13 @@ Important rules:
             # FIRST so that glossaries stored next to the EPUBs (source
             # folder / CWD) don't shadow the correct output-folder ones.
             if override_dir:
-                # A) Per-book output Glossary/  (override)
+                # A) Shared Glossary/ at override root (e.g. override_dir/Glossary/<book>_glossary.csv)
+                override_shared_glossary = os.path.join(os.path.abspath(override_dir), 'Glossary')
+                hit = _find_in_dir(override_shared_glossary)
+                if hit:
+                    return hit
+
+                # B) Per-book output Glossary/  (override)
                 hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
                 if hit:
                     return hit
