@@ -5202,7 +5202,7 @@ Recent translations to summarize:
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
         _gloss_row_layout = QHBoxLayout(self._gloss_status_row)
-        _gloss_row_layout.setContentsMargins(0, 0, 0, 0)
+        _gloss_row_layout.setContentsMargins(100, 0, 0, 0)
         _gloss_row_layout.setSpacing(6)
 
         self.manual_glossary_status_label = QLabel("")
@@ -5579,7 +5579,7 @@ Recent translations to summarize:
         # Wrap status row + auto glossary row in a vertical container
         _batch_right_vbox = QVBoxLayout()
         _batch_right_vbox.setContentsMargins(0, 0, 0, 0)
-        _batch_right_vbox.setSpacing(2)
+        _batch_right_vbox.setSpacing(6)
         _batch_right_vbox.addWidget(self._gloss_status_row)
         _batch_right_vbox.addWidget(batch_right_container)
         _batch_right_wrapper = QWidget()
