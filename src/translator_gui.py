@@ -1372,6 +1372,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         if 'append_glossary_auto_load' not in self.config:
             self.config['append_glossary_auto_load'] = False
         self.append_glossary_auto_load_var = self.config.get('append_glossary_auto_load', False)
+        self.fuzzy_auto_mapping_var = self.config.get('fuzzy_auto_mapping', False)
+        self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
 
         self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
@@ -5012,7 +5014,7 @@ Recent translations to summarize:
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = QComboBox()
-        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
+        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
         # Add Halgakos icon to each item
         try:
             _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -5027,10 +5029,11 @@ Recent translations to summarize:
         _auto_mode = self.config.get('auto_glossary_mode', None)
         if _auto_mode is None:
             _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        _mode_idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(_auto_mode.lower(), 0)
+        _mode_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(_auto_mode.lower(), 0)
         self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
         self.auto_glossary_shortcut_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
+            "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
             "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
             "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
@@ -5072,9 +5075,9 @@ Recent translations to summarize:
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
-            mode_map = {0: 'off', 1: 'off_no_automap', 2: 'no_glossary', 3: 'minimal', 4: 'balanced', 5: 'full'}
+            mode_map = {0: 'off', 1: 'off_fuzzy_automap', 2: 'off_no_automap', 3: 'no_glossary', 4: 'minimal', 5: 'balanced', 6: 'full'}
             new_mode = mode_map.get(index, 'off')
-            is_on = new_mode not in ('off', 'off_no_automap', 'no_glossary')
+            is_on = new_mode not in ('off', 'off_fuzzy_automap', 'off_no_automap', 'no_glossary')
             self.config['auto_glossary_mode'] = new_mode
             self.config['enable_auto_glossary'] = is_on
             self.enable_auto_glossary_var = is_on
@@ -5090,8 +5093,8 @@ Recent translations to summarize:
                     self.append_glossary_checkbox.style().unpolish(self.append_glossary_checkbox)
                     self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
                     self.append_glossary_checkbox.update()
-            # Auto-enable auto map when off/balanced/full is selected
-            if new_mode in ('off', 'balanced', 'full'):
+            # Auto-enable auto map when off/off_fuzzy_automap/balanced/full is selected
+            if new_mode in ('off', 'off_fuzzy_automap', 'balanced', 'full'):
                 self.config['append_glossary_auto_load'] = True
                 self.append_glossary_auto_load_var = True
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):
@@ -5112,6 +5115,21 @@ Recent translations to summarize:
                     self.append_glossary_auto_load_checkbox.style().unpolish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.style().polish(self.append_glossary_auto_load_checkbox)
                     self.append_glossary_auto_load_checkbox.update()
+            # Fuzzy auto-mapping: enable when off_fuzzy_automap, disable when off_no_automap/minimal
+            if new_mode == 'off_fuzzy_automap':
+                self.config['fuzzy_auto_mapping'] = True
+                self.fuzzy_auto_mapping_var = True
+                if hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                    self.fuzzy_auto_mapping_checkbox.blockSignals(True)
+                    self.fuzzy_auto_mapping_checkbox.setChecked(True)
+                    self.fuzzy_auto_mapping_checkbox.blockSignals(False)
+            elif new_mode in ('off_no_automap', 'minimal', 'no_glossary'):
+                self.config['fuzzy_auto_mapping'] = False
+                self.fuzzy_auto_mapping_var = False
+                if hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                    self.fuzzy_auto_mapping_checkbox.blockSignals(True)
+                    self.fuzzy_auto_mapping_checkbox.setChecked(False)
+                    self.fuzzy_auto_mapping_checkbox.blockSignals(False)
             if hasattr(self, 'auto_glossary_mode_combo'):
                 self.auto_glossary_mode_combo.blockSignals(True)
                 self.auto_glossary_mode_combo.setCurrentIndex(index)
@@ -10718,6 +10736,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else 'generativelanguage.googleapis.com',
             'FORCE_NATIVE_ANTHROPIC': '1' if getattr(self, 'force_native_anthropic_var', False) else '0',
             'ANTHROPIC_BASE_URL': getattr(self, 'anthropic_base_url_var', '') or '',
+            'FUZZY_AUTO_MAPPING': '1' if getattr(self, 'fuzzy_auto_mapping_var', False) else '0',
+            'FUZZY_AUTO_MAPPING_THRESHOLD': str(getattr(self, 'fuzzy_auto_mapping_threshold_var', 50)),
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
@@ -15498,6 +15518,16 @@ Important rules:
                     "rec": None,
                 },
                 {
+                    "value": "off_fuzzy_automap", "emoji": "🔍", "title": "OFF (Fuzzy Mapping)",
+                    "subtitle": "Auto-Mapping + Fuzzy name matching",
+                    "features": ["✓ No automatic extraction", "✓ Enables Auto-Mapping + Fuzzy matching",
+                                 "✓ Matches glossaries with similar filenames",
+                                 "✓ Best when filenames differ slightly",
+                                 "✓ Zero extra API cost"],
+                    "bg": "#2e2618", "hover": "#886830", "border": "#c8a048", "accent": "#f0d888",
+                    "rec": None,
+                },
+                {
                     "value": "off_no_automap", "emoji": "🔒", "title": "OFF (No Auto-Mapping)",
                     "subtitle": "Off + disables auto-mapping",
                     "features": ["✓ No automatic extraction", "✓ Disables Glossary subfolder → Output Automapping",
@@ -16573,11 +16603,19 @@ Important rules:
             # Prefer CSV over JSON, then TXT/MD.
             ext_priority = [".csv", ".json", ".txt", ".md"]
 
+            # Check if fuzzy auto-mapping is enabled
+            _fuzzy_enabled = os.environ.get('FUZZY_AUTO_MAPPING', '0') == '1'
+            try:
+                _fuzzy_threshold = int(os.environ.get('FUZZY_AUTO_MAPPING_THRESHOLD', '50')) / 100.0
+            except (ValueError, TypeError):
+                _fuzzy_threshold = 0.50
+
             def _find_in_dir(glossary_dir: str):
                 if not glossary_dir or not os.path.isdir(glossary_dir):
                     return None
 
                 direct_matches = []
+                fuzzy_candidates = []
 
                 try:
                     for fn in os.listdir(glossary_dir):
@@ -16597,12 +16635,39 @@ Important rules:
 
                         if stem_cf in preferred_stems:
                             direct_matches.append((preferred_stems.index(stem_cf), ext_priority.index(ext_l), full))
+                        elif _fuzzy_enabled:
+                            fuzzy_candidates.append((stem_cf, ext_priority.index(ext_l), full))
                 except Exception:
                     return None
 
                 if direct_matches:
                     direct_matches.sort(key=lambda t: (t[0], t[1]))
                     return direct_matches[0][2]
+
+                # Fuzzy fallback: score candidates against base name
+                if _fuzzy_enabled and fuzzy_candidates:
+                    from difflib import SequenceMatcher
+                    best_score = 0.0
+                    best_path = None
+                    best_ext_rank = 99
+                    for cand_stem, cand_ext_rank, cand_path in fuzzy_candidates:
+                        # Score against both "stem_glossary" and plain stem
+                        score = max(
+                            SequenceMatcher(None, base_cf, cand_stem).ratio(),
+                            SequenceMatcher(None, f"{base}_glossary".casefold(), cand_stem).ratio(),
+                        )
+                        if score > best_score or (score == best_score and cand_ext_rank < best_ext_rank):
+                            best_score = score
+                            best_path = cand_path
+                            best_ext_rank = cand_ext_rank
+                    if best_score >= _fuzzy_threshold and best_path:
+                        try:
+                            if hasattr(self, 'append_log'):
+                                pct = int(best_score * 100)
+                                self.append_log(f"📑 Fuzzy-mapped glossary ({pct}%): {os.path.basename(best_path)}")
+                        except Exception:
+                            pass
+                        return best_path
 
                 return None
 
@@ -17478,6 +17543,8 @@ Important rules:
                 ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], 'generativelanguage.googleapis.com', str),
                 ('force_native_anthropic', ['force_native_anthropic_var'], False, bool),
                 ('anthropic_base_url', ['anthropic_base_url_var'], '', str),
+                ('fuzzy_auto_mapping', ['fuzzy_auto_mapping_var'], False, bool),
+                ('fuzzy_auto_mapping_threshold', ['fuzzy_auto_mapping_threshold_var'], 50, lambda v: safe_int(v, 50)),
 
                 # Review settings
                 ('review_system_prompt', ['review_system_prompt_var'], '', str),
@@ -18516,6 +18583,8 @@ Important rules:
                 ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', 'generativelanguage.googleapis.com')),
                 ('FORCE_NATIVE_ANTHROPIC', '1' if getattr(self, 'force_native_anthropic_var', False) else '0'),
                 ('ANTHROPIC_BASE_URL', getattr(self, 'anthropic_base_url_var', '')),
+                ('FUZZY_AUTO_MAPPING', '1' if getattr(self, 'fuzzy_auto_mapping_var', False) else '0'),
+                ('FUZZY_AUTO_MAPPING_THRESHOLD', str(getattr(self, 'fuzzy_auto_mapping_threshold_var', 50))),
 
                 # PDF output
                 ('ENABLE_PDF_OUTPUT', '1' if getattr(self, 'enable_pdf_output_var', False) else '0'),

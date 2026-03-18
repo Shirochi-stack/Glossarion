@@ -1967,7 +1967,7 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'auto_glossary_mode_combo'):
             from PySide6.QtWidgets import QComboBox
             self.auto_glossary_mode_combo = QComboBox()
-            self.auto_glossary_mode_combo.addItems(["Off", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
+            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
             # Add Halgakos icon to each item
             try:
                 _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -1983,10 +1983,11 @@ CRITICAL EXTRACTION RULES:
                 # Migrate from old boolean
                 old_enabled = self.config.get('enable_auto_glossary', False)
                 saved_mode = 'minimal' if old_enabled else 'off'
-            mode_index = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(saved_mode.lower(), 4)
+            mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(saved_mode.lower(), 5)
             self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
         self.auto_glossary_mode_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
+            "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
             "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
             "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
@@ -2084,6 +2085,78 @@ CRITICAL EXTRACTION RULES:
         auto_load_desc.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
         auto_load_layout.addWidget(auto_load_desc)
         auto_load_layout.addStretch()
+
+        # Fuzzy Auto-Mapping toggle (under Auto-Mapping)
+        fuzzy_map_widget = QWidget()
+        fuzzy_map_layout = QHBoxLayout(fuzzy_map_widget)
+        fuzzy_map_layout.setContentsMargins(40, 0, 0, 5)
+        auto_layout.addWidget(fuzzy_map_widget)
+
+        if not hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+            self.fuzzy_auto_mapping_checkbox = self._create_styled_checkbox("Fuzzy Auto-Mapping")
+        try:
+            self.fuzzy_auto_mapping_checkbox.setChecked(self.config.get('fuzzy_auto_mapping', False))
+        except Exception:
+            pass
+        self.fuzzy_auto_mapping_checkbox.setToolTip(
+            "When enabled, auto-mapping will match files with similar names\n"
+            "(e.g. 'MyNovel_v2.epub' → 'MyNovel_glossary.csv').\n"
+            "Adjust the slider to control how similar names must be."
+        )
+        fuzzy_map_layout.addWidget(self.fuzzy_auto_mapping_checkbox)
+        fuzzy_map_desc = QLabel("(Matches files with similar names)")
+        fuzzy_map_desc.setCursor(Qt.PointingHandCursor)
+        fuzzy_map_desc.mousePressEvent = lambda _: self.fuzzy_auto_mapping_checkbox.toggle() if not getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False) else None
+        fuzzy_map_layout.addWidget(fuzzy_map_desc)
+        fuzzy_map_layout.addStretch()
+
+        # Fuzzy threshold mini-slider
+        fuzzy_slider_widget = QWidget()
+        fuzzy_slider_layout = QHBoxLayout(fuzzy_slider_widget)
+        fuzzy_slider_layout.setContentsMargins(60, 0, 0, 10)
+        auto_layout.addWidget(fuzzy_slider_widget)
+
+        fuzzy_slider_label = QLabel("Similarity:")
+        fuzzy_slider_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        fuzzy_slider_layout.addWidget(fuzzy_slider_label)
+
+        if not hasattr(self, 'fuzzy_auto_mapping_threshold_var'):
+            self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
+        self.fuzzy_mapping_slider = QSlider(Qt.Horizontal)
+        self.fuzzy_mapping_slider.setMinimum(30)
+        self.fuzzy_mapping_slider.setMaximum(95)
+        self.fuzzy_mapping_slider.setValue(int(self.fuzzy_auto_mapping_threshold_var))
+        self.fuzzy_mapping_slider.setMaximumWidth(180)
+        self._disable_slider_mousewheel(self.fuzzy_mapping_slider)
+        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_slider)
+
+        self.fuzzy_mapping_value_label = QLabel(f"{self.fuzzy_auto_mapping_threshold_var}%")
+        self.fuzzy_mapping_value_label.setStyleSheet("color: #ddd; font-size: 9pt; min-width: 30px;")
+        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_value_label)
+
+        def _on_fuzzy_slider_changed(value):
+            self.fuzzy_auto_mapping_threshold_var = value
+            self.fuzzy_mapping_value_label.setText(f"{value}%")
+        self.fuzzy_mapping_slider.valueChanged.connect(_on_fuzzy_slider_changed)
+        fuzzy_slider_layout.addStretch()
+
+        # Sync fuzzy toggle enabled state with auto-mapping
+        def _sync_fuzzy_enabled(*_args):
+            try:
+                auto_map_on = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                locked = getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False)
+                if not locked:
+                    self.fuzzy_auto_mapping_checkbox.setEnabled(auto_map_on)
+                self.fuzzy_mapping_slider.setEnabled(auto_map_on and self.fuzzy_auto_mapping_checkbox.isChecked())
+            except Exception:
+                pass
+
+        _sync_fuzzy_enabled()
+        try:
+            self.append_glossary_auto_load_checkbox.toggled.connect(_sync_fuzzy_enabled)
+            self.fuzzy_auto_mapping_checkbox.toggled.connect(_sync_fuzzy_enabled)
+        except Exception:
+            pass
 
         # Auto-Mapping only makes sense when Append Glossary is enabled.
         def _sync_auto_mapping_enabled_state(*_args):
@@ -2988,7 +3061,8 @@ CRITICAL EXTRACTION RULES:
             mode_raw = self.auto_glossary_mode_combo.currentText() if hasattr(self, 'auto_glossary_mode_combo') else 'Off'
             # Map display text to internal mode key
             _display_to_mode = {
-                'Off': 'off', 'Off (No Auto-Mapping)': 'off_no_automap',
+                'Off': 'off', 'Off (Fuzzy Mapping)': 'off_fuzzy_automap',
+                'Off (No Auto-Mapping)': 'off_no_automap',
                 'No Glossary': 'no_glossary', 'Minimal': 'minimal',
                 'Balanced': 'balanced', 'Full': 'full',
             }
@@ -3073,8 +3147,8 @@ CRITICAL EXTRACTION RULES:
                 if _append_desc_label:
                     _append_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle()
 
-            # Auto-enable & lock auto-map when off/balanced/full is selected
-            if mode in ('off', 'balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
+            # Auto-enable & lock auto-map when off/off_fuzzy_automap/balanced/full is selected
+            if mode in ('off', 'off_fuzzy_automap', 'balanced', 'full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if not self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(True)
                 _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
@@ -3087,7 +3161,44 @@ CRITICAL EXTRACTION RULES:
                 if _auto_load_desc_label:
                     _auto_load_desc_label.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
 
-            # "No Glossary" - lock both toggles OFF
+            # Fuzzy auto-mapping lock logic
+            _fuzzy_desc_label = None
+            try:
+                if hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                    parent_widget = self.fuzzy_auto_mapping_checkbox.parentWidget()
+                    if parent_widget:
+                        for child in parent_widget.findChildren(QLabel):
+                            if 'similar' in (child.text() or '').lower():
+                                _fuzzy_desc_label = child
+                                break
+            except Exception:
+                pass
+
+            if mode == 'off_fuzzy_automap' and hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                if not self.fuzzy_auto_mapping_checkbox.isChecked():
+                    self.fuzzy_auto_mapping_checkbox.setChecked(True)
+                _lock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
+                if _fuzzy_desc_label:
+                    _fuzzy_desc_label.mousePressEvent = lambda _: None
+                self.config['fuzzy_auto_mapping'] = True
+                if hasattr(self, 'fuzzy_auto_mapping_var'):
+                    self.fuzzy_auto_mapping_var = True
+            elif mode in ('off', 'balanced', 'full') and hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                _unlock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
+                if _fuzzy_desc_label:
+                    _fuzzy_desc_label.mousePressEvent = lambda _: self.fuzzy_auto_mapping_checkbox.toggle()
+            elif hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                # off_no_automap, minimal, no_glossary — lock fuzzy OFF
+                if self.fuzzy_auto_mapping_checkbox.isChecked():
+                    self.fuzzy_auto_mapping_checkbox.setChecked(False)
+                _lock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
+                if _fuzzy_desc_label:
+                    _fuzzy_desc_label.mousePressEvent = lambda _: None
+                self.config['fuzzy_auto_mapping'] = False
+                if hasattr(self, 'fuzzy_auto_mapping_var'):
+                    self.fuzzy_auto_mapping_var = False
+
+            # "No Glossary" - lock all three toggles OFF
             if mode == 'no_glossary':
                 if hasattr(self, 'append_glossary_checkbox'):
                     if self.append_glossary_checkbox.isChecked():
