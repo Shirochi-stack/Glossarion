@@ -5226,13 +5226,15 @@ Recent translations to summarize:
                 all_files = []  # (book_base, file_path)
                 for epub_path in epubs:
                     base = os.path.splitext(os.path.basename(epub_path))[0]
-                    if override_dir:
-                        out_dir = os.path.join(os.path.abspath(override_dir), base)
-                    else:
-                        out_dir = os.path.join(os.getcwd(), base)
 
-                    if is_balanced_full:
-                        gdir = os.path.join(os.path.abspath(override_dir), 'Glossary') if override_dir else 'Glossary'
+                    if override_dir:
+                        _root = os.path.abspath(override_dir)
+                    else:
+                        _root = os.getcwd()
+
+                    # 1. Shared Glossary/ folder at root: <root>/Glossary/<base>_glossary.*
+                    gdir = os.path.join(_root, 'Glossary')
+                    if os.path.isdir(gdir):
                         for ext in ['.csv', '.json', '.txt', '.md']:
                             f = os.path.join(gdir, f"{base}_glossary{ext}")
                             if os.path.exists(f):
@@ -5240,25 +5242,54 @@ Recent translations to summarize:
                         pf = os.path.join(gdir, f"{base}_glossary_progress.json")
                         if os.path.exists(pf):
                             all_files.append((base, pf))
+
+                    # 2. Per-book folder: <root>/<base>/glossary.* and <root>/<base>/Glossary/<base>_glossary.*
+                    out_dir = os.path.join(_root, base)
+                    if os.path.isdir(out_dir):
                         for ext in ['.csv', '.json', '.txt', '.md']:
                             f = os.path.join(out_dir, f"glossary{ext}")
                             if os.path.exists(f):
                                 all_files.append((base, f))
-                        # Per-book progress file
-                        for pname in ['glossary_progress.json', f'{base}_glossary_progress.json']:
-                            pf2 = os.path.join(out_dir, pname)
-                            if os.path.exists(pf2):
-                                all_files.append((base, pf2))
-                    else:
-                        for ext in ['.csv', '.json', '.txt', '.md']:
-                            f = os.path.join(out_dir, f"glossary{ext}")
-                            if os.path.exists(f):
-                                all_files.append((base, f))
-                        # Progress file
+                        # Per-book Glossary subfolder
+                        book_gdir = os.path.join(out_dir, 'Glossary')
+                        if os.path.isdir(book_gdir):
+                            for ext in ['.csv', '.json', '.txt', '.md']:
+                                f = os.path.join(book_gdir, f"{base}_glossary{ext}")
+                                if os.path.exists(f):
+                                    all_files.append((base, f))
+                        # Progress files
                         for pname in ['glossary_progress.json', f'{base}_glossary_progress.json']:
                             pf = os.path.join(out_dir, pname)
                             if os.path.exists(pf):
                                 all_files.append((base, pf))
+
+                    # 3. Include whatever _guess_glossary_for_input_file would map
+                    #    (handles fuzzy matching when enabled)
+                    try:
+                        _guessed = self._guess_glossary_for_input_file(epub_path)
+                        if _guessed and os.path.exists(_guessed):
+                            _g_norm = os.path.normpath(os.path.abspath(_guessed))
+                            if _g_norm not in {os.path.normpath(os.path.abspath(fp)) for _, fp in all_files}:
+                                all_files.append((base, _guessed))
+                    except Exception:
+                        pass
+
+                    # 4. Also include the currently active auto-mapped glossary
+                    _auto_gp = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                    if _auto_gp and os.path.exists(_auto_gp) and not getattr(self, 'manual_glossary_manually_loaded', False):
+                        _auto_norm = os.path.normpath(os.path.abspath(_auto_gp))
+                        if _auto_norm not in {os.path.normpath(os.path.abspath(fp)) for _, fp in all_files}:
+                            all_files.append((base, _auto_gp))
+
+                # Deduplicate by normalized path
+                _seen = set()
+                _deduped = []
+                for bk, fp in all_files:
+                    _norm = os.path.normpath(os.path.abspath(fp))
+                    if _norm not in _seen:
+                        _seen.add(_norm)
+                        _deduped.append((bk, fp))
+                all_files = _deduped
 
                 if not all_files:
                     books_str = ", ".join(os.path.splitext(os.path.basename(e))[0] for e in epubs)
