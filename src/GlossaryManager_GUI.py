@@ -571,8 +571,11 @@ class GlossaryManagerMixin:
                             self.config['glossary_skip_identical_entries'] = bool(checked)
 
                 # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
+                # (Skip if a glossary is already mapped — dialog is recreated each open)
                 try:
+                    _already_mapped = bool(getattr(self, 'manual_glossary_path', None))
                     if (
+                        not _already_mapped and
                         hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked() and
                         hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
                     ):
@@ -2153,6 +2156,11 @@ CRITICAL EXTRACTION RULES:
 
         _sync_fuzzy_enabled()
         try:
+            # Disconnect all before reconnect to avoid accumulation across dialog opens
+            try:
+                self.fuzzy_auto_mapping_checkbox.toggled.disconnect()
+            except Exception:
+                pass
             self.append_glossary_auto_load_checkbox.toggled.connect(_sync_fuzzy_enabled)
             self.fuzzy_auto_mapping_checkbox.toggled.connect(_sync_fuzzy_enabled)
         except Exception:
@@ -2174,7 +2182,7 @@ CRITICAL EXTRACTION RULES:
 
         # Keep it in sync when Append Glossary changes (avoid duplicate connections)
         try:
-            self.append_glossary_checkbox.toggled.disconnect(_sync_auto_mapping_enabled_state)
+            self.append_glossary_checkbox.toggled.disconnect()
         except Exception:
             pass
         try:
@@ -2260,17 +2268,18 @@ CRITICAL EXTRACTION RULES:
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
                             _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
-                            if getattr(self, '_last_glossary_log', '') != _log_msg:
+                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
                                 self.append_log(_log_msg)
-                                self._last_glossary_log = _log_msg
+                                self._last_editor_switch_log = _log_msg
                 except Exception:
                     pass
             except Exception:
                 pass
 
-        # Connect (avoid duplicate connections)
+        # Connect (avoid duplicate connections — disconnect ALL slots first since
+        # each glossary_manager() call creates a new closure that can't be matched)
         try:
-            self.append_glossary_auto_load_checkbox.toggled.disconnect(_on_auto_mapping_toggled)
+            self.append_glossary_auto_load_checkbox.toggled.disconnect()
         except Exception:
             pass
         try:
@@ -3289,9 +3298,9 @@ CRITICAL EXTRACTION RULES:
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
                             _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
-                            if getattr(self, '_last_glossary_log', '') != _log_msg:
+                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
                                 self.append_log(_log_msg)
-                                self._last_glossary_log = _log_msg
+                                self._last_editor_switch_log = _log_msg
             except Exception:
                 pass
         
@@ -4297,9 +4306,9 @@ CRITICAL EXTRACTION RULES:
                
                self.stats_label.setText(" | ".join(stats))
                _log_msg = f"✅ Loaded {len(entries)} entries from glossary"
-               if getattr(self, '_last_glossary_log', '') != _log_msg:
+               if getattr(self, '_last_loaded_glossary_log', '') != _log_msg:
                    self.append_log(_log_msg)
-                   self._last_glossary_log = _log_msg
+                   self._last_loaded_glossary_log = _log_msg
                self._last_find_text = ""
                self._last_find_pos = -1
                # Capture baseline translated values for change tracking

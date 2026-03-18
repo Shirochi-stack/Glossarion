@@ -5177,9 +5177,9 @@ Recent translations to summarize:
                         if new_path and os.path.exists(new_path):
                             self.editor_file_entry.setText(new_path)
                             _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
-                            if getattr(self, '_last_glossary_log', '') != _log_msg:
+                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
                                 self.append_log(_log_msg)
-                                self._last_glossary_log = _log_msg
+                                self._last_editor_switch_log = _log_msg
             except Exception:
                 pass
 
@@ -16527,9 +16527,9 @@ Important rules:
                     if hasattr(self, 'append_log'):
                         # This is Auto-Fill filename matching (not output-folder auto-load)
                         _log_msg = f"📑 Auto-mapped glossary: {os.path.basename(gp)}"
-                        if getattr(self, '_last_glossary_log', '') != _log_msg:
+                        if getattr(self, '_last_automap_log', '') != _log_msg:
                             self.append_log(_log_msg)
-                            self._last_glossary_log = _log_msg
+                            self._last_automap_log = _log_msg
                 except Exception:
                     pass
                 return 1
