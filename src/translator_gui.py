@@ -1964,6 +1964,13 @@ Text to analyze:
         try:
             print("[CLOSE] Window closing...")
             
+            # Save all settings before shutdown so they persist across restarts
+            try:
+                self.save_config(show_message=False)
+                print("[CLOSE] Config saved successfully")
+            except Exception as e:
+                print(f"[CLOSE] Warning: Could not save config on close: {e}")
+            
             # Stop any background operations first
             self.stop_all_operations()
 
@@ -18121,8 +18128,13 @@ Important rules:
                 
                 if found:
                     converted_value = converter(final_value) if converter else final_value
+                    # Protect sensitive fields: don't overwrite non-empty values with empty ones
+                    if key == 'api_key' and not converted_value and self.config.get('api_key'):
+                        continue  # Preserve existing API key if new value is empty
                     self.config[key] = converted_value
-                elif default is not None:
+                elif default is not None and key not in self.config:
+                    # Only apply default if key doesn't already exist in config
+                    # (prevents wiping loaded values when save_config is called before widgets exist)
                     self.config[key] = default
 
             # --- 3. Handle Special Cases and Complex Logic ---
@@ -18344,6 +18356,12 @@ Important rules:
             encrypted_config = encrypt_config(self.config)
             if google_creds_path:
                 encrypted_config['google_cloud_credentials'] = google_creds_path
+            
+            # Debug: trace api_key persistence
+            _saved_key = encrypted_config.get('api_key', '')
+            _key_len = len(_saved_key)
+            _key_prefix = _saved_key[:15] if _saved_key else '(empty)'
+            print(f"[SAVE_CONFIG] api_key being written: len={_key_len}, starts_with={_key_prefix}")
             
             json.dumps(encrypted_config, ensure_ascii=False, indent=2) # Validation check
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:

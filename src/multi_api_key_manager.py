@@ -5024,6 +5024,14 @@ class MultiAPIKeyDialog(QDialog):
             self.glossary_tree.clearSelection()
         
         self._show_glossary_status(f"Glossary Keys {'enabled' if enabled else 'disabled'}")
+        
+        # Update in-memory config immediately so glossary extraction reads the correct value
+        # (save_config is called when the dialog is closed/saved via the normal save handler)
+        self.translator_gui.config['use_glossary_keys'] = enabled
+        # Also update the GUI variable
+        if hasattr(self.translator_gui, 'use_glossary_keys_var'):
+            self.translator_gui.use_glossary_keys_var = enabled
+        
         if not getattr(self, '_initializing', False):
             glossary_keys = self.translator_gui.config.get('glossary_keys', [])
             if enabled:
@@ -5043,6 +5051,14 @@ class MultiAPIKeyDialog(QDialog):
             _os.environ['USE_GLOSSARY_KEYS'] = '1' if enabled else '0'
         except Exception:
             pass
+        
+        # Clear in-memory glossary pool when disabled to prevent stale pool usage
+        if not enabled:
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.clear_in_memory_glossary_keys()
+            except Exception:
+                pass
         
         self._notify_authgpt_visibility()
 
