@@ -5198,6 +5198,14 @@ Recent translations to summarize:
         except Exception:
             pass
 
+        # Periodic auto-mapping refresh timer (2 seconds)
+        # Re-checks glossary mapping so new files (e.g. after extraction) are picked up.
+        from PySide6.QtCore import QTimer as _QTimer
+        self._automap_refresh_timer = _QTimer(self)
+        self._automap_refresh_timer.setInterval(2000)
+        self._automap_refresh_timer.timeout.connect(self._periodic_automap_refresh)
+        self._automap_refresh_timer.start()
+
         # Delete glossary button (supports multiple EPUBs)
         def _delete_current_glossary():
             try:
@@ -16491,6 +16499,65 @@ Important rules:
             self.append_log(f"📑 No matching glossary found in {glossary_base_dir}")
         except Exception as e:
             self.append_log(f"⚠️ Failed to auto-load glossary: {e}")
+
+    def _periodic_automap_refresh(self):
+        """Periodically re-check auto-mapping so new glossary files are picked up.
+
+        Called by a 2-second QTimer. Only does work when auto-mapping is
+        enabled, an EPUB is selected, no process is running, and the user
+        hasn't manually loaded a glossary.
+        """
+        try:
+            # Guard: auto-mapping must be enabled
+            automap_on = bool(
+                getattr(self, 'append_glossary_auto_load_var', False) or
+                self.config.get('append_glossary_auto_load', False)
+            )
+            if not automap_on:
+                return
+
+            append_on = bool(
+                getattr(self, 'append_glossary_var', False) or
+                self.config.get('append_glossary', False)
+            )
+            if not append_on:
+                return
+
+            # Guard: don't re-map while a process is running
+            if hasattr(self, '_is_any_process_running') and self._is_any_process_running():
+                return
+
+            # Guard: user manually loaded a glossary — don't override it
+            if getattr(self, 'manual_glossary_manually_loaded', False):
+                return
+
+            # Guard: need at least one selected EPUB
+            files = list(getattr(self, 'selected_files', []) or [])
+            epubs = [p for p in files if str(p).lower().endswith('.epub')]
+            if not epubs:
+                return
+
+            # Remember current glossary before re-mapping
+            prev_glossary = getattr(self, 'manual_glossary_path', None)
+            prev_map = dict(getattr(self, 'manual_glossary_map', {}) or {})
+
+            # Run auto-fill (it logs internally only when something changes)
+            self._autofill_glossary_for_current_selection()
+
+            # If the glossary changed, update the glossary editor path if visible
+            new_glossary = getattr(self, 'manual_glossary_path', None)
+            if new_glossary and new_glossary != prev_glossary:
+                try:
+                    _glossary_tab_visible = False
+                    if hasattr(self, 'tab_widget') and hasattr(self, 'glossary_manager_widget'):
+                        _glossary_tab_visible = self.tab_widget.currentWidget() == self.glossary_manager_widget
+                    if _glossary_tab_visible and hasattr(self, 'editor_file_entry'):
+                        if os.path.exists(new_glossary):
+                            self.editor_file_entry.setText(new_glossary)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     def _autofill_glossary_for_current_selection(self) -> int:
         """Auto-fill glossary selection/mapping for the currently selected input files.
@@ -16516,6 +16583,15 @@ Important rules:
                     # If user manually loaded this glossary, don't override it
                     if getattr(self, 'manual_glossary_manually_loaded', False):
                         return 0
+                    # Before clearing, peek at what the new guess would be.
+                    # If it's the same file, skip the clear+re-map cycle entirely
+                    # (avoids log spam from periodic timer).
+                    try:
+                        _peek = self._guess_glossary_for_input_file(epubs[0])
+                        if _peek and os.path.normpath(os.path.abspath(_peek)) == os.path.normpath(os.path.abspath(self.manual_glossary_path)):
+                            return 1  # Already mapped to the right glossary
+                    except Exception:
+                        pass
                     # Auto-filled glossary from a previous file — clear it so we can re-map
                     _prev = self.manual_glossary_path
                     try:
