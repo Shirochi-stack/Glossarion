@@ -13243,6 +13243,7 @@ class UnifiedClient:
                         raise UnifiedClientError(f"Anthropic streaming error after thinking removal: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
+                    start_ts = _t.time()  # reset timing baseline to successful re-open
 
                 elif raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower:
                     print(f"🧠 [anthropic] Adaptive thinking not supported — falling back to standard extended thinking")
@@ -13278,6 +13279,7 @@ class UnifiedClient:
                         raise UnifiedClientError(f"Anthropic streaming error after adaptive fallback: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened with standard thinking (status={raw_resp.status_code})")
+                    start_ts = _t.time()  # reset timing baseline to successful re-open
 
                 else:
                     raise UnifiedClientError(f"Anthropic streaming error: {err_body}", http_status=raw_resp.status_code)
@@ -13292,9 +13294,10 @@ class UnifiedClient:
             log_buf = []
             thinking_tokens_seen = 0
             current_block_type = None  # track content_block_start type
+            first_text_ts = None  # timestamp of first text delta
 
             try:
-                for raw_line in raw_resp.iter_lines(decode_unicode=True):
+                for raw_line in raw_resp.iter_lines(chunk_size=1, decode_unicode=True):
                     # Cancellation check
                     if self._is_stop_requested():
                         self._cancelled = True
@@ -13335,6 +13338,11 @@ class UnifiedClient:
                         if delta_type == "text_delta":
                             frag = delta.get("text", "")
                             if frag:
+                                if first_text_ts is None:
+                                    first_text_ts = _t.time()
+                                    ttft = first_text_ts - start_ts
+                                    if not self._is_stop_requested():
+                                        print(f"🛰️ [anthropic] First text token received in {ttft:.1f}s")
                                 text_parts.append(frag)
                                 if log_stream and not self._is_stop_requested():
                                     combined = "".join(log_buf) + frag
@@ -13344,7 +13352,7 @@ class UnifiedClient:
                                     if "\n" in temp_combined:
                                         parts = temp_combined.split("\n")
                                         for p in parts[:-1]:
-                                            print(p)
+                                            print(p, flush=True)
                                         log_buf = [parts[-1]]
                                     else:
                                         log_buf.append(frag)
@@ -13420,7 +13428,11 @@ class UnifiedClient:
             content = "".join(text_parts)
             if not self._is_stop_requested():
                 thinking_info = f", thinking_chunks={thinking_tokens_seen}" if thinking_tokens_seen > 0 else ""
-                print(f"🛰️ [anthropic] SSE stream complete: {len(content)} chars, finish={finish_reason}{thinking_info}")
+                stream_elapsed = _t.time() - start_ts
+                text_dur = ""
+                if first_text_ts is not None:
+                    text_dur = f", text_streamed_in={_t.time() - first_text_ts:.1f}s"
+                print(f"🛰️ [anthropic] SSE stream complete in {stream_elapsed:.1f}s: {len(content)} chars, finish={finish_reason}{thinking_info}{text_dur}")
 
             return UnifiedResponse(
                 content=content,

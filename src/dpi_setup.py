@@ -43,6 +43,6 @@ def configure():
     # ── Explicit 1.25× scale factor ────────────────────────────────────────
     # With auto-scaling disabled, 1.0 renders too compact on most screens.
     # 1.25 provides a comfortable default size across resolutions.
-    os.environ["QT_SCALE_FACTOR"] = "1.77"
+    os.environ["QT_SCALE_FACTOR"] = "1.76"
 
     print("✅ DPI scaling disabled (QT_ENABLE_HIGHDPI_SCALING=0, QT_FONT_DPI=96, QT_SCALE_FACTOR=1)")
