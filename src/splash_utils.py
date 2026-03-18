@@ -1,8 +1,18 @@
 # splash_utils.py - PySide6 Version
 import sys
+import os
 import time
 import atexit
 import threading
+
+# Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 
 # DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
 try:

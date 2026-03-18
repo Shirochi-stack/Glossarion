@@ -15,6 +15,15 @@ import json
 import os
 import sys
 
+# Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 _configured = False
 
 # Default scale factor when config.json has no value

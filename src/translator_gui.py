@@ -6,6 +6,17 @@ if __name__ == '__main__':
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
 import os
+
+# Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 if getattr(sys, 'frozen', False):
     # Running as bundled executable
     bundle_dir = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
