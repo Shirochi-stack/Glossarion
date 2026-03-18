@@ -2299,11 +2299,11 @@ def _create_context_management_section(self, parent):
         _pixmap = QPixmap(_icon_path)
         if not _pixmap.isNull():
             _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
-            _target = int(150 * _dpr)
+            _target = int(130 * _dpr)
             _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             _scaled.setDevicePixelRatio(_dpr)
             _icon_label.setPixmap(_scaled)
-            _icon_label.setFixedSize(150, 150)
+            _icon_label.setFixedSize(130, 130)
             _icon_label.setAlignment(Qt.AlignCenter)
             section_v.addWidget(_icon_label)
 
