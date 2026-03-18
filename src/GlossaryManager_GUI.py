@@ -2215,6 +2215,9 @@ CRITICAL EXTRACTION RULES:
 
                     # Clear the current state so the correct loader can take over
                     try:
+                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
                         self.manual_glossary_path = None
                         self.auto_loaded_glossary_path = None
                         self.auto_loaded_glossary_for_file = None
@@ -2236,6 +2239,9 @@ CRITICAL EXTRACTION RULES:
                 else:
                     # Auto-mapping OFF → fall back to output folder glossary
                     try:
+                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
                         self.manual_glossary_path = None
                         self.auto_loaded_glossary_path = None
                         self.auto_loaded_glossary_for_file = None

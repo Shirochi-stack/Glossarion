@@ -5150,6 +5150,12 @@ Recent translations to summarize:
                     epub_path = epubs[0]
                 if epub_path:
                     # Clear current glossary state for a clean switch
+                    _prev_automap = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                    if _prev_automap and not getattr(self, 'manual_glossary_manually_loaded', False):
+                        try:
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev_automap)}")
+                        except Exception:
+                            pass
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
