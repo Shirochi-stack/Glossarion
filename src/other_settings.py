@@ -9395,54 +9395,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     anthropic_help.setContentsMargins(0, 0, 0, 3)
     additional_v.addWidget(anthropic_help)
 
-    # Quick-paste shortcuts for Anthropic URLs
-    anthropic_shortcuts_widget = QWidget()
-    anthropic_shortcuts_h = QHBoxLayout(anthropic_shortcuts_widget)
-    anthropic_shortcuts_h.setContentsMargins(0, 0, 0, 5)
-    anthropic_shortcuts_h.addWidget(QLabel("Quick paste (double-click):"))
 
-    anthropic_official_url = "https://api.anthropic.com"
-
-    try:
-        from PySide6.QtGui import QGuiApplication
-        from PySide6.QtCore import QTimer
-    except ImportError:
-        QGuiApplication = None
-        QTimer = None
-
-    anthropic_official_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{anthropic_official_url}</span>')
-    anthropic_official_shortcut.setStyleSheet("font-size: 8pt;")
-    anthropic_official_shortcut.setTextFormat(Qt.RichText)
-    anthropic_official_shortcut.setCursor(Qt.PointingHandCursor)
-    anthropic_official_shortcut.setToolTip("Double-click to paste official Anthropic API URL")
-    _anth_orig_style = anthropic_official_shortcut.styleSheet()
-    _anth_orig_text = anthropic_official_shortcut.text()
-    def _paste_anthropic_official(event):
-        self.anthropic_base_url_entry.setText(anthropic_official_url)
-        self.anthropic_base_url_var = anthropic_official_url
-        os.environ['ANTHROPIC_BASE_URL'] = anthropic_official_url
-        try:
-            if QGuiApplication:
-                QGuiApplication.clipboard().setText(anthropic_official_url)
-        except Exception:
-            pass
-        try:
-            anthropic_official_shortcut.setStyleSheet(_anth_orig_style + " color: #00d084;")
-            anthropic_official_shortcut.setTextFormat(Qt.PlainText)
-            anthropic_official_shortcut.setText(f"\u2713 Pasted: {anthropic_official_url}")
-            if QTimer:
-                QTimer.singleShot(900, lambda: (
-                    anthropic_official_shortcut.setStyleSheet(_anth_orig_style),
-                    anthropic_official_shortcut.setTextFormat(Qt.RichText),
-                    anthropic_official_shortcut.setText(_anth_orig_text),
-                ))
-        except Exception:
-            pass
-    anthropic_official_shortcut.mouseDoubleClickEvent = _paste_anthropic_official
-    anthropic_shortcuts_h.addWidget(anthropic_official_shortcut)
-
-    anthropic_shortcuts_h.addStretch()
-    additional_v.addWidget(anthropic_shortcuts_widget)
     
     # Add the additional endpoints frame to the main section
     section_v.addWidget(self.additional_endpoints_frame)
