@@ -61,17 +61,30 @@ def count_tokens(text: str) -> int:
 
 # ─── EPUB reading helpers ───────────────────────────────────────────────
 
-# Special file patterns to skip (nav, toc, cover)
+# Special file patterns to skip — mirrors TransateKRtoEN.py special_keywords
 _SPECIAL_PATTERNS = [
-    'nav', 'toc', 'cover', 'titlepage', 'copyright',
-    'colophon', 'halftitle', 'frontmatter',
+    'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
+    'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+    'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
+    'bibliography', 'titlepage', 'halftitle', 'frontmatter', 'backmatter',
 ]
 
 
 def _is_special_file(filename: str) -> bool:
-    """Check if a filename is a special/metadata file that should be skipped."""
+    """Check if a filename is a special/metadata file that should be skipped.
+    Mirrors the heuristic in translator_gui._is_special_file:
+    1) Known keyword patterns
+    2) Filenames with no digits (e.g. 'info.xhtml', 'about.xhtml')
+    """
+    import re
     base = os.path.splitext(os.path.basename(filename))[0].lower()
-    return any(pat in base for pat in _SPECIAL_PATTERNS)
+    # Check known special-file keywords
+    if any(pat in base for pat in _SPECIAL_PATTERNS):
+        return True
+    # Heuristic: filenames with no digits are often special/metadata files
+    if not re.search(r'\d', base):
+        return True
+    return False
 
 
 def _html_to_plaintext(html_content: str) -> str:
@@ -905,8 +918,8 @@ def generate_chunked_review(
         log_fn("🛑 Stopped by user")
         return None
 
-    # 4. Create API client
-    try:
+    # 4. Client factory — each thread creates its own for true parallelism
+    def _make_client():
         from unified_api_client import UnifiedClient
         from extract_glossary_from_epub import create_client_with_multi_key_support
 
@@ -914,7 +927,12 @@ def generate_chunked_review(
             os.environ['ENDPOINT'] = endpoint
         os.environ['MODEL'] = model
 
-        client = create_client_with_multi_key_support(api_key, model, output_dir, config)
+        return create_client_with_multi_key_support(api_key, model, output_dir, config)
+
+    # Verify we can create at least one client before spawning threads
+    try:
+        _test_client = _make_client()
+        del _test_client
     except Exception as e:
         log_fn(f"❌ Failed to create API client: {e}")
         return None
@@ -930,6 +948,13 @@ def generate_chunked_review(
     def _review_chunk(ci, chunk_chapters):
         """Process a single chunk — returns (index, review_text_or_None, elapsed)."""
         if stop_check_fn and stop_check_fn():
+            return ci, None, 0.0
+
+        # Per-thread client for true parallelism
+        try:
+            thread_client = _make_client()
+        except Exception as e:
+            _safe_log(f"❌ Chunk {ci+1}: Failed to create API client: {e}")
             return ci, None, 0.0
 
         first_ch = chunk_chapters[0][0]
@@ -953,7 +978,7 @@ def generate_chunked_review(
 
         try:
             start_time = time.time()
-            result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
+            result = thread_client.send(messages, temperature=temperature, max_tokens=None, context='review')
             elapsed = time.time() - start_time
 
             if stop_check_fn and stop_check_fn():
@@ -1055,8 +1080,9 @@ def generate_chunked_review(
     ]
 
     try:
+        synthesis_client = _make_client()
         start_time = time.time()
-        result = client.send(final_messages, temperature=temperature, max_tokens=None, context='review')
+        result = synthesis_client.send(final_messages, temperature=temperature, max_tokens=None, context='review')
         elapsed = time.time() - start_time
 
         if stop_check_fn and stop_check_fn():
