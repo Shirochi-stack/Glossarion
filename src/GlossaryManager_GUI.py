@@ -2123,8 +2123,8 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'fuzzy_auto_mapping_threshold_var'):
             self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
         self.fuzzy_mapping_slider = QSlider(Qt.Horizontal)
-        self.fuzzy_mapping_slider.setMinimum(30)
-        self.fuzzy_mapping_slider.setMaximum(95)
+        self.fuzzy_mapping_slider.setMinimum(10)
+        self.fuzzy_mapping_slider.setMaximum(100)
         self.fuzzy_mapping_slider.setValue(int(self.fuzzy_auto_mapping_threshold_var))
         self.fuzzy_mapping_slider.setMaximumWidth(180)
         self._disable_slider_mousewheel(self.fuzzy_mapping_slider)
