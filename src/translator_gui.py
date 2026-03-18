@@ -5199,35 +5199,52 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
 
-        # ── Manual glossary status label + clear button ──
-        self._gloss_status_sep = QLabel("│")
-        self._gloss_status_sep.setStyleSheet("color: #555; font-size: 11pt; margin: 0 2px;")
-        self._gloss_status_sep.hide()
-        batch_right_layout.addWidget(self._gloss_status_sep)
+        # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
+        self._gloss_status_row = QWidget()
+        _gloss_row_layout = QHBoxLayout(self._gloss_status_row)
+        _gloss_row_layout.setContentsMargins(0, 0, 0, 0)
+        _gloss_row_layout.setSpacing(6)
 
         self.manual_glossary_status_label = QLabel("")
-        self.manual_glossary_status_label.setStyleSheet("""
-            color: #888; font-size: 9pt; font-style: italic;
-            padding: 0 2px;
-        """)
+        self.manual_glossary_status_label.setStyleSheet(
+            "color: #94a3b8; font-size: 9pt; font-style: italic;"
+        )
         self.manual_glossary_status_label.setToolTip("Currently loaded glossary file (manual or auto-mapped)")
-        self.manual_glossary_status_label.hide()
-        batch_right_layout.addWidget(self.manual_glossary_status_label)
+        _gloss_row_layout.addWidget(self.manual_glossary_status_label)
 
-        self.clear_manual_glossary_btn = QPushButton("✕")
-        self.clear_manual_glossary_btn.setFixedSize(22, 22)
+        self.clear_manual_glossary_btn = QPushButton("✕ Clear")
+        self.clear_manual_glossary_btn.setFixedHeight(20)
+        self.clear_manual_glossary_btn.setCursor(Qt.PointingHandCursor)
         self.clear_manual_glossary_btn.setToolTip("Clear the currently loaded glossary")
         self.clear_manual_glossary_btn.setStyleSheet("""
             QPushButton {
                 background: transparent; color: #ff6b6b; border: 1px solid #ff6b6b;
-                border-radius: 3px; font-size: 10pt; font-weight: bold; padding: 0;
+                border-radius: 3px; font-size: 8pt; font-weight: bold; padding: 0 6px;
             }
             QPushButton:hover { background: #ff6b6b; color: #1a1a2e; }
         """)
-        self.clear_manual_glossary_btn.hide()  # hidden when no glossary loaded
 
         def _clear_manual_glossary():
             _prev = getattr(self, 'manual_glossary_path', None)
+            if not _prev:
+                return
+            # Confirmation dialog with centered buttons
+            from PySide6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Clear Glossary")
+            msg.setText(f"Clear the loaded glossary?\n\n{os.path.basename(_prev)}")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            msg.setStyleSheet("""
+                QPushButton {
+                    min-width: 80px; min-height: 30px;
+                    padding: 6px 20px; font-size: 10pt;
+                }
+                QDialogButtonBox { qproperty-centerButtons: true; }
+            """)
+            if msg.exec() != QMessageBox.Yes:
+                return
             self.manual_glossary_path = None
             self.manual_glossary_manually_loaded = False
             self.auto_loaded_glossary_path = None
@@ -5237,11 +5254,13 @@ Recent translations to summarize:
                 os.environ.pop('MANUAL_GLOSSARY', None)
             except Exception:
                 pass
-            if _prev:
-                self.append_log(f"📑 Cleared glossary: {os.path.basename(_prev)}")
+            self.append_log(f"📑 Cleared glossary: {os.path.basename(_prev)}")
             self._update_manual_glossary_status()
         self.clear_manual_glossary_btn.clicked.connect(_clear_manual_glossary)
-        batch_right_layout.addWidget(self.clear_manual_glossary_btn)
+        _gloss_row_layout.addWidget(self.clear_manual_glossary_btn)
+        _gloss_row_layout.addStretch()
+
+        self._gloss_status_row.hide()  # hidden when no glossary loaded
 
         # Sync forced toggle states to the current auto glossary mode on startup.
         # The combo's initial index was set above (line ~5033) BEFORE the signal
@@ -5557,7 +5576,15 @@ Recent translations to summarize:
 
         batch_right_layout.addStretch()
         
-        self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
+        # Wrap status row + auto glossary row in a vertical container
+        _batch_right_vbox = QVBoxLayout()
+        _batch_right_vbox.setContentsMargins(0, 0, 0, 0)
+        _batch_right_vbox.setSpacing(2)
+        _batch_right_vbox.addWidget(self._gloss_status_row)
+        _batch_right_vbox.addWidget(batch_right_container)
+        _batch_right_wrapper = QWidget()
+        _batch_right_wrapper.setLayout(_batch_right_vbox)
+        self.frame.addWidget(_batch_right_wrapper, 7, 3, Qt.AlignLeft)
 
         # Output Token Limit tooltip (main output)
         try:
@@ -16663,12 +16690,11 @@ Important rules:
             pass
     
     def _update_manual_glossary_status(self):
-        """Update the manual glossary status label and clear button visibility."""
+        """Update the manual glossary status row visibility and label text."""
         try:
             gp = getattr(self, 'manual_glossary_path', None)
+            has_row = hasattr(self, '_gloss_status_row')
             has_label = hasattr(self, 'manual_glossary_status_label')
-            has_btn = hasattr(self, 'clear_manual_glossary_btn')
-            has_sep = hasattr(self, '_gloss_status_sep')
             if gp:
                 basename = os.path.basename(gp)
                 is_manual = getattr(self, 'manual_glossary_manually_loaded', False)
@@ -16676,19 +16702,13 @@ Important rules:
                 if has_label:
                     self.manual_glossary_status_label.setText(f"{prefix}: {basename}")
                     self.manual_glossary_status_label.setToolTip(gp)
-                    self.manual_glossary_status_label.show()
-                if has_btn:
-                    self.clear_manual_glossary_btn.show()
-                if has_sep:
-                    self._gloss_status_sep.show()
+                if has_row:
+                    self._gloss_status_row.show()
             else:
                 if has_label:
                     self.manual_glossary_status_label.setText("")
-                    self.manual_glossary_status_label.hide()
-                if has_btn:
-                    self.clear_manual_glossary_btn.hide()
-                if has_sep:
-                    self._gloss_status_sep.hide()
+                if has_row:
+                    self._gloss_status_row.hide()
         except Exception:
             pass
 
