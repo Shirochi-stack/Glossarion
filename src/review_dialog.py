@@ -823,9 +823,15 @@ class ReviewDialog(QDialog):
 
     def _open_final_prompt_dialog(self):
         """Open a dialog to edit the Final Review synthesis prompt."""
+        # Reuse existing dialog if open
+        if hasattr(self, '_final_prompt_dialog') and self._final_prompt_dialog and self._final_prompt_dialog.isVisible():
+            self._final_prompt_dialog.raise_()
+            self._final_prompt_dialog.activateWindow()
+            return
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Final Review Prompt")
-        dialog.setModal(True)
+        dialog.setModal(False)
         dialog.setMinimumSize(600, 400)
         dialog.resize(700, 500)
 
@@ -884,7 +890,7 @@ class ReviewDialog(QDialog):
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setStyleSheet("padding: 6px 20px; border-radius: 3px; font-size: 10pt;")
-        cancel_btn.clicked.connect(dialog.reject)
+        cancel_btn.clicked.connect(dialog.close)
         btn_row.addWidget(cancel_btn)
 
         ok_btn = QPushButton("✅ Save")
@@ -893,14 +899,17 @@ class ReviewDialog(QDialog):
             "padding: 6px 20px; border-radius: 3px; font-size: 10pt; }"
             "QPushButton:hover { background-color: #2dbc4e; }"
         )
-        ok_btn.clicked.connect(dialog.accept)
+        def _save_and_close():
+            self._final_review_prompt = prompt_edit.toPlainText().strip() or DEFAULT_FINAL_REVIEW_PROMPT
+            self._save_prompt_to_config()
+            dialog.close()
+        ok_btn.clicked.connect(_save_and_close)
         btn_row.addWidget(ok_btn)
 
         layout.addLayout(btn_row)
 
-        if dialog.exec() == QDialog.Accepted:
-            self._final_review_prompt = prompt_edit.toPlainText().strip() or DEFAULT_FINAL_REVIEW_PROMPT
-            self._save_prompt_to_config()
+        self._final_prompt_dialog = dialog
+        dialog.show()
 
     def _load_existing_review(self):
         """If a review already exists, load it into the log field."""
