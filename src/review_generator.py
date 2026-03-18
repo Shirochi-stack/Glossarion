@@ -974,9 +974,7 @@ def generate_chunked_review(
         last_ch = chunk_chapters[-1][0]
         range_label = first_ch if first_ch == last_ch else f"{first_ch} → {last_ch}"
 
-        _safe_log(f"\n{'─'*40}")
-        _safe_log(f"📄 Chunk {ci+1}/{total_chunks}: {range_label} ({len(chunk_chapters)} chapter(s))")
-        _safe_log(f"{'─'*40}")
+        _safe_log(f"\n{'─'*40}\n📄 Chunk {ci+1}/{total_chunks}: {range_label} ({len(chunk_chapters)} chapter(s))\n{'─'*40}")
 
         content_parts = [f"--- Chapter: {name} ---\n{text}" for name, text in chunk_chapters]
         full_content = "\n\n".join(content_parts)
@@ -1095,9 +1093,7 @@ def generate_chunked_review(
         log_fn("❌ No chunk reviews were generated")
         return None
 
-    log_fn(f"\n{'═'*40}")
-    log_fn(f"📊 {len(chunk_reviews)}/{total_chunks} chunk reviews collected ({total_elapsed:.1f}s total)")
-    log_fn(f"{'═'*40}")
+    log_fn(f"\n{'═'*40}\n📊 {len(chunk_reviews)}/{total_chunks} chunk reviews collected ({total_elapsed:.1f}s total)\n{'═'*40}")
 
     if stop_check_fn and stop_check_fn():
         log_fn("🛑 Stopped by user")

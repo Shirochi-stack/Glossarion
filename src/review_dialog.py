@@ -1338,9 +1338,7 @@ class ReviewDialog(QDialog):
 
             def _generate_single(idx, epub_path):
                 basename = os.path.basename(epub_path)
-                self._review_queue.put(('log', f"\n{'═'*50}"))
-                self._review_queue.put(('log', f"📖 [{idx+1}/{total}] {basename}"))
-                self._review_queue.put(('log', f"{'═'*50}\n"))
+                self._review_queue.put(('log', f"\n{'═'*50}\n📖 [{idx+1}/{total}] {basename}\n{'═'*50}"))
                 self._review_queue.put(('nav', idx))  # Navigate dropdown to this EPUB
 
                 if self._stop_requested:
@@ -1420,9 +1418,7 @@ class ReviewDialog(QDialog):
                             errors += 1
                             self._review_queue.put(('log', f"❌ Future error: {e}"))
 
-            self._review_queue.put(('log', f"\n{'═'*50}"))
-            self._review_queue.put(('log', f"📊 Finished: {completed}/{total} reviews ({errors} errors)"))
-            self._review_queue.put(('log', f"{'═'*50}"))
+            self._review_queue.put(('log', f"\n{'═'*50}\n📊 Finished: {completed}/{total} reviews ({errors} errors)\n{'═'*50}"))
             self._review_queue.put(('all_done', None))
 
         self._review_thread = threading.Thread(target=_run_all, daemon=True)
