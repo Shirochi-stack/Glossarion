@@ -435,7 +435,7 @@ class GrpcGeminiClient:
                                 if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
                                     for line in part.text.split("\n"):
                                         if line.strip().startswith("**") and grpc_thinking_chunks > 1:
-                                            print(flush=True)
+                                            print("\u200b", flush=True)
                                         print(f"    {line}", flush=True)
                                 continue
                             if part.text:
