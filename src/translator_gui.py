@@ -11303,6 +11303,31 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
 
+            # Sync all thinking-related env vars so glossary extraction uses the same settings as translation
+            try:
+                # Gemini thinking
+                os.environ['ENABLE_GEMINI_THINKING'] = "1" if self.enable_gemini_thinking_var else "0"
+                os.environ['THINKING_BUDGET'] = self.thinking_budget_var if self.enable_gemini_thinking_var else '0'
+                os.environ['GEMINI_THINKING_LEVEL'] = getattr(self, 'thinking_level_var', 'high')
+                # GPT/OpenRouter reasoning
+                os.environ['ENABLE_GPT_THINKING'] = "1" if self.enable_gpt_thinking_var else "0"
+                os.environ['GPT_REASONING_TOKENS'] = self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else ''
+                os.environ['GPT_EFFORT'] = self.gpt_effort_var
+                # DeepSeek thinking
+                os.environ['ENABLE_DEEPSEEK_THINKING'] = "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0"
+                # Anthropic extended/adaptive thinking
+                os.environ['ENABLE_ANTHROPIC_THINKING'] = "1" if getattr(self, 'enable_anthropic_thinking_var', False) else "0"
+                os.environ['ANTHROPIC_THINKING_BUDGET'] = str(self.anthropic_thinking_budget_var) if getattr(self, 'enable_anthropic_thinking_var', False) else '0'
+                os.environ['ANTHROPIC_FORCE_ADAPTIVE'] = "1" if getattr(self, 'anthropic_force_adaptive_var', False) else "0"
+                os.environ['ANTHROPIC_EFFORT'] = getattr(self, 'anthropic_effort_var', 'medium')
+                # Skip thinking for lightweight tasks
+                os.environ['SKIP_BOOK_TITLE_THINKING'] = "1" if getattr(self, 'skip_book_title_thinking_var', True) else "0"
+                os.environ['SKIP_METADATA_THINKING'] = "1" if getattr(self, 'skip_metadata_thinking_var', True) else "0"
+                os.environ['SKIP_TOC_THINKING'] = "1" if getattr(self, 'skip_toc_thinking_var', False) else "0"
+                os.environ['LIGHTWEIGHT_THINKING_LEVEL'] = str(getattr(self, 'lightweight_thinking_level_var', 1))
+            except Exception:
+                pass
+
             # Create Glossary folder
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
             if override_dir:
