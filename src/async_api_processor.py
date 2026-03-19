@@ -1182,19 +1182,43 @@ class AsyncAPIProcessor:
             job.metadata['last_error'] = str(e)
             
     def _get_api_key(self) -> str:
-        """Get API key from GUI settings"""
+        """Get API key from GUI settings, with AuthGPT OAuth fallback"""
+        # Try standard API key first
+        key = ''
         if hasattr(self.gui, 'api_key_entry'):
-            # PySide6 QLineEdit uses text() method
             if hasattr(self.gui.api_key_entry, 'text'):
-                return self.gui.api_key_entry.text().strip()
+                key = self.gui.api_key_entry.text().strip()
             else:
-                # Fallback for tkinter compatibility during transition
-                return self.gui.api_key_entry.get().strip()
+                key = self.gui.api_key_entry.get().strip()
         elif hasattr(self.gui, 'api_key_var'):
-            return self.gui.api_key_var.get().strip()
+            key = self.gui.api_key_var.get().strip()
         else:
-            # Fallback to environment variable
-            return os.getenv('API_KEY', '') or os.getenv('GEMINI_API_KEY', '') or os.getenv('GOOGLE_API_KEY', '')
+            key = os.getenv('API_KEY', '') or os.getenv('GEMINI_API_KEY', '') or os.getenv('GOOGLE_API_KEY', '')
+        
+        if key:
+            return key
+        
+        # Fallback: try AuthGPT OAuth token if model is authgpt/*
+        try:
+            model = ''
+            if hasattr(self.gui, 'model_var'):
+                if hasattr(self.gui.model_var, 'get'):
+                    model = self.gui.model_var.get()
+                else:
+                    model = str(self.gui.model_var) if self.gui.model_var else ''
+            
+            if model.lower().startswith('authgpt/'):
+                try:
+                    from authgpt_auth import get_default_store
+                    token = get_default_store().get_valid_access_token(auto_login=True)
+                    if token:
+                        return token
+                except Exception as e:
+                    print(f"[ASYNC] AuthGPT OAuth token retrieval failed: {e}")
+        except Exception:
+            pass
+        
+        return key
     
     def _get_api_key_from_gui(self) -> str:
         """Wrapper for _get_api_key for consistency"""
@@ -1704,14 +1728,14 @@ class AsyncProcessingDialog:
         provider = self.processor.get_provider_from_model(model_name)
         if provider and provider in self.processor.PROVIDER_CONFIGS:
             status_text = f"✓ Supported ({provider.upper()})"
-            status_label = QLabel(status_text)
-            status_label.setStyleSheet("color: #28a745; font-size: 10pt; font-weight: bold;")
+            self.status_label = QLabel(status_text)
+            self.status_label.setStyleSheet("color: #28a745; font-size: 10pt; font-weight: bold;")
         else:
             status_text = "✗ Not supported for async"
-            status_label = QLabel(status_text)
-            status_label.setStyleSheet("color: #dc3545; font-size: 10pt; font-weight: bold;")
+            self.status_label = QLabel(status_text)
+            self.status_label.setStyleSheet("color: #dc3545; font-size: 10pt; font-weight: bold;")
             
-        model_layout.addWidget(status_label)
+        model_layout.addWidget(self.status_label)
         model_layout.addStretch()
         info_layout.addLayout(model_layout)
         
@@ -1728,6 +1752,29 @@ class AsyncProcessingDialog:
         # Add to parent layout
         parent.layout().addWidget(info_group)
         
+    def _refresh_model_info(self):
+        """Refresh model name and support status from current GUI selection"""
+        try:
+            if hasattr(self.gui, 'model_var'):
+                if hasattr(self.gui.model_var, 'get'):
+                    model_name = self.gui.model_var.get()
+                else:
+                    model_name = str(self.gui.model_var) if self.gui.model_var else "Not selected"
+            else:
+                model_name = "Not selected"
+            
+            self.model_label.setText(model_name)
+            
+            provider = self.processor.get_provider_from_model(model_name)
+            if provider and provider in self.processor.PROVIDER_CONFIGS:
+                self.status_label.setText(f"✓ Supported ({provider.upper()})")
+                self.status_label.setStyleSheet("color: #28a745; font-size: 10pt; font-weight: bold;")
+            else:
+                self.status_label.setText("✗ Not supported for async")
+                self.status_label.setStyleSheet("color: #dc3545; font-size: 10pt; font-weight: bold;")
+        except Exception as e:
+            print(f"[ASYNC] Failed to refresh model info: {e}")
+    
     def _create_config_section(self, parent):
         """Create configuration section"""
         config_group = QGroupBox("Async Processing Configuration")
@@ -2965,11 +3012,20 @@ class AsyncProcessingDialog:
             else:
                 model = str(self.gui.model_var) if self.gui.model_var else ""
             
-            # Get API key
+            # Get API key (AuthGPT models will use OAuth token automatically)
             api_key = self._get_api_key_from_gui()
             
+            # For authgpt/ models: strip prefix for OpenAI Batch API, OAuth token serves as key
+            is_authgpt = model.lower().startswith('authgpt/')
+            if is_authgpt:
+                model = model.split('/', 1)[1]  # authgpt/gpt-4o -> gpt-4o
+                self._log(f"AuthGPT mode: using OpenAI Batch API with model '{model}' and OAuth token")
+            
             if not api_key:
-                self._show_error("API key is required")
+                if is_authgpt:
+                    self._show_error("AuthGPT OAuth token could not be obtained.\nPlease log in via the browser when prompted.")
+                else:
+                    self._show_error("API key is required")
                 return
                 
             # Prepare environment variables like the main translation
@@ -4404,6 +4460,7 @@ def show_async_processing_dialog(parent, translator_gui):
     # Reuse existing dialog if present to preserve state
     if hasattr(translator_gui, "async_dialog") and getattr(translator_gui, "async_dialog"):
         dlg_obj = translator_gui.async_dialog
+        dlg_obj._refresh_model_info()
         dlg_obj.dialog.showNormal()
         dlg_obj.dialog.raise_()
         dlg_obj.dialog.activateWindow()
