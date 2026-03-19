@@ -18185,9 +18185,6 @@ Important rules:
                 
                 if found:
                     converted_value = converter(final_value) if converter else final_value
-                    # Protect sensitive fields: don't overwrite non-empty values with empty ones
-                    if key == 'api_key' and not converted_value and self.config.get('api_key'):
-                        continue  # Preserve existing API key if new value is empty
                     self.config[key] = converted_value
                 elif default is not None and key not in self.config:
                     # Only apply default if key doesn't already exist in config
