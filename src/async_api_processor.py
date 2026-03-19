@@ -3116,16 +3116,22 @@ class AsyncProcessingDialog:
                 self._start_polling(job.job_id)
                 
         except Exception as e:
-            self._log(f"❌ Error: {str(e)}")
+            error_msg = str(e)
+            # Truncate very long error messages (e.g. full JSON responses)
+            if len(error_msg) > 500:
+                error_msg = error_msg[:500] + '\n... (truncated)'
+            self._log(f"❌ Error: {error_msg}")
             print(f"Async processing error: {traceback.format_exc()}")
-            self._show_error(f"Failed to start async processing: {str(e)}")
-            
-            # Re-enable button immediately on error
-            QTimer.singleShot(0, lambda: self.start_button.setEnabled(True))
+            self._show_error(f"Failed to start async processing:\n\n{error_msg}")
         finally:
-            # Only schedule re-enable if not already handled in exception block
-            # (Though redundant re-enables are harmless)
-            QTimer.singleShot(0, lambda: self.start_button.setEnabled(True))
+            # Always re-enable the button on completion/failure
+            try:
+                QTimer.singleShot(0, self.dialog, lambda: self.start_button.setEnabled(True))
+            except Exception:
+                try:
+                    self.start_button.setEnabled(True)
+                except Exception:
+                    pass
 
     def _prepare_environment_variables(self):
         """Prepare environment variables from GUI settings"""
@@ -4429,7 +4435,18 @@ class AsyncProcessingDialog:
     def _show_error(self, message):
         """Thread-safe error dialog"""
         self._log(f"Error: {message}", level="error")
-        QTimer.singleShot(0, lambda: QMessageBox.critical(self.dialog, "Error", message))
+        # Also show in the GUI log panel so it's visible even if dialog fails
+        if hasattr(self.gui, 'append_log'):
+            try:
+                QTimer.singleShot(0, self.dialog, lambda: self.gui.append_log(f"❌ {message}"))
+            except Exception:
+                pass
+        # Truncate for dialog display (very long messages can cause rendering issues)
+        display_msg = message if len(message) <= 800 else message[:800] + '\n... (truncated)'
+        try:
+            QTimer.singleShot(0, self.dialog, lambda: QMessageBox.critical(self.dialog, "Error", display_msg))
+        except Exception:
+            pass
 
     def _show_info(self, title, message):
         """Thread-safe info dialog"""
