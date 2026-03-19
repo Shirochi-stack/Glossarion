@@ -14837,6 +14837,26 @@ class UnifiedClient:
                                             reasoning_frag = delta.get("reasoning_content") or delta.get("reasoning")
                                         else:
                                             reasoning_frag = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                                        
+                                        # Gemini OAI: thoughts come as delta.content with
+                                        # model_extra={'extra_content': {'google': {'thought': True}}}
+                                        _is_gemini_thought = False
+                                        if not reasoning_frag and provider == 'gemini-openai':
+                                            try:
+                                                _extra = getattr(delta, 'model_extra', None) or {}
+                                                _ec = _extra.get('extra_content', {}) if isinstance(_extra, dict) else {}
+                                                _google = _ec.get('google', {}) if isinstance(_ec, dict) else {}
+                                                _is_gemini_thought = (_google.get('thought') is True) if isinstance(_google, dict) else False
+                                            except Exception:
+                                                _is_gemini_thought = False
+                                            
+                                            if _is_gemini_thought:
+                                                # Thought content lives in the regular content field
+                                                if isinstance(delta, dict):
+                                                    reasoning_frag = delta.get("content")
+                                                else:
+                                                    reasoning_frag = getattr(delta, "content", None)
+                                        
                                         if reasoning_frag and isinstance(reasoning_frag, str):
                                             oai_thinking_chunks += 1
                                             oai_thinking_text_parts.append(reasoning_frag)
@@ -14858,11 +14878,13 @@ class UnifiedClient:
                                                     oai_thinking_log_buf = [parts[-1]]
 
                                         # Handle both object and dict access for content
+                                        # Skip if this chunk is a Gemini thought (content is the thought, not output)
                                         delta_content = None
-                                        if isinstance(delta, dict):
-                                            delta_content = delta.get("content")
-                                        else:
-                                            delta_content = getattr(delta, "content", None)
+                                        if not _is_gemini_thought:
+                                            if isinstance(delta, dict):
+                                                delta_content = delta.get("content")
+                                            else:
+                                                delta_content = getattr(delta, "content", None)
 
                                         # If switching from thinking to text, print completion
                                         if delta_content and oai_thinking_started and oai_stream_thinking and not self._is_stop_requested():
