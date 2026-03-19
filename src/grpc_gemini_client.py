@@ -393,12 +393,8 @@ class GrpcGeminiClient:
             # Thinking streaming state
             grpc_stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
             grpc_thinking_started = False
-            grpc_thinking_buf = []
             grpc_thinking_chunks = 0
             grpc_thinking_start_ts = None
-            grpc_thinking_flushed = False  # True once 0.5s passed and buffer was printed
-            grpc_thinking_deferred_lines = []  # holds lines until threshold
-            _GRPC_THINKING_THRESHOLD = 0.5
             
             for chunk in stream:
                 if stop_check_fn and stop_check_fn():
@@ -432,59 +428,21 @@ class GrpcGeminiClient:
                                 grpc_thinking_chunks += 1
                                 if grpc_thinking_start_ts is None:
                                     grpc_thinking_start_ts = time.time()
-                                grpc_thinking_started = True
-                                if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
-                                    combined = "".join(grpc_thinking_buf) + part.text
-                                    if "\n" in combined:
-                                        tparts = combined.split("\n")
-                                        for p in tparts[:-1]:
-                                            if grpc_thinking_flushed:
-                                                print(f"    {p}", flush=True)
-                                            else:
-                                                grpc_thinking_deferred_lines.append(p)
-                                        grpc_thinking_buf = [tparts[-1]]
-                                    else:
-                                        grpc_thinking_buf.append(part.text)
-                                        if len("".join(grpc_thinking_buf)) > 150:
-                                            if grpc_thinking_flushed:
-                                                print(f"    {''.join(grpc_thinking_buf)}", end="", flush=True)
-                                            else:
-                                                grpc_thinking_deferred_lines.append("".join(grpc_thinking_buf))
-                                            grpc_thinking_buf = []
-                                    # Check if threshold passed — flush deferred content
-                                    if not grpc_thinking_flushed and (time.time() - grpc_thinking_start_ts) >= _GRPC_THINKING_THRESHOLD:
-                                        grpc_thinking_flushed = True
+                                if not grpc_thinking_started:
+                                    grpc_thinking_started = True
+                                    if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
                                         print(f"🧠 [gemini-grpc] Thinking...", flush=True)
-                                        for dl in grpc_thinking_deferred_lines:
-                                            print(f"    {dl}", flush=True)
-                                        grpc_thinking_deferred_lines = []
+                                if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
+                                    for line in part.text.split("\n"):
+                                        if line:
+                                            print(f"    {line}", flush=True)
                                 continue
                             if part.text:
-                                # If switching from thinking to text, flush thinking
+                                # If switching from thinking to text, print completion
                                 if grpc_thinking_started and grpc_stream_thinking and not (stop_check_fn and stop_check_fn()):
-                                    if grpc_thinking_flushed:
-                                        if grpc_thinking_buf:
-                                            remaining = "".join(grpc_thinking_buf)
-                                            if remaining.strip():
-                                                print(f"    {remaining}", flush=True)
-                                            grpc_thinking_buf = []
-                                        thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
-                                        print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                                    else:
-                                        # Thinking finished before 0.5s threshold — still flush deferred content
-                                        thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
-                                        if grpc_thinking_deferred_lines or grpc_thinking_buf:
-                                            print(f"🧠 [gemini-grpc] Thinking ({thinking_dur:.1f}s)...", flush=True)
-                                            for dl in grpc_thinking_deferred_lines:
-                                                print(f"    {dl}", flush=True)
-                                            if grpc_thinking_buf:
-                                                remaining = "".join(grpc_thinking_buf)
-                                                if remaining.strip():
-                                                    print(f"    {remaining}", flush=True)
-                                                grpc_thinking_buf = []
-                                            print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                    thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
+                                    print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                     grpc_thinking_started = False
-                                    grpc_thinking_deferred_lines = []
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
                                     # Line-buffered streaming output
