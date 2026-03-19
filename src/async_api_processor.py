@@ -225,7 +225,7 @@ class AsyncAPIProcessor:
             return 'bedrock'
             
         # Check for aggregator prefixes that might support async
-        if model_lower.startswith(('eh/', 'electronhub/', 'electron/')):
+        if model_lower.startswith(('eh/', 'electronhub/', 'electron/', 'authgpt/')):
             # Extract actual model after prefix
             actual_model = model.split('/', 1)[1] if '/' in model else model
             return self.get_provider_from_model(actual_model)
@@ -2915,13 +2915,16 @@ class AsyncProcessingDialog:
             model = str(self.gui.model_var) if self.gui.model_var else ""
         
         if not self.processor.supports_async(model):
-            QMessageBox.critical(
+            reply = QMessageBox.warning(
                 self.dialog,
-                "Not Supported",
-                f"Model '{model}' does not support async processing.\n"
-                "Supported providers: Gemini, Anthropic, OpenAI, Mistral, Groq"
+                "Possibly Unsupported",
+                f"Model '{model}' may not support async processing.\n"
+                "Known supported providers: Gemini, Anthropic, OpenAI, Mistral, Groq\n\n"
+                "Would you like to try anyway?",
+                QMessageBox.Yes | QMessageBox.No
             )
-            return
+            if reply != QMessageBox.Yes:
+                return
         
         # Add special check for Gemini
         if model.lower().startswith('gemini'):
@@ -2936,14 +2939,7 @@ class AsyncProcessingDialog:
             if reply != QMessageBox.Yes:
                 return
         
-        if not self.processor.supports_async(model):
-            QMessageBox.critical(
-                self.dialog,
-                "Not Supported",
-                f"Model '{model}' does not support async processing.\n"
-                "Supported providers: Gemini, Anthropic, OpenAI, Mistral, Groq"
-            )
-            return
+
             
         if not hasattr(self.gui, 'file_path') or not self.gui.file_path:
             QMessageBox.warning(self.dialog, "No File", "Please select a file to translate first")
