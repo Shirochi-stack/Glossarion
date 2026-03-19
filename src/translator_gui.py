@@ -11297,6 +11297,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
             except Exception:
                 pass
+            try:
+                stream_thinking = bool(self.config.get('stream_thinking_logs', True))
+                os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
+            except Exception:
+                pass
 
             # Create Glossary folder
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
