@@ -87,9 +87,14 @@ def enable_detailed_http_logging(log_folder="http_requests"):
     if _patched:
         return _log_folder
     
-    # Create log folder
-    _log_folder = Path(log_folder)
-    _log_folder.mkdir(exist_ok=True)
+    # Create log folder — resolve relative paths against the script directory,
+    # not CWD, to avoid issues on macOS/Linux where CWD may be / or $HOME.
+    if not os.path.isabs(log_folder):
+        _base_dir = os.path.dirname(os.path.abspath(__file__))
+        _log_folder = Path(os.path.join(_base_dir, log_folder))
+    else:
+        _log_folder = Path(log_folder)
+    _log_folder.mkdir(parents=True, exist_ok=True)
     
     # NOW import requests
     import requests

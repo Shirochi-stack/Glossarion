@@ -291,8 +291,38 @@ translation_main = translation_stop_flag = translation_stop_check = None
 glossary_main = glossary_stop_flag = glossary_stop_check = None
 fallback_compile_epub = scan_html_folder = None
 
-CONFIG_FILE = "config.json"
+# Resolve the application directory (where config.json, logs, etc. live).
+# In frozen (PyInstaller) builds, this is next to the executable.
+# In dev mode, this is next to the source file.
+if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+    _APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
+
+
+def _atomic_json_write(filepath, data):
+    """Write JSON atomically using write-to-temp-then-rename.
+
+    Prevents config corruption if the app crashes or power is lost mid-write.
+    os.replace is atomic on POSIX and near-atomic on Windows.
+    """
+    tmp_path = filepath + ".tmp"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, filepath)
+    except Exception:
+        # Fallback: direct write (better than losing data entirely)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 # --- Robust file logging and crash tracing setup ---
 _FAULT_LOG_FH = None
@@ -855,8 +885,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             from api_key_encryption import encrypt_config
             config_to_save = encrypt_config(self.config)
             
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+            _atomic_json_write(CONFIG_FILE, config_to_save)
             
             if updates_made:
                 print("[Sanitizer] Saved sanitized config.json (fixes applied)")
@@ -1204,8 +1233,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.config['auto_update_check'] = True
             # Save the default config immediately so it exists
             try:
-                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                _atomic_json_write(CONFIG_FILE, self.config)
             except Exception as e:
                 print(f"Warning: Could not save config.json: {e}")
 
@@ -5791,8 +5819,7 @@ Recent translations to summarize:
         # Save to config
         self.config['system_prompt_to_user'] = self.system_prompt_to_user_var
         try:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(encrypt_config(self.config), f, ensure_ascii=False, indent=2)
+            _atomic_json_write(CONFIG_FILE, encrypt_config(self.config))
         except Exception as e:
             print(f"Warning: Could not save config: {e}")
         
@@ -18414,8 +18441,7 @@ Important rules:
                 encrypted_config['google_cloud_credentials'] = google_creds_path
             
             json.dumps(encrypted_config, ensure_ascii=False, indent=2) # Validation check
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
+            _atomic_json_write(CONFIG_FILE, encrypted_config)
 
             # --- 6. Post-Save Verification and Messaging ---
             if show_message and debug_enabled:
