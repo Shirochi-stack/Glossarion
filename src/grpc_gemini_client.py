@@ -395,6 +395,8 @@ class GrpcGeminiClient:
             grpc_thinking_started = False
             grpc_thinking_chunks = 0
             grpc_thinking_start_ts = None
+            grpc_thinking_log_buf = []  # buffer for accumulating thinking text before printing
+            grpc_thinking_text_parts = []  # accumulate all thinking text for token counting
             
             for chunk in stream:
                 if stop_check_fn and stop_check_fn():
@@ -426,6 +428,7 @@ class GrpcGeminiClient:
                             is_thought = getattr(part, 'thought', False)
                             if is_thought and part.text:
                                 grpc_thinking_chunks += 1
+                                grpc_thinking_text_parts.append(part.text)
                                 if grpc_thinking_start_ts is None:
                                     grpc_thinking_start_ts = time.time()
                                 if not grpc_thinking_started:
@@ -433,14 +436,25 @@ class GrpcGeminiClient:
                                     if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
                                         print(f"🧠 [gemini-grpc] Thinking...", flush=True)
                                 if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
-                                    for line in part.text.split("\n"):
-                                        if line.strip().startswith("**") and grpc_thinking_chunks > 1:
-                                            print("\u200b", flush=True)
-                                        print(f"    {line}", flush=True)
+                                    grpc_thinking_log_buf.append(part.text)
+                                    combined = "".join(grpc_thinking_log_buf)
+                                    if "\n" in combined:
+                                        parts_split = combined.split("\n")
+                                        for p in parts_split[:-1]:
+                                            if p.strip().startswith("**") and grpc_thinking_chunks > 1:
+                                                print("\u200b", flush=True)
+                                            print(f"    {p}", flush=True)
+                                        grpc_thinking_log_buf = [parts_split[-1]]
                                 continue
                             if part.text:
                                 # If switching from thinking to text, print completion
                                 if grpc_thinking_started and grpc_stream_thinking and not (stop_check_fn and stop_check_fn()):
+                                    # Flush remaining buffered thinking text
+                                    remainder = "".join(grpc_thinking_log_buf).rstrip("\n")
+                                    if remainder:
+                                        for p in remainder.split("\n"):
+                                            print(f"    {p}", flush=True)
+                                    grpc_thinking_log_buf = []
                                     thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
                                     print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                     grpc_thinking_started = False
