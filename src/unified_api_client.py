@@ -14348,53 +14348,38 @@ class UnifiedClient:
                         except Exception:
                             pass
                     
-                    # Gemini OpenAI-compatible endpoint: inject thinking config via extra_body
+                    # Gemini OpenAI-compatible endpoint: use reasoning_effort parameter
+                    gemini_reasoning_effort = None
                     if provider == 'gemini-openai':
                         try:
                             enable_gemini_think = os.getenv('ENABLE_GEMINI_THINKING', '1') == '1'
                             if enable_gemini_think:
-                                # Detect Gemini 3+ vs 2.5 for thinking_level vs thinking_budget
-                                model_lower = (effective_model or '').lower()
-                                is_g3 = 'gemini-3' in model_lower or 'gemini3' in model_lower
+                                # Map GEMINI_THINKING_LEVEL env var to reasoning_effort
+                                # Supported values: low, medium, high (and "none" to disable on 2.5)
+                                level = os.getenv('GEMINI_THINKING_LEVEL', 'high').strip().lower()
+                                if level == 'minimal':
+                                    level = 'none'
+                                if level not in ('low', 'medium', 'high', 'none'):
+                                    level = 'high'
+                                gemini_reasoning_effort = level
                                 
-                                thinking_cfg = {"include_thoughts": True}
-                                if is_g3:
-                                    level = os.getenv('GEMINI_THINKING_LEVEL', 'high').strip().upper()
-                                    if level not in ('LOW', 'MEDIUM', 'HIGH'):
-                                        level = 'HIGH'
-                                    thinking_cfg["thinking_level"] = level
-                                else:
-                                    budget_str = os.getenv('THINKING_BUDGET', '-1').strip()
-                                    try:
-                                        budget = int(budget_str)
-                                    except ValueError:
-                                        budget = -1
-                                    if budget > 0:
-                                        thinking_cfg["thinking_budget"] = budget
-                                    # budget -1 = dynamic (server default), budget 0 = disabled
-                                    elif budget == 0:
-                                        thinking_cfg = {}  # No thinking
-                                
-                                if thinking_cfg:
-                                    extra_body["google"] = {"thinking_config": thinking_cfg}
-                                    
-                                    # Log once per thread
-                                    try:
-                                        tls = self._get_thread_local_client()
-                                        if not hasattr(tls, 'gemini_openai_thinking_logged'):
-                                            tls.gemini_openai_thinking_logged = set()
-                                        state_key = (str(effective_model or ''), str(thinking_cfg))
-                                        if state_key not in tls.gemini_openai_thinking_logged:
-                                            tls.gemini_openai_thinking_logged.add(state_key)
-                                            try:
-                                                tname = threading.current_thread().name
-                                            except Exception:
-                                                tname = "unknown-thread"
-                                            self._debug_log(
-                                                f"🧠 [gemini-openai:{tname}] thinking config={thinking_cfg} (model={effective_model})"
-                                            )
-                                    except Exception:
-                                        pass
+                                # Log once per thread
+                                try:
+                                    tls = self._get_thread_local_client()
+                                    if not hasattr(tls, 'gemini_openai_thinking_logged'):
+                                        tls.gemini_openai_thinking_logged = set()
+                                    state_key = (str(effective_model or ''), level)
+                                    if state_key not in tls.gemini_openai_thinking_logged:
+                                        tls.gemini_openai_thinking_logged.add(state_key)
+                                        try:
+                                            tname = threading.current_thread().name
+                                        except Exception:
+                                            tname = "unknown-thread"
+                                        self._debug_log(
+                                            f"🧠 [gemini-openai:{tname}] reasoning_effort={level} (model={effective_model})"
+                                        )
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
                     
@@ -14493,6 +14478,9 @@ class UnifiedClient:
                     }
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
+                    # Gemini OpenAI: inject reasoning_effort as a top-level param
+                    if gemini_reasoning_effort:
+                        call_kwargs["reasoning_effort"] = gemini_reasoning_effort
                     # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
                     env_stream = os.getenv("ENABLE_STREAMING", "0")
                     cfg_stream = False
