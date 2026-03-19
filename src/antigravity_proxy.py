@@ -983,6 +983,9 @@ def send_message_stream(
     ag_thinking_chunks = 0
     ag_thinking_start_ts = None
     ag_current_block_type = None
+    ag_thinking_flushed = False  # True once 0.5s passed and buffer was printed
+    ag_thinking_deferred_lines: list = []  # holds lines until threshold
+    _AG_THINKING_THRESHOLD = 0.5
 
     # httpx iter_lines() yields str directly; requests iter_lines needs chunk_size=1
     line_iter = resp.iter_lines() if use_httpx else resp.iter_lines(decode_unicode=True, chunk_size=1)
@@ -1018,19 +1021,22 @@ def send_message_stream(
             if ag_current_block_type == "thinking" and stream_thinking:
                 if not ag_thinking_started:
                     ag_thinking_started = True
-                    _log("🧠 [antigravity] Thinking...")
+                    # Don't print header yet — defer until threshold
 
         elif event_type == "content_block_stop":
             if ag_current_block_type == "thinking" and stream_thinking and ag_thinking_started:
-                # Flush remaining thinking buffer
-                if ag_thinking_buf:
-                    remaining = "".join(ag_thinking_buf)
-                    if remaining.strip():
-                        _log(f"    {remaining}")
-                    ag_thinking_buf = []
-                thinking_dur = time.time() - ag_thinking_start_ts if ag_thinking_start_ts else 0
-                _log(f"🧠 [antigravity] Thinking complete ({ag_thinking_chunks} chunks, {thinking_dur:.1f}s)")
+                if ag_thinking_flushed:
+                    # Flush remaining thinking buffer
+                    if ag_thinking_buf:
+                        remaining = "".join(ag_thinking_buf)
+                        if remaining.strip():
+                            _log(f"    {remaining}")
+                        ag_thinking_buf = []
+                    thinking_dur = time.time() - ag_thinking_start_ts if ag_thinking_start_ts else 0
+                    _log(f"🧠 [antigravity] Thinking complete ({ag_thinking_chunks} chunks, {thinking_dur:.1f}s)")
+                # else: thinking was < 0.5s, discard silently
                 ag_thinking_started = False
+                ag_thinking_deferred_lines = []
             ag_current_block_type = None
 
         elif event_type == "content_block_delta":
@@ -1047,13 +1053,26 @@ def send_message_stream(
                     if "\n" in combined:
                         parts = combined.split("\n")
                         for part in parts[:-1]:
-                            _log(f"    {part}")
+                            if ag_thinking_flushed:
+                                _log(f"    {part}")
+                            else:
+                                ag_thinking_deferred_lines.append(part)
                         ag_thinking_buf = [parts[-1]]
                     else:
                         ag_thinking_buf.append(thinking_text)
                         if len("".join(ag_thinking_buf)) > 150:
-                            _log(f"    {''.join(ag_thinking_buf)}")
+                            if ag_thinking_flushed:
+                                _log(f"    {''.join(ag_thinking_buf)}")
+                            else:
+                                ag_thinking_deferred_lines.append("".join(ag_thinking_buf))
                             ag_thinking_buf = []
+                    # Check if threshold passed — flush deferred content
+                    if not ag_thinking_flushed and ag_thinking_start_ts and (time.time() - ag_thinking_start_ts) >= _AG_THINKING_THRESHOLD:
+                        ag_thinking_flushed = True
+                        _log("🧠 [antigravity] Thinking...")
+                        for dl in ag_thinking_deferred_lines:
+                            _log(f"    {dl}")
+                        ag_thinking_deferred_lines = []
 
             elif delta_type == "text_delta":
                 text = delta.get("text", "")
