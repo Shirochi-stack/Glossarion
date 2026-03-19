@@ -69,22 +69,66 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
     return "graceful stop active - not starting new api call" in s
 
 def create_client_with_multi_key_support(api_key, model, output_dir, config):
-    """Create a UnifiedClient with multi API key support if enabled"""
+    """Create a UnifiedClient with multi API key support if enabled.
     
-    # Check if multi API key mode is enabled
-    use_multi_keys = config.get('use_multi_api_keys', False)
+    Priority order for key pool:
+    1. Glossary-specific keys (USE_GLOSSARY_KEYS=1 + GLOSSARY_API_KEYS / config['glossary_keys'])
+    2. Multi-API keys (use_multi_api_keys + config['multi_api_keys'])
+    3. Single key mode (main GUI key only)
+    """
     
-    # Set environment variables for UnifiedClient to pick up
-    if use_multi_keys and 'multi_api_keys' in config and config['multi_api_keys']:
-        print("🔑 Multi API Key mode enabled for glossary extraction")
+    # ── Step 1: Determine which key pool to use ──────────────────────────
+    use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+    
+    # Try to load glossary-specific keys
+    glossary_keys = []
+    if use_glossary_keys:
+        # Source 1: GLOSSARY_API_KEYS env var (set by GUI)
+        glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
+        try:
+            if glossary_keys_json and glossary_keys_json.strip() not in ('', '[]', 'null', 'None'):
+                glossary_keys = json.loads(glossary_keys_json)
+        except Exception:
+            glossary_keys = []
         
-        # Enable multi-key mode without putting the full key list into a single env var (Windows limit)
+        # Source 2: config['glossary_keys'] (from config file)
+        if not glossary_keys:
+            glossary_keys = config.get('glossary_keys', [])
+    
+    if use_glossary_keys and glossary_keys:
+        # ── GLOSSARY KEYS MODE ──────────────────────────────────────────
+        # Use glossary-specific keys for rotation, NOT the translation multi-keys
+        print("🔑 Glossary API Key mode enabled for glossary extraction")
+        
         os.environ['USE_MULTI_API_KEYS'] = '1'
-        os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat
+        os.environ['USE_MULTI_KEYS'] = '1'
         os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
         os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
 
-        # Store the actual keys in-memory and initialize the shared pool
+        # Store glossary keys in-memory and initialize the shared pool
+        try:
+            UnifiedClient.set_in_memory_multi_keys(
+                glossary_keys,
+                force_rotation=config.get('force_key_rotation', True),
+                rotation_frequency=config.get('rotation_frequency', 1),
+            )
+        except Exception:
+            pass
+        
+        print(f"   • Glossary keys configured: {len(glossary_keys)}")
+        print(f"   • Force rotation: {config.get('force_key_rotation', True)}")
+        print(f"   • Rotation frequency: every {config.get('rotation_frequency', 1)} request(s)")
+    
+    elif config.get('use_multi_api_keys', False) and config.get('multi_api_keys'):
+        # ── MULTI-KEY MODE (no glossary keys) ────────────────────────────
+        # Fall back to regular translation multi-keys
+        print("🔑 Multi API Key mode enabled for glossary extraction")
+        
+        os.environ['USE_MULTI_API_KEYS'] = '1'
+        os.environ['USE_MULTI_KEYS'] = '1'
+        os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
+        os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
+
         try:
             UnifiedClient.set_in_memory_multi_keys(
                 config['multi_api_keys'],
