@@ -18077,7 +18077,7 @@ Important rules:
                 ('manual_context_limit', ['manual_context_entry', 'manual_context_var'], 5, lambda v: safe_int(v, 5)),
                 ('glossary_history_rolling', ['glossary_history_rolling_checkbox', 'glossary_history_rolling_var'], False, bool),
                 ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
-                ('auto_glossary_mode', ['auto_glossary_mode_var'], 'off', str),
+                ('auto_glossary_mode', ['auto_glossary_mode_var'], 'balanced', str),
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
                 ('glossary_output_legacy_json', ['glossary_output_legacy_json_var'], False, bool),
                 ('glossary_include_all_characters', ['glossary_include_all_characters_var'], False, bool),
