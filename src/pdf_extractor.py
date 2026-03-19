@@ -508,11 +508,19 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
         doc = fitz.open(pdf_path)
         images_by_page = {}
         
-        print(f"📷 Extracting images from PDF...")
+        _total_img_pages = len(doc)
+        print(f"📷 Extracting images from PDF ({_total_img_pages} pages)...")
+        _last_img_pct = -1
         
-        for page_num in range(len(doc)):
+        for page_num in range(_total_img_pages):
             page = doc[page_num]
             image_list = page.get_images(full=True)
+            
+            # Progress logging every 10%
+            _img_pct = int((page_num + 1) / _total_img_pages * 100) if _total_img_pages else 100
+            if _img_pct // 10 > _last_img_pct // 10 or page_num == _total_img_pages - 1:
+                _last_img_pct = _img_pct
+                print(f"    📷 Scanning images: {_img_pct}% ({page_num + 1}/{_total_img_pages} pages)")
             
             if not image_list:
                 continue
@@ -1412,11 +1420,11 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                             bar_len = 30
                             filled = int(bar_len * percent / 100)
                             bar = '█' * filled + '░' * (bar_len - filled)
-                            print(f"    Rendering: [{bar}] {percent:.1f}% ({completed_pages}/{total_pages} pages)", end='\r')
+                            print(f"    Rendering: [{bar}] {percent:.1f}% ({completed_pages}/{total_pages} pages)")
                         except Exception as e:
                             print(f"    ⚠️ Worker failed: {e}")
 
-                print(f"    ✅ Rendering complete! {completed_pages}/{total_pages} pages processed.          ")
+                print(f"    ✅ Rendering complete! {completed_pages}/{total_pages} pages processed.")
 
                 # Sort by page number to ensure correct order
                 page_list.sort(key=lambda x: x[0])
@@ -1425,8 +1433,18 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 # Sequential extraction for small PDFs or single worker
                 page_list = []
                 print(f"📄 Rendering {total_pages} pages via MuPDF {render_mode.upper()} (near 1:1 layout)...")
-                results = _extract_xhtml_chunk((pdf_path, 0, total_pages, images_dir, _images_by_page_str, render_mode))
-                page_list = results
+                
+                # Process in batches with progress reporting
+                _batch_size = max(1, total_pages // 10)  # Report ~10 progress updates
+                _processed = 0
+                for _start in range(0, total_pages, _batch_size):
+                    _end = min(_start + _batch_size, total_pages)
+                    batch_results = _extract_xhtml_chunk((pdf_path, _start, _end, images_dir, _images_by_page_str, render_mode))
+                    page_list.extend(batch_results)
+                    _processed += len(batch_results)
+                    _pct = min(100, int(_processed / total_pages * 100))
+                    print(f"    Rendering: {_pct}% ({_processed}/{total_pages} pages)")
+                
                 doc.close()
             if page_by_page:
                 return page_list, images_by_page
