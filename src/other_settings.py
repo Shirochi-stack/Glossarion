@@ -2806,26 +2806,6 @@ def _create_response_handling_section(self, parent):
     thinking_h_level.addStretch()
     section_v.addWidget(thinking_row_level)
 
-    # Map gRPC to Thinking Level toggle (enabled by default)
-    grpc_map_cb = self._create_styled_checkbox("Map gRPC to Thinking Level")
-    grpc_map_cb.setToolTip(
-        "When enabled, gRPC translates the Thinking Level above into a token budget.\n"
-        "When disabled, gRPC uses the Thinking Budget slider directly (like Gemini 2.5)."
-    )
-    grpc_map_cb.setContentsMargins(40, 0, 0, 0)
-    try:
-        grpc_map_cb.setChecked(bool(getattr(self, 'grpc_map_thinking_level_var', True)))
-    except Exception:
-        pass
-    def _on_grpc_map_changed(checked):
-        try:
-            self.grpc_map_thinking_level_var = bool(checked)
-            os.environ["GRPC_MAP_THINKING_LEVEL"] = "1" if checked else "0"
-        except Exception:
-            pass
-    grpc_map_cb.toggled.connect(_on_grpc_map_changed)
-    section_v.addWidget(grpc_map_cb)
-
     # Enable thoughts toggle (disabled by default) — placed after level selector
     if not hasattr(self, 'enable_thoughts_var'):
         self.enable_thoughts_var = bool(
@@ -2871,7 +2851,7 @@ def _create_response_handling_section(self, parent):
         self._sync_thoughts_lock_state(True)
     
     # Store reference to description label for enable/disable
-    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3).\nBudget: 0 = disabled (or minimal via eGRPC), 0-32768 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — Gemini 3 Flash supports minimal\nGemini 3.0 Pro (gemini-3-pro-*) does not support medium; Gemini 3.1 Pro supports medium.")
+    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3).\nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — Gemini 3 Flash supports minimal\nGemini 3.0 Pro (gemini-3-pro-*) does not support medium; Gemini 3.1 Pro supports medium.")
     self.gemini_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.gemini_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gemini_desc_label)
@@ -9509,8 +9489,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     gemini_help = QLabel(
         "Auto-detects mode from URL:\n"
         "  • URLs with /openai or http(s):// → OpenAI-compatible REST endpoint\n"
-        "  • Bare hostname (no /openai) → ⚡ Raw gRPC (binary protobuf, HTTP/2)\n"
-        "  Note: gRPC maps Thinking Level → Budget when toggle is enabled"
+        "  • Bare hostname (no /openai) → ⚡ Raw gRPC (binary protobuf, HTTP/2)"
     )
     gemini_help.setStyleSheet("color: gray; font-size: 8pt;")
     gemini_help.setWordWrap(True)

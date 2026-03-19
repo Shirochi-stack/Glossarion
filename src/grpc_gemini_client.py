@@ -217,6 +217,8 @@ class GrpcGeminiClient:
         max_output_tokens: Optional[int] = None,
         safety_disabled: bool = False,
         thinking_budget: int = -1,
+        thinking_level: Optional[str] = None,
+        is_gemini_3: bool = False,
         supports_thinking: bool = False,
         anti_dupe_params: Optional[Dict] = None,
         stop_check_fn=None,
@@ -230,7 +232,9 @@ class GrpcGeminiClient:
             temperature: Sampling temperature  
             max_output_tokens: Max output tokens
             safety_disabled: Whether to disable safety filters
-            thinking_budget: Thinking budget (-1=dynamic, 0=disabled, >0=token count)
+            thinking_budget: Thinking budget for Gemini 2.5 (-1=dynamic, 0=disabled)
+            thinking_level: Thinking level for Gemini 3 (minimal/low/medium/high)
+            is_gemini_3: Whether this is a Gemini 3 model
             supports_thinking: Whether model supports thinking
             anti_dupe_params: Anti-duplicate parameters (top_p, top_k, etc.)
             stop_check_fn: Callable that returns True if operation should stop
@@ -257,7 +261,8 @@ class GrpcGeminiClient:
         gen_config = self._build_generation_config(
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            thinking_budget=thinking_budget if supports_thinking else None,
+            thinking_budget=thinking_budget if supports_thinking and not is_gemini_3 else None,
+            thinking_level=thinking_level if supports_thinking and is_gemini_3 else None,
             anti_dupe_params=anti_dupe_params,
         )
         
@@ -319,6 +324,8 @@ class GrpcGeminiClient:
         max_output_tokens: Optional[int] = None,
         safety_disabled: bool = False,
         thinking_budget: int = -1,
+        thinking_level: Optional[str] = None,
+        is_gemini_3: bool = False,
         supports_thinking: bool = False,
         anti_dupe_params: Optional[Dict] = None,
         stop_check_fn=None,
@@ -343,7 +350,8 @@ class GrpcGeminiClient:
         gen_config = self._build_generation_config(
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            thinking_budget=thinking_budget if supports_thinking else None,
+            thinking_budget=thinking_budget if supports_thinking and not is_gemini_3 else None,
+            thinking_level=thinking_level if supports_thinking and is_gemini_3 else None,
             anti_dupe_params=anti_dupe_params,
         )
         safety_settings = self._build_safety_settings(safety_disabled)
@@ -452,23 +460,16 @@ class GrpcGeminiClient:
                                     grpc_thinking_started = False
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
-                                    # Line-buffered streaming output (matches OAI pattern)
+                                    # Line-buffered streaming output
                                     frag = part.text.replace("\r", "")
                                     combined = "".join(log_buf) + frag
-                                    
-                                    # Inject newlines after HTML closing tags for clean line breaks
-                                    temp_combined = combined
-                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                        temp_combined = temp_combined.replace(tag, tag + '\n')
-                                    
-                                    if "\n" in temp_combined:
-                                        parts_split = temp_combined.split("\n")
-                                        for ln in parts_split[:-1]:
+                                    if "\n" in combined:
+                                        lines = combined.split("\n")
+                                        for ln in lines[:-1]:
                                             print(ln)
-                                        log_buf = [parts_split[-1]]
+                                        log_buf = [lines[-1]]
                                     else:
                                         log_buf.append(frag)
-                                        # Flush if buffer is getting long to show progress
                                         if len("".join(log_buf)) > 150:
                                             print("".join(log_buf), end="", flush=True)
                                             log_buf = []
@@ -604,6 +605,7 @@ class GrpcGeminiClient:
         temperature: Optional[float] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
         anti_dupe_params: Optional[Dict] = None,
     ) -> GenerationConfig:
         """Build GenerationConfig protobuf message"""
@@ -630,12 +632,19 @@ class GrpcGeminiClient:
             if "frequency_penalty" in anti_dupe_params:
                 config_kwargs["frequency_penalty"] = anti_dupe_params["frequency_penalty"]
         
-        # Apply thinking configuration (budget already resolved by caller)
-        if _ThinkingConfig is not None and thinking_budget is not None:
+        # Apply thinking configuration
+        if _ThinkingConfig is not None and (thinking_budget is not None or thinking_level is not None):
             include_thoughts = os.getenv("ENABLE_THOUGHTS", "false").strip().lower() in ("1", "true", "yes", "on")
             thinking_kwargs = {'include_thoughts': include_thoughts}
-            if thinking_budget != -1:
+            if thinking_budget is not None and thinking_budget != -1:
                 thinking_kwargs['thinking_budget'] = thinking_budget
+            elif thinking_level is not None:
+                # Proto only supports thinking_budget (int), not thinking_level
+                level_budget_map = {'minimal': 0, 'low': 4096, 'medium': 12288, 'high': 32768 }
+                level_str = str(thinking_level).lower()
+                budget_val = level_budget_map.get(level_str)
+                if budget_val is not None:
+                    thinking_kwargs['thinking_budget'] = budget_val
             try:
                 config_kwargs['thinking_config'] = _ThinkingConfig(**thinking_kwargs)
             except Exception as e:

@@ -5939,7 +5939,7 @@ CRITICAL EXTRACTION RULES:
                                 interactive=True
                             )
                             
-                            gr.Markdown("*0 = disabled, 0-32768 = limited thinking*", elem_classes=["markdown-small"])
+                            gr.Markdown("*0 = disabled, 512-24576 = limited thinking*", elem_classes=["markdown-small"])
                     
                     gr.Markdown("---")
                     gr.Markdown("🔒 **API keys are encrypted** when saved to config using AES encryption.")

@@ -1311,7 +1311,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
-        self.grpc_map_thinking_level_var = self.config.get('grpc_map_thinking_level', True)
         self.enable_thoughts_var = self.config.get('enable_thoughts', True)
         # NEW: GPT/OpenRouter reasoning controls
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
@@ -11045,7 +11044,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var else "0",
             'THINKING_BUDGET': self.thinking_budget_var if self.enable_gemini_thinking_var else '0',
             'GEMINI_THINKING_LEVEL': getattr(self, 'thinking_level_var', 'high'),
-            'GRPC_MAP_THINKING_LEVEL': '1' if getattr(self, 'grpc_map_thinking_level_var', True) else '0',
             # GPT/OpenRouter reasoning
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
@@ -11315,7 +11313,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['ENABLE_GEMINI_THINKING'] = "1" if self.enable_gemini_thinking_var else "0"
                 os.environ['THINKING_BUDGET'] = self.thinking_budget_var if self.enable_gemini_thinking_var else '0'
                 os.environ['GEMINI_THINKING_LEVEL'] = getattr(self, 'thinking_level_var', 'high')
-                os.environ['GRPC_MAP_THINKING_LEVEL'] = '1' if getattr(self, 'grpc_map_thinking_level_var', True) else '0'
                 # GPT/OpenRouter reasoning
                 os.environ['ENABLE_GPT_THINKING'] = "1" if self.enable_gpt_thinking_var else "0"
                 os.environ['GPT_REASONING_TOKENS'] = self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else ''
@@ -18073,7 +18070,6 @@ Important rules:
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
                 ('thinking_budget', ['thinking_budget_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('thinking_level', ['thinking_level_var'], 'high', str),
-                ('grpc_map_thinking_level', ['grpc_map_thinking_level_var'], True, bool),
                 ('enable_gpt_thinking', ['enable_gpt_thinking_var'], False, bool),
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
@@ -19069,7 +19065,6 @@ Important rules:
                 ('ENABLE_GEMINI_THINKING', '1' if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
                 ('THINKING_BUDGET', str(getattr(self, 'thinking_budget_var', '-1')) if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
                 ('GEMINI_THINKING_LEVEL', getattr(self, 'thinking_level_var', 'high')),
-                ('GRPC_MAP_THINKING_LEVEL', '1' if getattr(self, 'grpc_map_thinking_level_var', True) else '0'),
                 ('ENABLE_GPT_THINKING', '1' if getattr(self, 'enable_gpt_thinking_var', True) else '0'),
                 ('GPT_REASONING_TOKENS', str(getattr(self, 'gpt_reasoning_tokens_var', '2000')) if getattr(self, 'enable_gpt_thinking_var', True) else ''),
                 ('GPT_EFFORT', getattr(self, 'gpt_effort_var', 'medium')),
