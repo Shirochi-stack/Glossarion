@@ -9276,24 +9276,22 @@ def main(log_callback=None, stop_callback=None):
                                 _executor.shutdown(wait=False, cancel_futures=True)
                             except Exception:
                                 pass
-                            # Force-kill any child processes spawned by the executor
+                            # Force-kill ALL child processes spawned by the executor.
+                            # In frozen builds, cmdline matching fails (just shows exe name),
+                            # and during PDF extraction all children belong to our executor.
                             try:
                                 import psutil
                                 _current = psutil.Process(os.getpid())
                                 for _child in _current.children(recursive=True):
                                     try:
-                                        _cmd = " ".join(_child.cmdline())
+                                        _child.kill()
                                     except Exception:
-                                        _cmd = ""
-                                    if "_pdf_extraction_worker" in _cmd or "pdf_extractor" in _cmd or "pdf_extraction_manager" in _cmd:
-                                        try:
-                                            _child.kill()
-                                        except Exception:
-                                            pass
+                                        pass
                             except Exception:
                                 pass
                             print("🛑 PDF extraction cancelled by user")
-                            _drain_log_queue()
+                            # Skip _drain_log_queue() — killing all children also killed the
+                            # Manager process that owns the queue, so queue ops would hang.
                             return
                         _drain_log_queue()
                         # Heartbeat: show a waiting message every 5s while worker initializes
@@ -9311,7 +9309,10 @@ def main(log_callback=None, stop_callback=None):
                     _drain_log_queue()
                     _pdf_ext_result = future.result()
                 finally:
-                    _executor.shutdown(wait=False)
+                    try:
+                        _executor.shutdown(wait=False)
+                    except Exception:
+                        pass
                     # Clean up stop file
                     try:
                         if os.path.exists(_pdf_stop_file):
