@@ -16168,6 +16168,13 @@ class UnifiedClient:
                         error_type="config_error"
                     )
 
+                # 400 Bad Request — permanent error for this key/config, skip same-key retries
+                # but let the caller try fallback keys if available
+                if "400" in error_str and ("INVALID_ARGUMENT" in error_str or "invalid_request_error" in error_str or "Bad Request" in error_str):
+                    print(f"❌ Antigravity: 400 Bad Request (not retrying same key): {error_str[:200]}")
+                    last_error = exc
+                    break
+
                 # Rate limit / quota exhausted
                 if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA_EXHAUSTED" in error_str:
                     if attempt < max_retries - 1:
