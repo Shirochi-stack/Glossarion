@@ -3015,17 +3015,26 @@ class AsyncProcessingDialog:
             # Get API key (AuthGPT models will use OAuth token automatically)
             api_key = self._get_api_key_from_gui()
             
-            # For authgpt/ models: strip prefix for OpenAI Batch API, OAuth token serves as key
+            # AuthGPT OAuth tokens are NOT accepted by OpenAI's Batch API
+            # (requires sk-* secret keys). If user wants async with an authgpt/ model,
+            # they need a real OpenAI API key entered in the API key field.
             is_authgpt = model.lower().startswith('authgpt/')
             if is_authgpt:
-                model = model.split('/', 1)[1]  # authgpt/gpt-4o -> gpt-4o
-                self._log(f"AuthGPT mode: using OpenAI Batch API with model '{model}' and OAuth token")
+                if not api_key or not api_key.startswith('sk-'):
+                    self._show_error(
+                        "AuthGPT models cannot use async batch mode with OAuth tokens.\n\n"
+                        "The OpenAI Batch API requires a secret API key (sk-...).\n"
+                        "ChatGPT OAuth tokens are only accepted by the ChatGPT backend,\n"
+                        "which does not support batch processing.\n\n"
+                        "To use async mode, enter your OpenAI API key in the API key field."
+                    )
+                    return
+                # User provided a real sk-* key — strip authgpt/ prefix and use OpenAI Batch API
+                model = model.split('/', 1)[1]
+                self._log(f"AuthGPT model with OpenAI key: submitting '{model}' to Batch API")
             
             if not api_key:
-                if is_authgpt:
-                    self._show_error("AuthGPT OAuth token could not be obtained.\nPlease log in via the browser when prompted.")
-                else:
-                    self._show_error("API key is required")
+                self._show_error("API key is required")
                 return
                 
             # Prepare environment variables like the main translation
