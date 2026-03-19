@@ -9298,7 +9298,7 @@ def main(log_callback=None, stop_callback=None):
                         _drain_log_queue()
                         # Heartbeat: show a waiting message every 5s while worker initializes
                         _now = time.time()
-                        if not _got_first_log and (_now - _last_heartbeat) >= 5.0:
+                        if not _got_first_log and (_now - _last_heartbeat) >= 3.0:
                             _elapsed = int(_now - _heartbeat_start)
                             print(f"⏳ PDF worker initializing... ({_elapsed}s elapsed)")
                             _last_heartbeat = _now
