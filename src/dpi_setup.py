@@ -1,7 +1,7 @@
-# dpi_setup.py — Windows DPI-scaling bootstrap for PySide6
+# dpi_setup.py — Cross-platform DPI-scaling bootstrap for PySide6
 #
 # Call  dpi_setup.configure()  ONCE, **before** importing any PySide6 modules.
-# Safe to call multiple times (idempotent) and on non-Windows platforms (no-op).
+# Safe to call multiple times (idempotent). Works on Windows, macOS, and Linux.
 #
 # What this does:
 #   1. Sets QT_ENABLE_HIGHDPI_SCALING=0  → disables Qt6 automatic DPI scaling
@@ -27,7 +27,95 @@ except Exception:
 _configured = False
 
 # Default scale factor when config.json has no value
-DEFAULT_SCALE_FACTOR = 1.67
+DEFAULT_SCALE_FACTOR = 1.2
+
+
+def _get_screen_resolution():
+    """Return (width, height) of the primary monitor using stdlib only.
+
+    Windows  → ctypes + GetSystemMetrics
+    macOS    → subprocess + system_profiler (JSON)
+    Linux    → subprocess + xrandr
+    Returns (0, 0) on failure.
+    """
+    width, height = 0, 0
+
+    # ── Windows ────────────────────────────────────────────────────────────
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                try:
+                    user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+            width = user32.GetSystemMetrics(0)
+            height = user32.GetSystemMetrics(1)
+        except Exception:
+            pass
+
+    # ── macOS ──────────────────────────────────────────────────────────────
+    elif sys.platform == "darwin":
+        try:
+            import subprocess, re as _re
+            out = subprocess.check_output(
+                ["system_profiler", "SPDisplaysDataType"],
+                timeout=5, stderr=subprocess.DEVNULL,
+            ).decode("utf-8", errors="replace")
+            # Look for "Resolution: 2560 x 1440" (or Retina variant)
+            m = _re.search(r"Resolution:\s+(\d+)\s*x\s*(\d+)", out)
+            if m:
+                width, height = int(m.group(1)), int(m.group(2))
+        except Exception:
+            pass
+
+    # ── Linux / X11 ────────────────────────────────────────────────────────
+    else:
+        try:
+            import subprocess, re as _re
+            out = subprocess.check_output(
+                ["xrandr", "--current"],
+                timeout=5, stderr=subprocess.DEVNULL,
+            ).decode("utf-8", errors="replace")
+            # Match the *connected primary* line first, fall back to any connected
+            m = _re.search(r"connected primary\s+(\d+)x(\d+)", out)
+            if not m:
+                m = _re.search(r"connected\s+(\d+)x(\d+)", out)
+            if m:
+                width, height = int(m.group(1)), int(m.group(2))
+        except Exception:
+            pass
+
+    return width, height
+
+
+def _get_default_scale_for_resolution():
+    """Return a sensible default scale factor based on the primary monitor's resolution.
+
+    Works on Windows, macOS, and Linux (no PySide6 needed).
+    Falls back to DEFAULT_SCALE_FACTOR if detection fails.
+    """
+    try:
+        width, height = _get_screen_resolution()
+        if width <= 0 or height <= 0:
+            return DEFAULT_SCALE_FACTOR
+
+        # Choose scale factor based on horizontal resolution
+        if width >= 3840:       # 4K (3840×2160)
+            return 1.7
+        elif width >= 2560:     # 1440p / QHD (2560×1440)
+            return 1.2
+        elif width >= 1920:     # 1080p (1920×1080)
+            return 1.0
+        elif width >= 1366:     # 768p / common laptops
+            return 1.0
+        else:                   # 720p or lower
+            return 0.9
+    except Exception:
+        return DEFAULT_SCALE_FACTOR
 
 
 def _read_scale_factor():
@@ -43,7 +131,9 @@ def _read_scale_factor():
         if os.path.isfile(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            val = cfg.get("gui_scale_factor", DEFAULT_SCALE_FACTOR)
+            val = cfg.get("gui_scale_factor", None)
+            if val is None:
+                return _get_default_scale_for_resolution()
             factor = float(val)
             # Clamp to sane range
             if factor < 0.5:
@@ -53,7 +143,7 @@ def _read_scale_factor():
             return factor
     except Exception:
         pass
-    return DEFAULT_SCALE_FACTOR
+    return _get_default_scale_for_resolution()
 
 
 def configure():
