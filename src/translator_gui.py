@@ -16556,10 +16556,10 @@ Important rules:
                     setattr(self, 'auto_glossary_mode_var', mode_val)
                     setattr(self, 'enable_auto_glossary_var', (mode_val not in ('off', 'off_no_automap')))
                     if hasattr(self, 'auto_glossary_mode_combo'):
-                        idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(mode_val, 4)
+                        idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(mode_val, 5)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
                     if hasattr(self, 'auto_glossary_shortcut_combo'):
-                        _shortcut_idx = {'off': 0, 'off_no_automap': 1, 'no_glossary': 2, 'minimal': 3, 'balanced': 4, 'full': 5}.get(mode_val, 0)
+                        _shortcut_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(mode_val, 5)
                         self.auto_glossary_shortcut_combo.blockSignals(True)
                         self.auto_glossary_shortcut_combo.setCurrentIndex(_shortcut_idx)
                         self.auto_glossary_shortcut_combo.blockSignals(False)
