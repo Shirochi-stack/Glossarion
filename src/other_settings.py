@@ -880,6 +880,13 @@ def _sync_thoughts_lock_state(self, stream_thinking_on):
             cb.blockSignals(True)
             cb.setChecked(True)
             cb.blockSignals(False)
+            # Manually show the ✓ overlay since stateChanged didn't fire
+            from PySide6.QtWidgets import QLabel
+            for child in cb.findChildren(QLabel):
+                if child.text() == "✓":
+                    child.setGeometry(2, 1, 14, 14)
+                    child.show()
+                    break
             # Sync var + env + config
             self.enable_thoughts_var = True
             self.config['enable_thoughts'] = True
