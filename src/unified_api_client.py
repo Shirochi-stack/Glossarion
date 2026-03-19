@@ -14348,21 +14348,21 @@ class UnifiedClient:
                         except Exception:
                             pass
                     
-                    # Gemini OpenAI-compatible endpoint: inject thinkingConfig via extra_body
+                    # Gemini OpenAI-compatible endpoint: inject thinking config via extra_body
                     if provider == 'gemini-openai':
                         try:
                             enable_gemini_think = os.getenv('ENABLE_GEMINI_THINKING', '1') == '1'
                             if enable_gemini_think:
-                                # Detect Gemini 3+ vs 2.5 for thinkingLevel vs thinkingBudget
+                                # Detect Gemini 3+ vs 2.5 for thinking_level vs thinking_budget
                                 model_lower = (effective_model or '').lower()
                                 is_g3 = 'gemini-3' in model_lower or 'gemini3' in model_lower
                                 
-                                thinking_cfg = {"includeThoughts": True}
+                                thinking_cfg = {"include_thoughts": True}
                                 if is_g3:
                                     level = os.getenv('GEMINI_THINKING_LEVEL', 'high').strip().upper()
                                     if level not in ('LOW', 'MEDIUM', 'HIGH'):
                                         level = 'HIGH'
-                                    thinking_cfg["thinkingLevel"] = level
+                                    thinking_cfg["thinking_level"] = level
                                 else:
                                     budget_str = os.getenv('THINKING_BUDGET', '-1').strip()
                                     try:
@@ -14370,13 +14370,13 @@ class UnifiedClient:
                                     except ValueError:
                                         budget = -1
                                     if budget > 0:
-                                        thinking_cfg["thinkingBudget"] = budget
+                                        thinking_cfg["thinking_budget"] = budget
                                     # budget -1 = dynamic (server default), budget 0 = disabled
                                     elif budget == 0:
                                         thinking_cfg = {}  # No thinking
                                 
                                 if thinking_cfg:
-                                    extra_body["thinkingConfig"] = thinking_cfg
+                                    extra_body["google"] = {"thinking_config": thinking_cfg}
                                     
                                     # Log once per thread
                                     try:
