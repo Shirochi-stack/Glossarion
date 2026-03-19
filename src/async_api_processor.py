@@ -1582,21 +1582,6 @@ class AsyncProcessingDialog:
                 border-radius: 3px;
                 padding: 4px;
             }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #3d3d3d;
-                border: 1px solid #4a5568;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #4d4d4d;
-            }
-            QSpinBox::up-arrow {
-                width: 8px;
-                height: 8px;
-            }
-            QSpinBox::down-arrow {
-                width: 8px;
-                height: 8px;
-            }
         """)
 
         # Override close behavior: hide instead of closing to preserve state
