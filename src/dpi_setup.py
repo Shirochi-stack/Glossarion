@@ -196,7 +196,7 @@ def _get_default_scale_for_resolution():
         if width >= 3840:       # 4K (3840×2160)
             return 1.7
         elif width >= 2560:     # 1440p / QHD (2560×1440)
-            return 1.2
+            return 1.15
         elif width >= 1920:     # 1080p (1920×1080)
             return 1.0
         elif width >= 1366:     # 768p / common laptops
