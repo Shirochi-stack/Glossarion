@@ -196,6 +196,7 @@ app_files = [
 	
 	('enhanced_text_extractor.py', '.'),	
 	('pdf_extractor.py', '.'),
+	('_pdf_extraction_worker.py', '.'),
 	
 	('multi_api_key_manager.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
@@ -424,6 +425,7 @@ app_modules = [
 	'review_generator',
 	'enhanced_text_extractor.py',
 	'pdf_extractor',
+	'_pdf_extraction_worker',
 	'multi_api_key_manager.py',
 	'individual_endpoint_dialog.py',
 	'bubble_detector', 
