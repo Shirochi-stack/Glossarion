@@ -470,7 +470,19 @@ class GrpcGeminiClient:
                                             grpc_thinking_buf = []
                                         thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
                                         print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                                    # else: thinking was < 0.5s, discard silently
+                                    else:
+                                        # Thinking finished before 0.5s threshold — still flush deferred content
+                                        thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
+                                        if grpc_thinking_deferred_lines or grpc_thinking_buf:
+                                            print(f"🧠 [gemini-grpc] Thinking ({thinking_dur:.1f}s)...", flush=True)
+                                            for dl in grpc_thinking_deferred_lines:
+                                                print(f"    {dl}", flush=True)
+                                            if grpc_thinking_buf:
+                                                remaining = "".join(grpc_thinking_buf)
+                                                if remaining.strip():
+                                                    print(f"    {remaining}", flush=True)
+                                                grpc_thinking_buf = []
+                                            print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                     grpc_thinking_started = False
                                     grpc_thinking_deferred_lines = []
                                 text_parts.append(part.text)

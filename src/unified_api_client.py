@@ -12657,6 +12657,7 @@ class UnifiedClient:
                             gemini_thinking_flushed = False  # True once 0.5s passed and buffer was printed
                             gemini_thinking_deferred_lines = []  # holds lines until threshold
                             _THINKING_THRESHOLD = 0.5
+                            import time as _t
                             for evt in stream:
                                 response = evt  # keep last event for debugging
                                 cands = getattr(evt, 'candidates', None)
@@ -12715,7 +12716,19 @@ class UnifiedClient:
                                                             gemini_thinking_buf = []
                                                         thinking_dur = _t.time() - gemini_thinking_start_ts if gemini_thinking_start_ts else 0
                                                         print(f"🧠 [gemini-native] Thinking complete ({gemini_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                                                    # else: thinking was < 0.5s, discard silently
+                                                    else:
+                                                        # Thinking finished before 0.5s threshold — still flush deferred content
+                                                        thinking_dur = _t.time() - gemini_thinking_start_ts if gemini_thinking_start_ts else 0
+                                                        if gemini_thinking_deferred_lines or gemini_thinking_buf:
+                                                            print(f"🧠 [gemini-native] Thinking ({thinking_dur:.1f}s)...", flush=True)
+                                                            for dl in gemini_thinking_deferred_lines:
+                                                                print(f"    {dl}", flush=True)
+                                                            if gemini_thinking_buf:
+                                                                remaining = "".join(gemini_thinking_buf)
+                                                                if remaining.strip():
+                                                                    print(f"    {remaining}", flush=True)
+                                                                gemini_thinking_buf = []
+                                                            print(f"🧠 [gemini-native] Thinking complete ({gemini_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                                     gemini_thinking_started = False  # prevent re-printing
                                                     gemini_thinking_deferred_lines = []
                                                 text_parts.append(part.text)
@@ -13533,7 +13546,19 @@ class UnifiedClient:
                                     thinking_buf = []
                                 thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
                                 print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
-                            # else: thinking was < 0.5s, discard silently
+                            else:
+                                # Thinking finished before 0.5s threshold — still flush deferred content
+                                thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
+                                if thinking_deferred_lines or thinking_buf:
+                                    print(f"🧠 [anthropic] Thinking ({thinking_dur:.1f}s)...", flush=True)
+                                    for dl in thinking_deferred_lines:
+                                        print(f"    {dl}", flush=True)
+                                    if thinking_buf:
+                                        remaining = "".join(thinking_buf)
+                                        if remaining.strip():
+                                            print(f"    {remaining}", flush=True)
+                                        thinking_buf = []
+                                    print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
                             thinking_deferred_lines = []
                         current_block_type = None
 
@@ -14884,7 +14909,19 @@ class UnifiedClient:
                                                     oai_thinking_buf = []
                                                 thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
                                                 print(f"🧠 [{provider}] Thinking complete ({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                                            # else: thinking was < 0.5s, discard silently
+                                            else:
+                                                # Thinking finished before 0.5s threshold — still flush deferred content
+                                                thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
+                                                if oai_thinking_deferred_lines or oai_thinking_buf:
+                                                    print(f"🧠 [{provider}] Thinking ({thinking_dur:.1f}s)...", flush=True)
+                                                    for dl in oai_thinking_deferred_lines:
+                                                        print(f"    {dl}", flush=True)
+                                                    if oai_thinking_buf:
+                                                        remaining = "".join(oai_thinking_buf)
+                                                        if remaining.strip():
+                                                            print(f"    {remaining}", flush=True)
+                                                        oai_thinking_buf = []
+                                                    print(f"🧠 [{provider}] Thinking complete ({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                             oai_thinking_started = False
                                             oai_thinking_deferred_lines = []
 
