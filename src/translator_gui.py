@@ -5288,7 +5288,7 @@ Recent translations to summarize:
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
         _gloss_row_layout = QHBoxLayout(self._gloss_status_row)
-        _gloss_row_layout.setContentsMargins(0, 0, 0, 8)
+        _gloss_row_layout.setContentsMargins(0, 0, 8, 8)
         _gloss_row_layout.setSpacing(6)
 
         self.manual_glossary_status_label = QLabel("")
@@ -5305,7 +5305,7 @@ Recent translations to summarize:
         self.clear_manual_glossary_btn.setStyleSheet("""
             QPushButton {
                 background: transparent; color: #ff6b6b; border: 1px solid #ff6b6b;
-                border-radius: 3px; font-size: 8pt; font-weight: bold; padding: 0 6px;
+                border-radius: 3px; font-size: 8pt; font-weight: bold; padding: 0;
             }
             QPushButton:hover { background: #ff6b6b; color: #1a1a2e; }
         """)
