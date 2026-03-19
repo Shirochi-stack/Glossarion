@@ -1311,7 +1311,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
-        self.enable_thoughts_var = self.config.get('enable_thoughts', False)
+        self.enable_thoughts_var = self.config.get('enable_thoughts', True)
         # NEW: GPT/OpenRouter reasoning controls
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
         self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
@@ -1401,6 +1401,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         if self.use_thread_pool_extraction_var:
             print(f"⚡ Thread pool extraction: ENABLED (fast I/O mode)")
         # Sync ENABLE_THOUGHTS env with config on startup
+        # Force thoughts ON when stream thinking logs are enabled (matches UI lock behavior)
+        if getattr(self, 'stream_thinking_logs_var', False):
+            self.enable_thoughts_var = True
+            self.config['enable_thoughts'] = True
         os.environ['ENABLE_THOUGHTS'] = '1' if self.enable_thoughts_var else '0'
         
         # Initialize the executor based on current settings
@@ -17975,7 +17979,7 @@ Important rules:
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
-                ('enable_thoughts', ['enable_thoughts_var'], False, bool),
+                ('enable_thoughts', ['enable_thoughts_var'], True, bool),
                 ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
@@ -18821,7 +18825,7 @@ Important rules:
                 ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if self.config.get('allow_authgpt_batch_stream_logs', False) else '0'),
-                ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', False) else '0'),
+                ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
                 ('STREAM_THINKING_LOGS', '1' if self.config.get('stream_thinking_logs', True) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 

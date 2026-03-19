@@ -339,6 +339,7 @@ def setup_other_settings_methods(gui_instance):
         # Other settings methods
         'configure_rolling_summary_prompts', 'toggle_thinking_budget', 
         'toggle_gpt_reasoning_controls', 'toggle_anthropic_thinking_controls',
+        '_sync_thoughts_lock_state',
         'open_other_settings',
         'open_multi_api_key_manager', 'show_ai_hunter_settings',
         'delete_translated_headers_file', 'delete_toc_txt_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
@@ -862,6 +863,61 @@ def toggle_thinking_budget(self):
             self.gemini_desc_label.setEnabled(enabled)
             color = "gray" if enabled else "#606060"
             self.gemini_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
+    except Exception:
+        pass
+
+def _sync_thoughts_lock_state(self, stream_thinking_on):
+    """Lock/unlock the 'Enable thoughts' toggle based on stream thinking state.
+
+    When stream thinking is ON the thoughts toggle is force-checked, styled
+    purple (#b388ff) with a 🔒 prefix, and made non-interactive — matching
+    the auto-glossary lock pattern in GlossaryManager_GUI.
+    """
+    try:
+        cb = self.enable_thoughts_checkbox
+        if stream_thinking_on:
+            # Force-check and lock
+            cb.blockSignals(True)
+            cb.setChecked(True)
+            cb.blockSignals(False)
+            # Sync var + env + config
+            self.enable_thoughts_var = True
+            self.config['enable_thoughts'] = True
+            os.environ['ENABLE_THOUGHTS'] = '1'
+            # Purple lock styling — include full indicator overrides so the
+            # parent container's QCheckBox::indicator styles are not lost
+            if not hasattr(cb, '_original_text'):
+                cb._original_text = cb.text()
+            if not cb.text().startswith('🔒'):
+                cb.setText(f"🔒 {cb._original_text}")
+            cb.setEnabled(False)
+            cb.setStyleSheet("""
+                QCheckBox { color: #b388ff; }
+                QCheckBox::indicator {
+                    width: 14px; height: 14px;
+                    border: 1px solid #b388ff;
+                    border-radius: 2px;
+                    background-color: #b388ff;
+                }
+                QCheckBox::indicator:disabled {
+                    background-color: #b388ff;
+                    border-color: #b388ff;
+                }
+            """)
+            cb._mode_locked = True
+        else:
+            # Unlock — restore original text and interactivity
+            if getattr(cb, '_mode_locked', False):
+                if hasattr(cb, '_original_text'):
+                    cb.setText(cb._original_text)
+                cb.setEnabled(True)
+                # Clear inline stylesheet so parent container styles take over
+                cb.setStyleSheet("")
+                # Force Qt to re-read the parent stylesheet
+                cb.style().unpolish(cb)
+                cb.style().polish(cb)
+                cb.update()
+                cb._mode_locked = False
     except Exception:
         pass
 
@@ -2460,31 +2516,6 @@ def _create_response_handling_section(self, parent):
             pass
     self.allow_batch_stream_logs_checkbox.toggled.connect(_on_allow_batch_stream_logs_toggle)
 
-    def _on_streaming_toggle(checked):
-        try:
-            self.enable_streaming_var = bool(checked)
-            # Keep environment in sync immediately
-            os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
-            # Enable/disable logs toggle based on streaming state
-            self.allow_batch_stream_logs_checkbox.setEnabled(checked)
-            # Force style update to ensure visual state (color) updates immediately
-            self.allow_batch_stream_logs_checkbox.style().unpolish(self.allow_batch_stream_logs_checkbox)
-            self.allow_batch_stream_logs_checkbox.style().polish(self.allow_batch_stream_logs_checkbox)
-        except Exception:
-            pass
-    self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
-    
-    # Initialize state (scheduled to run after widget construction)
-    from PySide6.QtCore import QTimer
-    QTimer.singleShot(0, lambda: _on_streaming_toggle(self.enable_streaming_checkbox.isChecked()))
-
-    section_v.addWidget(self.enable_streaming_checkbox)
-    streaming_warn = QLabel("⚠️ Enabling this may result in silent truncation")
-    streaming_warn.setStyleSheet("color: #f59e0b; font-size: 9pt;")
-    streaming_warn.setContentsMargins(20, 0, 0, 4)
-    section_v.addWidget(streaming_warn)
-    section_v.addWidget(self.allow_batch_stream_logs_checkbox)
-
     # Stream thinking/reasoning logs toggle
     if not hasattr(self, 'stream_thinking_logs_var'):
         self.stream_thinking_logs_var = bool(
@@ -2515,10 +2546,38 @@ def _create_response_handling_section(self, parent):
             self.stream_thinking_logs_var = bool(checked)
             self.config['stream_thinking_logs'] = self.stream_thinking_logs_var
             os.environ['STREAM_THINKING_LOGS'] = '1' if checked else '0'
+            # Force-enable and lock the thoughts toggle when stream thinking is ON
+            if hasattr(self, 'enable_thoughts_checkbox'):
+                self._sync_thoughts_lock_state(checked)
         except Exception:
             pass
     self.stream_thinking_logs_checkbox.toggled.connect(_on_stream_thinking_logs_toggle)
+
+    def _on_streaming_toggle(checked):
+        try:
+            self.enable_streaming_var = bool(checked)
+            # Keep environment in sync immediately
+            os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
+            # Enable/disable logs toggle based on streaming state
+            self.allow_batch_stream_logs_checkbox.setEnabled(checked)
+            # Force style update to ensure visual state (color) updates immediately
+            self.allow_batch_stream_logs_checkbox.style().unpolish(self.allow_batch_stream_logs_checkbox)
+            self.allow_batch_stream_logs_checkbox.style().polish(self.allow_batch_stream_logs_checkbox)
+        except Exception:
+            pass
+    self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
+    
+    # Initialize state (scheduled to run after widget construction)
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, lambda: _on_streaming_toggle(self.enable_streaming_checkbox.isChecked()))
+
+    section_v.addWidget(self.enable_streaming_checkbox)
+    streaming_warn = QLabel("⚠️ Enabling this may result in silent truncation")
+    streaming_warn.setStyleSheet("color: #f59e0b; font-size: 9pt;")
+    streaming_warn.setContentsMargins(20, 0, 0, 4)
+    section_v.addWidget(streaming_warn)
     section_v.addWidget(self.stream_thinking_logs_checkbox)
+    section_v.addWidget(self.allow_batch_stream_logs_checkbox)
 
     # AuthGPT (ChatGPT Subscription) batch stream log toggle
     section_v.addSpacing(6)
@@ -2745,13 +2804,14 @@ def _create_response_handling_section(self, parent):
         self.enable_thoughts_var = bool(
             self.config.get(
                 'enable_thoughts',
-                str(os.environ.get('ENABLE_THOUGHTS', '0')) == '1'
+                str(os.environ.get('ENABLE_THOUGHTS', '1')) == '1'
             )
         )
     thoughts_row = QWidget()
     thoughts_h = QHBoxLayout(thoughts_row)
     thoughts_h.setContentsMargins(20, 2, 0, 0)
     enable_thoughts_cb = self._create_styled_checkbox("Enable thoughts (include model reasoning metadata)")
+    self.enable_thoughts_checkbox = enable_thoughts_cb  # Store ref for lock/unlock
     enable_thoughts_cb.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Adds model reasoning thoughts metadata to responses when supported. "
@@ -2763,6 +2823,12 @@ def _create_response_handling_section(self, parent):
         enable_thoughts_cb.setChecked(False)
     def _on_enable_thoughts_toggle(checked):
         try:
+            # Ignore user unchecks while locked by stream thinking
+            if getattr(enable_thoughts_cb, '_mode_locked', False) and not checked:
+                enable_thoughts_cb.blockSignals(True)
+                enable_thoughts_cb.setChecked(True)
+                enable_thoughts_cb.blockSignals(False)
+                return
             self.enable_thoughts_var = bool(checked)
             self.config['enable_thoughts'] = self.enable_thoughts_var
             os.environ['ENABLE_THOUGHTS'] = '1' if checked else '0'
@@ -2772,6 +2838,10 @@ def _create_response_handling_section(self, parent):
     thoughts_h.addWidget(enable_thoughts_cb)
     thoughts_h.addStretch()
     section_v.addWidget(thoughts_row)
+
+    # Apply initial lock state if stream thinking is already enabled
+    if getattr(self, 'stream_thinking_logs_var', False):
+        self._sync_thoughts_lock_state(True)
     
     # Store reference to description label for enable/disable
     self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3).\nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — Gemini 3 Flash supports minimal\nGemini 3.0 Pro (gemini-3-pro-*) does not support medium; Gemini 3.1 Pro supports medium.")
