@@ -1104,7 +1104,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.1.4"
+        __version__ = "8.1.5"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1179,7 +1179,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.4')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.1.5')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2867,6 +2867,7 @@ Recent translations to summarize:
             # Preserve streaming logs during batch mode; must be initialized here so save_config
             # keeps the user's choice even if the Other Settings dialog is never opened.
             ('allow_batch_stream_logs_var', 'allow_batch_stream_logs', False),
+            ('stream_thinking_logs_var', 'stream_thinking_logs', True),
             ('html2text_escape_snob_var', 'html2text_escape_snob', False),
 
         ]
@@ -3112,7 +3113,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.1.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.1.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -18117,6 +18118,7 @@ Important rules:
                 ('ignore_retry_after', ['ignore_retry_after_checkbox', 'ignore_retry_after_var'], False, bool),
                 ('enable_streaming', ['enable_streaming_checkbox', 'enable_streaming_var'], False, bool),
                 ('allow_batch_stream_logs', ['allow_batch_stream_logs_checkbox', 'allow_batch_stream_logs_var'], False, bool),
+                ('stream_thinking_logs', ['stream_thinking_logs_checkbox', 'stream_thinking_logs_var'], True, bool),
                 ('max_retries', ['max_retries_var'], 3, lambda v: safe_int(v, 3)),
                 ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
 
@@ -18790,6 +18792,7 @@ Important rules:
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if self.config.get('allow_authgpt_batch_stream_logs', False) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', False) else '0'),
+                ('STREAM_THINKING_LOGS', '1' if self.config.get('stream_thinking_logs', True) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 
                 # General settings
@@ -19294,7 +19297,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.1.4...")
+    print("🚀 Starting Glossarion v8.1.5...")
     
     # Initialize splash screen
     splash_manager = None

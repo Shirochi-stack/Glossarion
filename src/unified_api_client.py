@@ -12648,6 +12648,12 @@ class UnifiedClient:
                                 log_stream = False
                             log_buf = []
                             log_flush_len = 240
+                            # Thinking streaming state
+                            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                            gemini_thinking_started = False
+                            gemini_thinking_buf = []
+                            gemini_thinking_chunks = 0
+                            gemini_thinking_start_ts = None
                             for evt in stream:
                                 response = evt  # keep last event for debugging
                                 cands = getattr(evt, 'candidates', None)
@@ -12661,7 +12667,39 @@ class UnifiedClient:
                                     parts = getattr(content_obj, 'parts', None)
                                     if parts:
                                         for part in parts:
+                                            # Check for thinking/thought parts
+                                            is_thought = getattr(part, 'thought', False)
+                                            if is_thought and hasattr(part, 'text') and part.text:
+                                                gemini_thinking_chunks += 1
+                                                if gemini_thinking_start_ts is None:
+                                                    gemini_thinking_start_ts = _t.time()
+                                                if not gemini_thinking_started and stream_thinking and not self._is_stop_requested():
+                                                    gemini_thinking_started = True
+                                                    print(f"🧠 [gemini-native] Thinking...", flush=True)
+                                                if stream_thinking and log_stream and not self._is_stop_requested():
+                                                    combined = "".join(gemini_thinking_buf) + part.text
+                                                    if "\n" in combined:
+                                                        tparts = combined.split("\n")
+                                                        for p in tparts[:-1]:
+                                                            print(f"    {p}", flush=True)
+                                                        gemini_thinking_buf = [tparts[-1]]
+                                                    else:
+                                                        gemini_thinking_buf.append(part.text)
+                                                        if len("".join(gemini_thinking_buf)) > 150:
+                                                            print(f"    {''.join(gemini_thinking_buf)}", end="", flush=True)
+                                                            gemini_thinking_buf = []
+                                                continue
                                             if hasattr(part, 'text') and part.text:
+                                                # If we were in thinking mode, flush and close it
+                                                if gemini_thinking_started and stream_thinking and not self._is_stop_requested():
+                                                    if gemini_thinking_buf:
+                                                        remaining = "".join(gemini_thinking_buf)
+                                                        if remaining.strip():
+                                                            print(f"    {remaining}", flush=True)
+                                                        gemini_thinking_buf = []
+                                                    thinking_dur = _t.time() - gemini_thinking_start_ts if gemini_thinking_start_ts else 0
+                                                    print(f"🧠 [gemini-native] Thinking complete ({gemini_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                                    gemini_thinking_started = False  # prevent re-printing
                                                 text_parts.append(part.text)
                                                 if log_stream and not self._is_stop_requested():
                                                     frag = part.text.replace("\r", "")
@@ -13395,9 +13433,11 @@ class UnifiedClient:
                         cb = evt.get("content_block", {})
                         current_block_type = cb.get("type", "")
                         if current_block_type == "thinking" and not self._is_stop_requested():
+                            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
                             if not thinking_started:
                                 thinking_started = True
-                                print(f"🧠 [anthropic] Thinking...", flush=True)
+                                if stream_thinking:
+                                    print(f"🧠 [anthropic] Thinking...", flush=True)
 
                     # content_block_delta → text or thinking fragment
                     elif evt_type == "content_block_delta":
@@ -13434,30 +13474,32 @@ class UnifiedClient:
                                 first_thinking_ts = _t.time()
                             # Stream thinking text to log in real-time
                             thinking_text = delta.get("thinking", "")
-                            if thinking_text and log_stream and not self._is_stop_requested():
+                            if thinking_text and log_stream and not self._is_stop_requested() and stream_thinking:
                                 combined = "".join(thinking_buf) + thinking_text
                                 if "\n" in combined:
                                     parts = combined.split("\n")
                                     for p in parts[:-1]:
-                                        print(f"  💭 {p}", flush=True)
+                                        print(f"    {p}", flush=True)
                                     thinking_buf = [parts[-1]]
                                 else:
                                     thinking_buf.append(thinking_text)
                                     if len("".join(thinking_buf)) > 150:
-                                        print(f"  💭 {''.join(thinking_buf)}", end="", flush=True)
+                                        print(f"    {''.join(thinking_buf)}", end="", flush=True)
                                         thinking_buf = []
 
                     # content_block_stop → flush thinking buffer & reset block type
                     elif evt_type == "content_block_stop":
                         if current_block_type == "thinking" and not self._is_stop_requested():
-                            # Flush remaining thinking buffer
-                            if thinking_buf:
-                                remaining = "".join(thinking_buf)
-                                if remaining.strip():
-                                    print(f"  💭 {remaining}", flush=True)
-                                thinking_buf = []
-                            thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
-                            print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
+                            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                            if stream_thinking:
+                                # Flush remaining thinking buffer
+                                if thinking_buf:
+                                    remaining = "".join(thinking_buf)
+                                    if remaining.strip():
+                                        print(f"    {remaining}", flush=True)
+                                    thinking_buf = []
+                                thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
+                                print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
                         current_block_type = None
 
                     # message_delta → stop reason + usage
@@ -14708,6 +14750,12 @@ class UnifiedClient:
                         text_parts = []
                         log_buf = []  # Always define to avoid UnboundLocalError
                         finish_reason = 'stop'
+                        # Thinking/reasoning streaming state
+                        oai_stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                        oai_thinking_started = False
+                        oai_thinking_buf = []
+                        oai_thinking_chunks = 0
+                        oai_thinking_start_ts = None
 
                         def _check_cancel_during_stream():
                             if self._is_stop_requested():
@@ -14744,12 +14792,49 @@ class UnifiedClient:
                                         delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
 
                                     if delta is not None:
+                                        # Check for reasoning_content (DeepSeek, OpenRouter, etc.)
+                                        reasoning_frag = None
+                                        if isinstance(delta, dict):
+                                            reasoning_frag = delta.get("reasoning_content") or delta.get("reasoning")
+                                        else:
+                                            reasoning_frag = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                                        if reasoning_frag and isinstance(reasoning_frag, str):
+                                            oai_thinking_chunks += 1
+                                            if oai_thinking_start_ts is None:
+                                                oai_thinking_start_ts = _t.time()
+                                            if not oai_thinking_started and oai_stream_thinking and not self._is_stop_requested():
+                                                oai_thinking_started = True
+                                                print(f"🧠 [{provider}] Thinking...", flush=True)
+                                            if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                                combined = "".join(oai_thinking_buf) + reasoning_frag
+                                                if "\n" in combined:
+                                                    tparts = combined.split("\n")
+                                                    for p in tparts[:-1]:
+                                                        print(f"    {p}", flush=True)
+                                                    oai_thinking_buf = [tparts[-1]]
+                                                else:
+                                                    oai_thinking_buf.append(reasoning_frag)
+                                                    if len("".join(oai_thinking_buf)) > 150:
+                                                        print(f"    {''.join(oai_thinking_buf)}", end="", flush=True)
+                                                        oai_thinking_buf = []
+
                                         # Handle both object and dict access for content
                                         delta_content = None
                                         if isinstance(delta, dict):
                                             delta_content = delta.get("content")
                                         else:
                                             delta_content = getattr(delta, "content", None)
+
+                                        # If switching from thinking to text, flush thinking
+                                        if delta_content and oai_thinking_started and oai_stream_thinking and not self._is_stop_requested():
+                                            if oai_thinking_buf:
+                                                remaining = "".join(oai_thinking_buf)
+                                                if remaining.strip():
+                                                    print(f"    {remaining}", flush=True)
+                                                oai_thinking_buf = []
+                                            thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
+                                            print(f"🧠 [{provider}] Thinking complete ({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                            oai_thinking_started = False
 
                                         if isinstance(delta_content, list):
                                             for part in delta_content:

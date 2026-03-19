@@ -2485,6 +2485,41 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(streaming_warn)
     section_v.addWidget(self.allow_batch_stream_logs_checkbox)
 
+    # Stream thinking/reasoning logs toggle
+    if not hasattr(self, 'stream_thinking_logs_var'):
+        self.stream_thinking_logs_var = bool(
+            self.config.get(
+                'stream_thinking_logs',
+                str(os.environ.get('STREAM_THINKING_LOGS', '1')) == '1'
+            )
+        )
+    try:
+        self.config['stream_thinking_logs'] = bool(self.stream_thinking_logs_var)
+    except Exception:
+        pass
+    self.stream_thinking_logs_checkbox = self._create_styled_checkbox(
+        "Stream thinking/reasoning logs"
+    )
+    self.stream_thinking_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
+        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, and Antigravity. "
+        "Disable to suppress thinking output and only show final text.</p></qt>"
+    )
+    try:
+        self.stream_thinking_logs_checkbox.setChecked(bool(self.stream_thinking_logs_var))
+    except Exception:
+        pass
+    def _on_stream_thinking_logs_toggle(checked):
+        try:
+            self.stream_thinking_logs_var = bool(checked)
+            self.config['stream_thinking_logs'] = self.stream_thinking_logs_var
+            os.environ['STREAM_THINKING_LOGS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.stream_thinking_logs_checkbox.toggled.connect(_on_stream_thinking_logs_toggle)
+    section_v.addWidget(self.stream_thinking_logs_checkbox)
+
     # AuthGPT (ChatGPT Subscription) batch stream log toggle
     section_v.addSpacing(6)
     if not hasattr(self, 'allow_authgpt_batch_stream_logs_var'):

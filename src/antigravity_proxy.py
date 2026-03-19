@@ -976,6 +976,13 @@ def send_message_stream(
     usage = None
     got_first_data = False
     log_buf: list = []
+    # Thinking streaming state
+    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+    ag_thinking_started = False
+    ag_thinking_buf: list = []
+    ag_thinking_chunks = 0
+    ag_thinking_start_ts = None
+    ag_current_block_type = None
 
     # httpx iter_lines() yields str directly; requests iter_lines needs chunk_size=1
     line_iter = resp.iter_lines() if use_httpx else resp.iter_lines(decode_unicode=True, chunk_size=1)
@@ -1004,9 +1011,51 @@ def send_message_stream(
 
         event_type = event.get("type", "")
 
-        if event_type == "content_block_delta":
+        # Track block types for thinking detection
+        if event_type == "content_block_start":
+            cb = event.get("content_block", {})
+            ag_current_block_type = cb.get("type", "")
+            if ag_current_block_type == "thinking" and stream_thinking:
+                if not ag_thinking_started:
+                    ag_thinking_started = True
+                    _log("🧠 [antigravity] Thinking...")
+
+        elif event_type == "content_block_stop":
+            if ag_current_block_type == "thinking" and stream_thinking and ag_thinking_started:
+                # Flush remaining thinking buffer
+                if ag_thinking_buf:
+                    remaining = "".join(ag_thinking_buf)
+                    if remaining.strip():
+                        _log(f"    {remaining}")
+                    ag_thinking_buf = []
+                thinking_dur = time.time() - ag_thinking_start_ts if ag_thinking_start_ts else 0
+                _log(f"🧠 [antigravity] Thinking complete ({ag_thinking_chunks} chunks, {thinking_dur:.1f}s)")
+                ag_thinking_started = False
+            ag_current_block_type = None
+
+        elif event_type == "content_block_delta":
             delta = event.get("delta", {})
-            if delta.get("type") == "text_delta":
+            delta_type = delta.get("type", "")
+
+            if delta_type == "thinking_delta":
+                ag_thinking_chunks += 1
+                if ag_thinking_start_ts is None:
+                    ag_thinking_start_ts = time.time()
+                thinking_text = delta.get("thinking", "")
+                if thinking_text and log_stream and stream_thinking:
+                    combined = "".join(ag_thinking_buf) + thinking_text
+                    if "\n" in combined:
+                        parts = combined.split("\n")
+                        for part in parts[:-1]:
+                            _log(f"    {part}")
+                        ag_thinking_buf = [parts[-1]]
+                    else:
+                        ag_thinking_buf.append(thinking_text)
+                        if len("".join(ag_thinking_buf)) > 150:
+                            _log(f"    {''.join(ag_thinking_buf)}")
+                            ag_thinking_buf = []
+
+            elif delta_type == "text_delta":
                 text = delta.get("text", "")
                 collected_content.append(text)
                 # Real-time stream logging (HTML-tag-aware line buffering)
