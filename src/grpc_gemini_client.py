@@ -433,11 +433,11 @@ class GrpcGeminiClient:
                                     if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
                                         print(f"🧠 [gemini-grpc] Thinking...", flush=True)
                                 if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
-                                    thought_text = part.text.replace("\\n", "\n")
-                                    for line in thought_text.split("\n"):
-                                        # Add blank line before bold section headers for readability
-                                        if line.strip().startswith("**"):
-                                            print(flush=True)
+                                    # gRPC delivers each thinking section as a separate chunk
+                                    # with no separator between them - add blank line between chunks
+                                    if grpc_thinking_chunks > 1:
+                                        print(flush=True)
+                                    for line in part.text.split("\n"):
                                         print(f"    {line}", flush=True)
                                 continue
                             if part.text:
