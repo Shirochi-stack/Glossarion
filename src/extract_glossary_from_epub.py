@@ -3832,9 +3832,7 @@ def main(log_callback=None, stop_callback=None):
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
-                    # Log the final size after deduplication
-                    removed = max(0, original_size - len(glossary))
-                    print(f"✅ Saved {len(glossary)} entries (after {removed} duplicates removed) before exit")
+                    print(f"✅ Saved {len(glossary)} entries before exit")
                 return
             
             # Get current batch of units
