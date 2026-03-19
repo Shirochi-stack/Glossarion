@@ -3978,7 +3978,7 @@ class AsyncProcessingDialog:
             base_name = os.path.splitext(os.path.basename(source_path))[0]
             
             # Check for override
-            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.gui.config.get('output_directory')
             if override_dir:
                 output_dir = os.path.join(override_dir, base_name)
             else:
