@@ -14348,20 +14348,30 @@ class UnifiedClient:
                         except Exception:
                             pass
                     
-                    # Gemini OpenAI-compatible endpoint: use reasoning_effort parameter
-                    gemini_reasoning_effort = None
+                    # Gemini OpenAI-compatible endpoint: inject thinking_config via extra_body
+                    # NOTE: reasoning_effort and thinking_config CANNOT be used together;
+                    # we use thinking_config exclusively so we can also set include_thoughts.
                     if provider == 'gemini-openai':
                         try:
                             enable_gemini_think = os.getenv('ENABLE_GEMINI_THINKING', '1') == '1'
                             if enable_gemini_think:
-                                # Map GEMINI_THINKING_LEVEL env var to reasoning_effort
-                                # Supported values: low, medium, high (and "none" to disable on 2.5)
                                 level = os.getenv('GEMINI_THINKING_LEVEL', 'high').strip().lower()
                                 if level == 'minimal':
                                     level = 'none'
                                 if level not in ('low', 'medium', 'high', 'none'):
                                     level = 'high'
-                                gemini_reasoning_effort = level
+                                
+                                stream_thoughts = os.getenv('STREAM_THINKING_LOGS', '1') == '1'
+                                
+                                if level != 'none':
+                                    thinking_cfg = {"thinking_level": level.upper()}
+                                    if stream_thoughts:
+                                        thinking_cfg["include_thoughts"] = True
+                                    extra_body["extra_body"] = {
+                                        "google": {
+                                            "thinking_config": thinking_cfg
+                                        }
+                                    }
                                 
                                 # Log once per thread
                                 try:
@@ -14376,7 +14386,7 @@ class UnifiedClient:
                                         except Exception:
                                             tname = "unknown-thread"
                                         self._debug_log(
-                                            f"🧠 [gemini-openai:{tname}] reasoning_effort={level} (model={effective_model})"
+                                            f"🧠 [gemini-openai:{tname}] thinking_level={level.upper()}, include_thoughts={stream_thoughts} (model={effective_model})"
                                         )
                                 except Exception:
                                     pass
@@ -14478,9 +14488,7 @@ class UnifiedClient:
                     }
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
-                    # Gemini OpenAI: inject reasoning_effort as a top-level param
-                    if gemini_reasoning_effort:
-                        call_kwargs["reasoning_effort"] = gemini_reasoning_effort
+
                     # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
                     env_stream = os.getenv("ENABLE_STREAMING", "0")
                     cfg_stream = False
