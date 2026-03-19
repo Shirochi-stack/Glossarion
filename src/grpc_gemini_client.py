@@ -435,6 +435,9 @@ class GrpcGeminiClient:
                                 if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
                                     thought_text = part.text.replace("\\n", "\n")
                                     for line in thought_text.split("\n"):
+                                        # Add blank line before bold section headers for readability
+                                        if line.strip().startswith("**"):
+                                            print(flush=True)
                                         print(f"    {line}", flush=True)
                                 continue
                             if part.text:
