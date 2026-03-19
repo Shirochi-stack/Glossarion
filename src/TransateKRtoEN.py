@@ -9255,7 +9255,11 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Wait for completion with periodic stop-checking + log draining
                     while not future.done():
-                        if check_stop():
+                        # Check both check_stop() AND the env var directly.
+                        # TRANSLATION_CANCELLED is set by GUI thread (same process) so it's always reliable,
+                        # unlike check_stop() which may return False during graceful stop transitions.
+                        _should_stop = check_stop() or os.environ.get('TRANSLATION_CANCELLED') == '1'
+                        if _should_stop:
                             # Signal the worker to stop via stop file
                             try:
                                 with open(_pdf_stop_file, 'w') as f:
@@ -9263,7 +9267,28 @@ def main(log_callback=None, stop_callback=None):
                             except Exception:
                                 pass
                             future.cancel()
-                            _executor.shutdown(wait=False, cancel_futures=True)
+                            # shutdown(wait=False) does NOT kill running workers —
+                            # we need to explicitly kill the process
+                            try:
+                                _executor.shutdown(wait=False, cancel_futures=True)
+                            except Exception:
+                                pass
+                            # Force-kill any child processes spawned by the executor
+                            try:
+                                import psutil
+                                _current = psutil.Process(os.getpid())
+                                for _child in _current.children(recursive=True):
+                                    try:
+                                        _cmd = " ".join(_child.cmdline())
+                                    except Exception:
+                                        _cmd = ""
+                                    if "_pdf_extraction_worker" in _cmd or "pdf_extractor" in _cmd or "pdf_extraction_manager" in _cmd:
+                                        try:
+                                            _child.kill()
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
                             print("🛑 PDF extraction cancelled by user")
                             _drain_log_queue()
                             return

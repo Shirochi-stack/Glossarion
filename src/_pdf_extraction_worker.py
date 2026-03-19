@@ -216,11 +216,26 @@ def _run_pdf_extraction_inner(config_path):
         # Single string content
         serialized_content = content
 
-    # Serialize images_info (convert int keys to strings for JSON)
+    # Serialize images_info (convert int keys to strings for JSON, Rect objects to lists)
     serialized_images = {}
     if isinstance(images_info, dict):
         for k, v in images_info.items():
-            serialized_images[str(k)] = v
+            page_images = []
+            if isinstance(v, list):
+                for img in v:
+                    if isinstance(img, dict):
+                        img_copy = dict(img)
+                        # Convert fitz.Rect to plain list for JSON serialization
+                        if 'bbox' in img_copy:
+                            bbox = img_copy['bbox']
+                            try:
+                                img_copy['bbox'] = [float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)]
+                            except (AttributeError, TypeError):
+                                img_copy['bbox'] = list(bbox) if bbox else [0, 0, 0, 0]
+                        page_images.append(img_copy)
+                    else:
+                        page_images.append(img)
+            serialized_images[str(k)] = page_images
 
     elapsed = time.time() - start_time
 
