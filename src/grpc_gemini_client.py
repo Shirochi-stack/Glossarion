@@ -460,16 +460,23 @@ class GrpcGeminiClient:
                                     grpc_thinking_started = False
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
-                                    # Line-buffered streaming output
+                                    # Line-buffered streaming output (matches OAI pattern)
                                     frag = part.text.replace("\r", "")
                                     combined = "".join(log_buf) + frag
-                                    if "\n" in combined:
-                                        lines = combined.split("\n")
-                                        for ln in lines[:-1]:
+                                    
+                                    # Inject newlines after HTML closing tags for clean line breaks
+                                    temp_combined = combined
+                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                        temp_combined = temp_combined.replace(tag, tag + '\n')
+                                    
+                                    if "\n" in temp_combined:
+                                        parts_split = temp_combined.split("\n")
+                                        for ln in parts_split[:-1]:
                                             print(ln)
-                                        log_buf = [lines[-1]]
+                                        log_buf = [parts_split[-1]]
                                     else:
                                         log_buf.append(frag)
+                                        # Flush if buffer is getting long to show progress
                                         if len("".join(log_buf)) > 150:
                                             print("".join(log_buf), end="", flush=True)
                                             log_buf = []
