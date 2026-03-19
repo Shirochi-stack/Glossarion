@@ -2249,8 +2249,23 @@ def _create_context_management_section(self, parent):
     
     section_v.addWidget(output_dir_row)
 
-    # ── GUI Scale Factor ──
+    # ── Auto DPI Scale ──
     section_v.addSpacing(6)
+    if not hasattr(self, 'auto_dpi_scale_var'):
+        self.auto_dpi_scale_var = self.config.get('auto_dpi_scale', False)
+
+    auto_dpi_cb = self._create_styled_checkbox("Auto DPI Scale")
+    auto_dpi_cb.setToolTip(
+        "Automatically choose GUI scale factor based on your monitor resolution.\n"
+        "When enabled, the manual scale factor below is ignored.\n"
+        "⚠️ Requires restart to take effect."
+    )
+    try:
+        auto_dpi_cb.setChecked(bool(self.auto_dpi_scale_var))
+    except Exception:
+        pass
+
+    # ── GUI Scale Factor ──
     scale_row = QWidget()
     scale_h = QHBoxLayout(scale_row)
     scale_h.setContentsMargins(0, 0, 0, 0)
@@ -2285,7 +2300,30 @@ def _create_context_management_section(self, parent):
     scale_spin.valueChanged.connect(_on_scale_changed)
     scale_h.addWidget(scale_spin)
     scale_h.addStretch()
+
+    # Wire auto DPI toggle to enable/disable scale controls
+    scale_controls = [scale_label, scale_spin]
+    def _on_auto_dpi_toggled(checked):
+        try:
+            self.auto_dpi_scale_var = bool(checked)
+            self.config['auto_dpi_scale'] = self.auto_dpi_scale_var
+            for ctrl in scale_controls:
+                ctrl.setEnabled(not checked)
+            # Save immediately so dpi_setup reads the new value on next launch
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    auto_dpi_cb.toggled.connect(_on_auto_dpi_toggled)
+    section_v.addWidget(auto_dpi_cb)
     section_v.addWidget(scale_row)
+
+    # Apply initial enabled state
+    initial_auto = auto_dpi_cb.isChecked()
+    for ctrl in scale_controls:
+        ctrl.setEnabled(not initial_auto)
 
     scale_desc = QLabel(
         "Controls the overall GUI size (default 1.70).\n"

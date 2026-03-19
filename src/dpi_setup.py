@@ -27,7 +27,7 @@ except Exception:
 _configured = False
 
 # Default scale factor when config.json has no value
-DEFAULT_SCALE_FACTOR = 1.2
+DEFAULT_SCALE_FACTOR = 1.0
 
 
 def _get_screen_resolution():
@@ -111,9 +111,9 @@ def _get_default_scale_for_resolution():
         elif width >= 1920:     # 1080p (1920×1080)
             return 1.0
         elif width >= 1366:     # 768p / common laptops
-            return 1.0
+            return 0.62
         else:                   # 720p or lower
-            return 0.9
+            return 0.6
     except Exception:
         return DEFAULT_SCALE_FACTOR
 
@@ -131,6 +131,9 @@ def _read_scale_factor():
         if os.path.isfile(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
+            # If auto DPI scaling is enabled, use resolution-based default
+            if cfg.get("auto_dpi_scale", False):
+                return _get_default_scale_for_resolution()
             val = cfg.get("gui_scale_factor", None)
             if val is None:
                 return _get_default_scale_for_resolution()
