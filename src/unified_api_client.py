@@ -12219,7 +12219,10 @@ class UnifiedClient:
                     # Extract any thinking tokens if available
                     thinking_tokens_displayed = False
                     
-                    if hasattr(response, 'raw_response'):
+                    # Skip if streaming already reported thinking stats
+                    if hasattr(response, '_streaming_thinking_chunks') and response._streaming_thinking_chunks > 0:
+                        thinking_tokens_displayed = True
+                    elif hasattr(response, 'raw_response'):
                         raw_resp = response.raw_response
                         
                         # Check multiple possible locations for thinking tokens
@@ -14791,6 +14794,7 @@ class UnifiedClient:
                         oai_thinking_chunks = 0
                         oai_thinking_start_ts = None
                         oai_thinking_log_buf = []  # buffer for accumulating thinking text before printing
+                        oai_thinking_text_parts = []  # accumulate all reasoning text for token counting
 
                         def _check_cancel_during_stream():
                             if self._is_stop_requested():
@@ -14835,6 +14839,7 @@ class UnifiedClient:
                                             reasoning_frag = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                                         if reasoning_frag and isinstance(reasoning_frag, str):
                                             oai_thinking_chunks += 1
+                                            oai_thinking_text_parts.append(reasoning_frag)
                                             if oai_thinking_start_ts is None:
                                                 oai_thinking_start_ts = _t.time()
                                             if not oai_thinking_started:
@@ -14983,11 +14988,30 @@ class UnifiedClient:
                         except Exception:
                             pass
                         
-                        return UnifiedResponse(
+                        # Count thinking tokens from accumulated text
+                        if oai_thinking_chunks > 0 and not self._is_stop_requested():
+                            thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
+                            full_thinking_text = "".join(oai_thinking_text_parts)
+                            thinking_tokens = 0
+                            try:
+                                import tiktoken as _tiktoken
+                                try:
+                                    enc = _tiktoken.encoding_for_model(effective_model or 'gpt-4')
+                                except Exception:
+                                    enc = _tiktoken.get_encoding('cl100k_base')
+                                thinking_tokens = len(enc.encode(full_thinking_text))
+                            except Exception:
+                                # Fallback: rough estimate ~4 chars per token
+                                thinking_tokens = max(1, len(full_thinking_text) // 4)
+                            print(f"   💭 Thinking tokens used: {thinking_tokens:,} ({thinking_dur:.1f}s)")
+                        
+                        _stream_resp = UnifiedResponse(
                             content=content,
                             finish_reason=finish_reason,
                             raw_response=None
                         )
+                        _stream_resp._streaming_thinking_chunks = oai_thinking_chunks
+                        return _stream_resp
                     # Non-streaming extraction with Gemini awareness
                     if use_responses_api:
                         try:
