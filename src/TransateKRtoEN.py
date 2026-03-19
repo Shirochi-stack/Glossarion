@@ -9198,11 +9198,25 @@ def main(log_callback=None, stop_callback=None):
     if is_pdf_file:
         print("📄 Processing PDF file...")
         try:
-            # Use ProcessPoolExecutor in GUI mode to prevent GUI freezing
-            use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" and log_callback
+            # Determine whether to use ProcessPoolExecutor based on PDF size.
+            # Small PDFs (< threshold pages) use direct in-thread extraction (faster, instant stop).
+            # Large PDFs use ProcessPoolExecutor to prevent GUI lag from long fitz operations.
+            _pdf_page_threshold = int(os.getenv("PDF_ASYNC_PAGE_THRESHOLD", "100"))
+            _pdf_page_count = 0
+            try:
+                import fitz as _fitz_check
+                with _fitz_check.open(input_path) as _doc:
+                    _pdf_page_count = len(_doc)
+                print(f"📄 PDF has {_pdf_page_count} pages (async threshold: {_pdf_page_threshold})")
+            except Exception:
+                _pdf_page_count = _pdf_page_threshold + 1  # Assume large if can't check
+            
+            use_async = (os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" 
+                        and log_callback 
+                        and _pdf_page_count >= _pdf_page_threshold)
             
             if use_async:
-                print("🚀 Using ProcessPoolExecutor for PDF extraction (prevents GUI lag)...")
+                print(f"🚀 Using ProcessPoolExecutor for PDF extraction ({_pdf_page_count} pages, prevents GUI lag)...")
                 from concurrent.futures import ProcessPoolExecutor
                 import multiprocessing
                 from _pdf_extraction_worker import run_pdf_extraction
