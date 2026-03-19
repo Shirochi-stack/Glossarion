@@ -13356,9 +13356,12 @@ class UnifiedClient:
             finish_reason = 'stop'
             usage = None
             log_buf = []
+            thinking_buf = []  # buffer for thinking text streaming
             thinking_tokens_seen = 0
+            thinking_started = False  # whether we've printed the thinking header
             current_block_type = None  # track content_block_start type
             first_text_ts = None  # timestamp of first text delta
+            first_thinking_ts = None  # timestamp of first thinking delta
 
             try:
                 for raw_line in raw_resp.iter_lines():
@@ -13391,8 +13394,12 @@ class UnifiedClient:
                     if evt_type == "content_block_start":
                         cb = evt.get("content_block", {})
                         current_block_type = cb.get("type", "")
+                        if current_block_type == "thinking" and not self._is_stop_requested():
+                            if not thinking_started:
+                                thinking_started = True
+                                print(f"🧠 [anthropic] Thinking...", flush=True)
 
-                    # content_block_delta → text fragment (skip thinking deltas)
+                    # content_block_delta → text or thinking fragment
                     elif evt_type == "content_block_delta":
                         delta = evt.get("delta", {})
                         delta_type = delta.get("type", "")
@@ -13422,11 +13429,35 @@ class UnifiedClient:
                                             print("".join(log_buf), end="", flush=True)
                                             log_buf = []
                         elif delta_type == "thinking_delta":
-                            # Thinking deltas are not included in output, but count them
                             thinking_tokens_seen += 1
+                            if first_thinking_ts is None:
+                                first_thinking_ts = _t.time()
+                            # Stream thinking text to log in real-time
+                            thinking_text = delta.get("thinking", "")
+                            if thinking_text and log_stream and not self._is_stop_requested():
+                                combined = "".join(thinking_buf) + thinking_text
+                                if "\n" in combined:
+                                    parts = combined.split("\n")
+                                    for p in parts[:-1]:
+                                        print(f"  💭 {p}", flush=True)
+                                    thinking_buf = [parts[-1]]
+                                else:
+                                    thinking_buf.append(thinking_text)
+                                    if len("".join(thinking_buf)) > 150:
+                                        print(f"  💭 {''.join(thinking_buf)}", end="", flush=True)
+                                        thinking_buf = []
 
-                    # content_block_stop → reset block type
+                    # content_block_stop → flush thinking buffer & reset block type
                     elif evt_type == "content_block_stop":
+                        if current_block_type == "thinking" and not self._is_stop_requested():
+                            # Flush remaining thinking buffer
+                            if thinking_buf:
+                                remaining = "".join(thinking_buf)
+                                if remaining.strip():
+                                    print(f"  💭 {remaining}", flush=True)
+                                thinking_buf = []
+                            thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
+                            print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
                         current_block_type = None
 
                     # message_delta → stop reason + usage
