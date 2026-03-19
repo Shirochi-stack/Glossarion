@@ -12031,13 +12031,6 @@ class UnifiedClient:
                 if not self._is_stop_requested():
                     print("   ⚠️ Gemini 3 Pro does not support thinking_level=minimal; falling back to low")
         
-        # For gRPC: optionally map thinking_level to thinking_budget (toggle-gated)
-        if os.getenv("GRPC_MAP_THINKING_LEVEL", "1") == "1" and self._is_gemini_3_model() and thinking_budget == -1:
-            _level_map = {'minimal': 0, 'low': 4096, 'medium': 12288, 'high': 32768}
-            _mapped = _level_map.get(thinking_level)
-            if _mapped is not None:
-                thinking_budget = _mapped
-        
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
         # Force enable for gemini-3-pro-image model (with or without -preview suffix)
@@ -12140,7 +12133,7 @@ class UnifiedClient:
             
             thinking_status = ""
             if supports_thinking or use_openai_endpoint:
-                if is_gemini_3 and (not use_grpc_transport or os.getenv('GRPC_MAP_THINKING_LEVEL', '1') == '1'):
+                if is_gemini_3:
                     thinking_status = f" (thinking level: {thinking_level})"
                 elif thinking_budget == 0:
                     thinking_status = " (thinking disabled)"
@@ -12322,7 +12315,6 @@ class UnifiedClient:
                     if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
                     
-                    
                     try:
                         if use_streaming:
                             if not self._is_stop_requested():
@@ -12334,6 +12326,8 @@ class UnifiedClient:
                                 max_output_tokens=max_tokens,
                                 safety_disabled=disable_safety,
                                 thinking_budget=thinking_budget,
+                                thinking_level=thinking_level,
+                                is_gemini_3=is_gemini_3,
                                 supports_thinking=supports_thinking,
                                 anti_dupe_params=anti_dupe_params,
                                 stop_check_fn=self._is_stop_requested,
@@ -12347,6 +12341,8 @@ class UnifiedClient:
                                 max_output_tokens=max_tokens,
                                 safety_disabled=disable_safety,
                                 thinking_budget=thinking_budget,
+                                thinking_level=thinking_level,
+                                is_gemini_3=is_gemini_3,
                                 supports_thinking=supports_thinking,
                                 anti_dupe_params=anti_dupe_params,
                                 stop_check_fn=self._is_stop_requested,
@@ -12355,10 +12351,8 @@ class UnifiedClient:
                         if supports_thinking and not self._is_stop_requested():
                             if grpc_response.thinking_tokens > 0:
                                 print(f"   💭 Thinking tokens used: {grpc_response.thinking_tokens}")
-                            elif thinking_budget > 0:
-                                print(f"   💭 Thinking tokens used: 0 (thinking budget: {thinking_budget})")
-                            elif thinking_budget == -1:
-                                print(f"   💭 Thinking tokens used: 0 (dynamic thinking)")
+                            elif is_gemini_3 and thinking_level:
+                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
                         
                         # Convert GrpcGeminiResponse to UnifiedResponse
                         text_content = grpc_response.text
