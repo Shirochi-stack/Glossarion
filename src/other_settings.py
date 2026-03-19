@@ -7571,6 +7571,41 @@ def _create_processing_options_section(self, parent):
     pdf_format_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(pdf_format_desc)
     
+    # PDF Async Page Threshold (use direct calls for small PDFs, ProcessPoolExecutor for large)
+    if not hasattr(self, 'pdf_async_page_threshold_var'):
+        self.pdf_async_page_threshold_var = str(self.config.get('pdf_async_page_threshold', '100'))
+    
+    pdf_threshold_row = QWidget()
+    pdf_threshold_h = QHBoxLayout(pdf_threshold_row)
+    pdf_threshold_h.setContentsMargins(20, 2, 0, 0)
+    
+    pdf_threshold_label = QLabel("Async page threshold:")
+    pdf_threshold_h.addWidget(pdf_threshold_label)
+    
+    pdf_threshold_edit = QLineEdit()
+    pdf_threshold_edit.setFixedWidth(60)
+    try:
+        pdf_threshold_edit.setText(str(self.pdf_async_page_threshold_var))
+    except Exception:
+        pdf_threshold_edit.setText("100")
+    def _on_pdf_threshold_changed(text):
+        try:
+            self.pdf_async_page_threshold_var = text
+        except Exception:
+            pass
+    pdf_threshold_edit.textChanged.connect(_on_pdf_threshold_changed)
+    pdf_threshold_h.addWidget(pdf_threshold_edit)
+    
+    pdf_threshold_default = QLabel("(default: 100)")
+    pdf_threshold_h.addWidget(pdf_threshold_default)
+    pdf_threshold_h.addStretch()
+    section_v.addWidget(pdf_threshold_row)
+    
+    pdf_threshold_desc = QLabel("PDFs below this page count use direct extraction (faster, instant stop).\nLarger PDFs use ProcessPoolExecutor to prevent GUI lag.")
+    pdf_threshold_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_threshold_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_threshold_desc)
+    
     # Initialize PDF render mode variable
     if not hasattr(self, 'pdf_render_mode_var'):
         self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')

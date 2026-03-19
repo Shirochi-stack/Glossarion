@@ -1315,10 +1315,49 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         # Determine render mode early
         render_mode = os.getenv("PDF_RENDER_MODE", "absolute").lower()  # pdf2htmlex | absolute | xhtml | html | semantic | image
 
-        # Extract embedded images unless we're rasterizing whole pages
+        # Extract embedded images – strategy depends on render mode:
+        # - absolute/semantic: need actual image files on disk → full extraction
+        # - xhtml/html: fitz embeds images inline, we only need bounding boxes for link detection
+        # - image: rasterizes whole pages, no image extraction needed
         images_by_page = {}
         if extract_images and render_mode != "image":
-            images_by_page = extract_images_from_pdf(pdf_path, output_dir)
+            if render_mode in ("xhtml", "html"):
+                # Lightweight bbox-only scan (no image-to-disk writes).
+                # This avoids spending 60-90s extracting every image from large PDFs
+                # when fitz already embeds them in the rendered HTML.
+                try:
+                    _bbox_doc = fitz.open(pdf_path)
+                    _total_bp = len(_bbox_doc)
+                    print(f"📷 Quick bbox scan ({_total_bp} pages)...")
+                    for _bp in range(_total_bp):
+                        _page = _bbox_doc[_bp]
+                        _img_list = _page.get_images(full=True)
+                        if not _img_list:
+                            continue
+                        _page_imgs = []
+                        for _img_idx, _img in enumerate(_img_list):
+                            try:
+                                _xref = _img[0]
+                                _rects = _page.get_image_rects(_xref)
+                                _bbox = _rects[0] if _rects else (0, 0, 0, 0)
+                                _page_imgs.append({
+                                    'index': _img_idx,
+                                    'filename': f"page_{_bp + 1}_img_{_img_idx + 1}.png",
+                                    'bbox': _bbox,
+                                })
+                            except Exception:
+                                continue
+                        if _page_imgs:
+                            images_by_page[_bp] = _page_imgs
+                    _bbox_doc.close()
+                    _total_imgs = sum(len(v) for v in images_by_page.values())
+                    print(f"✅ Found {_total_imgs} image bboxes from {len(images_by_page)} pages")
+                except Exception as _e:
+                    print(f"⚠️ Bbox scan failed: {_e}")
+                    images_by_page = {}
+            else:
+                # Full extraction for absolute/semantic modes that need image files
+                images_by_page = extract_images_from_pdf(pdf_path, output_dir)
         images_dir = os.path.join(output_dir, 'images')
 
         doc = fitz.open(pdf_path)

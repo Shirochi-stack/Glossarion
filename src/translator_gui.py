@@ -1642,6 +1642,7 @@ Text to analyze:
         # PDF settings
         self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
         self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')
+        self.pdf_async_page_threshold_var = str(self.config.get('pdf_async_page_threshold', '100'))
         
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
@@ -11054,6 +11055,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_PAGE_NUMBER_ALIGNMENT': self.config.get('pdf_page_number_alignment', 'center'),
             'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
             'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'xhtml',
+            'PDF_ASYNC_PAGE_THRESHOLD': str(self.pdf_async_page_threshold_var) if hasattr(self, 'pdf_async_page_threshold_var') else '100',
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
             'PDF_FAST_RENDERING': '1' if self.config.get('pdf_fast_rendering', True) else '0',
             # Image compression quality sub-settings
@@ -18163,6 +18165,7 @@ Important rules:
                 # PDF settings
                 ('pdf_output_format', ['pdf_output_format_var'], 'pdf', str),
                 ('pdf_render_mode', ['pdf_render_mode_var'], 'xhtml', str),
+                ('pdf_async_page_threshold', ['pdf_async_page_threshold_var'], '100', str),
             ]
             
             # Process the settings map to populate self.config
