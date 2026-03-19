@@ -31,17 +31,32 @@ import sys
 import time
 import traceback
 
+# Module-level log queue, set by run_pdf_extraction when called from ProcessPoolExecutor
+_log_queue = None
+
 
 def log(msg):
-    """Print a progress message that the manager will pick up."""
+    """Send a progress message to the parent process (via queue) or print to stdout."""
     try:
-        print(f"[PROGRESS] {msg}", flush=True)
+        if _log_queue is not None:
+            _log_queue.put(msg)
+        else:
+            print(f"[PROGRESS] {msg}", flush=True)
     except Exception:
         pass
 
 
-def run_pdf_extraction(config_path):
-    """Main PDF extraction logic, running in subprocess."""
+def run_pdf_extraction(config_path, log_queue=None):
+    """Main PDF extraction logic, running in subprocess.
+    
+    Args:
+        config_path: Path to the JSON config file with extraction parameters.
+        log_queue: Optional multiprocessing.Queue for forwarding log messages
+                   to the parent process (used by ProcessPoolExecutor).
+    """
+    global _log_queue
+    _log_queue = log_queue
+    
     start_time = time.time()
 
     # Load config

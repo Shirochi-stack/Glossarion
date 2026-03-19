@@ -9204,6 +9204,7 @@ def main(log_callback=None, stop_callback=None):
             if use_async:
                 print("🚀 Using ProcessPoolExecutor for PDF extraction (prevents GUI lag)...")
                 from concurrent.futures import ProcessPoolExecutor
+                import multiprocessing
                 from _pdf_extraction_worker import run_pdf_extraction
                 
                 # Write config JSON for the worker process
@@ -9221,18 +9222,37 @@ def main(log_callback=None, stop_callback=None):
                 with open(_pdf_ext_config_path, 'w', encoding='utf-8') as f:
                     json.dump(_pdf_ext_config, f, ensure_ascii=False)
                 
+                # Create a queue for real-time log forwarding from worker process
+                _log_queue = multiprocessing.Manager().Queue()
+                
+                def _drain_log_queue():
+                    """Forward all pending log messages from worker to GUI."""
+                    while not _log_queue.empty():
+                        try:
+                            msg = _log_queue.get_nowait()
+                            if log_callback:
+                                log_callback(msg)
+                            else:
+                                print(msg)
+                        except Exception:
+                            break
+                
                 # Run extraction in a worker process (no timeout)
-                with ProcessPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(run_pdf_extraction, _pdf_ext_config_path)
+                _num_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
+                with ProcessPoolExecutor(max_workers=_num_workers) as executor:
+                    future = executor.submit(run_pdf_extraction, _pdf_ext_config_path, _log_queue)
                     
-                    # Wait for completion with periodic stop-checking
+                    # Wait for completion with periodic stop-checking + log draining
                     while not future.done():
                         if check_stop():
                             future.cancel()
                             print("🛑 PDF extraction cancelled by user")
                             return
-                        time.sleep(0.5)
+                        _drain_log_queue()
+                        time.sleep(0.3)
                     
+                    # Drain any remaining log messages after completion
+                    _drain_log_queue()
                     _pdf_ext_result = future.result()
                 
                 if not _pdf_ext_result or not _pdf_ext_result.get("success"):
