@@ -390,6 +390,12 @@ class GrpcGeminiClient:
             is_batch = os.getenv("BATCH_TRANSLATION", "0") == "1"
             allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
             should_log = log_stream and (not is_batch or allow_batch_logs)
+            # Thinking streaming state
+            grpc_stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+            grpc_thinking_started = False
+            grpc_thinking_buf = []
+            grpc_thinking_chunks = 0
+            grpc_thinking_start_ts = None
             
             for chunk in stream:
                 if stop_check_fn and stop_check_fn():
@@ -417,7 +423,39 @@ class GrpcGeminiClient:
                     # Extract text from parts
                     if candidate.content and candidate.content.parts:
                         for part in candidate.content.parts:
+                            # Check for thinking/thought parts
+                            is_thought = getattr(part, 'thought', False)
+                            if is_thought and part.text:
+                                grpc_thinking_chunks += 1
+                                if grpc_thinking_start_ts is None:
+                                    grpc_thinking_start_ts = time.time()
+                                if not grpc_thinking_started and grpc_stream_thinking and not (stop_check_fn and stop_check_fn()):
+                                    grpc_thinking_started = True
+                                    print(f"🧠 [gemini-grpc] Thinking...", flush=True)
+                                if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
+                                    combined = "".join(grpc_thinking_buf) + part.text
+                                    if "\n" in combined:
+                                        tparts = combined.split("\n")
+                                        for p in tparts[:-1]:
+                                            print(f"    {p}", flush=True)
+                                        grpc_thinking_buf = [tparts[-1]]
+                                    else:
+                                        grpc_thinking_buf.append(part.text)
+                                        if len("".join(grpc_thinking_buf)) > 150:
+                                            print(f"    {''.join(grpc_thinking_buf)}", end="", flush=True)
+                                            grpc_thinking_buf = []
+                                continue
                             if part.text:
+                                # If switching from thinking to text, flush thinking
+                                if grpc_thinking_started and grpc_stream_thinking and not (stop_check_fn and stop_check_fn()):
+                                    if grpc_thinking_buf:
+                                        remaining = "".join(grpc_thinking_buf)
+                                        if remaining.strip():
+                                            print(f"    {remaining}", flush=True)
+                                        grpc_thinking_buf = []
+                                    thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
+                                    print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                    grpc_thinking_started = False
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
                                     # Line-buffered streaming output
