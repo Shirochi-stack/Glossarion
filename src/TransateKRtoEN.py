@@ -7771,6 +7771,7 @@ _THINKING_ENV_KEYS = (
     'ENABLE_GPT_THINKING', 'GPT_EFFORT',
     'ENABLE_DEEPSEEK_THINKING',
     'ENABLE_ANTHROPIC_THINKING',
+    'GRPC_MAP_THINKING_LEVEL',
 )
 
 # Mappings for the "Think a little" slider (1-5)
@@ -7792,6 +7793,7 @@ def _get_thinking_skip_values():
         'GPT_EFFORT': _GPT_EFFORT_MAP[level],
         'ENABLE_DEEPSEEK_THINKING': '0',
         'ENABLE_ANTHROPIC_THINKING': '0',
+        'GRPC_MAP_THINKING_LEVEL': '1',
     }
 
 @contextmanager
