@@ -125,6 +125,7 @@ app_files = [
     ('enhanced_text_extractor.py', '.'),	
     ('pdf_extractor.py', '.'),
     ('_pdf_extraction_worker.py', '.'),
+    ('pdf_extraction_manager.py', '.'),
 	
     ('multi_api_key_manager.py', '.'),
     ('individual_endpoint_dialog.py', '.'),
@@ -205,6 +206,7 @@ app_modules = [
     'enhanced_text_extractor.py',
     'pdf_extractor',
     '_pdf_extraction_worker',
+    'pdf_extraction_manager',
     'multi_api_key_manager.py',
     'individual_endpoint_dialog.py',
     'model_options',
