@@ -12013,7 +12013,8 @@ class UnifiedClient:
             thinking_level = "high"
 
         # If user tries to disable thinking via budget=0, map to the lowest supported level per model
-        if self._is_gemini_3_model() and thinking_budget == 0:
+        # (skip for gRPC — eGRPC accepts budget=0 directly)
+        if self._is_gemini_3_model() and thinking_budget == 0 and not use_grpc_transport:
             if "flash" in model_lower:
                 thinking_level = "minimal"
                 if not self._is_stop_requested():
@@ -12143,7 +12144,10 @@ class UnifiedClient:
                 if is_gemini_3 and (not use_grpc_transport or os.getenv('GRPC_MAP_THINKING_LEVEL', '1') == '1'):
                     thinking_status = f" (thinking level: {thinking_level})"
                 elif thinking_budget == 0:
-                    thinking_status = " (thinking disabled)"
+                    if use_grpc_transport:
+                        thinking_status = " (thinking budget: 0)"
+                    else:
+                        thinking_status = " (thinking disabled)"
                 elif thinking_budget == -1:
                     thinking_status = " (dynamic thinking)"
                 elif thinking_budget > 0:
@@ -12271,7 +12275,10 @@ class UnifiedClient:
                                 print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == 0:
-                                print(f"   ✅ Thinking disabled")
+                                if use_grpc_transport:
+                                    print(f"   💭 Thinking tokens used: 0 (thinking budget: 0)")
+                                else:
+                                    print(f"   ✅ Thinking disabled")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == -1:
                                 # Dynamic thinking - might not be reported
