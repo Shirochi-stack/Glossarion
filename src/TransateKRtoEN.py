@@ -9218,6 +9218,16 @@ def main(log_callback=None, stop_callback=None):
                     "css_override_path": os.getenv("EPUB_CSS_OVERRIDE_PATH", "").strip(),
                     "attach_css_enabled": os.getenv("ATTACH_CSS_TO_CHAPTERS", "0") == "1"
                 }
+                # Create a stop file for cross-process cancellation
+                _pdf_stop_file = os.path.join(out, '_pdf_extraction_stop')
+                # Clean up any leftover stop file from a previous run
+                if os.path.exists(_pdf_stop_file):
+                    try:
+                        os.remove(_pdf_stop_file)
+                    except Exception:
+                        pass
+                _pdf_ext_config['stop_file'] = _pdf_stop_file
+                
                 _pdf_ext_config_path = os.path.join(out, '_pdf_extraction_config.json')
                 with open(_pdf_ext_config_path, 'w', encoding='utf-8') as f:
                     json.dump(_pdf_ext_config, f, ensure_ascii=False)
@@ -9239,14 +9249,23 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Run extraction in a worker process (no timeout)
                 _num_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
-                with ProcessPoolExecutor(max_workers=_num_workers) as executor:
-                    future = executor.submit(run_pdf_extraction, _pdf_ext_config_path, _log_queue)
+                _executor = ProcessPoolExecutor(max_workers=_num_workers)
+                try:
+                    future = _executor.submit(run_pdf_extraction, _pdf_ext_config_path, _log_queue)
                     
                     # Wait for completion with periodic stop-checking + log draining
                     while not future.done():
                         if check_stop():
+                            # Signal the worker to stop via stop file
+                            try:
+                                with open(_pdf_stop_file, 'w') as f:
+                                    f.write('stop')
+                            except Exception:
+                                pass
                             future.cancel()
+                            _executor.shutdown(wait=False, cancel_futures=True)
                             print("🛑 PDF extraction cancelled by user")
+                            _drain_log_queue()
                             return
                         _drain_log_queue()
                         time.sleep(0.3)
@@ -9254,6 +9273,14 @@ def main(log_callback=None, stop_callback=None):
                     # Drain any remaining log messages after completion
                     _drain_log_queue()
                     _pdf_ext_result = future.result()
+                finally:
+                    _executor.shutdown(wait=False)
+                    # Clean up stop file
+                    try:
+                        if os.path.exists(_pdf_stop_file):
+                            os.remove(_pdf_stop_file)
+                    except Exception:
+                        pass
                 
                 if not _pdf_ext_result or not _pdf_ext_result.get("success"):
                     _error = _pdf_ext_result.get("error", "Unknown error") if _pdf_ext_result else "No result"

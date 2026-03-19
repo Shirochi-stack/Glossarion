@@ -103,6 +103,14 @@ def _run_pdf_extraction_inner(config_path):
     html2text_enabled = config.get("html2text", False)
     css_override_path = config.get("css_override_path", "").strip()
     attach_css_enabled = config.get("attach_css_enabled", False)
+    stop_file = config.get("stop_file", "")
+
+    # Make stop file path available to pdf_extractor via env var
+    if stop_file:
+        os.environ['PDF_EXTRACTION_STOP_FILE'] = stop_file
+
+    def _is_stopped():
+        return stop_file and os.path.exists(stop_file)
 
     if not pdf_path or not os.path.isfile(pdf_path):
         log(f"❌ PDF file not found: {pdf_path}")
@@ -124,6 +132,11 @@ def _run_pdf_extraction_inner(config_path):
 
     # Phase 1: Extract PDF content with formatting
     log(f"📄 Extracting PDF: {os.path.basename(pdf_path)} (render mode: {render_mode})")
+
+    if _is_stopped():
+        log("🛑 PDF extraction cancelled before start")
+        return {"success": False, "error": "Cancelled by user"}
+
     try:
         content, images_info = extract_pdf_with_formatting(
             pdf_path,
@@ -137,6 +150,10 @@ def _run_pdf_extraction_inner(config_path):
         return {"success": False, "error": f"Extraction failed: {e}"}
 
     # Phase 2: Generate CSS if enabled
+    if _is_stopped():
+        log("🛑 PDF extraction cancelled after content extraction")
+        return {"success": False, "error": "Cancelled by user"}
+
     css_generated = False
     if generate_css:
         css_path = os.path.join(output_dir, 'styles.css')

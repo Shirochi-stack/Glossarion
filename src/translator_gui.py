@@ -13405,7 +13405,9 @@ Important rules:
                             continue
 
                         # Known helper flags / scripts
-                        if "--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s:
+                        if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
+                                or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
@@ -13673,7 +13675,9 @@ Important rules:
                         cmd_s = _cmdline_s(child)
                         if _is_mp_internal(cmd_s):
                             continue
-                        if "--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s:
+                        if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
+                                or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue

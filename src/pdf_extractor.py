@@ -513,6 +513,12 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
         _last_img_pct = -1
         
         for page_num in range(_total_img_pages):
+            # Check for stop flag (cross-process via stop file)
+            _sf = os.environ.get('PDF_EXTRACTION_STOP_FILE', '')
+            if _sf and os.path.exists(_sf):
+                print("🛑 PDF image extraction cancelled by user")
+                break
+            
             page = doc[page_num]
             image_list = page.get_images(full=True)
             
@@ -1412,6 +1418,12 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     futures = [executor.submit(_extract_xhtml_chunk, r) for r in ranges]
 
                     for future in concurrent.futures.as_completed(futures):
+                        # Check for stop flag (cross-process via stop file)
+                        _sf = os.environ.get('PDF_EXTRACTION_STOP_FILE', '')
+                        if _sf and os.path.exists(_sf):
+                            print("🛑 PDF rendering cancelled by user")
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
                         try:
                             chunk_results = future.result()
                             page_list.extend(chunk_results)
@@ -1438,6 +1450,11 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 _batch_size = max(1, total_pages // 10)  # Report ~10 progress updates
                 _processed = 0
                 for _start in range(0, total_pages, _batch_size):
+                    # Check for stop flag (cross-process via stop file)
+                    _sf = os.environ.get('PDF_EXTRACTION_STOP_FILE', '')
+                    if _sf and os.path.exists(_sf):
+                        print("🛑 PDF rendering cancelled by user")
+                        break
                     _end = min(_start + _batch_size, total_pages)
                     batch_results = _extract_xhtml_chunk((pdf_path, _start, _end, images_dir, _images_by_page_str, render_mode))
                     page_list.extend(batch_results)
