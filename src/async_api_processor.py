@@ -1563,6 +1563,40 @@ class AsyncProcessingDialog:
             QDialog {
                 background-color: #1e1e1e;
             }
+            QWidget {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+            QScrollArea {
+                background-color: #1e1e1e;
+                border: none;
+            }
+            QSpinBox {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #3d3d3d;
+                border: 1px solid #4a5568;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #4d4d4d;
+            }
+            QSpinBox::up-arrow {
+                width: 8px;
+                height: 8px;
+            }
+            QSpinBox::down-arrow {
+                width: 8px;
+                height: 8px;
+            }
         """)
 
         # Override close behavior: hide instead of closing to preserve state

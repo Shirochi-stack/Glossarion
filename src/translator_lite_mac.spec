@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v8.1.2 - PyInstaller Specification File (macOS)
+Glossarion Lite v8.1.3 - PyInstaller Specification File (macOS)
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 Includes post-build step to create .dmg
 """
@@ -14,7 +14,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite_v8.1.2_MAC'
+APP_NAME = 'L_Glossarion_Lite_v8.1.3_MAC'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -1133,8 +1133,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Glossarion Lite',
         'CFBundleDisplayName': 'Glossarion Lite',
-        'CFBundleVersion': '8.1.2',
-        'CFBundleShortVersionString': '8.1.2',
+        'CFBundleVersion': '8.1.3',
+        'CFBundleShortVersionString': '8.1.3',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.15.0',
     },
