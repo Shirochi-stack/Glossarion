@@ -9254,6 +9254,9 @@ def main(log_callback=None, stop_callback=None):
                     future = _executor.submit(run_pdf_extraction, _pdf_ext_config_path, _log_queue)
                     
                     # Wait for completion with periodic stop-checking + log draining
+                    _heartbeat_start = time.time()
+                    _last_heartbeat = _heartbeat_start
+                    _got_first_log = False
                     while not future.done():
                         # Check both check_stop() AND the env var directly.
                         # TRANSLATION_CANCELLED is set by GUI thread (same process) so it's always reliable,
@@ -9293,6 +9296,15 @@ def main(log_callback=None, stop_callback=None):
                             _drain_log_queue()
                             return
                         _drain_log_queue()
+                        # Heartbeat: show a waiting message every 5s while worker initializes
+                        _now = time.time()
+                        if not _got_first_log and (_now - _last_heartbeat) >= 5.0:
+                            _elapsed = int(_now - _heartbeat_start)
+                            print(f"⏳ PDF worker initializing... ({_elapsed}s elapsed)")
+                            _last_heartbeat = _now
+                        # Track if we've received any log messages from the worker
+                        if not _got_first_log and not _log_queue.empty():
+                            _got_first_log = True
                         time.sleep(0.3)
                     
                     # Drain any remaining log messages after completion
