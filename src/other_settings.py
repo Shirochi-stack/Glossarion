@@ -2252,7 +2252,7 @@ def _create_context_management_section(self, parent):
     # ── Auto DPI Scale ──
     section_v.addSpacing(6)
     if not hasattr(self, 'auto_dpi_scale_var'):
-        self.auto_dpi_scale_var = self.config.get('auto_dpi_scale', False)
+        self.auto_dpi_scale_var = self.config.get('auto_dpi_scale', True)
 
     auto_dpi_cb = self._create_styled_checkbox("Auto DPI Scale")
     auto_dpi_cb.setToolTip(
@@ -2301,6 +2301,20 @@ def _create_context_management_section(self, parent):
     scale_h.addWidget(scale_spin)
     scale_h.addStretch()
 
+    # Disabled styling for scale controls
+    _scale_label_enabled_style = ""
+    _scale_label_disabled_style = "color: #808080;"
+    _scale_spin_disabled_style = "color: #808080; background-color: rgba(255,255,255,0.05);"
+
+    def _apply_scale_disabled_styling(disabled):
+        """Apply or remove disabled visual styling on the scale label and spinbox."""
+        if disabled:
+            scale_label.setStyleSheet(_scale_label_disabled_style)
+            scale_spin.setStyleSheet(_scale_spin_disabled_style)
+        else:
+            scale_label.setStyleSheet(_scale_label_enabled_style)
+            scale_spin.setStyleSheet("")
+
     # Wire auto DPI toggle to enable/disable scale controls
     scale_controls = [scale_label, scale_spin]
     def _on_auto_dpi_toggled(checked):
@@ -2309,6 +2323,17 @@ def _create_context_management_section(self, parent):
             self.config['auto_dpi_scale'] = self.auto_dpi_scale_var
             for ctrl in scale_controls:
                 ctrl.setEnabled(not checked)
+            _apply_scale_disabled_styling(checked)
+            # When auto is enabled, show the auto-detected value in the spinbox
+            if checked:
+                try:
+                    from dpi_setup import _get_default_scale_for_resolution
+                    auto_val = _get_default_scale_for_resolution()
+                    scale_spin.blockSignals(True)
+                    scale_spin.setValue(auto_val)
+                    scale_spin.blockSignals(False)
+                except Exception:
+                    pass
             # Save immediately so dpi_setup reads the new value on next launch
             try:
                 self.save_config(show_message=False)
@@ -2320,10 +2345,21 @@ def _create_context_management_section(self, parent):
     section_v.addWidget(auto_dpi_cb)
     section_v.addWidget(scale_row)
 
-    # Apply initial enabled state
+    # Apply initial enabled state and styling
     initial_auto = auto_dpi_cb.isChecked()
     for ctrl in scale_controls:
         ctrl.setEnabled(not initial_auto)
+    _apply_scale_disabled_styling(initial_auto)
+    # Show auto-detected value when initially in auto mode
+    if initial_auto:
+        try:
+            from dpi_setup import _get_default_scale_for_resolution
+            auto_val = _get_default_scale_for_resolution()
+            scale_spin.blockSignals(True)
+            scale_spin.setValue(auto_val)
+            scale_spin.blockSignals(False)
+        except Exception:
+            pass
 
     scale_desc = QLabel(
         "Controls the overall GUI size (default 1.70).\n"

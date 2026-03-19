@@ -221,7 +221,7 @@ def _read_scale_factor():
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             # If auto DPI scaling is enabled, use resolution-based default
-            if cfg.get("auto_dpi_scale", False):
+            if cfg.get("auto_dpi_scale", True):
                 return _get_default_scale_for_resolution()
             val = cfg.get("gui_scale_factor", None)
             if val is None:
