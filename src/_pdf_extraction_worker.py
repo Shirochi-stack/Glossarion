@@ -57,6 +57,34 @@ def run_pdf_extraction(config_path, log_queue=None):
     global _log_queue
     _log_queue = log_queue
     
+    # Redirect stdout so that ALL print() calls (including from pdf_extractor.py)
+    # are forwarded through the log queue to the GUI
+    _original_stdout = sys.stdout
+    if log_queue is not None:
+        class _QueueWriter:
+            """Wraps a multiprocessing.Queue to look like sys.stdout."""
+            def write(self, msg):
+                if msg and msg.strip():
+                    try:
+                        # Strip [PROGRESS] prefix if log() already added it
+                        clean = msg.strip()
+                        if clean.startswith("[PROGRESS] "):
+                            clean = clean[len("[PROGRESS] "):]
+                        log_queue.put(clean)
+                    except Exception:
+                        pass
+            def flush(self):
+                pass
+        sys.stdout = _QueueWriter()
+    
+    try:
+        return _run_pdf_extraction_inner(config_path)
+    finally:
+        sys.stdout = _original_stdout
+
+
+def _run_pdf_extraction_inner(config_path):
+    """Inner extraction logic (separated so stdout redirect works in a try/finally)."""
     start_time = time.time()
 
     # Load config
