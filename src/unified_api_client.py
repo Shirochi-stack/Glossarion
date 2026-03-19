@@ -12678,9 +12678,9 @@ class UnifiedClient:
                                                     if stream_thinking and log_stream and not self._is_stop_requested():
                                                         print(f"🧠 [gemini-native] Thinking...", flush=True)
                                                 if stream_thinking and log_stream and not self._is_stop_requested():
-                                                    for line in part.text.split("\n"):
-                                                        if line:
-                                                            print(f"    {line}", flush=True)
+                                                    thought_text = part.text.replace("\\n", "\n")
+                                                    for line in thought_text.split("\n"):
+                                                        print(f"    {line}", flush=True)
                                                 continue
                                             if hasattr(part, 'text') and part.text:
                                                 # If we were in thinking mode, print completion

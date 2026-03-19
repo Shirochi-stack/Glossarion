@@ -433,9 +433,9 @@ class GrpcGeminiClient:
                                     if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
                                         print(f"🧠 [gemini-grpc] Thinking...", flush=True)
                                 if grpc_stream_thinking and should_log and not (stop_check_fn and stop_check_fn()):
-                                    for line in part.text.split("\n"):
-                                        if line:
-                                            print(f"    {line}", flush=True)
+                                    thought_text = part.text.replace("\\n", "\n")
+                                    for line in thought_text.split("\n"):
+                                        print(f"    {line}", flush=True)
                                 continue
                             if part.text:
                                 # If switching from thinking to text, print completion
@@ -445,18 +445,19 @@ class GrpcGeminiClient:
                                     grpc_thinking_started = False
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
+                                    # Line-buffered streaming output
                                     frag = part.text.replace("\r", "")
                                     combined = "".join(log_buf) + frag
-                                    # Inject newlines after HTML closing tags
-                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                        combined = combined.replace(tag, tag + '\n')
                                     if "\n" in combined:
-                                        parts_split = combined.split("\n")
-                                        for ln in parts_split[:-1]:
+                                        lines = combined.split("\n")
+                                        for ln in lines[:-1]:
                                             print(ln)
-                                        log_buf = [parts_split[-1]]
+                                        log_buf = [lines[-1]]
                                     else:
-                                        log_buf = [combined]
+                                        log_buf.append(frag)
+                                        if len("".join(log_buf)) > 150:
+                                            print("".join(log_buf), end="", flush=True)
+                                            log_buf = []
                 
                 # Extract thinking tokens from usage metadata
                 if chunk.usage_metadata:
@@ -620,23 +621,18 @@ class GrpcGeminiClient:
         if _ThinkingConfig is not None and (thinking_budget is not None or thinking_level is not None):
             include_thoughts = os.getenv("ENABLE_THOUGHTS", "false").strip().lower() in ("1", "true", "yes", "on")
             thinking_kwargs = {'include_thoughts': include_thoughts}
-            if thinking_level is not None:
-                # Gemini 3: proto only supports thinking_budget (int), map level to budget
+            if thinking_budget is not None and thinking_budget != -1:
+                thinking_kwargs['thinking_budget'] = thinking_budget
+            elif thinking_level is not None:
+                # Proto only supports thinking_budget (int), not thinking_level
                 level_budget_map = {'minimal': 0, 'low': 4096, 'medium': 12288, 'high': 32768 }
                 level_str = str(thinking_level).lower()
                 budget_val = level_budget_map.get(level_str)
                 if budget_val is not None:
                     thinking_kwargs['thinking_budget'] = budget_val
-            elif thinking_budget is not None:
-                # Gemini 2.5: pass thinking_budget directly (-1 = dynamic/default)
-                thinking_kwargs['thinking_budget'] = thinking_budget
             try:
-                tc = _ThinkingConfig(**thinking_kwargs)
-                config_kwargs['thinking_config'] = tc
-                logger.debug(f"ThinkingConfig created: {thinking_kwargs}")
-                print(f"   🧠 [gemini-grpc] ThinkingConfig: include_thoughts={thinking_kwargs.get('include_thoughts')}, budget={thinking_kwargs.get('thinking_budget', 'not set')}")
+                config_kwargs['thinking_config'] = _ThinkingConfig(**thinking_kwargs)
             except Exception as e:
-                print(f"   ❌ [gemini-grpc] Failed to set ThinkingConfig: {e}")
                 logger.debug(f"Failed to set ThinkingConfig: {e}")
         
         return GenerationConfig(**config_kwargs)
