@@ -13384,6 +13384,7 @@ class UnifiedClient:
             log_buf = []
             thinking_tokens_seen = 0
             thinking_started = False  # whether we've seen a thinking block
+            thinking_log_buf = []  # buffer for accumulating thinking text before printing
             current_block_type = None  # track content_block_start type
             first_text_ts = None  # timestamp of first text delta
             first_thinking_ts = None  # timestamp of first thinking delta
@@ -13465,15 +13466,27 @@ class UnifiedClient:
                                     print(f"🧠 [anthropic] Thinking...", flush=True)
                             thinking_text = delta.get("thinking", "")
                             if thinking_text and log_stream and not self._is_stop_requested() and stream_thinking:
-                                for line in thinking_text.split("\n"):
-                                    if line:
-                                        print(f"    {line}", flush=True)
+                                thinking_log_buf.append(thinking_text)
+                                combined = "".join(thinking_log_buf)
+                                if "\n" in combined:
+                                    parts = combined.split("\n")
+                                    for p in parts[:-1]:
+                                        if p.strip().startswith("**") and thinking_tokens_seen > 1:
+                                            print("\u200b", flush=True)
+                                        print(f"    {p}", flush=True)
+                                    thinking_log_buf = [parts[-1]]
 
                     # content_block_stop → flush thinking buffer & reset block type
                     elif evt_type == "content_block_stop":
                         if current_block_type == "thinking" and not self._is_stop_requested():
                             stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
                             if stream_thinking and thinking_started:
+                                # Flush any remaining buffered thinking text
+                                remainder = "".join(thinking_log_buf).rstrip("\n")
+                                if remainder:
+                                    for p in remainder.split("\n"):
+                                        print(f"    {p}", flush=True)
+                                thinking_log_buf = []
                                 thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
                                 print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
                         current_block_type = None
@@ -14335,6 +14348,56 @@ class UnifiedClient:
                         except Exception:
                             pass
                     
+                    # Gemini OpenAI-compatible endpoint: inject thinkingConfig via extra_body
+                    if provider == 'gemini-openai':
+                        try:
+                            enable_gemini_think = os.getenv('ENABLE_GEMINI_THINKING', '1') == '1'
+                            if enable_gemini_think:
+                                # Detect Gemini 3+ vs 2.5 for thinkingLevel vs thinkingBudget
+                                model_lower = (effective_model or '').lower()
+                                is_g3 = 'gemini-3' in model_lower or 'gemini3' in model_lower
+                                
+                                thinking_cfg = {"includeThoughts": True}
+                                if is_g3:
+                                    level = os.getenv('GEMINI_THINKING_LEVEL', 'high').strip().upper()
+                                    if level not in ('LOW', 'MEDIUM', 'HIGH'):
+                                        level = 'HIGH'
+                                    thinking_cfg["thinkingLevel"] = level
+                                else:
+                                    budget_str = os.getenv('THINKING_BUDGET', '-1').strip()
+                                    try:
+                                        budget = int(budget_str)
+                                    except ValueError:
+                                        budget = -1
+                                    if budget > 0:
+                                        thinking_cfg["thinkingBudget"] = budget
+                                    # budget -1 = dynamic (server default), budget 0 = disabled
+                                    elif budget == 0:
+                                        thinking_cfg = {}  # No thinking
+                                
+                                if thinking_cfg:
+                                    extra_body["thinkingConfig"] = thinking_cfg
+                                    
+                                    # Log once per thread
+                                    try:
+                                        tls = self._get_thread_local_client()
+                                        if not hasattr(tls, 'gemini_openai_thinking_logged'):
+                                            tls.gemini_openai_thinking_logged = set()
+                                        state_key = (str(effective_model or ''), str(thinking_cfg))
+                                        if state_key not in tls.gemini_openai_thinking_logged:
+                                            tls.gemini_openai_thinking_logged.add(state_key)
+                                            try:
+                                                tname = threading.current_thread().name
+                                            except Exception:
+                                                tname = "unknown-thread"
+                                            self._debug_log(
+                                                f"🧠 [gemini-openai:{tname}] thinking config={thinking_cfg} (model={effective_model})"
+                                            )
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                    
                     # Add safety parameters for providers that support them
                     # Note: Together AI and Groq don't support the 'moderation' parameter
                     if disable_safety and provider in ["fireworks"]:
@@ -14731,6 +14794,7 @@ class UnifiedClient:
                         oai_thinking_started = False
                         oai_thinking_chunks = 0
                         oai_thinking_start_ts = None
+                        oai_thinking_log_buf = []  # buffer for accumulating thinking text before printing
 
                         def _check_cancel_during_stream():
                             if self._is_stop_requested():
@@ -14782,9 +14846,15 @@ class UnifiedClient:
                                                 if oai_stream_thinking and log_stream and not self._is_stop_requested():
                                                     print(f"🧠 [{provider}] Thinking...", flush=True)
                                             if oai_stream_thinking and log_stream and not self._is_stop_requested():
-                                                for line in reasoning_frag.split("\n"):
-                                                    if line:
-                                                        print(f"    {line}", flush=True)
+                                                oai_thinking_log_buf.append(reasoning_frag)
+                                                combined = "".join(oai_thinking_log_buf)
+                                                if "\n" in combined:
+                                                    parts = combined.split("\n")
+                                                    for p in parts[:-1]:
+                                                        if p.strip().startswith("**") and oai_thinking_chunks > 1:
+                                                            print("\u200b", flush=True)
+                                                        print(f"    {p}", flush=True)
+                                                    oai_thinking_log_buf = [parts[-1]]
 
                                         # Handle both object and dict access for content
                                         delta_content = None
@@ -14795,6 +14865,12 @@ class UnifiedClient:
 
                                         # If switching from thinking to text, print completion
                                         if delta_content and oai_thinking_started and oai_stream_thinking and not self._is_stop_requested():
+                                            # Flush any remaining buffered thinking text
+                                            remainder = "".join(oai_thinking_log_buf).rstrip("\n")
+                                            if remainder:
+                                                for p in remainder.split("\n"):
+                                                    print(f"    {p}", flush=True)
+                                            oai_thinking_log_buf = []
                                             thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
                                             print(f"🧠 [{provider}] Thinking complete ({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                             oai_thinking_started = False
