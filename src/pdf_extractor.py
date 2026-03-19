@@ -82,6 +82,210 @@ def _externalize_data_uri_images(html: str, images_dir: str, page_index: int) ->
 
     return pattern.sub(repl, html)
 
+
+def _extract_xhtml_chunk(args):
+    """
+    Worker function to extract and post-process a range of pages in xhtml/html mode.
+    Each worker opens the PDF independently (PyMuPDF is NOT thread-safe).
+    
+    args: (pdf_path, start_page, end_page, images_dir, images_by_page, render_mode)
+    Returns list of (page_num_1indexed, html) tuples.
+    """
+    pdf_path, start_page, end_page, images_dir, images_by_page, render_mode = args
+    results = []
+
+    try:
+        import fitz
+        import re as _re
+        from typing import Tuple as _Tuple
+    except Exception as e:
+        return results
+
+    doc = fitz.open(pdf_path)
+
+    for i in range(start_page, end_page):
+        try:
+            page = doc[i]
+            try:
+                page_html = page.get_text("xhtml" if render_mode == "xhtml" else "html")
+            except Exception:
+                page_html = page.get_text("html")
+
+            # Externalize data URI images
+            try:
+                page_html = _externalize_data_uri_images(page_html, images_dir, i + 1)
+            except Exception:
+                pass
+
+            # BeautifulSoup link injection
+            try:
+                from bs4 import BeautifulSoup
+                from bs4.element import NavigableString, Tag
+
+                def _rect_to_tuple(r):
+                    if hasattr(r, 'x0'):
+                        x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                    else:
+                        x0, y0, x1, y1 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+                    if x1 < x0: x0, x1 = x1, x0
+                    if y1 < y0: y0, y1 = y1, y0
+                    return x0, y0, x1, y1
+
+                def _rect_area(rt):
+                    x0, y0, x1, y1 = rt
+                    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+                def _rect_intersection_area(a, b):
+                    ix0 = max(a[0], b[0]); iy0 = max(a[1], b[1])
+                    ix1 = min(a[2], b[2]); iy1 = min(a[3], b[3])
+                    return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+
+                def _collapse_ws(s):
+                    return ' '.join((s or '').split())
+
+                def _wrap_text_once(soup, needle, href, external):
+                    if not needle:
+                        return False
+                    needle_norm = _collapse_ws(needle)
+                    if len(needle_norm) < 3:
+                        return False
+                    for node in soup.find_all(string=True):
+                        if not isinstance(node, NavigableString):
+                            continue
+                        if not node.parent or (isinstance(node.parent, Tag) and node.parent.name in ('script', 'style')):
+                            continue
+                        if isinstance(node.parent, Tag) and node.parent.name == 'a':
+                            continue
+                        s = str(node)
+                        if not s.strip():
+                            continue
+                        idx = s.find(needle)
+                        if idx != -1:
+                            before = s[:idx]; match = s[idx:idx + len(needle)]; after = s[idx + len(needle):]
+                            a = soup.new_tag('a', href=href)
+                            if external: a['target'] = '_blank'; a['rel'] = 'noopener noreferrer'
+                            a.string = match
+                            new_nodes = []
+                            if before: new_nodes.append(NavigableString(before))
+                            new_nodes.append(a)
+                            if after: new_nodes.append(NavigableString(after))
+                            node.replace_with(*new_nodes)
+                            return True
+                        if needle_norm in _collapse_ws(s):
+                            a = soup.new_tag('a', href=href)
+                            if external: a['target'] = '_blank'; a['rel'] = 'noopener noreferrer'
+                            a.string = s
+                            node.replace_with(a)
+                            return True
+                    return False
+
+                soup = BeautifulSoup(page_html, 'html.parser')
+                container = soup.find(id=_re.compile(r'^page\d+$'))
+                if container is None:
+                    container = soup.body if soup.body else soup
+
+                page_anchor_id = f'page-{i + 1}'
+                if soup.find(id=page_anchor_id) is None:
+                    anchor = soup.new_tag('a', id=page_anchor_id)
+                    if isinstance(container, Tag):
+                        container.insert(0, anchor)
+                    else:
+                        soup.insert(0, anchor)
+
+                # Image bbox map for link detection
+                page_images = images_by_page.get(str(i), images_by_page.get(i, []))
+                image_boxes = []
+                for img in page_images:
+                    try:
+                        fn = img.get('filename')
+                        bb = img.get('bbox')
+                        if fn and bb:
+                            image_boxes.append((fn, _rect_to_tuple(bb)))
+                    except Exception:
+                        continue
+
+                unresolved = []
+                for ln in (page.get_links() or []):
+                    r = ln.get('from')
+                    if not r:
+                        continue
+                    rt = _rect_to_tuple(r)
+                    if _rect_area(rt) <= 0:
+                        continue
+                    href = None
+                    external = False
+                    if ln.get('page') is not None and ln.get('page') >= 0:
+                        href = f'#page-{int(ln["page"]) + 1}'
+                    elif ln.get('uri'):
+                        href = ln['uri']
+                        external = True
+                    if not href:
+                        continue
+
+                    best_img = None; best_score = 0.0
+                    for fn, ib in image_boxes:
+                        ia = _rect_intersection_area(rt, ib)
+                        if ia <= 0: continue
+                        score = ia / max(_rect_area(rt), 1e-9)
+                        if score > best_score: best_score = score; best_img = fn
+                    if best_img and best_score >= 0.4:
+                        img_tag = soup.find('img', src=_re.compile(_re.escape(best_img) + r'$'))
+                        if img_tag and img_tag.parent and getattr(img_tag.parent, 'name', None) != 'a':
+                            a = soup.new_tag('a', href=href)
+                            if external: a['target'] = '_blank'; a['rel'] = 'noopener noreferrer'
+                            img_tag.replace_with(a); a.append(img_tag)
+                            continue
+
+                    link_text = ''
+                    try:
+                        link_text = page.get_text('text', clip=fitz.Rect(*rt))
+                    except Exception:
+                        pass
+                    link_text = _collapse_ws(link_text)
+                    if link_text and _wrap_text_once(soup, link_text, href, external):
+                        continue
+                    unresolved.append(href)
+
+                if unresolved:
+                    seen = set(); uniq = [u for u in unresolved if u not in seen and not seen.add(u)]
+                    links_div = soup.new_tag('div', **{'class': 'pdf-links'})
+                    p = soup.new_tag('p'); p.string = 'Links:'; links_div.append(p)
+                    ul = soup.new_tag('ul')
+                    for u in uniq:
+                        li = soup.new_tag('li')
+                        a = soup.new_tag('a', href=u)
+                        if not u.startswith('#'): a['target'] = '_blank'; a['rel'] = 'noopener noreferrer'
+                        a.string = u; li.append(a); ul.append(li)
+                    links_div.append(ul)
+                    if isinstance(container, Tag): container.append(links_div)
+                    else: soup.append(links_div)
+
+                page_html = str(soup)
+            except Exception:
+                pass
+
+            # Title page centering (first 3 pages)
+            if i < 3:
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(page_html, 'html.parser')
+                    for tag in soup.find_all(['h1', 'h2']):
+                        existing_style = tag.get('style', '')
+                        if existing_style and not existing_style.endswith(';'):
+                            existing_style += ';'
+                        tag['style'] = existing_style + 'text-align:center!important;'
+                        tag['class'] = tag.get('class', []) + ['align-center']
+                    page_html = str(soup)
+                except Exception:
+                    pass
+
+            results.append((i + 1, page_html))
+        except Exception as e:
+            results.append((i + 1, f"<!-- Extraction error page {i+1}: {e} -->"))
+
+    doc.close()
+    return results
+
 def extract_text_from_pdf(pdf_path):
     """
     Extract text from a PDF file.
@@ -1172,251 +1376,58 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         
         # If user requests exact page rendering, use MuPDF's built-in XHTML/HTML renderer for near 1:1 output
         if render_mode in ("xhtml", "html"):
-            page_list = []
             total_pages = len(doc)
-            print(f"📄 Rendering {total_pages} pages via MuPDF {render_mode.upper()} (near 1:1 layout)...")
-            import re as _re
-            for i in range(total_pages):
-                page = doc[i]
-                try:
-                    page_html = page.get_text("xhtml" if render_mode == "xhtml" else "html")
-                except Exception:
-                    page_html = page.get_text("html")
-                # Replace any data URI images with files under images/
-                try:
-                    page_html = _externalize_data_uri_images(page_html, images_dir, i + 1)
-                except Exception:
-                    pass
-                # Preserve PDF hyperlinks (annotations) in MuPDF XHTML/HTML output.
-                # IMPORTANT: MuPDF's XHTML output is often *reflowed* (not 1:1 positioned), so absolute overlay
-                # rectangles from PDF coords can end up misaligned. Instead, try to wrap the *actual extracted*
-                # text or images in <a href="..."> so links survive in both HTML and HTML→PDF conversion.
-                try:
-                    from bs4 import BeautifulSoup
-                    from bs4.element import NavigableString, Tag
+            num_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
+            
+            # Serialize images_by_page keys to strings for cross-process compatibility
+            _images_by_page_str = {}
+            if isinstance(images_by_page, dict):
+                for k, v in images_by_page.items():
+                    _images_by_page_str[str(k)] = v
 
-                    def _rect_to_tuple(r) -> Tuple[float, float, float, float]:
-                        if hasattr(r, 'x0'):
-                            x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
-                        else:
-                            x0, y0, x1, y1 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
-                        # normalize
-                        if x1 < x0:
-                            x0, x1 = x1, x0
-                        if y1 < y0:
-                            y0, y1 = y1, y0
-                        return x0, y0, x1, y1
+            # Use parallel processing for larger PDFs with multiple workers
+            if total_pages > 20 and num_workers > 1:
+                print(f"📄 Rendering {total_pages} pages via MuPDF {render_mode.upper()} using {num_workers} workers...")
+                doc.close()  # Close before forking — workers open independently
 
-                    def _rect_area(rt) -> float:
-                        x0, y0, x1, y1 = rt
-                        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+                # Divide pages into chunks
+                chunk_size = max(1, (total_pages + num_workers - 1) // num_workers)
+                ranges = []
+                for start in range(0, total_pages, chunk_size):
+                    end = min(start + chunk_size, total_pages)
+                    ranges.append((pdf_path, start, end, images_dir, _images_by_page_str, render_mode))
 
-                    def _rect_intersection_area(a, b) -> float:
-                        ax0, ay0, ax1, ay1 = a
-                        bx0, by0, bx1, by1 = b
-                        ix0 = max(ax0, bx0)
-                        iy0 = max(ay0, by0)
-                        ix1 = min(ax1, bx1)
-                        iy1 = min(ay1, by1)
-                        return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+                page_list = []
+                completed_pages = 0
 
-                    def _collapse_ws(s: str) -> str:
-                        return ' '.join((s or '').split())
+                with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+                    futures = [executor.submit(_extract_xhtml_chunk, r) for r in ranges]
 
-                    def _wrap_text_once(soup: BeautifulSoup, needle: str, href: str, external: bool) -> bool:
-                        if not needle:
-                            return False
-                        needle_norm = _collapse_ws(needle)
-                        if len(needle_norm) < 3:
-                            return False
-
-                        for node in soup.find_all(string=True):
-                            if not isinstance(node, NavigableString):
-                                continue
-                            if not node.parent or (isinstance(node.parent, Tag) and node.parent.name in ('script', 'style')):
-                                continue
-                            # Don't double-wrap
-                            if isinstance(node.parent, Tag) and node.parent.name == 'a':
-                                continue
-
-                            s = str(node)
-                            if not s.strip():
-                                continue
-
-                            # Exact match first
-                            idx = s.find(needle)
-                            if idx != -1:
-                                before = s[:idx]
-                                match = s[idx:idx + len(needle)]
-                                after = s[idx + len(needle):]
-
-                                a = soup.new_tag('a', href=href)
-                                if external:
-                                    a['target'] = '_blank'
-                                    a['rel'] = 'noopener noreferrer'
-                                a.string = match
-
-                                new_nodes = []
-                                if before:
-                                    new_nodes.append(NavigableString(before))
-                                new_nodes.append(a)
-                                if after:
-                                    new_nodes.append(NavigableString(after))
-
-                                node.replace_with(*new_nodes)
-                                return True
-
-                            # Fallback: normalized containment (wrap the whole text node)
-                            if needle_norm in _collapse_ws(s):
-                                a = soup.new_tag('a', href=href)
-                                if external:
-                                    a['target'] = '_blank'
-                                    a['rel'] = 'noopener noreferrer'
-                                a.string = s
-                                node.replace_with(a)
-                                return True
-
-                        return False
-
-                    soup = BeautifulSoup(page_html, 'html.parser')
-
-                    # Pick a container: MuPDF often uses <div id="page0">, but fall back to <body> / root.
-                    container = soup.find(id=_re.compile(r'^page\d+$'))
-                    if container is None:
-                        container = soup.body if soup.body else soup
-
-                    # Anchor for internal #page-N navigation when pages are combined
-                    page_anchor_id = f'page-{i + 1}'
-                    if soup.find(id=page_anchor_id) is None:
-                        anchor = soup.new_tag('a', id=page_anchor_id)
-                        if isinstance(container, Tag):
-                            container.insert(0, anchor)
-                        else:
-                            soup.insert(0, anchor)
-
-                    # Build image bbox map for this page (if we extracted images)
-                    page_images = images_by_page.get(i, []) if isinstance(images_by_page, dict) else []
-                    image_boxes = []  # list[(filename, rect_tuple)]
-                    for img in page_images:
+                    for future in concurrent.futures.as_completed(futures):
                         try:
-                            fn = img.get('filename')
-                            bb = img.get('bbox')
-                            if fn and bb:
-                                image_boxes.append((fn, _rect_to_tuple(bb)))
-                        except Exception:
-                            continue
+                            chunk_results = future.result()
+                            page_list.extend(chunk_results)
+                            completed_pages += len(chunk_results)
+                            percent = min(100, (completed_pages / total_pages) * 100)
+                            bar_len = 30
+                            filled = int(bar_len * percent / 100)
+                            bar = '█' * filled + '░' * (bar_len - filled)
+                            print(f"    Rendering: [{bar}] {percent:.1f}% ({completed_pages}/{total_pages} pages)", end='\r')
+                        except Exception as e:
+                            print(f"    ⚠️ Worker failed: {e}")
 
-                    unresolved = []
+                print(f"    ✅ Rendering complete! {completed_pages}/{total_pages} pages processed.          ")
 
-                    for ln in (page.get_links() or []):
-                        r = ln.get('from')
-                        if not r:
-                            continue
-                        rt = _rect_to_tuple(r)
-                        if _rect_area(rt) <= 0:
-                            continue
+                # Sort by page number to ensure correct order
+                page_list.sort(key=lambda x: x[0])
 
-                        href = None
-                        external = False
-                        if ln.get('page') is not None and ln.get('page') >= 0:
-                            href = f'#page-{int(ln["page"]) + 1}'
-                        elif ln.get('uri'):
-                            href = ln['uri']
-                            external = True
-                        if not href:
-                            continue
-
-                        # 1) If this link overlaps an extracted image bbox, wrap that <img>
-                        best_img = None
-                        best_score = 0.0
-                        for fn, ib in image_boxes:
-                            ia = _rect_intersection_area(rt, ib)
-                            if ia <= 0:
-                                continue
-                            score = ia / max(_rect_area(rt), 1e-9)
-                            if score > best_score:
-                                best_score = score
-                                best_img = fn
-
-                        if best_img and best_score >= 0.4:
-                            # Find matching <img> by filename in src
-                            img_tag = soup.find('img', src=_re.compile(_re.escape(best_img) + r'$'))
-                            if img_tag and img_tag.parent and getattr(img_tag.parent, 'name', None) != 'a':
-                                a = soup.new_tag('a', href=href)
-                                if external:
-                                    a['target'] = '_blank'
-                                    a['rel'] = 'noopener noreferrer'
-                                img_tag.replace_with(a)
-                                a.append(img_tag)
-                                continue
-
-                        # 2) Try to wrap the text inside the link rectangle
-                        link_text = ''
-                        try:
-                            link_text = page.get_text('text', clip=fitz.Rect(*rt))
-                        except Exception:
-                            link_text = ''
-                        link_text = _collapse_ws(link_text)
-
-                        if link_text and _wrap_text_once(soup, link_text, href, external):
-                            continue
-
-                        # 3) Fallback: keep the link as a visible list at the end of the page
-                        unresolved.append(href)
-
-                    if unresolved:
-                        uniq = []
-                        seen = set()
-                        for u in unresolved:
-                            if u not in seen:
-                                uniq.append(u)
-                                seen.add(u)
-
-                        links_div = soup.new_tag('div', **{'class': 'pdf-links'})
-                        p = soup.new_tag('p')
-                        p.string = 'Links:'
-                        links_div.append(p)
-                        ul = soup.new_tag('ul')
-                        for u in uniq:
-                            li = soup.new_tag('li')
-                            a = soup.new_tag('a', href=u)
-                            if not u.startswith('#'):
-                                a['target'] = '_blank'
-                                a['rel'] = 'noopener noreferrer'
-                            a.string = u
-                            li.append(a)
-                            ul.append(li)
-                        links_div.append(ul)
-
-                        if isinstance(container, Tag):
-                            container.append(links_div)
-                        else:
-                            soup.append(links_div)
-
-                    page_html = str(soup)
-                except Exception:
-                    pass
-                
-                # Post-process: add centering styles to h1/h2 tags on title pages (first few pages)
-                if i < 3:  # First 3 pages often have title/copyright/TOC
-                    try:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(page_html, 'html.parser')
-                        # Center all h1 and h2 tags on these pages
-                        for tag in soup.find_all(['h1', 'h2']):
-                            # Add both class and inline style for maximum compatibility
-                            existing_style = tag.get('style', '')
-                            if existing_style and not existing_style.endswith(';'):
-                                existing_style += ';'
-                            tag['style'] = existing_style + 'text-align:center!important;'
-                            tag['class'] = tag.get('class', []) + ['align-center']
-                        page_html = str(soup)
-                    except Exception as e:
-                        # If beautifulsoup fails, just use the page as-is
-                        pass
-                
-                page_list.append((i + 1, page_html))
-            doc.close()
+            else:
+                # Sequential extraction for small PDFs or single worker
+                page_list = []
+                print(f"📄 Rendering {total_pages} pages via MuPDF {render_mode.upper()} (near 1:1 layout)...")
+                results = _extract_xhtml_chunk((pdf_path, 0, total_pages, images_dir, _images_by_page_str, render_mode))
+                page_list = results
+                doc.close()
             if page_by_page:
                 return page_list, images_by_page
             else:
