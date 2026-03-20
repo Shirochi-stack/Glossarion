@@ -1635,9 +1635,13 @@ class MetadataBatchTranslatorUI:
         
         # Reload config from disk
         try:
-            import json
+            import json, sys
             from api_key_encryption import decrypt_config
-            with open('config.json', 'r', encoding='utf-8') as f:
+            if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+                _cfg_path = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'config.json')
+            else:
+                _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+            with open(_cfg_path, 'r', encoding='utf-8') as f:
                 self.gui.config = json.load(f)
                 self.gui.config = decrypt_config(self.gui.config)
         except Exception as e:

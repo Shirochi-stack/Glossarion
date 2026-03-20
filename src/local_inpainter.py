@@ -632,14 +632,22 @@ class LocalInpainter:
     }
     
     def __init__(self, config_path="config.json", enable_worker_process=None):
+        # Resolve default config path next to script/executable (macOS .app cwd is /)
+        def _default_cfg():
+            if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+                return os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'config.json')
+            return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
         # Normalize config_path (prevent non-path objects like dict/credentials)
         try:
             if isinstance(config_path, (str, os.PathLike)):
                 config_path = str(config_path)
+                # Resolve bare "config.json" to absolute path
+                if not os.path.isabs(config_path):
+                    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config_path)
             else:
-                config_path = "config.json"
+                config_path = _default_cfg()
         except Exception:
-            config_path = "config.json"
+            config_path = _default_cfg()
         # Load config first to check parallel_panel_translation setting
         self.config_path = config_path
         self.config = self._load_config()
@@ -1243,10 +1251,11 @@ class LocalInpainter:
                                 with open(self.config_path, 'r', encoding='utf-8') as f2:
                                     cfg = json.load(f2)
                             except Exception:
-                                # If config_path isn't the default, fall back to config.json
+                                # If config_path isn't the default, fall back to config.json next to script
                                 try:
-                                    if str(self.config_path).lower() != "config.json":
-                                        self.config_path = "config.json"
+                                    _fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+                                    if os.path.abspath(str(self.config_path)) != os.path.abspath(_fallback):
+                                        self.config_path = _fallback
                                         if os.path.exists(self.config_path):
                                             with open(self.config_path, 'r', encoding='utf-8') as f3:
                                                 cfg = json.load(f3)
@@ -1294,15 +1303,16 @@ class LocalInpainter:
             # Update
             full_config.update(self.config)
             # Atomic write: write to temp then replace
-            tmp_path = (self.config_path or 'config.json') + '.tmp'
+            _cfg_fallback = self.config_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+            tmp_path = _cfg_fallback + '.tmp'
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(full_config, f, indent=2, ensure_ascii=False)
             try:
-                os.replace(tmp_path, self.config_path or 'config.json')
+                os.replace(tmp_path, _cfg_fallback)
             except Exception as replace_err:
                 logger.debug(f"Config atomic replace failed, trying direct write: {replace_err}")
                 # Fallback to direct write
-                with open(self.config_path or 'config.json', 'w', encoding='utf-8') as f:
+                with open(_cfg_fallback, 'w', encoding='utf-8') as f:
                     json.dump(full_config, f, indent=2, ensure_ascii=False)
         except Exception as save_err:
             # Never crash on config save, but log for debugging

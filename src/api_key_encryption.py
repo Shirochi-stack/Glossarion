@@ -14,7 +14,14 @@ class APIKeyEncryption:
     """Simple encryption handler for API keys"""
     
     def __init__(self):
-        self.key_file = Path('.glossarion_key')
+        # Resolve key file next to the executable (frozen) or script (dev)
+        # to avoid writing to read-only root (/) on macOS .app bundles
+        import sys
+        if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+            _app_dir = Path(sys.executable).parent
+        else:
+            _app_dir = Path(__file__).parent
+        self.key_file = _app_dir / '.glossarion_key'
         self.cipher = self._get_or_create_cipher()
         
         # Define which fields to encrypt

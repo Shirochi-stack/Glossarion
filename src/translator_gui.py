@@ -19370,7 +19370,7 @@ if __name__ == "__main__":
             debug_mode_enabled = False
             try:
                 import json
-                config_path = "config.json"
+                config_path = CONFIG_FILE
                 if os.path.exists(config_path):
                     with open(config_path, 'r', encoding='utf-8') as f:
                         config = json.load(f)
