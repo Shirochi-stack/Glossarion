@@ -2891,6 +2891,60 @@ def _create_response_handling_section(self, parent):
     deepseek_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(deepseek_desc)
 
+    # xAI Grok Reasoning (Responses API)
+    xai_title = QLabel("xAI Grok Reasoning")
+    xai_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(xai_title)
+
+    xai_row = QWidget()
+    xai_h = QHBoxLayout(xai_row)
+    xai_h.setContentsMargins(20, 5, 0, 0)
+
+    if not hasattr(self, 'xai_use_responses_api_var'):
+        self.xai_use_responses_api_var = bool(
+            self.config.get(
+                'xai_use_responses_api',
+                str(os.environ.get('XAI_USE_RESPONSES_API', '1')) == '1'
+            )
+        )
+    try:
+        self.config['xai_use_responses_api'] = bool(self.xai_use_responses_api_var)
+        os.environ['XAI_USE_RESPONSES_API'] = '1' if self.xai_use_responses_api_var else '0'
+    except Exception:
+        pass
+
+    xai_cb = self._create_styled_checkbox("Use Responses API for Reasoning Models")
+    xai_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Route grok-4-*-reasoning models through the xAI Responses API "
+        "instead of Chat Completions. This enables reasoning summary output "
+        "(detailed thinking) which is not available via Chat Completions. "
+        "The reasoning summary is displayed as 🧠 thinking logs."
+        "</p></qt>"
+    )
+    try:
+        xai_cb.setChecked(bool(self.xai_use_responses_api_var))
+    except Exception:
+        xai_cb.setChecked(True)
+
+    def _on_xai_responses_toggle(checked):
+        try:
+            self.xai_use_responses_api_var = bool(checked)
+            self.config['xai_use_responses_api'] = self.xai_use_responses_api_var
+            os.environ['XAI_USE_RESPONSES_API'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    xai_cb.toggled.connect(_on_xai_responses_toggle)
+    xai_h.addWidget(xai_cb)
+    xai_h.addStretch()
+    section_v.addWidget(xai_row)
+
+    xai_desc = QLabel("Enables reasoning summaries for grok-4-*-reasoning models.\nWithout this, reasoning tokens are used but not visible.")
+    xai_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    xai_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(xai_desc)
+
     # Anthropic Extended Thinking
     anthropic_title = QLabel("Anthropic Extended Thinking")
     anthropic_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
