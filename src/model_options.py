@@ -139,7 +139,6 @@ def get_model_options() -> List[str]:
         "or/qwen/qwen3-235b-a22b", "or/qwen/qwen3-235b-a22b-thinking-2507",
         
         # For ElectronHub, prefix with 'eh/'
-        "eh/claude-sonnet-4-6","eh/claude-sonnet-4-6-thinking","eh/claude-opus-4-6","eh/claude-opus-4-6-thinking",
         "eh/claude-sonnet-4-5-20250929", "eh/claude-sonnet-4-5-20250929-thinking",        
         "eh/claude-sonnet-4-20250514:aws-bedrock", "eh/claude-sonnet-4-20250514-thinking:aws-bedrock",
         "eh/claude-sonnet-4-20250514", "eh/claude-sonnet-4-20250514-thinking",       
