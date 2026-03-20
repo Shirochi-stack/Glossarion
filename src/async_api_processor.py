@@ -1599,13 +1599,6 @@ class AsyncProcessingDialog:
                 background-color: #1e1e1e;
                 border: none;
             }
-            QSpinBox {
-                background-color: #2d2d2d;
-                color: white;
-                border: 1px solid #4a5568;
-                border-radius: 3px;
-                padding: 4px;
-            }
         """)
 
         # Override close behavior: hide instead of closing to preserve state
