@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
       
       - name: Install system dependencies
         run: |
@@ -45,7 +45,7 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer cython virtualenv
+          pip install buildozer==1.5.0 cython virtualenv
       
       - name: Cache Buildozer (NDK/SDK)
         uses: actions/cache@v4
@@ -110,6 +110,72 @@ jobs:
           if command -v convert &> /dev/null; then
             convert "$ANDROID_DIR/assets/Halgakos.ico" "$ANDROID_DIR/assets/Halgakos.png" 2>/dev/null || true
           fi
+          
+          # Stubs for packages removed from buildozer requirements
+          # These allow backend code to import without crashing on Android
+          cat > "$ANDROID_DIR/_backend/httpx_stub.py" << 'STUBEOF'
+          """Stub — httpx not available on Android, use requests instead."""
+          class Client:
+              def __init__(self, *a, **kw): pass
+              def get(self, *a, **kw): raise NotImplementedError("httpx unavailable")
+              def post(self, *a, **kw): raise NotImplementedError("httpx unavailable")
+          class AsyncClient(Client): pass
+          STUBEOF
+          
+          cat > "$ANDROID_DIR/_backend/rapidfuzz_stub.py" << 'STUBEOF'
+          """Stub — rapidfuzz not available on Android, falls back to difflib."""
+          import difflib
+          class fuzz:
+              @staticmethod
+              def ratio(s1, s2): return int(difflib.SequenceMatcher(None, s1, s2).ratio() * 100)
+              @staticmethod
+              def partial_ratio(s1, s2): return int(difflib.SequenceMatcher(None, s1, s2).ratio() * 100)
+          class process:
+              @staticmethod
+              def extractOne(query, choices, **kw):
+                  best = max(choices, key=lambda c: difflib.SequenceMatcher(None, query, c).ratio())
+                  score = int(difflib.SequenceMatcher(None, query, best).ratio() * 100)
+                  return (best, score, 0) if score > kw.get('score_cutoff', 0) else None
+          STUBEOF
+          
+          cat > "$ANDROID_DIR/_backend/langdetect_stub.py" << 'STUBEOF'
+          """Stub — langdetect not available on Android."""
+          def detect(text): return "unknown"
+          def detect_langs(text): return []
+          STUBEOF
+          
+          cat > "$ANDROID_DIR/_backend/ebooklib_stub.py" << 'STUBEOF'
+          """Stub — ebooklib not available on Android."""
+          class epub:
+              ITEM_DOCUMENT = 9
+              class EpubBook: pass
+              @staticmethod
+              def read_epub(*a, **kw): raise NotImplementedError("ebooklib unavailable on Android")
+          STUBEOF
+          
+          # Create sitecustomize.py to register stubs as real module names
+          cat > "$ANDROID_DIR/_backend/sitecustomize.py" << 'STUBEOF'
+          import importlib, sys, os
+          _stub_map = {
+              'httpx': 'httpx_stub',
+              'rapidfuzz': 'rapidfuzz_stub',
+              'rapidfuzz.fuzz': 'rapidfuzz_stub',
+              'rapidfuzz.process': 'rapidfuzz_stub',
+              'langdetect': 'langdetect_stub',
+              'ebooklib': 'ebooklib_stub',
+              'ebooklib.epub': 'ebooklib_stub',
+          }
+          for mod_name, stub_name in _stub_map.items():
+              if mod_name not in sys.modules:
+                  try:
+                      importlib.import_module(mod_name)
+                  except ImportError:
+                      try:
+                          stub = importlib.import_module(stub_name)
+                          sys.modules[mod_name] = stub
+                      except Exception:
+                          pass
+          STUBEOF
       
       - name: Build debug APK
         working-directory: src/android
@@ -137,8 +203,8 @@ jobs:
           path: src/android/bin/*.apk
           if-no-files-found: warn
       
-      - name: Upload build log on failure
-        if: failure()
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: android-build-log
