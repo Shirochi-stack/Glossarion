@@ -36,14 +36,19 @@ _src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-DEFAULT_MODELS = [
-    'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash',
-    'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano',
-    'gpt-4o', 'gpt-4o-mini',
-    'claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022',
-    'deepseek/deepseek-chat', 'qwen/qwen3-235b-a22b',
-    'authgpt/gpt-5.2', 'authgpt/gemini-2.5-flash',
-]
+# Import model catalog — fall back to a minimal list if unavailable
+try:
+    from model_options import get_model_options
+    DEFAULT_MODELS = get_model_options()
+except ImportError:
+    DEFAULT_MODELS = [
+        'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash',
+        'gpt-5.4', 'gpt-5.2', 'gpt-5-mini',
+        'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001',
+        'deepseek-chat',
+        'authgpt/gpt-5.2', 'authgpt/gemini-2.5-flash',
+        'antigravity/claude-sonnet-4-6', 'antigravity/gemini-2.5-flash',
+    ]
 
 GLOSSARY_MODES = ['Off', 'Minimal', 'Balanced', 'Full', 'No Glossary']
 
@@ -753,7 +758,12 @@ class TranslationScreen(MDScreen):
         if not self.selected_file or not os.path.isfile(self.selected_file):
             toast("Please select a file first")
             return
-        if not self.api_key and not self.use_multi_keys:
+        # authgpt/ and antigravity/ prefixes don't need an API key
+        model_lower = self.model_name.lower()
+        needs_api_key = not (model_lower.startswith('authgpt/') or
+                             model_lower.startswith('antigravity/') or
+                             model_lower == 'google-translate-free')
+        if needs_api_key and not self.api_key and not self.use_multi_keys:
             toast("Please enter an API key")
             return
 
