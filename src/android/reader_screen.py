@@ -60,17 +60,12 @@ KV = '''
             bar_width: dp(4)
             on_scroll_y: root._on_scroll(self)
 
-            MDLabel:
-                id: content_label
-                text: root.current_text
-                markup: True
+            BoxLayout:
+                id: content_box
+                orientation: 'vertical'
                 size_hint_y: None
-                height: self.texture_size[1] + dp(40)
+                height: self.minimum_height
                 padding: [root.margin_px, dp(16)]
-                font_size: root.font_size_px
-                line_height: root.line_spacing
-                color: root.text_color
-                halign: root.text_align
 
         # Chapter nav bar
         BoxLayout:
@@ -316,10 +311,34 @@ class ReaderScreen(MDScreen):
             import ebooklib
             from ebooklib import epub
             from bs4 import BeautifulSoup
+            import re
+            import tempfile
+            import shutil
 
             book = epub.read_epub(self.file_path, options={'ignore_ncx': False})
             self.chapters = []
             self._chapter_titles = []
+
+            # Extract all images to a temp directory
+            self._epub_image_dir = tempfile.mkdtemp(prefix='glossarion_epub_')
+            image_map = {}  # maps EPUB href -> local file path
+            for item in book.get_items():
+                if item.get_type() == ebooklib.ITEM_IMAGE:
+                    img_name = os.path.basename(item.get_name())
+                    # Also store by full relative path for matching
+                    img_path = os.path.join(self._epub_image_dir, img_name)
+                    try:
+                        with open(img_path, 'wb') as f:
+                            f.write(item.get_content())
+                        image_map[item.get_name()] = img_path
+                        image_map[img_name] = img_path
+                        # Also map without directory prefix
+                        parts = item.get_name().replace('\\', '/').split('/')
+                        for i in range(len(parts)):
+                            key = '/'.join(parts[i:])
+                            image_map[key] = img_path
+                    except Exception:
+                        pass
 
             # Use spine for correct reading order
             spine_items = []
@@ -330,7 +349,6 @@ class ReaderScreen(MDScreen):
                     if item.get_type() == ebooklib.ITEM_DOCUMENT:
                         spine_items.append(item)
 
-            # Fallback: if spine is empty, use all document items
             if not spine_items:
                 spine_items = [
                     item for item in book.get_items()
@@ -354,18 +372,86 @@ class ReaderScreen(MDScreen):
 
                 soup = BeautifulSoup(content, 'html.parser')
 
-                # Extract visible text (skip scripts/styles)
+                # Remove scripts/styles
                 for tag in soup(['script', 'style', 'meta', 'link']):
                     tag.decompose()
 
-                text = soup.get_text(separator='\n\n').strip()
-                # Clean up excessive whitespace
-                import re
-                text = re.sub(r'\n{3,}', '\n\n', text)
-                text = re.sub(r'[ \t]+', ' ', text)
+                # Build content blocks: list of ('text', str) or ('image', filepath)
+                blocks = []
+                # Get the item's directory for resolving relative image paths
+                item_dir = os.path.dirname(item.get_name()).replace('\\', '/')
 
-                if not text or len(text.strip()) < 10:
-                    continue
+                body = soup.find('body') or soup
+                current_text_parts = []
+
+                def _flush_text():
+                    t = '\n\n'.join(current_text_parts).strip()
+                    t = re.sub(r'\n{3,}', '\n\n', t)
+                    t = re.sub(r'[ \t]+', ' ', t)
+                    if t:
+                        blocks.append(('text', t))
+                    current_text_parts.clear()
+
+                for element in body.children:
+                    if hasattr(element, 'name') and element.name:
+                        # Check if this element IS an image or CONTAINS images
+                        img_tags = []
+                        if element.name == 'img':
+                            img_tags = [element]
+                        elif element.name == 'svg':
+                            # SVG with embedded image
+                            img_tags = element.find_all('image')
+                        else:
+                            img_tags = element.find_all('img')
+
+                        if img_tags:
+                            # Flush accumulated text before the image
+                            text_before = element.get_text(separator='\n').strip()
+                            # Remove text that's part of image alt
+                            if text_before:
+                                current_text_parts.append(text_before)
+                            _flush_text()
+
+                            for img_tag in img_tags:
+                                src = img_tag.get('src') or img_tag.get('xlink:href', '')
+                                if src:
+                                    # Try to resolve image path
+                                    src_clean = src.replace('\\', '/')
+                                    # Remove leading ../
+                                    while src_clean.startswith('../'):
+                                        src_clean = src_clean[3:]
+
+                                    img_file = None
+                                    # Try exact match, basename match, relative to item
+                                    for candidate in [
+                                        src_clean,
+                                        os.path.basename(src_clean),
+                                        f"{item_dir}/{src_clean}" if item_dir else src_clean,
+                                    ]:
+                                        if candidate in image_map:
+                                            img_file = image_map[candidate]
+                                            break
+
+                                    if img_file and os.path.isfile(img_file):
+                                        blocks.append(('image', img_file))
+                        else:
+                            # Pure text element
+                            t = element.get_text(separator='\n').strip()
+                            if t:
+                                current_text_parts.append(t)
+                    elif hasattr(element, 'string') and element.string:
+                        t = element.string.strip()
+                        if t:
+                            current_text_parts.append(t)
+
+                _flush_text()
+
+                # Skip empty chapters (no text and no images)
+                if not blocks or (len(blocks) == 1 and blocks[0][0] == 'text' and len(blocks[0][1].strip()) < 10):
+                    # But allow image-only chapters
+                    has_images = any(b[0] == 'image' for b in blocks)
+                    if not has_images:
+                        continue
 
                 # Extract chapter title from headings
                 title = None
@@ -377,39 +463,104 @@ class ReaderScreen(MDScreen):
                             title = t[:80]
                             break
                 if not title:
-                    # Use filename as fallback
                     fname = item.get_name()
                     title = os.path.splitext(os.path.basename(fname))[0] if fname else f"Chapter {len(self.chapters) + 1}"
 
-                self.chapters.append(text)
+                self.chapters.append(blocks)
                 self._chapter_titles.append(title)
 
             if self.chapters:
                 self._show_chapter(0)
             else:
                 self.current_text = "No readable content found in this EPUB."
+                self._show_text_only(self.current_text)
         except ImportError:
             self.current_text = "Missing library: pip install ebooklib beautifulsoup4"
+            self._show_text_only(self.current_text)
         except Exception as e:
             import traceback
             self.current_text = f"Error loading EPUB:\n{e}\n\n{traceback.format_exc()}"
+            self._show_text_only(self.current_text)
 
     def _load_txt(self):
         try:
             with open(self.file_path, 'r', encoding='utf-8') as f:
                 text = f.read()
-            self.chapters = [text]
+            self.chapters = [[('text', text)]]
             self._chapter_titles = [self.book_title]
             self._show_chapter(0)
         except Exception as e:
             self.current_text = f"Error: {e}"
+            self._show_text_only(self.current_text)
+
+    def _show_text_only(self, text):
+        """Simple text-only display for errors or plain text."""
+        try:
+            box = self.ids.content_box
+            box.clear_widgets()
+            lbl = MDLabel(
+                text=text,
+                markup=True,
+                size_hint_y=None,
+                font_size=self.font_size_px,
+                line_height=self.line_spacing,
+                color=self.text_color,
+                halign=self.text_align,
+            )
+            lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+            box.add_widget(lbl)
+        except Exception:
+            pass
 
     def _show_chapter(self, index):
         if 0 <= index < len(self.chapters):
             self.current_chapter_index = index
-            self.current_text = self.chapters[index]
+            blocks = self.chapters[index]
             title = self._chapter_titles[index] if index < len(self._chapter_titles) else ""
             self.chapter_info = f"{title}  ({index + 1}/{len(self.chapters)})"
+
+            # Build plain text for search and bookmarks
+            self.current_text = '\n\n'.join(b[1] for b in blocks if b[0] == 'text')
+
+            # Populate the content_box with interleaved text/image widgets
+            try:
+                from kivy.uix.image import AsyncImage
+
+                box = self.ids.content_box
+                box.clear_widgets()
+
+                for block_type, block_content in blocks:
+                    if block_type == 'text':
+                        lbl = MDLabel(
+                            text=block_content,
+                            markup=True,
+                            size_hint_y=None,
+                            font_size=self.font_size_px,
+                            line_height=self.line_spacing,
+                            color=self.text_color,
+                            halign=self.text_align,
+                        )
+                        lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+                        box.add_widget(lbl)
+                    elif block_type == 'image':
+                        img = AsyncImage(
+                            source=block_content,
+                            size_hint_y=None,
+                            height=dp(300),
+                            fit_mode='contain',
+                            allow_stretch=True,
+                        )
+                        # Adjust height on load to maintain aspect ratio
+                        def _on_texture(instance, texture, *args):
+                            if texture:
+                                aspect = texture.width / max(texture.height, 1)
+                                max_w = instance.parent.width if instance.parent else 400
+                                instance.height = min(dp(600), max_w / max(aspect, 0.1))
+                        img.bind(texture=_on_texture)
+                        box.add_widget(img)
+            except Exception:
+                pass
+
             try:
                 self.ids.content_scroll.scroll_y = 1.0
             except Exception:
