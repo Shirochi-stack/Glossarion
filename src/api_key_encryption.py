@@ -14,10 +14,14 @@ class APIKeyEncryption:
     """Simple encryption handler for API keys"""
     
     def __init__(self):
-        # Resolve key file next to the executable (frozen) or script (dev)
-        # to avoid writing to read-only root (/) on macOS .app bundles
         import sys
-        if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+        # Determine writable directory for the encryption key file
+        if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
+            # macOS .app bundles: Contents/MacOS/ is read-only on DMGs
+            # Use ~/Library/Application Support/Glossarion/ instead
+            _app_dir = Path.home() / 'Library' / 'Application Support' / 'Glossarion'
+            _app_dir.mkdir(parents=True, exist_ok=True)
+        elif getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
             _app_dir = Path(sys.executable).parent
         else:
             _app_dir = Path(__file__).parent
@@ -42,15 +46,31 @@ class APIKeyEncryption:
         
         # Generate new key
         key = Fernet.generate_key()
-        self.key_file.write_bytes(key)
+        try:
+            self.key_file.write_bytes(key)
+        except OSError:
+            # Fallback: write to home directory if primary path is read-only
+            try:
+                fallback = Path.home() / '.glossarion_key'
+                fallback.write_bytes(key)
+                self.key_file = fallback
+            except OSError:
+                # Last resort: key lives in memory only for this session
+                return Fernet(key)
         
         # Hide file on Windows
         if os.name == 'nt':
-            import ctypes
-            ctypes.windll.kernel32.SetFileAttributesW(str(self.key_file), 2)
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(self.key_file), 2)
+            except Exception:
+                pass
         else:
             # Restrict permissions on Unix
-            os.chmod(self.key_file, 0o600)
+            try:
+                os.chmod(self.key_file, 0o600)
+            except OSError:
+                pass
         
         return Fernet(key)
     
