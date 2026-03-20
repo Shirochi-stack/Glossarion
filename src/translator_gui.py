@@ -59,11 +59,12 @@ def _kill_child_process_tree(timeout=1.5):
             except Exception:
                 pass
     except Exception:
-        # Best-effort fallback using taskkill without raising
+        # Best-effort fallback using taskkill without raising (Windows only)
         try:
             import subprocess, os
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(os.getpid())],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.name == 'nt':
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
     return count
@@ -664,26 +665,7 @@ def normalize_name_for_comparison(name):
     name = ' '.join(name.split())
     return name.strip()
         
-def load_application_icon(window, base_dir):
-    """Load application icon with fallback handling"""
-    ico_path = os.path.join(base_dir, 'Halgakos.ico')
-    if os.path.isfile(ico_path):
-        try:
-            window.iconbitmap(ico_path)
-        except Exception as e:
-            logging.warning(f"Could not set window icon: {e}")
-    try:
-        from PIL import Image, ImageTk
-        if os.path.isfile(ico_path):
-            icon_image = Image.open(ico_path)
-            if icon_image.mode != 'RGBA':
-                icon_image = icon_image.convert('RGBA')
-            icon_photo = ImageTk.PhotoImage(icon_image)
-            window.iconphoto(False, icon_photo)
-            return icon_photo
-    except (ImportError, Exception) as e:
-        logging.warning(f"Could not load icon image: {e}")
-    return None
+# load_application_icon() removed — was a Tkinter remnant, unused in PySide6.
 
 # UIHelper class removed - not needed in PySide6
 # PySide6 has built-in undo/redo support
@@ -2021,19 +2003,21 @@ Text to analyze:
         """
         super().changeEvent(event)
         if event.type() == event.Type.ActivationChange and not self.isActiveWindow():
-            try:
-                import ctypes
-                hwnd = int(self.winId())
-                HWND_NOTOPMOST = -2
-                SWP_NOMOVE = 0x0002
-                SWP_NOSIZE = 0x0001
-                SWP_NOACTIVATE = 0x0010
-                ctypes.windll.user32.SetWindowPos(
-                    hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-                )
-            except Exception:
-                pass
+            # Win32-only: clear TOPMOST flag via SetWindowPos
+            if platform.system() == 'Windows':
+                try:
+                    import ctypes
+                    hwnd = int(self.winId())
+                    HWND_NOTOPMOST = -2
+                    SWP_NOMOVE = 0x0002
+                    SWP_NOSIZE = 0x0001
+                    SWP_NOACTIVATE = 0x0010
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                    )
+                except Exception:
+                    pass
 
     def closeEvent(self, event):
         """Handle window close event properly"""
@@ -2135,18 +2119,28 @@ Text to analyze:
             # Stop any translation operations
             if hasattr(self, '_translation_thread') and self._translation_thread:
                 try:
-                    print("[CLEANUP] Terminating translation thread...")
-                    self._translation_thread.terminate()
-                    self._translation_thread.wait(1000)  # Wait up to 1 second
+                    print("[CLEANUP] Stopping translation thread...")
+                    if hasattr(self._translation_thread, 'terminate'):
+                        # QThread path
+                        self._translation_thread.terminate()
+                        self._translation_thread.wait(1000)
+                    elif hasattr(self._translation_thread, 'join'):
+                        # threading.Thread path — cannot force-terminate, just wait briefly
+                        self._translation_thread.join(timeout=1.0)
                 except:
                     pass
             
             # Stop glossary operations
             if hasattr(self, '_glossary_thread') and self._glossary_thread:
                 try:
-                    print("[CLEANUP] Terminating glossary thread...")
-                    self._glossary_thread.terminate()
-                    self._glossary_thread.wait(1000)  # Wait up to 1 second
+                    print("[CLEANUP] Stopping glossary thread...")
+                    if hasattr(self._glossary_thread, 'terminate'):
+                        # QThread path
+                        self._glossary_thread.terminate()
+                        self._glossary_thread.wait(1000)
+                    elif hasattr(self._glossary_thread, 'join'):
+                        # threading.Thread path — cannot force-terminate, just wait briefly
+                        self._glossary_thread.join(timeout=1.0)
                 except:
                     pass
             
@@ -2278,13 +2272,14 @@ Text to analyze:
                 if victims:
                     psutil.wait_procs(victims, timeout=1)
             except Exception:
-                # Fallback to taskkill if psutil unavailable
-                try:
-                    import subprocess
-                    subprocess.run(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+                # Fallback to taskkill if psutil unavailable (Windows only)
+                if os.name == 'nt':
+                    try:
+                        import subprocess
+                        subprocess.run(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
 
             # Sweep any remaining children (e.g., helper workers) to avoid temp-dir locks
             try:
