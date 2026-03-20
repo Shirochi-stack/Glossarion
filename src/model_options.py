@@ -181,7 +181,8 @@ def get_model_options() -> List[str]:
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
         "nd/deepseek-ai/deepseek-v3.2",
-        "nd/deepseek-ai/deepseek-r1",
+        "nd/deepseek-ai/deepseek-v3.1",
+        "nd/deepseek-ai/deepseek-v3.1-terminus",
         "nd/moonshotai/kimi-k2-thinking",
         "nd/meta/llama-4-maverick-17b-128e-instruct",
         "nd/meta/llama-4-scout-17b-16e-instruct",
