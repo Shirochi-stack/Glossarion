@@ -300,6 +300,31 @@ if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
 else:
     _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# On macOS .app bundles, App Translocation makes the bundle directory
+# read-only.  Detect this and redirect config/data to a writable location.
+if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
+    try:
+        _test_path = os.path.join(_APP_DIR, ".write_test")
+        with open(_test_path, "w") as _f:
+            _f.write("ok")
+        os.remove(_test_path)
+    except OSError:
+        # Bundle dir is read-only — use ~/Library/Application Support/Glossarion
+        _mac_app_support = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", "Glossarion"
+        )
+        os.makedirs(_mac_app_support, exist_ok=True)
+        # Migrate config from the bundle if it exists and hasn't been migrated yet
+        _bundle_config = os.path.join(_APP_DIR, "config.json")
+        _new_config = os.path.join(_mac_app_support, "config.json")
+        if os.path.isfile(_bundle_config) and not os.path.isfile(_new_config):
+            try:
+                import shutil as _shutil
+                _shutil.copy2(_bundle_config, _new_config)
+            except Exception:
+                pass
+        _APP_DIR = _mac_app_support
+
 CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
 
