@@ -142,18 +142,15 @@ def translate_chapter_streaming(
         if stop_event.is_set():
             return
 
-        # Call the API — the streaming output goes to stdout/print
-        # We'll capture it via a custom print hook
+        # Call the API via _get_response (the main routing method)
         full_text_parts = []
-        thinking_parts = []
 
-        # Hook into streaming by capturing printed output
-        # For now, use a synchronous call and capture the result
-        response = client.call_api(
+        response = client._get_response(
             messages=messages,
             temperature=temperature,
             max_tokens=max_output_tokens,
-            context="reader_translate",
+            max_completion_tokens=None,
+            response_name="reader_translate",
         )
 
         if stop_event.is_set():
