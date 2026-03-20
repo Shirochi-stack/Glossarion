@@ -16314,19 +16314,9 @@ class UnifiedClient:
             base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', 'https://api.openai.com/v1')
         
         # xAI multi-agent models need the Responses API (/v1/responses)
-        # instead of chat completions (/v1/chat/completions).
-        # Reasoning models (grok-4-*-reasoning, etc.) can optionally use it
-        # to get reasoning summaries (XAI_USE_RESPONSES_API toggle).
+        # instead of chat completions (/v1/chat/completions)
         effective_model = self.model
-        _model_lower = effective_model.lower()
-        _use_responses = (
-            'multi-agent' in _model_lower
-            or (
-                'reasoning' in _model_lower
-                and os.getenv('XAI_USE_RESPONSES_API', '1') == '1'
-            )
-        )
-        if provider == 'xai' and _use_responses:
+        if provider == 'xai' and 'multi-agent' in effective_model.lower():
             return self._send_xai_responses_api(
                 messages=messages,
                 temperature=temperature,
@@ -16347,14 +16337,11 @@ class UnifiedClient:
     
     def _send_xai_responses_api(self, messages, temperature, max_tokens, base_url,
                                  response_name, model) -> UnifiedResponse:
-        """Send request to xAI Responses API (/v1/responses) for multi-agent and reasoning models.
+        """Send request to xAI Responses API (/v1/responses) for multi-agent models.
         
-        Multi-agent models (grok-4.20-multi-agent-*) don't support /v1/chat/completions.
-        Reasoning models (grok-4-*-reasoning) can use this to get reasoning summaries.
-        Supports streaming via raw HTTP SSE.
+        Multi-agent models like grok-4.20-multi-agent-* don't support /v1/chat/completions.
+        They require the Responses API which uses 'input' instead of 'messages'.
         """
-        import json as _json
-        import time as _t
         max_retries = self._get_max_retries()
         api_delay = self._get_send_interval()
         
@@ -16363,16 +16350,15 @@ class UnifiedClient:
         if effective_model.startswith('grok/'):
             effective_model = effective_model[5:]
         
-        # Detect reasoning model
-        is_reasoning = 'reasoning' in effective_model.lower()
-        
         # Convert messages to responses API format
+        # The responses API uses 'input' which can be a string or array of messages
         input_messages = []
         system_prompt = None
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role == "system":
+                # System instructions go into 'instructions' parameter
                 if system_prompt:
                     system_prompt += "\n\n" + content
                 else:
@@ -16388,11 +16374,16 @@ class UnifiedClient:
                 if api_delay > 0 and attempt > 0:
                     time.sleep(api_delay)
                 
-                # Build request params
+                # Create client with xAI base URL
+                client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=base_url
+                )
+                
+                # Build params for responses.create()
                 params = {
                     "model": effective_model,
                     "input": input_messages,
-                    "stream": True,
                 }
                 if system_prompt:
                     params["instructions"] = system_prompt
@@ -16401,181 +16392,98 @@ class UnifiedClient:
                 if max_tokens:
                     params["max_output_tokens"] = max_tokens
                 
-                # Add reasoning summary for reasoning models
-                if is_reasoning:
-                    params["reasoning"] = {"summary": "detailed"}
+                print(f"🌀 [xai] Sending to Responses API (model={effective_model})")
                 
-                url = f"{base_url.rstrip('/')}/responses"
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                }
-                
-                # Thinking log settings
-                stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
-                log_stream = os.getenv("LOG_STREAM_EVENTS", "1") not in ("0", "false")
-                
-                mode_str = " (reasoning=detailed)" if is_reasoning else ""
-                print(f"🛰️ [xai] Responses API stream start (model={effective_model}{mode_str})")
-                
-                start_ts = _t.time()
-                
-                import requests as req
-                resp = req.post(url, json=params, headers=headers, timeout=600, stream=True)
-                
-                open_dur = _t.time() - start_ts
-                print(f"🛰️ [xai] Responses API stream opened in {open_dur:.1f}s (status={resp.status_code})")
-                
-                if resp.status_code != 200:
-                    error_msg = ""
-                    try:
-                        error_msg = resp.text[:500]
-                    except Exception:
-                        error_msg = f"HTTP {resp.status_code}"
-                    raise UnifiedClientError(
-                        f"xAI Responses API error ({resp.status_code}): {error_msg}",
-                        error_type="api_error"
+                # Try SDK responses.create() first
+                try:
+                    response = client.responses.create(**params)
+                    
+                    # Extract text from response
+                    content = ""
+                    if hasattr(response, 'output') and response.output:
+                        for item in response.output:
+                            if hasattr(item, 'type') and item.type == 'message':
+                                if hasattr(item, 'content') and item.content:
+                                    for block in item.content:
+                                        if hasattr(block, 'text'):
+                                            content += block.text
+                            elif hasattr(item, 'text'):
+                                content += item.text
+                    elif hasattr(response, 'output_text'):
+                        content = response.output_text or ""
+                    
+                    # Extract usage
+                    usage_data = None
+                    if hasattr(response, 'usage') and response.usage:
+                        u = response.usage
+                        usage_data = {
+                            "prompt_tokens": getattr(u, 'input_tokens', 0) or 0,
+                            "completion_tokens": getattr(u, 'output_tokens', 0) or 0,
+                            "total_tokens": (getattr(u, 'input_tokens', 0) or 0) + (getattr(u, 'output_tokens', 0) or 0),
+                        }
+                    
+                    finish_reason = "stop"
+                    if hasattr(response, 'status'):
+                        if response.status == 'incomplete':
+                            finish_reason = "length"
+                    
+                    return UnifiedResponse(
+                        content=content.strip(),
+                        finish_reason=finish_reason,
+                        usage=usage_data,
+                        raw_response=response
                     )
-                
-                # Parse SSE stream
-                text_parts = []
-                reasoning_parts = []
-                thinking_started = False
-                thinking_chunks = 0
-                thinking_start_ts = None
-                thinking_log_buf = []
-                first_text_logged = False
-                usage_data = None
-                current_event_type = ""
-                debug_line_count = 0
-                
-                for raw_line in resp.iter_lines(decode_unicode=True):
-                    if self._is_stop_requested():
-                        break
                     
-                    if raw_line is None:
-                        continue
+                except AttributeError:
+                    # SDK doesn't have responses — fall back to raw HTTP
+                    import requests as req
+                    url = f"{base_url.rstrip('/')}/responses"
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    }
                     
-                    # Debug: log first few raw lines to diagnose format
-                    debug_line_count += 1
-                    if debug_line_count <= 5 and log_stream:
-                        print(f"    [xai-sse] raw#{debug_line_count}: {raw_line[:120]}", flush=True)
+                    resp = req.post(url, json=params, headers=headers, timeout=300)
                     
-                    # SSE format: event lines set the type, data lines contain the payload
-                    if raw_line.startswith("event:"):
-                        current_event_type = raw_line[6:].strip()
-                        continue
+                    if resp.status_code != 200:
+                        error_msg = resp.text[:500]
+                        try:
+                            error_msg = resp.json().get("error", {}).get("message", error_msg)
+                        except Exception:
+                            pass
+                        raise UnifiedClientError(
+                            f"xAI Responses API error ({resp.status_code}): {error_msg}",
+                            error_type="api_error"
+                        )
                     
-                    if not raw_line.startswith("data:"):
-                        # Empty line = end of event block, but we process on data: line
-                        continue
+                    data = resp.json()
+                    content = ""
+                    for item in data.get("output", []):
+                        if item.get("type") == "message":
+                            for block in item.get("content", []):
+                                if block.get("type") == "output_text":
+                                    content += block.get("text", "")
+                        elif "text" in item:
+                            content += item["text"]
                     
-                    data_str = raw_line[5:].strip()
-                    if not data_str or data_str == "[DONE]":
-                        continue
+                    if not content and "output_text" in data:
+                        content = data["output_text"]
                     
-                    try:
-                        event = _json.loads(data_str)
-                    except _json.JSONDecodeError:
-                        continue
+                    usage_data = None
+                    if "usage" in data:
+                        u = data["usage"]
+                        usage_data = {
+                            "prompt_tokens": u.get("input_tokens", 0),
+                            "completion_tokens": u.get("output_tokens", 0),
+                            "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
+                        }
                     
-                    # Use event type from the `event:` line, or fall back to `type` in JSON
-                    event_type = current_event_type or event.get("type", "")
-                    # Reset for next event
-                    current_event_type = ""
-                    
-                    # Reasoning summary text delta
-                    if event_type == "response.reasoning_summary_text.delta":
-                        frag = event.get("delta", "")
-                        if frag and isinstance(frag, str):
-                            reasoning_parts.append(frag)
-                            thinking_chunks += 1
-                            if thinking_start_ts is None:
-                                thinking_start_ts = _t.time()
-                            if not thinking_started:
-                                thinking_started = True
-                                if stream_thinking and log_stream:
-                                    print(f"🧠 [xai] Thinking...", flush=True)
-                            if stream_thinking and log_stream:
-                                thinking_log_buf.append(frag)
-                                combined = "".join(thinking_log_buf)
-                                if "\n" in combined:
-                                    parts = combined.split("\n")
-                                    for p in parts[:-1]:
-                                        if p.strip().startswith("**") and thinking_chunks > 1:
-                                            print("\u200b", flush=True)
-                                        print(f"    {p}", flush=True)
-                                    thinking_log_buf = [parts[-1]]
-                    
-                    # Reasoning summary text done
-                    elif event_type == "response.reasoning_summary_text.done":
-                        if thinking_started and stream_thinking and log_stream:
-                            # Flush remaining buffer
-                            remainder = "".join(thinking_log_buf).rstrip("\n")
-                            if remainder:
-                                for p in remainder.split("\n"):
-                                    print(f"    {p}", flush=True)
-                            thinking_log_buf = []
-                            thinking_dur = _t.time() - thinking_start_ts if thinking_start_ts else 0
-                            print(f"🧠 [xai] Thinking complete ({thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                            thinking_started = False
-                    
-                    # Output text delta
-                    elif event_type == "response.output_text.delta":
-                        frag = event.get("delta", "")
-                        if frag and isinstance(frag, str):
-                            # If we were still in thinking when text starts, finalize
-                            if thinking_started and stream_thinking and log_stream:
-                                remainder = "".join(thinking_log_buf).rstrip("\n")
-                                if remainder:
-                                    for p in remainder.split("\n"):
-                                        print(f"    {p}", flush=True)
-                                thinking_log_buf = []
-                                thinking_dur = _t.time() - thinking_start_ts if thinking_start_ts else 0
-                                print(f"🧠 [xai] Thinking complete ({thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                                thinking_started = False
-                            
-                            if not first_text_logged and log_stream:
-                                first_text_dur = _t.time() - start_ts
-                                print(f"🛰️ [xai] First text token in {first_text_dur:.1f}s", flush=True)
-                                first_text_logged = True
-                            text_parts.append(frag)
-                    
-                    # Response completed — extract usage
-                    elif event_type == "response.completed":
-                        resp_data = event.get("response", {})
-                        u = resp_data.get("usage", {})
-                        if u:
-                            usage_data = {
-                                "prompt_tokens": u.get("input_tokens", 0),
-                                "completion_tokens": u.get("output_tokens", 0),
-                                "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
-                            }
-                            reasoning_tokens = 0
-                            details = u.get("output_tokens_details", {})
-                            if details and isinstance(details, dict):
-                                reasoning_tokens = details.get("reasoning_tokens", 0)
-                            if reasoning_tokens:
-                                usage_data["reasoning_tokens"] = reasoning_tokens
-                
-                content = "".join(text_parts)
-                
-                if not self._is_stop_requested():
-                    stream_elapsed = _t.time() - start_ts
-                    reasoning_info = ""
-                    if reasoning_parts:
-                        reasoning_info = f", reasoning_chunks={thinking_chunks}"
-                    if usage_data:
-                        reasoning_info += f", reasoning_tokens={usage_data.get('reasoning_tokens', 'n/a')}"
-                    print(f"🛰️ [xai] Responses API stream complete in {stream_elapsed:.1f}s ({len(text_parts)} text chunks{reasoning_info})", flush=True)
-                
-                return UnifiedResponse(
-                    content=content.strip(),
-                    finish_reason="stop",
-                    usage=usage_data,
-                    raw_response=None
-                )
+                    return UnifiedResponse(
+                        content=content.strip(),
+                        finish_reason="stop",
+                        usage=usage_data,
+                        raw_response=data
+                    )
                     
             except UnifiedClientError:
                 raise
