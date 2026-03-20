@@ -33,11 +33,15 @@ jobs:
           brew install pango cairo libffi gdk-pixbuf gobject-introspection
           brew install pkg-config cmake
       
-      - name: Build with PyInstaller
-        run: pyinstaller translator_lite_mac.spec
+      - name: Build ARM (Apple Silicon)
+        run: pyinstaller translator_lite_mac.spec --noconfirm
         working-directory: src
       
-      - name: Upload DMG artifact
+      - name: Build Intel (x86_64)
+        run: pyinstaller translator_lite_mac_intel.spec --noconfirm
+        working-directory: src
+      
+      - name: Upload DMG artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-Lite-macOS
