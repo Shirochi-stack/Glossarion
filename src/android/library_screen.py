@@ -18,7 +18,8 @@ from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.button import MDFloatingActionButton
 from kivymd.uix.label import MDLabel
 
-from android_file_utils import scan_for_books, get_documents_dir, get_downloads_dir
+from android_file_utils import (get_documents_dir, get_downloads_dir, scan_for_books,
+                                get_library_dir)
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,10 @@ class LibraryScreen(MDScreen):
 
         self.books.clear()
         scan_dirs = self.app.config_data.get('library_scan_dirs', [])
-        default_dirs = [get_documents_dir()]
+
+        # Primary: dedicated Library folder
+        lib_dir = get_library_dir()
+        default_dirs = [lib_dir, get_documents_dir()]
 
         downloads = get_downloads_dir()
         if os.path.isdir(downloads):
@@ -89,6 +93,15 @@ class LibraryScreen(MDScreen):
             if os.path.isdir(d):
                 found = scan_for_books(d)
                 self.books.extend(found)
+                # Also scan one level deep (for _output folders in Library)
+                if d == lib_dir:
+                    try:
+                        for entry in os.scandir(d):
+                            if entry.is_dir():
+                                sub_found = scan_for_books(entry.path)
+                                self.books.extend(sub_found)
+                    except (PermissionError, OSError):
+                        pass
 
         # Deduplicate
         seen = set()

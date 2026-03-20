@@ -316,32 +316,83 @@ class ReaderScreen(MDScreen):
             import ebooklib
             from ebooklib import epub
             from bs4 import BeautifulSoup
-            book = epub.read_epub(self.file_path, options={'ignore_ncx': True})
+
+            book = epub.read_epub(self.file_path, options={'ignore_ncx': False})
             self.chapters = []
             self._chapter_titles = []
-            for item in book.get_items():
-                if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    content = item.get_content().decode('utf-8', errors='replace')
-                    soup = BeautifulSoup(content, 'html.parser')
-                    text = soup.get_text(separator='\n\n').strip()
-                    if not text or len(text) < 10:
+
+            # Use spine for correct reading order
+            spine_items = []
+            items_by_id = {item.get_id(): item for item in book.get_items()}
+            for item_id, _linear in book.spine:
+                if item_id in items_by_id:
+                    item = items_by_id[item_id]
+                    if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                        spine_items.append(item)
+
+            # Fallback: if spine is empty, use all document items
+            if not spine_items:
+                spine_items = [
+                    item for item in book.get_items()
+                    if item.get_type() == ebooklib.ITEM_DOCUMENT
+                ]
+
+            for item in spine_items:
+                raw = item.get_content()
+
+                # Try multiple encodings
+                content = None
+                for enc in ('utf-8', 'utf-8-sig', 'euc-kr', 'cp949', 'shift_jis',
+                            'gb18030', 'big5', 'latin-1'):
+                    try:
+                        content = raw.decode(enc)
+                        break
+                    except (UnicodeDecodeError, LookupError):
                         continue
-                    title = None
-                    for tag in ['h1', 'h2', 'h3', 'title']:
-                        found = soup.find(tag)
-                        if found and found.get_text().strip():
-                            title = found.get_text().strip()[:80]
+                if content is None:
+                    content = raw.decode('utf-8', errors='replace')
+
+                soup = BeautifulSoup(content, 'html.parser')
+
+                # Extract visible text (skip scripts/styles)
+                for tag in soup(['script', 'style', 'meta', 'link']):
+                    tag.decompose()
+
+                text = soup.get_text(separator='\n\n').strip()
+                # Clean up excessive whitespace
+                import re
+                text = re.sub(r'\n{3,}', '\n\n', text)
+                text = re.sub(r'[ \t]+', ' ', text)
+
+                if not text or len(text.strip()) < 10:
+                    continue
+
+                # Extract chapter title from headings
+                title = None
+                for tag_name in ['h1', 'h2', 'h3', 'title']:
+                    found = soup.find(tag_name)
+                    if found:
+                        t = found.get_text().strip()
+                        if t and len(t) > 1:
+                            title = t[:80]
                             break
-                    if not title:
-                        title = f"Chapter {len(self.chapters) + 1}"
-                    self.chapters.append(text)
-                    self._chapter_titles.append(title)
+                if not title:
+                    # Use filename as fallback
+                    fname = item.get_name()
+                    title = os.path.splitext(os.path.basename(fname))[0] if fname else f"Chapter {len(self.chapters) + 1}"
+
+                self.chapters.append(text)
+                self._chapter_titles.append(title)
+
             if self.chapters:
                 self._show_chapter(0)
             else:
-                self.current_text = "No readable content found."
+                self.current_text = "No readable content found in this EPUB."
+        except ImportError:
+            self.current_text = "Missing library: pip install ebooklib beautifulsoup4"
         except Exception as e:
-            self.current_text = f"Error loading EPUB:\n{e}"
+            import traceback
+            self.current_text = f"Error loading EPUB:\n{e}\n\n{traceback.format_exc()}"
 
     def _load_txt(self):
         try:

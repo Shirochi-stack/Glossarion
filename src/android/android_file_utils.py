@@ -81,12 +81,29 @@ def get_config_path():
     return os.path.join(data_dir, 'config_android.json')
 
 
+def get_library_dir():
+    """Get the dedicated library directory for EPUBs.
+    
+    All translated EPUBs and their output folders live here.
+    
+    Android: /storage/emulated/0/Documents/Glossarion/Library/
+    Windows: ~/Documents/Glossarion/Library/
+    macOS:   ~/Documents/Glossarion/Library/
+    """
+    docs = get_documents_dir()
+    lib_dir = os.path.join(docs, 'Library')
+    os.makedirs(lib_dir, exist_ok=True)
+    return lib_dir
+
+
 def get_output_dir(input_file):
     """Get/create the output directory for a given input file.
     
-    Creates an output directory named '{filename}_output' next to the input file.
-    If the parent directory is read-only (e.g. Android Downloads), falls back
-    to the app's Documents directory.
+    Places the output inside the Glossarion Library folder:
+        ~/Documents/Glossarion/Library/{filename}_output/
+    
+    Falls back to creating next to the input file if the library dir
+    is not writable.
     
     Args:
         input_file: Path to the input EPUB/TXT file
@@ -94,12 +111,12 @@ def get_output_dir(input_file):
     Returns:
         str: Path to the output directory (created if needed)
     """
-    input_dir = os.path.dirname(os.path.abspath(input_file))
     base_name = os.path.splitext(os.path.basename(input_file))[0]
     output_name = f"{base_name}_output"
     
-    # Try creating next to the input file first
-    output_dir = os.path.join(input_dir, output_name)
+    # Primary: use the dedicated Glossarion Library folder
+    lib_dir = get_library_dir()
+    output_dir = os.path.join(lib_dir, output_name)
     try:
         os.makedirs(output_dir, exist_ok=True)
         # Test write access
@@ -111,7 +128,16 @@ def get_output_dir(input_file):
     except (OSError, PermissionError):
         pass
     
-    # Fallback: use app's documents directory
+    # Fallback: try next to the input file
+    input_dir = os.path.dirname(os.path.abspath(input_file))
+    output_dir = os.path.join(input_dir, output_name)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+    except (OSError, PermissionError):
+        pass
+    
+    # Last resort: app's documents directory directly
     docs = get_documents_dir()
     output_dir = os.path.join(docs, output_name)
     os.makedirs(output_dir, exist_ok=True)
