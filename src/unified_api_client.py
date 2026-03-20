@@ -14274,19 +14274,34 @@ class UnifiedClient:
                     if provider == 'openrouter':
                         try:
                             enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                            if enable_gpt:
-                                reasoning = {"enabled": True, "exclude": True}
+                            # Auto-detect :thinking suffix models (e.g. claude-3.7-sonnet:thinking, lfm-2.5-1.2b-thinking)
+                            _is_thinking_model = ':thinking' in (effective_model or '').lower() or '-thinking' in (effective_model or '').lower()
+                            if enable_gpt or _is_thinking_model:
+                                # exclude=False: include reasoning content in the response stream
+                                reasoning = {"enabled": True, "exclude": False}
                                 tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
                                 if tokens_str.isdigit() and int(tokens_str) > 0:
                                     reasoning.pop('effort', None)
                                     reasoning["max_tokens"] = int(tokens_str)
-                                else:
+                                elif not _is_thinking_model:
+                                    # Only set effort for non-thinking models (thinking models handle it internally)
                                     effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
                                     if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                                         effort = 'medium'
                                     reasoning.pop('max_tokens', None)
                                     reasoning["effort"] = effort
                                 extra_body["reasoning"] = reasoning
+                                if _is_thinking_model and not enable_gpt:
+                                    # Log auto-detection once
+                                    try:
+                                        tls = self._get_thread_local_client()
+                                        if not hasattr(tls, '_or_thinking_auto_logged'):
+                                            tls._or_thinking_auto_logged = set()
+                                        if effective_model not in tls._or_thinking_auto_logged:
+                                            tls._or_thinking_auto_logged.add(effective_model)
+                                            print(f"🧠 [openrouter] Auto-enabled reasoning for thinking model: {effective_model}")
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
 
@@ -14801,6 +14816,8 @@ class UnifiedClient:
                         oai_thinking_start_ts = None
                         oai_thinking_log_buf = []  # buffer for accumulating thinking text before printing
                         oai_thinking_text_parts = []  # accumulate all reasoning text for token counting
+                        _in_think_tag = False  # track <think>...</think> inline reasoning
+                        _think_tag_buf = ""  # buffer for partial tag detection
 
                         def _check_cancel_during_stream():
                             if self._is_stop_requested():
@@ -14843,6 +14860,11 @@ class UnifiedClient:
                                             reasoning_frag = delta.get("reasoning_content") or delta.get("reasoning")
                                         else:
                                             reasoning_frag = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                                            # Fallback: check model_extra for non-standard fields (OpenRouter, etc.)
+                                            if not reasoning_frag:
+                                                _me = getattr(delta, "model_extra", None)
+                                                if _me and isinstance(_me, dict):
+                                                    reasoning_frag = _me.get("reasoning_content") or _me.get("reasoning")
                                         
                                         # Gemini OAI: thoughts come as delta.content with
                                         # model_extra={'extra_content': {'google': {'thought': True}}}
@@ -14891,6 +14913,88 @@ class UnifiedClient:
                                                 delta_content = delta.get("content")
                                             else:
                                                 delta_content = getattr(delta, "content", None)
+
+                                        # Detect <think>...</think> inline reasoning tags
+                                        # Models like Liquid LFM, QwQ, etc. embed thinking in content
+                                        if delta_content and isinstance(delta_content, str) and not reasoning_frag:
+                                            _think_tag_buf += delta_content
+                                            _processed_content = ""
+                                            while _think_tag_buf:
+                                                if _in_think_tag:
+                                                    # Inside <think> — look for </think>
+                                                    end_idx = _think_tag_buf.find("</think>")
+                                                    if end_idx != -1:
+                                                        # Found closing tag — extract thinking text
+                                                        think_text = _think_tag_buf[:end_idx]
+                                                        _think_tag_buf = _think_tag_buf[end_idx + len("</think>"):]
+                                                        _in_think_tag = False
+                                                        if think_text:
+                                                            # Route to reasoning display
+                                                            oai_thinking_chunks += 1
+                                                            oai_thinking_text_parts.append(think_text)
+                                                            if oai_thinking_start_ts is None:
+                                                                oai_thinking_start_ts = _t.time()
+                                                            if not oai_thinking_started:
+                                                                oai_thinking_started = True
+                                                                if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                                                    print(f"🧠 [{provider}] Thinking...", flush=True)
+                                                            if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                                                oai_thinking_log_buf.append(think_text)
+                                                                combined = "".join(oai_thinking_log_buf)
+                                                                if "\n" in combined:
+                                                                    parts = combined.split("\n")
+                                                                    for p in parts[:-1]:
+                                                                        print(f"    {p}", flush=True)
+                                                                    oai_thinking_log_buf = [parts[-1]]
+                                                    else:
+                                                        # No closing tag yet — might be partial
+                                                        # Check if buffer might contain partial "</think>" at the end
+                                                        if len(_think_tag_buf) > 200:
+                                                            # Flush most of buffer as thinking, keep tail for partial tag
+                                                            flush_text = _think_tag_buf[:-10]
+                                                            _think_tag_buf = _think_tag_buf[-10:]
+                                                            oai_thinking_chunks += 1
+                                                            oai_thinking_text_parts.append(flush_text)
+                                                            if oai_thinking_start_ts is None:
+                                                                oai_thinking_start_ts = _t.time()
+                                                            if not oai_thinking_started:
+                                                                oai_thinking_started = True
+                                                                if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                                                    print(f"🧠 [{provider}] Thinking...", flush=True)
+                                                            if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                                                oai_thinking_log_buf.append(flush_text)
+                                                                combined = "".join(oai_thinking_log_buf)
+                                                                if "\n" in combined:
+                                                                    parts = combined.split("\n")
+                                                                    for p in parts[:-1]:
+                                                                        print(f"    {p}", flush=True)
+                                                                    oai_thinking_log_buf = [parts[-1]]
+                                                        break  # wait for more data
+                                                else:
+                                                    # Outside <think> — look for <think>
+                                                    start_idx = _think_tag_buf.find("<think>")
+                                                    if start_idx != -1:
+                                                        # Found opening tag
+                                                        before = _think_tag_buf[:start_idx]
+                                                        _think_tag_buf = _think_tag_buf[start_idx + len("<think>"):]
+                                                        _in_think_tag = True
+                                                        if before:
+                                                            _processed_content += before
+                                                    else:
+                                                        # No <think> tag — check for partial tag at end
+                                                        # e.g. buffer ends with "<thi" which could be start of "<think>"
+                                                        partial_match = 0
+                                                        for i in range(1, min(len("<think>"), len(_think_tag_buf) + 1)):
+                                                            if _think_tag_buf.endswith("<think>"[:i]):
+                                                                partial_match = i
+                                                        if partial_match > 0:
+                                                            _processed_content += _think_tag_buf[:-partial_match]
+                                                            _think_tag_buf = _think_tag_buf[-partial_match:]
+                                                            break  # wait for more data
+                                                        else:
+                                                            _processed_content += _think_tag_buf
+                                                            _think_tag_buf = ""
+                                            delta_content = _processed_content if _processed_content else None
 
                                         # If switching from thinking to text, print completion
                                         if delta_content and oai_thinking_started and oai_stream_thinking and not self._is_stop_requested():
