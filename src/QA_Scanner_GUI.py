@@ -1555,17 +1555,24 @@ class QAScannerMixin:
                 self.append_log(f"🔍 DEBUG: Processing EPUB: {epub_path}")
                 try:
                     epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                    # Use EPUB's parent dir as the primary base (not os.getcwd(), which
+                    # returns "/" on macOS frozen .app bundles)
+                    epub_parent_dir = os.path.dirname(os.path.abspath(epub_path))
                     current_dir = os.getcwd()
                     script_dir = os.path.dirname(os.path.abspath(__file__))
                     
                     self.append_log(f"🔍 DEBUG: EPUB base name: '{epub_base}'")
+                    self.append_log(f"🔍 DEBUG: EPUB parent dir: {epub_parent_dir}")
                     self.append_log(f"🔍 DEBUG: Current dir: {current_dir}")
                     self.append_log(f"🔍 DEBUG: Script dir: {script_dir}")
                     
                     # Check the most common locations in order of priority
+                    # epub_parent_dir first — the translation engine creates output
+                    # folders next to the input file
                     candidates = [
+                        os.path.join(epub_parent_dir, epub_base),    # next to the EPUB/source file
                         os.path.join(current_dir, epub_base),        # current working directory
-                        os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
+                        os.path.join(script_dir, epub_base),         # src directory
                         os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
                     ]
                     
@@ -1674,15 +1681,15 @@ class QAScannerMixin:
                     self.append_log(f"⚠️ Scanning phase: No matching output folders found for {len(epub_files_to_scan)} EPUB file(s)")
                     for epub_path in epub_files_to_scan:
                         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                        current_dir = os.getcwd()
-                        expected_folder = os.path.join(current_dir, epub_base)
+                        epub_parent_dir = os.path.dirname(os.path.abspath(epub_path))
+                        expected_folder = os.path.join(epub_parent_dir, epub_base)
                         self.append_log(f"  [{epub_base}] Expected: {expected_folder}")
                         self.append_log(f"  [{epub_base}] Exists: {os.path.isdir(expected_folder)}")
                     
-                    # List actual folders in current directory for debugging
+                    # List actual folders in EPUB parent directory for debugging
                     try:
-                        current_dir = os.getcwd()
-                        actual_folders = [d for d in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, d)) and not d.startswith('.')]
+                        epub_parent_dir = os.path.dirname(os.path.abspath(epub_files_to_scan[0]))
+                        actual_folders = [d for d in os.listdir(epub_parent_dir) if os.path.isdir(os.path.join(epub_parent_dir, d)) and not d.startswith('.')]
                         if actual_folders:
                             self.append_log(f"  Available folders: {', '.join(actual_folders[:10])}{'...' if len(actual_folders) > 10 else ''}")
                     except Exception:
