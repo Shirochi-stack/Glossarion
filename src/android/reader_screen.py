@@ -1,11 +1,16 @@
 # reader_screen.py
 """
 EpubReaderGUI — Modern EPUB/TXT reader with full reading controls.
-KivyMD 1.2.0 compatible.
+KivyMD 1.2.0 compatible.  Includes in-reader single-chapter translation
+with KO/EN toggle, streaming output overlay, and collapsible thinking panel.
 """
 
 import os
+import json
+import hashlib
 import logging
+import threading
+import re
 
 from kivy.properties import (ObjectProperty, StringProperty, NumericProperty,
                               ListProperty, BooleanProperty)
@@ -35,6 +40,18 @@ READER_THEMES = {
 }
 
 KV = '''
+<LangToggle@BoxLayout>:
+    size_hint: None, None
+    size: dp(100), dp(36)
+    spacing: 0
+    canvas.before:
+        Color:
+            rgba: [0.2, 0.2, 0.22, 1]
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(18)]
+
 <ReaderScreen>:
     BoxLayout:
         orientation: 'vertical'
@@ -45,15 +62,94 @@ KV = '''
                 pos: self.pos
                 size: self.size
 
-        MDTopAppBar:
-            id: top_bar
-            title: root.book_title
-            left_action_items: [["arrow-left", lambda x: root.go_back()]]
-            right_action_items: [["bookmark-outline", lambda x: root.toggle_bookmark()], ["magnify", lambda x: root.show_search()], ["table-of-contents", lambda x: root.show_toc()], ["format-font", lambda x: root.toggle_settings_panel()], ["translate", lambda x: root.translate_current()]]
-            md_bg_color: root.bg_color
-            specific_text_color: root.text_color
-            elevation: 0
+        # ── Top bar with KO/EN toggle ──
+        BoxLayout:
+            size_hint_y: None
+            height: dp(56)
+            padding: [dp(4), dp(4)]
+            spacing: dp(4)
+            canvas.before:
+                Color:
+                    rgba: root.bg_color
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
 
+            MDIconButton:
+                icon: "arrow-left"
+                theme_text_color: "Custom"
+                text_color: root.text_color
+                on_release: root.go_back()
+
+            # Book title — takes remaining space
+            MDLabel:
+                text: root.book_title
+                shorten: True
+                shorten_from: "right"
+                font_style: "Subtitle2"
+                color: root.text_color
+                valign: "center"
+
+            # KO / EN pill toggle
+            BoxLayout:
+                size_hint: None, None
+                size: dp(100), dp(36)
+                pos_hint: {"center_y": 0.5}
+                spacing: 0
+                canvas.before:
+                    Color:
+                        rgba: [0.2, 0.2, 0.24, 1]
+                    RoundedRectangle:
+                        pos: self.pos
+                        size: self.size
+                        radius: [dp(18)]
+
+                MDFlatButton:
+                    id: btn_ko
+                    text: "KO"
+                    size_hint: 0.5, 1
+                    font_size: sp(13)
+                    theme_text_color: "Custom"
+                    text_color: [1,1,1,1] if root.viewing_language == 'ko' else [0.55,0.55,0.55,1]
+                    md_bg_color: [0.35, 0.35, 0.40, 1] if root.viewing_language == 'ko' else [0,0,0,0]
+                    on_release: root.toggle_language('ko')
+
+                MDFlatButton:
+                    id: btn_en
+                    text: "EN"
+                    size_hint: 0.5, 1
+                    font_size: sp(13)
+                    theme_text_color: "Custom"
+                    text_color: [1,1,1,1] if root.viewing_language == 'en' else [0.55,0.55,0.55,1]
+                    md_bg_color: [0.35, 0.35, 0.40, 1] if root.viewing_language == 'en' else [0,0,0,0]
+                    on_release: root.toggle_language('en')
+
+            # Toolbar icons
+            MDIconButton:
+                icon: "translate"
+                theme_text_color: "Custom"
+                text_color: [0.4, 0.8, 1, 1] if root.is_translating else root.text_color
+                on_release: root.translate_current_chapter()
+
+            MDIconButton:
+                icon: "bookmark-outline"
+                theme_text_color: "Custom"
+                text_color: root.text_color
+                on_release: root.toggle_bookmark()
+
+            MDIconButton:
+                icon: "table-of-contents"
+                theme_text_color: "Custom"
+                text_color: root.text_color
+                on_release: root.show_toc()
+
+            MDIconButton:
+                icon: "format-font"
+                theme_text_color: "Custom"
+                text_color: root.text_color
+                on_release: root.toggle_settings_panel()
+
+        # ── Main content ──
         ScrollView:
             id: content_scroll
             do_scroll_x: False
@@ -67,7 +163,93 @@ KV = '''
                 height: self.minimum_height
                 padding: [root.margin_px, dp(16)]
 
-        # Chapter nav bar
+        # ── Streaming output overlay ──
+        BoxLayout:
+            id: stream_panel
+            orientation: 'vertical'
+            size_hint_y: None
+            height: 0
+            opacity: 0
+            padding: [dp(12), dp(6)]
+            canvas.before:
+                Color:
+                    rgba: [0.08, 0.08, 0.1, 0.95]
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+
+            BoxLayout:
+                size_hint_y: None
+                height: dp(32)
+                MDLabel:
+                    text: "Translating..."
+                    font_style: "Caption"
+                    theme_text_color: "Custom"
+                    text_color: [0.4, 0.8, 1, 1]
+                    size_hint_x: 0.6
+                MDIconButton:
+                    icon: "console"
+                    theme_text_color: "Custom"
+                    text_color: [0.6, 0.6, 0.6, 1]
+                    on_release: root._toggle_thinking_panel()
+                MDIconButton:
+                    icon: "stop-circle-outline"
+                    theme_text_color: "Custom"
+                    text_color: [1, 0.4, 0.4, 1]
+                    on_release: root._stop_translation()
+
+            ScrollView:
+                id: stream_scroll
+                size_hint_y: None
+                height: dp(100)
+                do_scroll_x: False
+                MDLabel:
+                    id: stream_label
+                    text: root.streaming_text
+                    markup: True
+                    size_hint_y: None
+                    height: self.texture_size[1] + dp(10)
+                    font_size: sp(12)
+                    color: [0.85, 0.85, 0.85, 1]
+
+        # ── Thinking terminal (collapsed by default) ──
+        BoxLayout:
+            id: thinking_panel
+            orientation: 'vertical'
+            size_hint_y: None
+            height: 0
+            opacity: 0
+            padding: [dp(12), dp(4)]
+            canvas.before:
+                Color:
+                    rgba: [0.05, 0.05, 0.07, 0.98]
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+
+            MDLabel:
+                text: "Thinking Output"
+                font_style: "Caption"
+                theme_text_color: "Custom"
+                text_color: [0.6, 0.4, 0.9, 1]
+                size_hint_y: None
+                height: dp(24)
+
+            ScrollView:
+                id: thinking_scroll
+                size_hint_y: None
+                height: dp(120)
+                do_scroll_x: False
+                MDLabel:
+                    id: thinking_label
+                    text: root.thinking_text
+                    markup: True
+                    size_hint_y: None
+                    height: self.texture_size[1] + dp(10)
+                    font_size: sp(11)
+                    color: [0.65, 0.55, 0.85, 1]
+
+        # ── Chapter nav bar ──
         BoxLayout:
             size_hint_y: None
             height: dp(48)
@@ -98,7 +280,7 @@ KV = '''
                 text_color: root.text_color
                 on_release: root.next_chapter()
 
-        # Settings panel (slides up)
+        # ── Settings panel (slides up) ──
         BoxLayout:
             id: settings_panel
             orientation: 'vertical'
@@ -114,19 +296,16 @@ KV = '''
                     pos: self.pos
                     size: self.size
 
-            # Font size
             BoxLayout:
                 size_hint_y: None
                 height: dp(48)
                 spacing: dp(8)
-
                 MDLabel:
                     text: "A"
                     font_size: sp(14)
                     halign: "center"
                     size_hint_x: 0.1
                     color: root.text_color
-
                 MDSlider:
                     id: font_slider
                     min: 12
@@ -135,7 +314,6 @@ KV = '''
                     value: root.font_size_pt
                     on_value: root.set_font_size(self.value)
                     size_hint_x: 0.7
-
                 MDLabel:
                     text: "A"
                     font_size: sp(28)
@@ -143,17 +321,14 @@ KV = '''
                     size_hint_x: 0.1
                     color: root.text_color
 
-            # Line spacing
             BoxLayout:
                 size_hint_y: None
                 height: dp(48)
                 spacing: dp(8)
-
                 MDLabel:
                     text: "Line Spacing"
                     size_hint_x: 0.4
                     color: root.text_color
-
                 MDSlider:
                     min: 1.0
                     max: 2.5
@@ -162,88 +337,69 @@ KV = '''
                     on_value: root.set_line_spacing(self.value)
                     size_hint_x: 0.6
 
-            # Themes
             BoxLayout:
                 size_hint_y: None
                 height: dp(48)
                 spacing: dp(8)
-
                 MDLabel:
                     text: "Theme"
                     size_hint_x: 0.25
                     color: root.text_color
-
                 MDIconButton:
                     icon: "white-balance-sunny"
                     on_release: root.set_theme("light")
-
                 MDIconButton:
                     icon: "weather-night"
                     on_release: root.set_theme("dark")
-
                 MDIconButton:
                     icon: "coffee"
                     on_release: root.set_theme("sepia")
-
                 MDIconButton:
                     icon: "circle"
                     on_release: root.set_theme("amoled")
 
-            # Margins
             BoxLayout:
                 size_hint_y: None
                 height: dp(48)
                 spacing: dp(8)
-
                 MDLabel:
                     text: "Margins"
                     size_hint_x: 0.3
                     color: root.text_color
-
                 MDFlatButton:
                     text: "Narrow"
                     on_release: root.set_margin("narrow")
-
                 MDFlatButton:
                     text: "Medium"
                     on_release: root.set_margin("medium")
-
                 MDFlatButton:
                     text: "Wide"
                     on_release: root.set_margin("wide")
 
-            # Alignment
             BoxLayout:
                 size_hint_y: None
                 height: dp(48)
                 spacing: dp(8)
-
                 MDLabel:
                     text: "Align"
                     size_hint_x: 0.3
                     color: root.text_color
-
                 MDIconButton:
                     icon: "format-align-left"
                     on_release: root.set_alignment("left")
-
                 MDIconButton:
                     icon: "format-align-justify"
                     on_release: root.set_alignment("justify")
-
                 MDIconButton:
                     icon: "format-align-center"
                     on_release: root.set_alignment("center")
 
-            # Brightness
             BoxLayout:
                 size_hint_y: None
                 height: dp(48)
                 spacing: dp(8)
-
                 MDIconButton:
                     icon: "brightness-4"
-
                 MDSlider:
                     min: 0.1
                     max: 1.0
@@ -254,7 +410,7 @@ KV = '''
 
 
 class ReaderScreen(MDScreen):
-    """EPUB/TXT reader with modern reading controls."""
+    """EPUB/TXT reader with modern reading controls and in-reader translation."""
 
     app = ObjectProperty(None, allownone=True)
     file_path = StringProperty('')
@@ -279,12 +435,25 @@ class ReaderScreen(MDScreen):
     current_chapter_index = NumericProperty(0)
     _settings_visible = BooleanProperty(False)
 
+    # ── Translation properties ──
+    viewing_language = StringProperty('ko')
+    is_translating = BooleanProperty(False)
+    streaming_text = StringProperty('')
+    thinking_text = StringProperty('')
+    show_thinking = BooleanProperty(False)
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         Builder.load_string(KV)
         self._chapter_titles = []
         self._toc_dialog = None
         self._search_dialog = None
+        # Translation state
+        self._raw_chapters = []          # raw HTML per chapter (for API)
+        self._translated_chapters = {}   # {chapter_index: translated text}
+        self._stop_event = threading.Event()
+        self._translation_thread = None
+        self._translations_dir = None    # set when EPUB loaded
 
     def on_enter_data(self, file_path=None, **kwargs):
         if file_path and file_path != self.file_path:
@@ -318,6 +487,13 @@ class ReaderScreen(MDScreen):
             book = epub.read_epub(self.file_path, options={'ignore_ncx': False})
             self.chapters = []
             self._chapter_titles = []
+            self._raw_chapters = []
+
+            # Set up translations cache directory
+            epub_dir = os.path.dirname(self.file_path)
+            epub_name = os.path.splitext(os.path.basename(self.file_path))[0]
+            self._translations_dir = os.path.join(epub_dir, '.translations', epub_name)
+            os.makedirs(self._translations_dir, exist_ok=True)
 
             # Extract all images to a temp directory
             self._epub_image_dir = tempfile.mkdtemp(prefix='glossarion_epub_')
@@ -468,8 +644,10 @@ class ReaderScreen(MDScreen):
 
                 self.chapters.append(blocks)
                 self._chapter_titles.append(title)
+                self._raw_chapters.append(content)
 
             if self.chapters:
+                self._load_cached_translations()
                 self._show_chapter(0)
             else:
                 self.current_text = "No readable content found in this EPUB."
@@ -517,49 +695,78 @@ class ReaderScreen(MDScreen):
             self.current_chapter_index = index
             blocks = self.chapters[index]
             title = self._chapter_titles[index] if index < len(self._chapter_titles) else ""
-            self.chapter_info = f"{title}  ({index + 1}/{len(self.chapters)})"
 
-            # Build plain text for search and bookmarks
-            self.current_text = '\n\n'.join(b[1] for b in blocks if b[0] == 'text')
+            # Language indicator in chapter info
+            lang_tag = " [EN]" if self.viewing_language == 'en' and index in self._translated_chapters else ""
+            en_avail = " ✓EN" if index in self._translated_chapters else ""
+            self.chapter_info = f"{title}  ({index + 1}/{len(self.chapters)}){en_avail}"
 
-            # Populate the content_box with interleaved text/image widgets
-            try:
-                from kivy.uix.image import AsyncImage
+            # Decide which content to display
+            use_translated = (self.viewing_language == 'en' and index in self._translated_chapters)
 
-                box = self.ids.content_box
-                box.clear_widgets()
+            if use_translated:
+                translated_text = self._translated_chapters[index]
+                # Build plain text
+                self.current_text = translated_text
+                # Show as a single text block
+                try:
+                    box = self.ids.content_box
+                    box.clear_widgets()
+                    lbl = MDLabel(
+                        text=translated_text,
+                        markup=True,
+                        size_hint_y=None,
+                        font_size=self.font_size_px,
+                        line_height=self.line_spacing,
+                        color=self.text_color,
+                        halign=self.text_align,
+                    )
+                    lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+                    box.add_widget(lbl)
+                except Exception:
+                    pass
+            else:
+                # Build plain text for search and bookmarks
+                self.current_text = '\n\n'.join(b[1] for b in blocks if b[0] == 'text')
 
-                for block_type, block_content in blocks:
-                    if block_type == 'text':
-                        lbl = MDLabel(
-                            text=block_content,
-                            markup=True,
-                            size_hint_y=None,
-                            font_size=self.font_size_px,
-                            line_height=self.line_spacing,
-                            color=self.text_color,
-                            halign=self.text_align,
-                        )
-                        lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
-                        box.add_widget(lbl)
-                    elif block_type == 'image':
-                        img = AsyncImage(
-                            source=block_content,
-                            size_hint_y=None,
-                            height=dp(300),
-                            fit_mode='contain',
-                            allow_stretch=True,
-                        )
-                        # Adjust height on load to maintain aspect ratio
-                        def _on_texture(instance, texture, *args):
-                            if texture:
-                                aspect = texture.width / max(texture.height, 1)
-                                max_w = instance.parent.width if instance.parent else 400
-                                instance.height = min(dp(600), max_w / max(aspect, 0.1))
-                        img.bind(texture=_on_texture)
-                        box.add_widget(img)
-            except Exception:
-                pass
+                # Populate the content_box with interleaved text/image widgets
+                try:
+                    from kivy.uix.image import AsyncImage
+
+                    box = self.ids.content_box
+                    box.clear_widgets()
+
+                    for block_type, block_content in blocks:
+                        if block_type == 'text':
+                            lbl = MDLabel(
+                                text=block_content,
+                                markup=True,
+                                size_hint_y=None,
+                                font_size=self.font_size_px,
+                                line_height=self.line_spacing,
+                                color=self.text_color,
+                                halign=self.text_align,
+                            )
+                            lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+                            box.add_widget(lbl)
+                        elif block_type == 'image':
+                            img = AsyncImage(
+                                source=block_content,
+                                size_hint_y=None,
+                                height=dp(300),
+                                fit_mode='contain',
+                                allow_stretch=True,
+                            )
+                            # Adjust height on load to maintain aspect ratio
+                            def _on_texture(instance, texture, *args):
+                                if texture:
+                                    aspect = texture.width / max(texture.height, 1)
+                                    max_w = instance.parent.width if instance.parent else 400
+                                    instance.height = min(dp(600), max_w / max(aspect, 0.1))
+                            img.bind(texture=_on_texture)
+                            box.add_widget(img)
+                except Exception:
+                    pass
 
             try:
                 self.ids.content_scroll.scroll_y = 1.0
@@ -771,3 +978,193 @@ class ReaderScreen(MDScreen):
     def translate_current(self):
         if self.app and self.file_path:
             self.app.open_translation(self.file_path)
+
+    # ══════════════════════════════════════════════════
+    #  IN-READER TRANSLATION
+    # ══════════════════════════════════════════════════
+
+    def toggle_language(self, lang):
+        """Switch between KO (original) and EN (translated) views."""
+        if lang == self.viewing_language:
+            return
+        if lang == 'en':
+            idx = self.current_chapter_index
+            if idx in self._translated_chapters:
+                self.viewing_language = 'en'
+                self._show_chapter(idx)
+            else:
+                # No translation yet — start one
+                self.translate_current_chapter()
+        else:
+            self.viewing_language = 'ko'
+            self._show_chapter(self.current_chapter_index)
+
+    def translate_current_chapter(self):
+        """Translate the current chapter using the configured LLM."""
+        if self.is_translating:
+            return
+        if not self.app:
+            return
+
+        idx = self.current_chapter_index
+        if idx in self._translated_chapters:
+            # Already translated — just switch view
+            self.viewing_language = 'en'
+            self._show_chapter(idx)
+            return
+
+        if idx >= len(self._raw_chapters):
+            return
+
+        # Get the text content for this chapter
+        chapter_text = ''
+        blocks = self.chapters[idx]
+        for btype, bcontent in blocks:
+            if btype == 'text':
+                chapter_text += bcontent + '\n\n'
+
+        if not chapter_text.strip():
+            return
+
+        self.is_translating = True
+        self.streaming_text = ''
+        self.thinking_text = ''
+        self._stop_event.clear()
+
+        # Show streaming overlay
+        self._show_stream_panel(True)
+
+        # Run in background thread
+        self._translation_thread = threading.Thread(
+            target=self._translation_worker_inline,
+            args=(idx, chapter_text),
+            daemon=True,
+        )
+        self._translation_thread.start()
+
+    def _translation_worker_inline(self, chapter_idx, chapter_text):
+        """Background thread: call the translation API."""
+        try:
+            from reader_translator import translate_chapter_streaming
+
+            config_data = self.app.config_data if self.app else {}
+
+            def _on_chunk(text):
+                def _update(dt, t=text):
+                    self.streaming_text += t
+                    try:
+                        self.ids.stream_scroll.scroll_y = 0
+                    except Exception:
+                        pass
+                Clock.schedule_once(_update)
+
+            def _on_thinking(text):
+                def _update(dt, t=text):
+                    self.thinking_text += t
+                    try:
+                        self.ids.thinking_scroll.scroll_y = 0
+                    except Exception:
+                        pass
+                Clock.schedule_once(_update)
+
+            def _on_complete(translated):
+                def _finish(dt, t=translated, ci=chapter_idx):
+                    self._translated_chapters[ci] = t
+                    self._save_translation_cache(ci, t)
+                    self.is_translating = False
+                    self.viewing_language = 'en'
+                    self._show_chapter(ci)
+                    # Auto-hide stream panel after a delay
+                    Clock.schedule_once(lambda dt: self._show_stream_panel(False), 2.0)
+                Clock.schedule_once(_finish)
+
+            def _on_error(err):
+                def _show_err(dt, e=err):
+                    self.streaming_text += f'\n[color=ff4444]Error: {e}[/color]'
+                    self.is_translating = False
+                Clock.schedule_once(_show_err)
+
+            translate_chapter_streaming(
+                chapter_text=chapter_text,
+                config_data=config_data,
+                on_chunk=_on_chunk,
+                on_thinking=_on_thinking,
+                on_complete=_on_complete,
+                on_error=_on_error,
+                stop_event=self._stop_event,
+            )
+        except Exception as e:
+            import traceback
+            err_msg = str(e)
+            Clock.schedule_once(lambda dt, m=err_msg: setattr(self, 'streaming_text', self.streaming_text + f'\n[color=ff4444]{m}[/color]'))
+            Clock.schedule_once(lambda dt: setattr(self, 'is_translating', False))
+
+    def _stop_translation(self):
+        """Cancel an in-progress translation."""
+        self._stop_event.set()
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                unified_api_client.hard_cancel_all()
+        except Exception:
+            pass
+        self.is_translating = False
+        self.streaming_text += '\n[color=ffaa00]Translation cancelled.[/color]'
+
+    def _show_stream_panel(self, show):
+        """Animate the streaming output panel."""
+        panel = self.ids.stream_panel
+        if show:
+            Animation(height=dp(160), opacity=1, d=0.25).start(panel)
+        else:
+            Animation(height=0, opacity=0, d=0.2).start(panel)
+
+    def _toggle_thinking_panel(self):
+        """Show/hide the thinking terminal."""
+        self.show_thinking = not self.show_thinking
+        panel = self.ids.thinking_panel
+        if self.show_thinking:
+            Animation(height=dp(160), opacity=1, d=0.2).start(panel)
+        else:
+            Animation(height=0, opacity=0, d=0.15).start(panel)
+
+    # ── Translation cache ──
+
+    def _get_cache_path(self, chapter_idx):
+        """Path to the cached translation file for a chapter."""
+        if not self._translations_dir:
+            return None
+        return os.path.join(self._translations_dir, f'chapter_{chapter_idx}.txt')
+
+    def _save_translation_cache(self, chapter_idx, translated_text):
+        """Save translated text to disk."""
+        path = self._get_cache_path(chapter_idx)
+        if path:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(translated_text)
+            except Exception as e:
+                logger.error(f"Failed to cache translation: {e}")
+
+    def _load_cached_translations(self):
+        """Load any previously cached translations from disk."""
+        if not self._translations_dir or not os.path.isdir(self._translations_dir):
+            return
+        self._translated_chapters = {}
+        for fname in os.listdir(self._translations_dir):
+            m = re.match(r'chapter_(\d+)\.txt$', fname)
+            if m:
+                idx = int(m.group(1))
+                path = os.path.join(self._translations_dir, fname)
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        self._translated_chapters[idx] = f.read()
+                except Exception:
+                    pass
+        if self._translated_chapters:
+            logger.info(f"Loaded {len(self._translated_chapters)} cached translations")
