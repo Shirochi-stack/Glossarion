@@ -739,11 +739,17 @@ class TranslationScreen(MDScreen):
                 import importlib
                 if 'TransateKRtoEN' in sys.modules:
                     importlib.reload(sys.modules['TransateKRtoEN'])
-                from TransateKRtoEN import TranslationConfig, translate_epub
+                from TransateKRtoEN import main as translate_main
 
-                config = TranslationConfig()
                 notify_translation_progress("Translating", 0, 100, os.path.basename(self.selected_file))
-                result = translate_epub(self.selected_file, config)
+
+                def _stop_check():
+                    return self._stop_requested
+
+                result = translate_main(
+                    log_callback=lambda msg: Clock.schedule_once(lambda dt, m=msg: self._append_log(str(m))),
+                    stop_callback=_stop_check,
+                )
                 self._append_log(f"[DONE] Complete: {result}")
                 cancel_progress_notification()
                 notify_translation_complete("Translation Complete", f"{os.path.basename(self.selected_file)} translated")
