@@ -5156,7 +5156,7 @@ Recent translations to summarize:
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
             "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
             "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
-            "No Glossary: Runs without glossary (doesn't change toggle)\n"
+            "No Glossary: Runs without glossary\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
