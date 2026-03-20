@@ -127,6 +127,24 @@ class GlossaryManagerMixin:
             QWidget {
                 background-color: transparent;
             }
+            QMenu {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 16px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #5a9fd4;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #4a5568;
+                margin: 4px 8px;
+            }
             QGroupBox {
                 color: white;
                 border: 1px solid #555;
