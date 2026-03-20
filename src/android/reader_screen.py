@@ -22,7 +22,7 @@ from kivymd.uix.button import MDIconButton, MDFlatButton, MDRaisedButton
 from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.slider import MDSlider
 from kivymd.uix.dialog import MDDialog
-from kivymd.uix.list import OneLineListItem
+from kivymd.uix.list import OneLineListItem, MDList
 from kivymd.uix.textfield import MDTextField
 
 logger = logging.getLogger(__name__)
@@ -267,8 +267,8 @@ class ReaderScreen(MDScreen):
     current_text = StringProperty('')
     chapter_info = StringProperty('Chapter 0/0')
 
-    font_size_pt = NumericProperty(18)
-    font_size_px = NumericProperty(sp(18))
+    font_size_pt = NumericProperty(14)
+    font_size_px = NumericProperty(sp(14))
     font_family = StringProperty('sans-serif')
     line_spacing = NumericProperty(1.5)
     text_align = StringProperty('left')
@@ -430,7 +430,7 @@ class ReaderScreen(MDScreen):
         if not self.app:
             return
         cfg = self.app.config_data
-        self.font_size_pt = cfg.get('reader_font_size', 18)
+        self.font_size_pt = cfg.get('reader_font_size', 14)
         self.font_size_px = sp(self.font_size_pt)
         self.line_spacing = cfg.get('reader_line_spacing', 1.5)
         self.text_align = cfg.get('reader_text_align', 'left')
