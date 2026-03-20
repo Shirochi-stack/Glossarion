@@ -205,9 +205,9 @@ jobs:
           if-no-files-found: error
 
   # ============================================================================
-  # macOS Build
+  # macOS ARM Build (Apple Silicon)
   # ============================================================================
-  build-macos:
+  build-macos-arm:
     runs-on: macos-latest
     
     steps:
@@ -235,21 +235,62 @@ jobs:
         run: pyinstaller translator_lite_mac.spec --noconfirm
         working-directory: src
       
+      - name: Upload macOS ARM DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-macOS-ARM
+          path: src/dist/*.dmg
+          if-no-files-found: warn
+      
+      - name: Upload macOS ARM app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-macOS-ARM-App
+          path: src/dist/*.app
+          if-no-files-found: warn
+
+  # ============================================================================
+  # macOS Intel Build (x86_64 - for VMware, older Macs, Hackintosh)
+  # ============================================================================
+  build-macos-intel:
+    runs-on: macos-15-intel
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+      
       - name: Build Intel (x86_64)
         run: pyinstaller translator_lite_mac_intel.spec --noconfirm
         working-directory: src
       
-      - name: Upload macOS DMG artifact
+      - name: Upload macOS Intel DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Z_Glossarion-Lite-macOS
+          name: Z_Glossarion-Lite-macOS-Intel
           path: src/dist/*.dmg
           if-no-files-found: warn
       
-      - name: Upload macOS app artifact (fallback)
+      - name: Upload macOS Intel app artifact (fallback)
         uses: actions/upload-artifact@v4
         with:
-          name: Z_Glossarion-Lite-macOS-App
+          name: Z_Glossarion-Lite-macOS-Intel-App
           path: src/dist/*.app
           if-no-files-found: warn
 

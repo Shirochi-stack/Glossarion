@@ -14610,7 +14610,7 @@ Important rules:
                except Exception:
                    at_bottom = True  # Default to scrolling to bottom
                
-               is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary'])
+               is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
                
                if is_memory:
                    # Apply green color formatting for memory messages
@@ -14625,18 +14625,6 @@ Important rules:
                    format.setFont(font)
                    
                    cursor.insertText(message + "\n", format)
-
-
-                    # Reset format to default so subsequent messages don't inherit green
-
-                    default_format = QTextCharFormat()
-
-                    default_format.setForeground(QColor("white"))
-
-                    cursor.setCharFormat(default_format)
-
-                    self.log_text.setTextCursor(cursor)
-
                else:
                    # Regular text append
                    self.log_text.append(message)
