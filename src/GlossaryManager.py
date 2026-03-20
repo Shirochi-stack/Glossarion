@@ -669,7 +669,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print(f"⚠️ OUTPUT_DIRECTORY override failed: {e}")
     # On macOS .app bundles, cwd can be '/' (read-only root).
     # Resolve relative output paths against the input file's directory.
-    if not os.path.isabs(output_dir):
+    # Only on macOS — on Windows this would change the output dir and break progress tracking.
+    if sys.platform == 'darwin' and not os.path.isabs(output_dir):
         epub_path_ref = os.getenv("EPUB_PATH", "")
         if epub_path_ref and os.path.exists(epub_path_ref):
             output_dir = os.path.join(os.path.dirname(os.path.abspath(epub_path_ref)), output_dir)

@@ -9091,7 +9091,8 @@ def main(log_callback=None, stop_callback=None):
     out = os.path.join(output_root, file_base) if output_root else file_base
     # On macOS .app bundles, cwd can be '/' (read-only root).
     # Resolve relative output paths against the input file's directory.
-    if not os.path.isabs(out):
+    # Only on macOS — on Windows this would change the output dir and break progress tracking.
+    if sys.platform == 'darwin' and not os.path.isabs(out):
         out = os.path.join(os.path.dirname(os.path.abspath(input_path)), out)
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
@@ -10446,7 +10447,7 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     glossary_search_dir = "Glossary"
                 # On macOS .app bundles, cwd can be '/' (read-only root).
-                if not os.path.isabs(glossary_search_dir):
+                if sys.platform == 'darwin' and not os.path.isabs(glossary_search_dir):
                     glossary_search_dir = os.path.join(os.path.dirname(os.path.abspath(input_path)), glossary_search_dir)
                 
                 if os.path.isdir(glossary_search_dir):
