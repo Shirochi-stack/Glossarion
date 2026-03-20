@@ -231,8 +231,12 @@ jobs:
           pip install pyinstaller
           pip install -r requirements-macos.txt
       
-      - name: Build with PyInstaller
-        run: pyinstaller translator_lite_mac.spec
+      - name: Build ARM (Apple Silicon)
+        run: pyinstaller translator_lite_mac.spec --noconfirm
+        working-directory: src
+      
+      - name: Build Intel (x86_64)
+        run: pyinstaller translator_lite_mac_intel.spec --noconfirm
         working-directory: src
       
       - name: Upload macOS DMG artifact
