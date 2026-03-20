@@ -11,6 +11,7 @@ jobs:
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     
     steps:
       - name: Checkout code
@@ -54,9 +55,10 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec') }}
+          key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
           restore-keys: |
             buildozer-${{ runner.os }}-
+          save-always: true
       
       - name: Copy shared backend files
         run: |
