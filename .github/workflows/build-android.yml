@@ -80,6 +80,7 @@ jobs:
           cp "$SRC_DIR/txt_processor.py" "$ANDROID_DIR/_backend/"
           cp "$SRC_DIR/api_key_encryption.py" "$ANDROID_DIR/_backend/"
           cp "$SRC_DIR/large_env.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
+          cp "$SRC_DIR/model_options.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
           
           # Stubs for modules not available on Android
           cat > "$ANDROID_DIR/_backend/image_translator.py" << 'EOF'
@@ -221,17 +222,50 @@ jobs:
           # Add _backend to PYTHONPATH so modules can be found
           export PYTHONPATH="$(pwd)/_backend:$PYTHONPATH"
           
+          # Clean the bin directory to force a fresh APK packaging
+          rm -rf bin/
+          
           # Build
           buildozer android debug 2>&1 | tee build.log
+          
+          # Show build result
+          echo "=== Build exit code: $? ==="
       
       - name: Find APK
         id: find_apk
         run: |
-          APK_PATH=$(find src/android/bin -name '*.apk' -type f | head -1)
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "Found APK: $APK_PATH"
+          echo "=== Searching for APK files ==="
+          # Search everywhere under src/android for .apk files
+          echo "--- Recursive search under src/android ---"
+          find src/android -name '*.apk' -type f 2>/dev/null || echo "No APK files found under src/android"
+          
+          # Also check .buildozer output paths
+          echo "--- Checking .buildozer paths ---"
+          find src/android/.buildozer -name '*.apk' -type f 2>/dev/null || echo "No APK in .buildozer"
+          
+          # List the bin directory if it exists
+          echo "--- Listing src/android/bin/ ---"
+          ls -la src/android/bin/ 2>/dev/null || echo "bin/ directory does not exist"
+          
+          # Find the APK anywhere
+          APK_PATH=$(find src/android -name '*.apk' -type f | head -1)
+          if [ -n "$APK_PATH" ]; then
+            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+            echo "apk_found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found APK: $APK_PATH"
+            # Copy to a known location for upload
+            mkdir -p src/android/bin
+            cp "$APK_PATH" src/android/bin/
+          else
+            echo "apk_found=false" >> $GITHUB_OUTPUT
+            echo "❌ No APK found anywhere!"
+            # Show the last 50 lines of build log for clues
+            echo "=== Last 50 lines of build.log ==="
+            tail -50 src/android/build.log 2>/dev/null || true
+          fi
       
       - name: Upload APK artifact
+        if: steps.find_apk.outputs.apk_found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Glossarion-Android-APK
@@ -246,9 +280,10 @@ jobs:
           path: src/android/build.log
       
       - name: Upload to Release (if tagged)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && steps.find_apk.outputs.apk_found == 'true'
         uses: softprops/action-gh-release@v1
         with:
           files: src/android/bin/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
