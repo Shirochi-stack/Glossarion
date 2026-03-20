@@ -1580,7 +1580,7 @@ class AsyncProcessingDialog:
     def _create_dialog(self):
         """Create the async processing dialog"""
         # Create main dialog
-        self.dialog = QDialog()
+        self.dialog = QDialog(self.parent)
         self.dialog.setWindowTitle("Async Batch Processing (50% Discount)")
         self.dialog.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
         self.dialog.setStyleSheet("""
