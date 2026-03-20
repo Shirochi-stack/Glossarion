@@ -348,6 +348,11 @@ class RetranslationMixin:
                     except Exception:
                         override_dir = None
                 expected_output_dir = os.path.join(override_dir, epub_base) if override_dir else epub_base
+                # On macOS .app bundles, cwd can be '/' (read-only root).
+                # Resolve relative output paths against the input file's directory.
+                # Only on macOS — on Windows this would change the output dir and break progress tracking.
+                if sys.platform == 'darwin' and not os.path.isabs(expected_output_dir):
+                    expected_output_dir = os.path.join(os.path.dirname(os.path.abspath(input_path)), expected_output_dir)
 
                 output_dir = cached_data.get('output_dir')
                 progress_file = cached_data.get('progress_file')
@@ -444,6 +449,11 @@ class RetranslationMixin:
             output_dir = os.path.join(override_dir, epub_base)
         else:
             output_dir = epub_base
+        # On macOS .app bundles, cwd can be '/' (read-only root).
+        # Resolve relative output paths against the input file's directory.
+        # Only on macOS — on Windows this would change the output dir and break progress tracking.
+        if sys.platform == 'darwin' and not os.path.isabs(output_dir):
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), output_dir)
         
         if not os.path.exists(output_dir):
             # Output folder doesn't exist - create it with an empty progress file
@@ -2744,6 +2754,11 @@ class RetranslationMixin:
                             override_dir = None
 
                     expected_output_dir = os.path.join(override_dir, epub_base) if override_dir else epub_base
+                    # On macOS .app bundles, cwd can be '/' (read-only root).
+                    # Resolve relative output paths against the input file's directory.
+                    # Only on macOS — on Windows this would change the output dir and break progress tracking.
+                    if sys.platform == 'darwin' and not os.path.isabs(expected_output_dir):
+                        expected_output_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), expected_output_dir)
                     expected_progress_file = os.path.join(expected_output_dir, "translation_progress.json")
 
                     # Update in-place if changed
