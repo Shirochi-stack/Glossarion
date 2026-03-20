@@ -14610,7 +14610,7 @@ Important rules:
                except Exception:
                    at_bottom = True  # Default to scrolling to bottom
                
-               is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
+               is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary'])
                
                if is_memory:
                    # Apply green color formatting for memory messages
