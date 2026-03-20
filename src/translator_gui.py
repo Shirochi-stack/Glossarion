@@ -5884,7 +5884,9 @@ Recent translations to summarize:
             if override_dir:
                 output_path = os.path.join(override_dir, folder_name)
             else:
-                output_path = os.path.join(os.getcwd(), folder_name)
+                # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
+                base_dir = os.path.dirname(os.path.abspath(files[0])) if files[0] else os.getcwd()
+                output_path = os.path.join(base_dir, folder_name)
             self._open_single_output_folder(output_path)
             return
         
@@ -5894,7 +5896,9 @@ Recent translations to summarize:
             if override_dir:
                 output_path = os.path.join(override_dir, base_name)
             else:
-                output_path = os.path.join(os.getcwd(), base_name)
+                # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
+                base_dir = os.path.dirname(os.path.abspath(files[0]))
+                output_path = os.path.join(base_dir, base_name)
             self._open_single_output_folder(output_path)
             return
         
@@ -5962,7 +5966,9 @@ Recent translations to summarize:
             if override_dir:
                 output_path = os.path.join(override_dir, base_name)
             else:
-                output_path = os.path.join(os.getcwd(), base_name)
+                # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
+                base_dir = os.path.dirname(os.path.abspath(file_path))
+                output_path = os.path.join(base_dir, base_name)
             
             exists = os.path.exists(output_path)
             icon = "📂" if exists else "📁"
