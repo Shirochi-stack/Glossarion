@@ -12155,7 +12155,8 @@ Important rules:
             else:
                 output_dir = "Glossary"
             # On macOS .app bundles, cwd can be '/' (read-only root).
-            if not os.path.isabs(output_dir) and hasattr(self, 'selected_files') and self.selected_files:
+            # Only on macOS — on Windows this changes the output dir and breaks glossary progress tracking.
+            if sys.platform == 'darwin' and not os.path.isabs(output_dir) and hasattr(self, 'selected_files') and self.selected_files:
                 output_dir = os.path.join(os.path.dirname(os.path.abspath(self.selected_files[0])), output_dir)
             os.makedirs(output_dir, exist_ok=True)
             output_file = os.path.join(output_dir, f"{folder_name}_glossary.json")
@@ -12281,7 +12282,8 @@ Important rules:
             else:
                 glossary_dir = "Glossary"
             # On macOS .app bundles, cwd can be '/' (read-only root).
-            if not os.path.isabs(glossary_dir):
+            # Only on macOS — on Windows this changes the output dir and breaks glossary progress tracking.
+            if sys.platform == 'darwin' and not os.path.isabs(glossary_dir):
                 glossary_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), glossary_dir)
             os.makedirs(glossary_dir, exist_ok=True)
             output_path = os.path.join(glossary_dir, f"{epub_base}_glossary.json")
