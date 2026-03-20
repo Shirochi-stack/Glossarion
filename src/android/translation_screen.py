@@ -778,35 +778,23 @@ class TranslationScreen(MDScreen):
         Clock.schedule_once(lambda dt: self._append_log("[OK] Translation started"))
 
         try:
-            import builtins
-            original_print = builtins.print
+            import importlib
+            if 'TransateKRtoEN' in sys.modules:
+                importlib.reload(sys.modules['TransateKRtoEN'])
+            from TransateKRtoEN import main as translate_main
 
-            def captured_print(*args, **kwargs):
-                text = ' '.join(str(a) for a in args)
-                Clock.schedule_once(lambda dt, t=text: self._append_log(t))
-                original_print(*args, **kwargs)
+            notify_translation_progress("Translating", 0, 100, os.path.basename(self.selected_file))
 
-            builtins.print = captured_print
-            try:
-                import importlib
-                if 'TransateKRtoEN' in sys.modules:
-                    importlib.reload(sys.modules['TransateKRtoEN'])
-                from TransateKRtoEN import main as translate_main
+            def _stop_check():
+                return self._stop_requested
 
-                notify_translation_progress("Translating", 0, 100, os.path.basename(self.selected_file))
-
-                def _stop_check():
-                    return self._stop_requested
-
-                result = translate_main(
-                    log_callback=lambda msg: Clock.schedule_once(lambda dt, m=msg: self._append_log(str(m))),
-                    stop_callback=_stop_check,
-                )
-                self._append_log(f"[DONE] Complete: {result}")
-                cancel_progress_notification()
-                notify_translation_complete("Translation Complete", f"{os.path.basename(self.selected_file)} translated")
-            finally:
-                builtins.print = original_print
+            result = translate_main(
+                log_callback=lambda msg: Clock.schedule_once(lambda dt, m=msg: self._append_log(str(m))),
+                stop_callback=_stop_check,
+            )
+            self._append_log(f"[DONE] Complete: {result}")
+            cancel_progress_notification()
+            notify_translation_complete("Translation Complete", f"{os.path.basename(self.selected_file)} translated")
 
         except Exception as e:
             import traceback

@@ -5,7 +5,7 @@ title = Glossarion
 package.name = glossarion
 package.domain = com.glossarion
 source.dir = .
-source.include_exts = py,kv,png,jpg,ico,json,csv,txt
+source.include_exts = py,kv,png,jpg,ico,json,csv,txt,otf,ttf,ttc
 source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 
 # Versioning
@@ -14,7 +14,7 @@ version = 1.0.0
 # Dependencies (python-for-android recipes)
 # NOTE: Some packages may need recipes. Major ones like kivy, pillow, lxml
 # have recipes in python-for-android. Others compile from pip.
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,lxml,html5lib,ebooklib,requests,httpx,certifi,charset-normalizer,chardet,html2text,regex,langdetect,rapidfuzz,tqdm,plyer,pyjnius,cryptography,openssl
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,lxml,requests,certifi,charset-normalizer,chardet,html2text,regex,tqdm,plyer,pyjnius,six,setuptools
 
 # Entry point
 entrypoint = main.py
@@ -32,7 +32,7 @@ fullscreen = 0
 # Android-specific
 android.api = 34
 android.minapi = 26
-android.ndk = 25b
+android.ndk = 27c
 android.sdk = 34
 android.accept_sdk_license = True
 
