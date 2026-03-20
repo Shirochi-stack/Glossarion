@@ -38,6 +38,7 @@ jobs:
             libffi-dev \
             libssl-dev \
             automake \
+            libltdl-dev \
             zip \
             unzip \
             openjdk-17-jdk
