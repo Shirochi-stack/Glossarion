@@ -46,6 +46,8 @@ KV = '''
             halign: "center"
             theme_text_color: "Hint"
             font_style: "Body1"
+            size_hint_y: None
+            height: 0
             opacity: 0
 
     MDFloatingActionButton:
@@ -106,8 +108,10 @@ class LibraryScreen(MDScreen):
         empty_label = self.ids.empty_label
         if not self.books:
             empty_label.opacity = 1
+            empty_label.height = dp(200)
             return
         empty_label.opacity = 0
+        empty_label.height = 0
 
         for book in self.books:
             item = self._create_book_item(book)

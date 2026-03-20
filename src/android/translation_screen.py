@@ -679,7 +679,7 @@ class TranslationScreen(MDScreen):
             pass
 
         self._show_log_panel()
-        self._append_log("🚀 Setting up environment...")
+        self._append_log("[>>] Setting up environment...")
         self._setup_environment()
 
         self._translation_thread = threading.Thread(target=self._translation_worker, daemon=True)
@@ -688,7 +688,7 @@ class TranslationScreen(MDScreen):
     def _stop_translation(self):
         self._stop_requested = True
         os.environ['GRACEFUL_STOP'] = '1'
-        self._append_log("⏹ Stop requested...")
+        self._append_log("[STOP] Stop requested...")
         try:
             self.ids.run_fab.icon = "clock-outline"
         except Exception:
@@ -717,13 +717,13 @@ class TranslationScreen(MDScreen):
         output_dir = get_output_dir(self.selected_file)
         set_input_file_env(self.selected_file, output_dir)
 
-        self._append_log(f"📁 Output: {output_dir}")
-        self._append_log(f"🤖 Model: {self.model_name}")
-        self._append_log(f"🌡️ Temp: {self.temperature}")
+        self._append_log(f"[DIR] Output: {output_dir}")
+        self._append_log(f"[AI] Model: {self.model_name}")
+        self._append_log(f"[T] Temp: {self.temperature}")
 
     def _translation_worker(self):
         from android_notification import notify_translation_progress, notify_translation_complete, cancel_progress_notification
-        Clock.schedule_once(lambda dt: self._append_log("🟢 Translation started"))
+        Clock.schedule_once(lambda dt: self._append_log("[OK] Translation started"))
 
         try:
             import builtins
@@ -744,7 +744,7 @@ class TranslationScreen(MDScreen):
                 config = TranslationConfig()
                 notify_translation_progress("Translating", 0, 100, os.path.basename(self.selected_file))
                 result = translate_epub(self.selected_file, config)
-                self._append_log(f"✅ Done: {result}")
+                self._append_log(f"[DONE] Complete: {result}")
                 cancel_progress_notification()
                 notify_translation_complete("Translation Complete", f"{os.path.basename(self.selected_file)} translated")
             finally:
@@ -752,7 +752,9 @@ class TranslationScreen(MDScreen):
 
         except Exception as e:
             import traceback
-            Clock.schedule_once(lambda dt: self._append_log(f"❌ Error: {e}\n{traceback.format_exc()}"))
+            # Capture eagerly — Python deletes `e` after the except block exits
+            err_msg = f"[ERR] Error: {e}\n{traceback.format_exc()}"
+            Clock.schedule_once(lambda dt, m=err_msg: self._append_log(m))
             try:
                 from android_notification import cancel_progress_notification
                 cancel_progress_notification()
