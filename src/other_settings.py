@@ -9663,6 +9663,78 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     anthropic_help.setContentsMargins(0, 0, 0, 3)
     additional_v.addWidget(anthropic_help)
 
+    # Quick paste shortcut for Anthropic endpoint
+    _eh_url = "https://api.electronhub.ai"
+    anthropic_shortcuts = QWidget()
+    anthropic_shortcuts_h = QHBoxLayout(anthropic_shortcuts)
+    anthropic_shortcuts_h.setContentsMargins(0, 0, 0, 5)
+    anthropic_shortcuts_h.addWidget(QLabel("Quick paste (double-click):"))
+
+    eh_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{_eh_url}</span>')
+    eh_shortcut.setStyleSheet("font-size: 8pt;")
+    eh_shortcut.setTextFormat(Qt.RichText)
+    eh_shortcut.setCursor(Qt.PointingHandCursor)
+    eh_shortcut.setToolTip("Double-click to paste ElectronHub URL into the Anthropic Base URL field")
+    _eh_orig_style = eh_shortcut.styleSheet()
+    _eh_orig_text = eh_shortcut.text()
+    def _paste_eh_url(event):
+        self.anthropic_base_url_entry.setText(_eh_url)
+        self.anthropic_base_url_var = _eh_url
+        os.environ['ANTHROPIC_BASE_URL'] = _eh_url
+        try:
+            QGuiApplication.clipboard().setText(_eh_url)
+        except Exception:
+            pass
+        try:
+            eh_shortcut.setStyleSheet(_eh_orig_style + " color: #00d084;")
+            eh_shortcut.setTextFormat(Qt.PlainText)
+            eh_shortcut.setText(f"✓ Pasted: {_eh_url}")
+            QTimer.singleShot(900, lambda: (
+                eh_shortcut.setStyleSheet(_eh_orig_style),
+                eh_shortcut.setTextFormat(Qt.RichText),
+                eh_shortcut.setText(_eh_orig_text),
+            ))
+        except Exception:
+            pass
+    eh_shortcut.mouseDoubleClickEvent = _paste_eh_url
+    anthropic_shortcuts_h.addWidget(eh_shortcut)
+
+    or_sep = QLabel(" | ")
+    or_sep.setStyleSheet("color: gray; font-size: 8pt;")
+    anthropic_shortcuts_h.addWidget(or_sep)
+
+    _or_url = "https://openrouter.ai/api"
+    or_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{_or_url}</span>')
+    or_shortcut.setStyleSheet("font-size: 8pt;")
+    or_shortcut.setTextFormat(Qt.RichText)
+    or_shortcut.setCursor(Qt.PointingHandCursor)
+    or_shortcut.setToolTip("Double-click to paste OpenRouter URL into the Anthropic Base URL field")
+    _or_orig_style = or_shortcut.styleSheet()
+    _or_orig_text = or_shortcut.text()
+    def _paste_or_url(event):
+        self.anthropic_base_url_entry.setText(_or_url)
+        self.anthropic_base_url_var = _or_url
+        os.environ['ANTHROPIC_BASE_URL'] = _or_url
+        try:
+            QGuiApplication.clipboard().setText(_or_url)
+        except Exception:
+            pass
+        try:
+            or_shortcut.setStyleSheet(_or_orig_style + " color: #00d084;")
+            or_shortcut.setTextFormat(Qt.PlainText)
+            or_shortcut.setText(f"✓ Pasted: {_or_url}")
+            QTimer.singleShot(900, lambda: (
+                or_shortcut.setStyleSheet(_or_orig_style),
+                or_shortcut.setTextFormat(Qt.RichText),
+                or_shortcut.setText(_or_orig_text),
+            ))
+        except Exception:
+            pass
+    or_shortcut.mouseDoubleClickEvent = _paste_or_url
+    anthropic_shortcuts_h.addWidget(or_shortcut)
+
+    anthropic_shortcuts_h.addStretch()
+    additional_v.addWidget(anthropic_shortcuts)
 
     
     # Add the additional endpoints frame to the main section
