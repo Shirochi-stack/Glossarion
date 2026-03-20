@@ -68,9 +68,9 @@ KV = '''
                     spacing: dp(4)
 
                     MDLabel:
-                        text: "Uses/key:"
+                        text: "Per key:"
                         halign: "right"
-                        size_hint_x: 0.5
+                        size_hint_x: 0.6
 
                     MDIconButton:
                         icon: "minus"

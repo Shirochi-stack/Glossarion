@@ -22,8 +22,48 @@ Config.set('graphics', 'multisamples', '0')
 from kivymd.app import MDApp
 from kivy.uix.screenmanager import ScreenManager, SlideTransition
 from kivy.core.window import Window
+from kivy.core.text import LabelBase
 from kivy.utils import platform
 from kivy.lang import Builder
+
+# ── Register a CJK-capable font so Korean/Japanese/Chinese render correctly ──
+def _register_cjk_font():
+    """Find and register a system font that supports CJK characters."""
+    import sys
+    candidates = []
+    if platform == 'android':
+        candidates = [
+            '/system/fonts/NotoSansCJK-Regular.ttc',
+            '/system/fonts/NotoSansCJKkr-Regular.otf',
+            '/system/fonts/NotoSansCJKjp-Regular.otf',
+            '/system/fonts/DroidSansFallback.ttf',
+        ]
+    elif sys.platform == 'win32':
+        windir = os.environ.get('WINDIR', r'C:\Windows')
+        fonts = os.path.join(windir, 'Fonts')
+        candidates = [
+            os.path.join(fonts, 'meiryo.ttc'),
+            os.path.join(fonts, 'msyh.ttc'),
+            os.path.join(fonts, 'msgothic.ttc'),
+            os.path.join(fonts, 'malgun.ttf'),
+            os.path.join(fonts, 'YuGothR.ttc'),
+        ]
+    elif sys.platform == 'darwin':
+        candidates = [
+            '/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc',
+            '/Library/Fonts/Arial Unicode.ttf',
+        ]
+
+    for font_path in candidates:
+        if os.path.isfile(font_path):
+            try:
+                LabelBase.register(name='Roboto', fn_regular=font_path)
+                return font_path
+            except Exception:
+                continue
+    return None
+
+_cjk_font = _register_cjk_font()
 
 # Import screens
 from library_screen import LibraryScreen

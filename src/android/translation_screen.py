@@ -44,6 +44,20 @@ DEFAULT_MODELS = [
     'authgpt/gpt-5.2', 'authgpt/gemini-2.5-flash',
 ]
 
+# These match translator_gui.py's _get_protected_prompt_profiles()
+DEFAULT_PROFILE_NAMES = [
+    'Universal',
+    'Korean_BeautifulSoup',
+    'Japanese_BeautifulSoup',
+    'Chinese_BeautifulSoup',
+    'Korean_html2text',
+    'Japanese_html2text',
+    'Chinese_html2text',
+    'korean_OCR',
+    'japanese_OCR',
+    'chinese_OCR',
+]
+
 KV = '''
 <TranslationScreen>:
     BoxLayout:
@@ -62,9 +76,9 @@ KV = '''
                 size_hint_y: None
                 height: self.minimum_height
                 padding: [dp(12), dp(8)]
-                spacing: dp(8)
+                spacing: dp(10)
 
-                # File selection
+                # ── File selection ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(80)
@@ -82,6 +96,8 @@ KV = '''
                                 text: "Input File"
                                 font_style: "Caption"
                                 theme_text_color: "Secondary"
+                                size_hint_y: None
+                                height: dp(20)
 
                             MDLabel:
                                 id: file_label
@@ -95,7 +111,7 @@ KV = '''
                             pos_hint: {"center_y": 0.5}
                             on_release: root.pick_file()
 
-                # Model
+                # ── Model ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(80)
@@ -117,16 +133,16 @@ KV = '''
                             pos_hint: {"center_y": 0.5}
                             on_release: root.show_model_menu(self)
 
-                # API Key
+                # ── API Key ──
                 MDCard:
                     size_hint: 1, None
-                    height: dp(120)
+                    height: dp(130)
                     padding: dp(16)
                     elevation: 1
 
                     BoxLayout:
                         orientation: 'vertical'
-                        spacing: dp(4)
+                        spacing: dp(8)
 
                         MDTextField:
                             id: api_key_field
@@ -137,24 +153,25 @@ KV = '''
 
                         BoxLayout:
                             size_hint_y: None
-                            height: dp(36)
-                            spacing: dp(8)
+                            height: dp(40)
+                            spacing: dp(12)
 
                             MDLabel:
-                                text: "Use Multi-Key Rotation"
-                                size_hint_x: 0.6
+                                text: "Multi-Key Rotation"
+                                size_hint_x: 0.55
 
                             MDSwitch:
                                 active: root.use_multi_keys
                                 on_active: root.use_multi_keys = self.active
                                 size_hint_x: 0.2
+                                pos_hint: {"center_y": 0.5}
 
                             MDIconButton:
                                 icon: "key-chain-variant"
                                 on_release: root.open_multikey_manager()
-                                size_hint_x: 0.2
+                                size_hint_x: 0.25
 
-                # Temperature
+                # ── Temperature ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(72)
@@ -165,8 +182,8 @@ KV = '''
                         spacing: dp(8)
 
                         MDLabel:
-                            text: "Temperature"
-                            size_hint_x: 0.3
+                            text: "Temp"
+                            size_hint_x: 0.15
 
                         MDSlider:
                             min: 0.0
@@ -174,14 +191,14 @@ KV = '''
                             step: 0.05
                             value: root.temperature
                             on_value: root.temperature = round(self.value, 2)
-                            size_hint_x: 0.5
+                            size_hint_x: 0.6
 
                         MDLabel:
                             text: str(root.temperature)
                             halign: "right"
-                            size_hint_x: 0.2
+                            size_hint_x: 0.25
 
-                # Profile
+                # ── Profile ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(72)
@@ -189,27 +206,28 @@ KV = '''
                     elevation: 1
 
                     BoxLayout:
-                        spacing: dp(8)
+                        spacing: dp(12)
 
                         MDLabel:
                             text: "Profile"
-                            size_hint_x: 0.3
+                            size_hint_x: 0.2
 
                         MDRaisedButton:
                             id: profile_btn
                             text: root.active_profile
                             on_release: root.show_profile_menu(self)
-                            size_hint_x: 0.7
+                            size_hint_x: 0.8
 
-                # System Prompt (expandable)
+                # ── System Prompt (expandable) ──
                 MDCard:
                     size_hint: 1, None
-                    height: dp(56) if not root.prompt_expanded else dp(240)
+                    height: dp(56) if not root.prompt_expanded else dp(260)
                     padding: dp(16)
                     elevation: 1
 
                     BoxLayout:
                         orientation: 'vertical'
+                        spacing: dp(4)
 
                         BoxLayout:
                             size_hint_y: None
@@ -217,22 +235,25 @@ KV = '''
 
                             MDLabel:
                                 text: "System Prompt"
-                                size_hint_x: 0.7
 
                             MDIconButton:
                                 icon: "chevron-down" if not root.prompt_expanded else "chevron-up"
                                 on_release: root.toggle_prompt()
 
-                        MDTextField:
-                            id: prompt_field
-                            text: root.system_prompt
-                            on_text: root.system_prompt = self.text
-                            multiline: True
-                            max_height: dp(160)
+                        ScrollView:
+                            size_hint_y: None
+                            height: dp(180) if root.prompt_expanded else 0
                             opacity: 1 if root.prompt_expanded else 0
-                            disabled: not root.prompt_expanded
 
-                # Output tokens
+                            MDTextField:
+                                id: prompt_field
+                                text: root.system_prompt
+                                on_text: root.system_prompt = self.text
+                                multiline: True
+                                size_hint_y: None
+                                height: max(dp(180), self.minimum_height)
+
+                # ── Output tokens ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(72)
@@ -252,7 +273,7 @@ KV = '''
                             input_filter: "int"
                             size_hint_x: 0.5
 
-                # Batch translation
+                # ── Batch translation ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(72)
@@ -263,26 +284,27 @@ KV = '''
                         spacing: dp(8)
 
                         MDLabel:
-                            text: "Batch Translation"
-                            size_hint_x: 0.4
+                            text: "Batch"
+                            size_hint_x: 0.2
 
                         MDSwitch:
                             active: root.batch_enabled
                             on_active: root.batch_enabled = self.active
                             size_hint_x: 0.2
+                            pos_hint: {"center_y": 0.5}
 
                         MDLabel:
                             text: "Size:"
                             halign: "right"
-                            size_hint_x: 0.15
+                            size_hint_x: 0.25
 
                         MDTextField:
                             text: str(root.batch_size)
                             on_text: root._parse_batch_size(self.text)
                             input_filter: "int"
-                            size_hint_x: 0.25
+                            size_hint_x: 0.35
 
-                # Auto glossary
+                # ── Auto glossary ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(56)
@@ -298,7 +320,7 @@ KV = '''
                             active: root.auto_glossary
                             on_active: root.auto_glossary = self.active
 
-                # Output language
+                # ── Output language ──
                 MDCard:
                     size_hint: 1, None
                     height: dp(72)
@@ -317,7 +339,7 @@ KV = '''
                             on_text: root.output_language = self.text
                             size_hint_x: 0.6
 
-                # Spacer
+                # Spacer for FAB
                 Widget:
                     size_hint_y: None
                     height: dp(80)
@@ -427,7 +449,90 @@ class TranslationScreen(MDScreen):
         self.batch_size = cfg.get('batch_size', 10)
         self.auto_glossary = cfg.get('enable_auto_glossary', True)
         self.output_language = cfg.get('output_language', 'English')
-        self.system_prompt = cfg.get('prompt_profiles', {}).get(self.active_profile, '')
+
+        # Load system prompt for active profile
+        self.system_prompt = self._get_prompt_for_profile(self.active_profile)
+
+    def _get_prompt_for_profile(self, profile_name):
+        """Get system prompt text for a profile.
+        
+        Handles both old format (string) and new format (dict with 'prompt' key).
+        Falls back to embedded default prompts with {target_lang} replacement.
+        """
+        import re
+        target_lang = self.output_language or 'English'
+
+        def _resolve(raw):
+            """Replace placeholders in a raw prompt string."""
+            if not raw:
+                return ''
+            raw = raw.replace('{target_lang}', target_lang)
+            raw = re.sub(r'\s*\{split_marker_instruction\}\s*', '\n', raw)
+            while '\n\n\n' in raw:
+                raw = raw.replace('\n\n\n', '\n\n')
+            return raw.strip()
+
+        if not self.app:
+            # No app context — use embedded defaults directly
+            from default_prompts import get_prompt
+            return get_prompt(profile_name, target_lang)
+
+        # 1. Try the android config's prompt_profiles
+        profiles = self.app.config_data.get('prompt_profiles', {})
+        if profiles and profile_name in profiles:
+            data = profiles[profile_name]
+            if isinstance(data, str):
+                return _resolve(data)
+            elif isinstance(data, dict):
+                return _resolve(data.get('prompt', ''))
+
+        # 2. Try loading from desktop config
+        try:
+            desktop_config = self._load_desktop_config()
+            if desktop_config:
+                dt_profiles = desktop_config.get('prompt_profiles', {})
+                if profile_name in dt_profiles:
+                    data = dt_profiles[profile_name]
+                    if isinstance(data, str):
+                        return _resolve(data)
+                    elif isinstance(data, dict):
+                        return _resolve(data.get('prompt', ''))
+        except Exception:
+            pass
+
+        # 3. Use embedded defaults (always available)
+        from default_prompts import get_prompt
+        return get_prompt(profile_name, target_lang)
+
+    def _load_desktop_config(self):
+        """Try to load the main desktop config.json."""
+        import json
+        # Check common locations
+        paths = []
+        if sys.platform == 'win32':
+            appdata = os.environ.get('APPDATA', '')
+            localappdata = os.environ.get('LOCALAPPDATA', '')
+            home = os.path.expanduser('~')
+            paths = [
+                os.path.join(home, '.glossarion', 'config.json'),
+                os.path.join(appdata, 'Glossarion', 'config.json'),
+                os.path.join(localappdata, 'Glossarion', 'config.json'),
+            ]
+        else:
+            home = os.path.expanduser('~')
+            paths = [
+                os.path.join(home, '.glossarion', 'config.json'),
+                os.path.join(home, '.config', 'glossarion', 'config.json'),
+            ]
+
+        for p in paths:
+            if os.path.isfile(p):
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                except Exception:
+                    continue
+        return None
 
     def _save_settings(self):
         if not self.app:
@@ -444,6 +549,12 @@ class TranslationScreen(MDScreen):
         cfg['enable_auto_glossary'] = self.auto_glossary
         cfg['output_language'] = self.output_language
         cfg['active_system_prompt'] = self.system_prompt
+
+        # Save prompt to profile
+        profiles = cfg.get('prompt_profiles', {})
+        profiles[self.active_profile] = self.system_prompt
+        cfg['prompt_profiles'] = profiles
+
         from android_config import save_config
         save_config(cfg)
 
@@ -479,24 +590,24 @@ class TranslationScreen(MDScreen):
             self._model_menu.dismiss()
 
     def show_profile_menu(self, caller):
-        profiles = ['Universal', 'Korean_BS', 'Korean_html2text',
-                     'Japanese_BS', 'Japanese_html2text',
-                     'Chinese_BS', 'Chinese_html2text']
+        # Start with built-in profiles (full names)
+        profiles = list(DEFAULT_PROFILE_NAMES)
+        # Add custom profiles from config
         if self.app:
             for p in self.app.config_data.get('prompt_profiles', {}).keys():
                 if p not in profiles:
                     profiles.append(p)
         items = [{"text": p, "viewclass": "OneLineListItem",
                   "on_release": lambda x=p: self._select_profile(x)} for p in profiles]
-        self._profile_menu = MDDropdownMenu(caller=caller, items=items, width_mult=4)
+        self._profile_menu = MDDropdownMenu(caller=caller, items=items, width_mult=5)
         self._profile_menu.open()
 
     def _select_profile(self, profile):
         self.active_profile = profile
         if self._profile_menu:
             self._profile_menu.dismiss()
-        if self.app:
-            self.system_prompt = self.app.config_data.get('prompt_profiles', {}).get(profile, '')
+        # Load the system prompt for this profile
+        self.system_prompt = self._get_prompt_for_profile(profile)
 
     def toggle_prompt(self):
         self.prompt_expanded = not self.prompt_expanded
