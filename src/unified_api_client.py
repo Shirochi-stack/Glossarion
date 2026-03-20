@@ -13251,6 +13251,27 @@ class UnifiedClient:
             start_ts = _t.time()
             # Log thinking status when starting stream
             thinking_mode = data.get('thinking', {}).get('type', None) if isinstance(data.get('thinking'), dict) else None
+            # Pre-flight: skip adaptive thinking if this endpoint+model is cached as unsupported
+            if thinking_mode == 'adaptive':
+                _adaptive_cache_key = f"{api_url}:{data.get('model', '')}"
+                try:
+                    with self.__class__._adaptive_unsupported_lock:
+                        _adaptive_cached = _adaptive_cache_key in self.__class__._adaptive_unsupported_models
+                except Exception:
+                    _adaptive_cached = False
+                if _adaptive_cached:
+                    data.pop('thinking', None)
+                    data.pop('output_config', None)
+                    budget_str = os.getenv('ANTHROPIC_THINKING_BUDGET', '10000')
+                    try:
+                        budget = int(budget_str)
+                    except Exception:
+                        budget = 10000
+                    if budget > 0:
+                        data['thinking'] = {'type': 'enabled', 'budget_tokens': budget}
+                    thinking_mode = data.get('thinking', {}).get('type', None) if isinstance(data.get('thinking'), dict) else None
+                    if not self._is_stop_requested():
+                        print(f"🧠 [anthropic] Adaptive thinking cached as unsupported for this endpoint — using extended thinking (budget={budget:,})")
             if not self._is_stop_requested():
                 thinking_label = ""
                 if thinking_mode == 'adaptive':
@@ -13344,13 +13365,16 @@ class UnifiedClient:
                         print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
 
-                elif raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower:
+                elif (raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower) or \
+                     (raw_resp.status_code in (400, 422) and ("\"adaptive\"" in err_lower or "'adaptive'" in err_lower) and
+                      ("should be 'enabled'" in err_lower or "should be \"enabled\"" in err_lower or "literal_error" in err_lower)):
                     print(f"🧠 [anthropic] Adaptive thinking not supported — falling back to standard extended thinking")
                     model_name = data.get('model')
-                    if model_name:
+                    _adaptive_cache_key = f"{api_url}:{model_name}" if model_name else None
+                    if _adaptive_cache_key:
                         try:
                             with self.__class__._adaptive_unsupported_lock:
-                                self.__class__._adaptive_unsupported_models.add(str(model_name))
+                                self.__class__._adaptive_unsupported_models.add(_adaptive_cache_key)
                         except Exception:
                             pass
                     data.pop('thinking', None)
@@ -13375,7 +13399,7 @@ class UnifiedClient:
                         raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
                     if raw_resp.status_code != 200:
                         raw_resp.read()
-                        raise UnifiedClientError(f"Anthropic streaming error after adaptive fallback: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
+                        raise UnifiedClientError(f"Anthropic streaming error after adaptive fallback: {raw_resp.text[:300]}", http_status=422)
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened with standard thinking (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
