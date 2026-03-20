@@ -19,6 +19,7 @@ from kivy.animation import Animation
 
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.button import MDFlatButton, MDRaisedButton, MDFloatingActionButton, MDIconButton
+from halgakos_fab import HalgakosFAB
 from kivymd.uix.textfield import MDTextField
 from kivymd.uix.selectioncontrol import MDSwitch
 from kivymd.uix.label import MDLabel
@@ -138,7 +139,7 @@ KV = '''
                 # ── API Key ──
                 MDCard:
                     size_hint: 1, None
-                    height: dp(130)
+                    height: dp(170)
                     padding: dp(16)
                     elevation: 1
 
@@ -172,6 +173,24 @@ KV = '''
                                 icon: "key-chain-variant"
                                 on_release: root.open_multikey_manager()
                                 size_hint_x: 0.25
+
+                        BoxLayout:
+                            size_hint_y: None
+                            height: dp(36)
+                            spacing: dp(8)
+
+                            MDRaisedButton:
+                                id: authgpt_btn
+                                text: root.authgpt_status_text
+                                font_size: sp(12)
+                                on_release: root.authgpt_login_toggle()
+                                size_hint_x: 0.75
+
+                            MDIconButton:
+                                icon: "logout"
+                                on_release: root.authgpt_logout()
+                                size_hint_x: 0.25
+                                disabled: not root.authgpt_logged_in
 
                 # ── Temperature ──
                 MDCard:
@@ -391,12 +410,10 @@ KV = '''
                     padding: [dp(12), dp(4)]
                     font_size: sp(12)
 
-    # Run FAB
-    MDFloatingActionButton:
+    # Run FAB with spinning Halgakos
+    HalgakosFAB:
         id: run_fab
-        icon: "play"
         pos_hint: {"right": 0.95, "y": 0.02}
-        elevation: 4
         on_release: root.run_translation()
 '''
 
@@ -410,6 +427,8 @@ class TranslationScreen(MDScreen):
     selected_file_display = StringProperty('No file selected')
     model_name = StringProperty('authgpt/gpt-5.2')
     api_key = StringProperty('')
+    authgpt_logged_in = BooleanProperty(False)
+    authgpt_status_text = StringProperty('AuthGPT: Login')
     use_multi_keys = BooleanProperty(False)
     temperature = NumericProperty(0.3)
     active_profile = StringProperty('Universal')
@@ -463,6 +482,9 @@ class TranslationScreen(MDScreen):
 
         # Load system prompt for active profile
         self.system_prompt = self._get_prompt_for_profile(self.active_profile)
+
+        # Check if AuthGPT token already exists
+        self._check_authgpt_status()
 
     def _get_prompt_for_profile(self, profile_name):
         """Get system prompt text for a profile.
@@ -570,6 +592,74 @@ class TranslationScreen(MDScreen):
         from android_config import save_config
         save_config(cfg)
 
+    # ── AuthGPT OAuth ──
+
+    def _check_authgpt_status(self):
+        """Check if AuthGPT token exists and update UI accordingly."""
+        try:
+            from android_oauth import has_valid_token, get_account_email
+            if has_valid_token():
+                email = get_account_email()
+                self.authgpt_logged_in = True
+                self.authgpt_status_text = f"AuthGPT: {email}" if email else "AuthGPT: Logged In"
+            else:
+                self.authgpt_logged_in = False
+                self.authgpt_status_text = "AuthGPT: Login"
+        except Exception:
+            self.authgpt_logged_in = False
+            self.authgpt_status_text = "AuthGPT: Login"
+
+    def authgpt_login_toggle(self):
+        """Start the AuthGPT OAuth flow."""
+        if self.authgpt_logged_in:
+            # Already logged in — show account info
+            from kivymd.toast import toast
+            toast(f"Already logged in: {self.authgpt_status_text}")
+            return
+
+        self.authgpt_status_text = "AuthGPT: Logging in..."
+        try:
+            from android_oauth import start_oauth_flow
+            start_oauth_flow(
+                on_success=self._on_authgpt_success,
+                on_error=self._on_authgpt_error,
+            )
+        except Exception as e:
+            self.authgpt_status_text = "AuthGPT: Login"
+            self._append_log(f"[ERR] AuthGPT login failed: {e}")
+
+    def _on_authgpt_success(self, tokens):
+        self.authgpt_logged_in = True
+        email = ""
+        try:
+            from android_oauth import get_account_email
+            email = get_account_email()
+        except Exception:
+            pass
+        self.authgpt_status_text = f"AuthGPT: {email}" if email else "AuthGPT: Logged In"
+        self._append_log("[OK] AuthGPT login successful!")
+        from kivymd.toast import toast
+        toast("AuthGPT: Logged in!")
+
+    def _on_authgpt_error(self, message):
+        self.authgpt_logged_in = False
+        self.authgpt_status_text = "AuthGPT: Login"
+        self._append_log(f"[ERR] AuthGPT: {message}")
+        from kivymd.toast import toast
+        toast(f"AuthGPT login failed")
+
+    def authgpt_logout(self):
+        """Clear stored AuthGPT tokens."""
+        try:
+            from android_oauth import logout
+            logout()
+        except Exception:
+            pass
+        self.authgpt_logged_in = False
+        self.authgpt_status_text = "AuthGPT: Login"
+        from kivymd.toast import toast
+        toast("AuthGPT: Logged out")
+
     # ── UI ──
 
     def pick_file(self):
@@ -674,7 +764,7 @@ class TranslationScreen(MDScreen):
         self.log_text = ''
 
         try:
-            self.ids.run_fab.icon = "stop"
+            self.ids.run_fab.start_spinning()
         except Exception:
             pass
 
@@ -715,7 +805,7 @@ class TranslationScreen(MDScreen):
 
         self._append_log("[STOP] Stop requested — waiting for in-flight calls to finish...")
         try:
-            self.ids.run_fab.icon = "clock-outline"
+            self.ids.run_fab.show_stopping()
         except Exception:
             pass
 
@@ -779,9 +869,38 @@ class TranslationScreen(MDScreen):
 
         try:
             import importlib
+
+            # Pre-register Android stubs into sys.modules BEFORE importing
+            # TransateKRtoEN, which does top-level `import tiktoken`, etc.
+            _stub_map = {
+                'tiktoken': 'tiktoken_stub',
+                'ebooklib': 'ebooklib_stub',
+                'ebooklib.epub': 'ebooklib_stub',
+                'httpx': 'httpx_stub',
+                'rapidfuzz': 'rapidfuzz_stub',
+                'rapidfuzz.fuzz': 'rapidfuzz_stub',
+                'rapidfuzz.process': 'rapidfuzz_stub',
+                'langdetect': 'langdetect_stub',
+            }
+            for mod_name, stub_name in _stub_map.items():
+                if mod_name not in sys.modules:
+                    try:
+                        importlib.import_module(mod_name)
+                    except ImportError:
+                        try:
+                            stub = importlib.import_module(stub_name)
+                            sys.modules[mod_name] = stub
+                        except Exception:
+                            pass
+
             if 'TransateKRtoEN' in sys.modules:
                 importlib.reload(sys.modules['TransateKRtoEN'])
-            from TransateKRtoEN import main as translate_main
+
+            try:
+                from TransateKRtoEN import main as translate_main
+            except ImportError as ie:
+                Clock.schedule_once(lambda dt, m=str(ie): self._append_log(f"[ERR] Cannot import translation engine: {m}"))
+                return
 
             notify_translation_progress("Translating", 0, 100, os.path.basename(self.selected_file))
 
@@ -813,7 +932,7 @@ class TranslationScreen(MDScreen):
         self.is_translating = False
         self._stop_requested = False
         try:
-            self.ids.run_fab.icon = "play"
+            self.ids.run_fab.stop_spinning()
         except Exception:
             pass
 
