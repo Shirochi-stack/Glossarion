@@ -5564,14 +5564,16 @@ CRITICAL EXTRACTION RULES:
                             for ext in ext_priority:
                                 candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
                     else:
-                        # No override — check auto/manual paths first, then CWD
+                        # No override — check auto/manual paths first, then EPUB parent dir
                         auto_path = getattr(self, 'auto_loaded_glossary_path', None)
                         manual_path = getattr(self, 'manual_glossary_path', None)
                         if auto_path and os.path.exists(auto_path):
                             candidates.append(auto_path)
                         if manual_path and os.path.exists(manual_path):
                             candidates.append(manual_path)
-                        out_dir = os.path.join(os.getcwd(), base)
+                        # Use EPUB's parent dir (not os.getcwd() which is "/" on macOS frozen)
+                        epub_parent = os.path.dirname(os.path.abspath(epub_path))
+                        out_dir = os.path.join(epub_parent, base)
                         for ext in ext_priority:
                             candidates.append(os.path.join(out_dir, f"glossary{ext}"))
                         for ext in ext_priority:
