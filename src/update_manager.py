@@ -1173,7 +1173,10 @@ class UpdateManager(QObject):
                         
                         # Add platform indicator for non-Windows files
                         if filename.lower().endswith('.dmg'):
-                            platform_tag = " [macOS]"
+                            if 'intel' in filename.lower():
+                                platform_tag = " [macOS Intel]"
+                            else:
+                                platform_tag = " [macOS]"
                         else:
                             platform_tag = ""
                         
