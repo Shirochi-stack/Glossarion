@@ -243,7 +243,7 @@ def request_storage_permissions():
         ])
         return True
     except Exception as e:
-        print(f"⚠️ Could not request storage permissions: {e}")
+        print(f"[WARN] Could not request storage permissions: {e}")
         return False
 
 
@@ -288,7 +288,7 @@ def scan_for_books(directory=None, extensions=None):
             except OSError:
                 continue
     except PermissionError:
-        print(f"⚠️ No permission to scan: {directory}")
+        print(f"[WARN] No permission to scan: {directory}")
     
     # Sort by modification time (newest first)
     books.sort(key=lambda b: b['modified'], reverse=True)

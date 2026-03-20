@@ -195,11 +195,11 @@ def _android_complete_notification(title, message):
 def _desktop_progress_notification(title, progress, max_progress, message):
     if max_progress > 0:
         pct = int(100 * progress / max_progress)
-        print(f"📱 [Notification] {title}: {pct}% — {message}")
+        print(f"[Notification] {title}: {pct}% -- {message}")
 
 
 def _desktop_complete_notification(title, message):
-    print(f"📱 [Notification] ✅ {title}: {message}")
+    print(f"[Notification] [OK] {title}: {message}")
     try:
         from plyer import notification
         notification.notify(

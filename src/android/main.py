@@ -28,22 +28,34 @@ from kivy.lang import Builder
 
 # ── CJK font helper ──
 def _get_cjk_font_paths():
-    """Find a CJK-capable system font that supports Korean/Japanese/Chinese.
+    """Find a CJK-capable font that supports Korean/Japanese/Chinese.
+    
+    Prefers the bundled Noto Sans CJK SC font which covers ALL CJK scripts.
+    Falls back to system fonts if the bundled font is not present.
     
     Returns (fn_regular, fn_bold) or (None, None).
     """
     import sys as _sys
+
+    # 1. Bundled Noto Sans CJK SC (covers Chinese + Japanese + Korean + Latin)
+    bundled = os.path.join(os.path.dirname(__file__), 'fonts', 'NotoSansCJKsc-Regular.otf')
+    if os.path.isfile(bundled):
+        return bundled, bundled  # same for bold (no bold variant bundled)
+
+    # 2. System fonts as fallback
     if platform == 'android':
         pairs = [
             ('/system/fonts/NotoSansCJK-Regular.ttc', '/system/fonts/NotoSansCJK-Bold.ttc'),
-            ('/system/fonts/NotoSansCJKkr-Regular.otf', '/system/fonts/NotoSansCJKkr-Bold.otf'),
+            ('/system/fonts/NotoSansCJKsc-Regular.otf', '/system/fonts/NotoSansCJKsc-Bold.otf'),
             ('/system/fonts/DroidSansFallback.ttf', '/system/fonts/DroidSansFallback.ttf'),
         ]
     elif _sys.platform == 'win32':
         windir = os.environ.get('WINDIR', r'C:\Windows')
         fd = os.path.join(windir, 'Fonts')
         pairs = [
+            # malgun covers Korean well
             (os.path.join(fd, 'malgun.ttf'), os.path.join(fd, 'malgunbd.ttf')),
+            # msyh covers Chinese well
             (os.path.join(fd, 'msyh.ttc'), os.path.join(fd, 'msyhbd.ttc')),
             (os.path.join(fd, 'meiryo.ttc'), os.path.join(fd, 'meiryob.ttc')),
             (os.path.join(fd, 'YuGothR.ttc'), os.path.join(fd, 'YuGothB.ttc')),

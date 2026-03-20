@@ -582,7 +582,7 @@ class TranslationScreen(MDScreen):
                 multiple=False,
             )
         except Exception as e:
-            self._append_log(f"⚠️ File picker error: {e}")
+            self._append_log(f"[WARN] File picker error: {e}")
 
     def _on_file_selected(self, selection):
         if selection:
@@ -669,7 +669,7 @@ class TranslationScreen(MDScreen):
 
         self._save_settings()
         self.is_translating = True
-        self._stop_requested = False
+        self._reset_stop_flags()
         self._log_lines = []
         self.log_text = ''
 
@@ -687,10 +687,62 @@ class TranslationScreen(MDScreen):
 
     def _stop_translation(self):
         self._stop_requested = True
+
+        # Match desktop translator_gui.py stop flag propagation
+        os.environ['TRANSLATION_CANCELLED'] = '1'
         os.environ['GRACEFUL_STOP'] = '1'
-        self._append_log("[STOP] Stop requested...")
+        os.environ['WAIT_FOR_CHUNKS'] = '0'
+
+        # Set stop flag on TransateKRtoEN module
+        try:
+            import TransateKRtoEN
+            if hasattr(TransateKRtoEN, 'set_stop_flag'):
+                TransateKRtoEN.set_stop_flag(True)
+        except Exception:
+            pass
+
+        # Set stop flag on unified_api_client
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                unified_api_client.hard_cancel_all()
+        except Exception:
+            pass
+
+        self._append_log("[STOP] Stop requested — waiting for in-flight calls to finish...")
         try:
             self.ids.run_fab.icon = "clock-outline"
+        except Exception:
+            pass
+
+    def _reset_stop_flags(self):
+        """Reset all stop flags before starting a new translation."""
+        self._stop_requested = False
+        os.environ.pop('TRANSLATION_CANCELLED', None)
+        os.environ.pop('GRACEFUL_STOP', None)
+        os.environ['WAIT_FOR_CHUNKS'] = '0'
+
+        try:
+            import TransateKRtoEN
+            if hasattr(TransateKRtoEN, 'set_stop_flag'):
+                TransateKRtoEN.set_stop_flag(False)
+            if hasattr(TransateKRtoEN, '_stop_requested'):
+                TransateKRtoEN._stop_requested = False
+            if hasattr(TransateKRtoEN, 'STOP_LOGGED'):
+                TransateKRtoEN.STOP_LOGGED = False
+        except Exception:
+            pass
+
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(False)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = False
         except Exception:
             pass
 

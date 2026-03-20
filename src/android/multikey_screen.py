@@ -187,7 +187,7 @@ class MultiKeyScreen(MDScreen):
         cooldown = key_data.get('cooldown', 0)
 
         line2 = f"Model: {model}" if model else "No model set"
-        line3 = f"{'✅ Enabled' if enabled else '❌ Disabled'} · Used: {usage}× · Cooldown: {cooldown}s"
+        line3 = f"{'[ON] Enabled' if enabled else '[OFF] Disabled'} · Used: {usage}x · Cooldown: {cooldown}s"
 
         item = ThreeLineListItem(
             text=f"Key #{index + 1}: {masked}",
