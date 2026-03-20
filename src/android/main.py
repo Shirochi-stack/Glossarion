@@ -26,44 +26,40 @@ from kivy.core.text import LabelBase
 from kivy.utils import platform
 from kivy.lang import Builder
 
-# ── Register a CJK-capable font so Korean/Japanese/Chinese render correctly ──
-def _register_cjk_font():
-    """Find and register a system font that supports CJK characters."""
-    import sys
-    candidates = []
+# ── CJK font helper ──
+def _get_cjk_font_paths():
+    """Find a CJK-capable system font that supports Korean/Japanese/Chinese.
+    
+    Returns (fn_regular, fn_bold) or (None, None).
+    """
+    import sys as _sys
     if platform == 'android':
-        candidates = [
-            '/system/fonts/NotoSansCJK-Regular.ttc',
-            '/system/fonts/NotoSansCJKkr-Regular.otf',
-            '/system/fonts/NotoSansCJKjp-Regular.otf',
-            '/system/fonts/DroidSansFallback.ttf',
+        pairs = [
+            ('/system/fonts/NotoSansCJK-Regular.ttc', '/system/fonts/NotoSansCJK-Bold.ttc'),
+            ('/system/fonts/NotoSansCJKkr-Regular.otf', '/system/fonts/NotoSansCJKkr-Bold.otf'),
+            ('/system/fonts/DroidSansFallback.ttf', '/system/fonts/DroidSansFallback.ttf'),
         ]
-    elif sys.platform == 'win32':
+    elif _sys.platform == 'win32':
         windir = os.environ.get('WINDIR', r'C:\Windows')
-        fonts = os.path.join(windir, 'Fonts')
-        candidates = [
-            os.path.join(fonts, 'meiryo.ttc'),
-            os.path.join(fonts, 'msyh.ttc'),
-            os.path.join(fonts, 'msgothic.ttc'),
-            os.path.join(fonts, 'malgun.ttf'),
-            os.path.join(fonts, 'YuGothR.ttc'),
+        fd = os.path.join(windir, 'Fonts')
+        pairs = [
+            (os.path.join(fd, 'malgun.ttf'), os.path.join(fd, 'malgunbd.ttf')),
+            (os.path.join(fd, 'msyh.ttc'), os.path.join(fd, 'msyhbd.ttc')),
+            (os.path.join(fd, 'meiryo.ttc'), os.path.join(fd, 'meiryob.ttc')),
+            (os.path.join(fd, 'YuGothR.ttc'), os.path.join(fd, 'YuGothB.ttc')),
         ]
-    elif sys.platform == 'darwin':
-        candidates = [
-            '/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc',
-            '/Library/Fonts/Arial Unicode.ttf',
+    elif _sys.platform == 'darwin':
+        pairs = [
+            ('/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc', '/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc'),
+            ('/Library/Fonts/Arial Unicode.ttf', '/Library/Fonts/Arial Unicode.ttf'),
         ]
+    else:
+        pairs = []
 
-    for font_path in candidates:
-        if os.path.isfile(font_path):
-            try:
-                LabelBase.register(name='Roboto', fn_regular=font_path)
-                return font_path
-            except Exception:
-                continue
-    return None
-
-_cjk_font = _register_cjk_font()
+    for fn_r, fn_b in pairs:
+        if os.path.isfile(fn_r):
+            return fn_r, fn_b if os.path.isfile(fn_b) else fn_r
+    return None, None
 
 # Import screens
 from library_screen import LibraryScreen
@@ -99,28 +95,51 @@ BoxLayout:
         TranslationScreen:
             name: 'translation'
 
-    MDBottomNavigation:
+    # Custom bottom nav bar (MDBottomNavigation reserves its own content
+    # panel area which clips the ScreenManager to ~50% height)
+    BoxLayout:
         id: bottom_nav
-        panel_color: app.theme_cls.bg_dark
-        text_color_active: 1, 1, 1, 1
+        size_hint_y: None
+        height: dp(56)
+        padding: [dp(8), 0]
 
-        MDBottomNavigationItem:
-            name: 'nav_library'
-            text: 'Library'
-            icon: 'bookshelf'
-            on_tab_press: app.switch_screen('library')
+        canvas.before:
+            Color:
+                rgba: app.theme_cls.bg_dark
+            Rectangle:
+                pos: self.pos
+                size: self.size
+            # Top border line
+            Color:
+                rgba: 0.3, 0.3, 0.3, 0.5
+            Rectangle:
+                pos: self.x, self.top - 1
+                size: self.width, 1
 
-        MDBottomNavigationItem:
-            name: 'nav_keys'
-            text: 'API Keys'
-            icon: 'key-chain-variant'
-            on_tab_press: app.switch_screen('multikey')
+        MDIconButton:
+            icon: "bookshelf"
+            theme_text_color: "Custom"
+            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'library' else (0.5,0.5,0.5,1)
+            pos_hint: {"center_y": 0.5}
+            on_release: app.switch_screen('library')
 
-        MDBottomNavigationItem:
-            name: 'nav_translate'
-            text: 'Translate'
-            icon: 'translate'
-            on_tab_press: app.switch_screen('translation')
+        Widget:
+
+        MDIconButton:
+            icon: "key-chain-variant"
+            theme_text_color: "Custom"
+            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'multikey' else (0.5,0.5,0.5,1)
+            pos_hint: {"center_y": 0.5}
+            on_release: app.switch_screen('multikey')
+
+        Widget:
+
+        MDIconButton:
+            icon: "translate"
+            theme_text_color: "Custom"
+            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'translation' else (0.5,0.5,0.5,1)
+            pos_hint: {"center_y": 0.5}
+            on_release: app.switch_screen('translation')
 '''
 
 
@@ -150,8 +169,40 @@ class GlossarionApp(MDApp):
         root = Builder.load_string(KV)
         return root
 
+    def _register_cjk_font(self):
+        """Register a CJK-capable font to replace Kivy's built-in Roboto.
+        
+        Must be called AFTER KivyMD sets up its theme, because KivyMD's
+        _run_prepare() re-registers the bundled Roboto font which overrides
+        any earlier registration.
+        """
+        from kivy import resources as kivy_resources
+        from kivy.logger import Logger
+        fn_regular, fn_bold = _get_cjk_font_paths()
+        if fn_regular:
+            # Add the font directory to Kivy's resource search path
+            font_dir = os.path.dirname(fn_regular)
+            kivy_resources.resource_add_path(font_dir)
+            try:
+                LabelBase.register(
+                    name='Roboto',
+                    fn_regular=fn_regular,
+                    fn_bold=fn_bold,
+                    fn_italic=fn_regular,
+                    fn_bolditalic=fn_bold,
+                )
+                Logger.info(f"CJK Font: Registered {os.path.basename(fn_regular)}")
+            except Exception as exc:
+                Logger.warning(f"CJK Font: Registration failed: {exc}")
+        else:
+            Logger.warning("CJK Font: No CJK font found, Korean/Japanese/Chinese may show as boxes")
+
     def on_start(self):
         """Called when the app starts."""
+        # Register CJK font — MUST happen here (after _run_prepare finishes)
+        # because KivyMD's _run_prepare re-registers the bundled Roboto AFTER build().
+        self._register_cjk_font()
+
         if platform == 'android':
             request_storage_permissions()
             create_notification_channels()
@@ -194,7 +245,7 @@ class GlossarionApp(MDApp):
         else:
             bottom_nav.opacity = 1
             bottom_nav.disabled = False
-            bottom_nav.height = bottom_nav.minimum_height or 56
+            bottom_nav.height = 56  # dp(56) handled by KV
 
         # Pass data to target screen
         screen = sm.get_screen(screen_name)

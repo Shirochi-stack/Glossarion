@@ -120,8 +120,13 @@ class LibraryScreen(MDScreen):
         ext_label = book['ext'].upper().replace('.', '')
         subtitle = f"{ext_label} · {size_str}"
 
+        # Shorten long names with ellipsis
+        display_name = book['name']
+        if len(display_name) > 45:
+            display_name = display_name[:42] + '...'
+
         item = TwoLineAvatarListItem(
-            text=book['name'],
+            text=display_name,
             secondary_text=subtitle,
             on_release=lambda x, b=book: self._on_book_tap(b),
         )
@@ -139,7 +144,9 @@ class LibraryScreen(MDScreen):
 
     def _get_cover_image(self, book):
         """Extract cover from EPUB or return None."""
-        if book['ext'] != '.epub':
+        if book['ext'].lower() != '.epub':
+            return None
+        if not os.path.isfile(book['path']):
             return None
         if book['path'] in self._cover_cache:
             return self._cover_cache[book['path']]

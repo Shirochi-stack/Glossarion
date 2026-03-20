@@ -26,7 +26,7 @@ from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.card import MDCard
 from kivymd.uix.slider import MDSlider
 from kivymd.uix.menu import MDDropdownMenu
-from kivymd.uix.snackbar import Snackbar
+from kivymd.toast import toast
 from kivymd.uix.dialog import MDDialog
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,8 @@ DEFAULT_MODELS = [
     'deepseek/deepseek-chat', 'qwen/qwen3-235b-a22b',
     'authgpt/gpt-5.2', 'authgpt/gemini-2.5-flash',
 ]
+
+GLOSSARY_MODES = ['Off', 'Minimal', 'Balanced', 'Full', 'No Glossary']
 
 # These match translator_gui.py's _get_protected_prompt_profiles()
 DEFAULT_PROFILE_NAMES = [
@@ -304,21 +306,25 @@ KV = '''
                             input_filter: "int"
                             size_hint_x: 0.35
 
-                # ── Auto glossary ──
+                # ── Glossary mode ──
                 MDCard:
                     size_hint: 1, None
-                    height: dp(56)
+                    height: dp(72)
                     padding: dp(16)
                     elevation: 1
 
                     BoxLayout:
-                        MDLabel:
-                            text: "Auto Glossary"
-                            size_hint_x: 0.7
+                        spacing: dp(12)
 
-                        MDSwitch:
-                            active: root.auto_glossary
-                            on_active: root.auto_glossary = self.active
+                        MDLabel:
+                            text: "Glossary Mode"
+                            size_hint_x: 0.35
+
+                        MDRaisedButton:
+                            id: glossary_btn
+                            text: root.glossary_mode
+                            on_release: root.show_glossary_menu(self)
+                            size_hint_x: 0.65
 
                 # ── Output language ──
                 MDCard:
@@ -411,7 +417,8 @@ class TranslationScreen(MDScreen):
     max_output_tokens = NumericProperty(128000)
     batch_enabled = BooleanProperty(False)
     batch_size = NumericProperty(10)
-    auto_glossary = BooleanProperty(True)
+    auto_glossary = BooleanProperty(True)  # legacy compat
+    glossary_mode = StringProperty('Balanced')
     output_language = StringProperty('English')
     prompt_expanded = BooleanProperty(False)
 
@@ -424,6 +431,7 @@ class TranslationScreen(MDScreen):
         self._translation_thread = None
         self._model_menu = None
         self._profile_menu = None
+        self._glossary_menu = None
         self._stop_requested = False
         self._log_lines = []
 
@@ -448,6 +456,9 @@ class TranslationScreen(MDScreen):
         self.batch_enabled = cfg.get('batch_translation', False)
         self.batch_size = cfg.get('batch_size', 10)
         self.auto_glossary = cfg.get('enable_auto_glossary', True)
+        self.glossary_mode = cfg.get('auto_glossary_mode', 'balanced').capitalize()
+        if self.glossary_mode == 'No_glossary':
+            self.glossary_mode = 'No Glossary'
         self.output_language = cfg.get('output_language', 'English')
 
         # Load system prompt for active profile
@@ -547,6 +558,7 @@ class TranslationScreen(MDScreen):
         cfg['batch_translation'] = self.batch_enabled
         cfg['batch_size'] = self.batch_size
         cfg['enable_auto_glossary'] = self.auto_glossary
+        cfg['auto_glossary_mode'] = self.glossary_mode.lower().replace(' ', '_')
         cfg['output_language'] = self.output_language
         cfg['active_system_prompt'] = self.system_prompt
 
@@ -612,6 +624,19 @@ class TranslationScreen(MDScreen):
     def toggle_prompt(self):
         self.prompt_expanded = not self.prompt_expanded
 
+    def show_glossary_menu(self, caller):
+        items = [{"text": m, "viewclass": "OneLineListItem",
+                  "on_release": lambda x=m: self._select_glossary_mode(x)} for m in GLOSSARY_MODES]
+        self._glossary_menu = MDDropdownMenu(caller=caller, items=items, width_mult=4)
+        self._glossary_menu.open()
+
+    def _select_glossary_mode(self, mode):
+        self.glossary_mode = mode
+        # Update legacy compat
+        self.auto_glossary = mode.lower() not in ('off', 'no_glossary', 'no glossary')
+        if self._glossary_menu:
+            self._glossary_menu.dismiss()
+
     def open_multikey_manager(self):
         if self.app:
             self.app.switch_screen('multikey')
@@ -636,10 +661,10 @@ class TranslationScreen(MDScreen):
             return
 
         if not self.selected_file or not os.path.isfile(self.selected_file):
-            Snackbar(text="Please select a file first").open()
+            toast("Please select a file first")
             return
         if not self.api_key and not self.use_multi_keys:
-            Snackbar(text="Please enter an API key").open()
+            toast("Please enter an API key")
             return
 
         self._save_settings()
@@ -684,6 +709,7 @@ class TranslationScreen(MDScreen):
         cfg['batch_translation'] = self.batch_enabled
         cfg['batch_size'] = self.batch_size
         cfg['enable_auto_glossary'] = self.auto_glossary
+        cfg['auto_glossary_mode'] = self.glossary_mode.lower().replace(' ', '_')
         cfg['output_language'] = self.output_language
 
         set_all_env_vars(cfg)

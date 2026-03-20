@@ -86,12 +86,13 @@ def set_all_env_vars(config):
     os.environ['TRANSLATION_HISTORY_LIMIT'] = str(_get('translation_history_limit', 2))
     os.environ['TRANSLATION_HISTORY_ROLLING'] = '1' if _get('translation_history_rolling', False) else '0'
 
-    # ── Streaming ──
-    os.environ['ENABLE_STREAMING'] = '1' if _get('enable_streaming', False) else '0'
+    # ── Streaming (always enabled on Android for real-time response) ──
+    os.environ['ENABLE_STREAMING'] = '1'
     os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if _get('allow_batch_stream_logs', False) else '0'
     os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if _get('allow_authgpt_batch_stream_logs', False) else '0'
     os.environ['LOG_STREAM_CHUNKS'] = '1'
     os.environ['ENABLE_THOUGHTS'] = '0'  # No thought display on mobile
+    os.environ['RESPONSE_STREAMING'] = '1'  # Always stream responses
 
     # ── Chapter processing ──
     os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if _get('batch_translate_headers', False) else '0'
