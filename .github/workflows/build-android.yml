@@ -1,0 +1,154 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    tags:
+      - 'v*'  # Also trigger on version tags
+
+jobs:
+  build-android:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            python3-pip \
+            autoconf \
+            libtool \
+            pkg-config \
+            zlib1g-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libtinfo5 \
+            cmake \
+            libffi-dev \
+            libssl-dev \
+            automake \
+            zip \
+            unzip \
+            openjdk-17-jdk
+      
+      - name: Install Buildozer and Cython
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install buildozer cython virtualenv
+      
+      - name: Cache Buildozer (NDK/SDK)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            src/android/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+      
+      - name: Copy shared backend files
+        run: |
+          # Copy necessary shared Python modules from src/ into the android build directory
+          # These are the translation engine files needed at runtime
+          ANDROID_DIR="src/android"
+          SRC_DIR="src"
+          
+          # Create a _backend directory for shared modules
+          mkdir -p "$ANDROID_DIR/_backend"
+          
+          # Core translation engine
+          cp "$SRC_DIR/TransateKRtoEN.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/unified_api_client.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/multi_api_key_manager.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/GlossaryManager.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/chapter_splitter.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/history_manager.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/txt_processor.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/api_key_encryption.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/large_env.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
+          
+          # Stubs for modules not available on Android
+          cat > "$ANDROID_DIR/_backend/image_translator.py" << 'EOF'
+          class ImageTranslator:
+              """Stub — image translation not supported on Android."""
+              pass
+          EOF
+          
+          cat > "$ANDROID_DIR/_backend/ai_hunter_enhanced.py" << 'EOF'
+          class ImprovedAIHunterDetection:
+              """Stub — AI hunter not available on Android."""
+              pass
+          EOF
+          
+          cat > "$ANDROID_DIR/_backend/pdf_extractor.py" << 'EOF'
+          def extract_text_from_pdf(*args, **kwargs): return ""
+          def extract_pdf_with_formatting(*args, **kwargs): return "", {}
+          def generate_css_from_pdf(*args, **kwargs): return ""
+          def create_pdf_from_html(*args, **kwargs): return False
+          def create_pdf_from_text(*args, **kwargs): return False
+          EOF
+          
+          # Create __init__.py
+          touch "$ANDROID_DIR/_backend/__init__.py"
+          
+          # Copy assets
+          mkdir -p "$ANDROID_DIR/assets"
+          cp "$SRC_DIR/Halgakos.ico" "$ANDROID_DIR/assets/" 2>/dev/null || true
+          
+          # Convert .ico to .png for Android (if ImageMagick is available)
+          if command -v convert &> /dev/null; then
+            convert "$ANDROID_DIR/assets/Halgakos.ico" "$ANDROID_DIR/assets/Halgakos.png" 2>/dev/null || true
+          fi
+      
+      - name: Build debug APK
+        working-directory: src/android
+        run: |
+          # Set JAVA_HOME for Buildozer
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          
+          # Add _backend to PYTHONPATH so modules can be found
+          export PYTHONPATH="$(pwd)/_backend:$PYTHONPATH"
+          
+          # Build
+          buildozer android debug 2>&1 | tee build.log
+      
+      - name: Find APK
+        id: find_apk
+        run: |
+          APK_PATH=$(find src/android/bin -name '*.apk' -type f | head -1)
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK_PATH"
+      
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-Android-APK
+          path: src/android/bin/*.apk
+          if-no-files-found: warn
+      
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-log
+          path: src/android/build.log
+      
+      - name: Upload to Release (if tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: src/android/bin/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
