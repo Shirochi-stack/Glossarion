@@ -14625,6 +14625,18 @@ Important rules:
                    format.setFont(font)
                    
                    cursor.insertText(message + "\n", format)
+
+
+                    # Reset format to default so subsequent messages don't inherit green
+
+                    default_format = QTextCharFormat()
+
+                    default_format.setForeground(QColor("white"))
+
+                    cursor.setCharFormat(default_format)
+
+                    self.log_text.setTextCursor(cursor)
+
                else:
                    # Regular text append
                    self.log_text.append(message)
