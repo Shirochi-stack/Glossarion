@@ -125,6 +125,9 @@ def get_model_options() -> List[str]:
         
         # For OR, prefix with 'or/'
         "or/openrouter/free",
+        "or/anthropic/claude-sonnet-4.6","or/anthropic/claude-sonnet-4.5", "or/anthropic/claude-sonnet-4",
+        "or/google/gemini-3.1-flash-lite-preview", "or/google/gemini-3-flash-preview", "or/google/gemini-3.1-pro-preview",
+        "or/openai/gpt-5.4","or/openai/gpt-5.4-mini", "or/openai/gpt-5.4-nano"
         "or/google/gemini-2.5-pro",
         "or/google/gemini-2.5-flash",
         "or/google/gemini-2.5-flash-preview-09-2025",
@@ -132,7 +135,8 @@ def get_model_options() -> List[str]:
         "or/openai/gpt-oss-20b:free","or/openai/gpt-5",
         "or/openai/gpt-5-mini",
         "or/openai/gpt-5-nano",
-        "or/openai/chatgpt-4o-latest", "or/deepseek/deepseek-chat-v3-0324:free", "or/deepseek/deepseek-r1-distill-llama-70b:free",
+        "or/openai/chatgpt-4o-latest", "or/deepseek/deepseek-chat-v3-0324:free", "or/deepseek/deepseek-r1-distill-llama-70b:free", "or/deepseek/deepseek-v3.2", 
+        "or/deepseek/deepseek-chat-v3.1", "or/deepseek/deepseek-r1-0528", "or/deepseek/deepseek-r1", "or/deepseek/deepseek-chat",
         "or/deepseek/deepseek-r1:free","or/deepseek/deepseek-r1-0528:free", "or/deepseek/deepseek-chat-v3.1:free", "or/deepseek/deepseek-r1-0528-qwen3-8b:free",
         "or/tngtech/deepseek-r1t2-chimera:free","or/tngtech/deepseek-r1t-chimera:free",
         "or/google/gemma-3-27b-it:free", "or/google/gemma-3-27b-it",

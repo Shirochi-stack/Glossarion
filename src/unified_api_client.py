@@ -14907,8 +14907,11 @@ class UnifiedClient:
 
                                         # Handle both object and dict access for content
                                         # Skip if this chunk is a Gemini thought (content is the thought, not output)
+                                        # Also skip content extraction during active reasoning — some providers
+                                        # (OpenRouter) send empty/partial content alongside reasoning in the same delta,
+                                        # which would leak thinking text into the final output.
                                         delta_content = None
-                                        if not _is_gemini_thought:
+                                        if not _is_gemini_thought and not reasoning_frag:
                                             if isinstance(delta, dict):
                                                 delta_content = delta.get("content")
                                             else:
