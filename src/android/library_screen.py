@@ -18,8 +18,7 @@ from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.button import MDFloatingActionButton
 from kivymd.uix.label import MDLabel
 
-from android_file_utils import (get_documents_dir, get_downloads_dir, scan_for_books,
-                                get_library_dir)
+from android_file_utils import scan_for_books, get_library_dir
 
 logger = logging.getLogger(__name__)
 
@@ -71,37 +70,34 @@ class LibraryScreen(MDScreen):
         self._cover_cache = {}
 
     def load_books(self):
-        """Scan directories for EPUB/TXT files."""
+        """Scan the dedicated Library folder for translated EPUB/TXT files."""
         if not self.app:
             Clock.schedule_once(lambda dt: self.load_books(), 0.5)
             return
 
         self.books.clear()
-        scan_dirs = self.app.config_data.get('library_scan_dirs', [])
 
-        # Primary: dedicated Library folder
+        # Only scan the dedicated Library folder (translated EPUBs)
         lib_dir = get_library_dir()
-        default_dirs = [lib_dir, get_documents_dir()]
 
-        downloads = get_downloads_dir()
-        if os.path.isdir(downloads):
-            default_dirs.append(downloads)
+        if os.path.isdir(lib_dir):
+            found = scan_for_books(lib_dir)
+            self.books.extend(found)
+            # Also scan subdirectories (for _output folders)
+            try:
+                for entry in os.scandir(lib_dir):
+                    if entry.is_dir():
+                        sub_found = scan_for_books(entry.path)
+                        self.books.extend(sub_found)
+            except (PermissionError, OSError):
+                pass
 
-        all_dirs = list(set(scan_dirs + default_dirs))
-
-        for d in all_dirs:
-            if os.path.isdir(d):
+        # Also scan any user-configured extra dirs
+        scan_dirs = self.app.config_data.get('library_scan_dirs', [])
+        for d in scan_dirs:
+            if os.path.isdir(d) and d != lib_dir:
                 found = scan_for_books(d)
                 self.books.extend(found)
-                # Also scan one level deep (for _output folders in Library)
-                if d == lib_dir:
-                    try:
-                        for entry in os.scandir(d):
-                            if entry.is_dir():
-                                sub_found = scan_for_books(entry.path)
-                                self.books.extend(sub_found)
-                    except (PermissionError, OSError):
-                        pass
 
         # Deduplicate
         seen = set()
