@@ -730,7 +730,9 @@ class GlossaryManagerMixin:
                 try:
                     import json
                     from api_key_encryption import decrypt_config
-                    with open('config.json', 'r', encoding='utf-8') as f:
+                    # Use the proper CONFIG_FILE path (handles macOS app bundle paths)
+                    from translator_gui import CONFIG_FILE as _cfg_path
+                    with open(_cfg_path, 'r', encoding='utf-8') as f:
                         self.config = json.load(f)
                         self.config = decrypt_config(self.config)
                     # Now call save_config to set ALL environment variables from the reloaded config
@@ -4746,9 +4748,9 @@ CRITICAL EXTRACTION RULES:
                 self.config['glossary_auto_backup'] = backup_checkbox.isChecked()
                 self.config['glossary_max_backups'] = max_backups_spinbox.value()
                 
-                # Save to config file
-                CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
-                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                # Save to config file (use proper macOS-aware config path)
+                from translator_gui import CONFIG_FILE as _cfg_path
+                with open(_cfg_path, 'w', encoding='utf-8') as f:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
                 
                 status = "enabled" if backup_checkbox.isChecked() else "disabled"
