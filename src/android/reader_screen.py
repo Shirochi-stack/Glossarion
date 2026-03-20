@@ -521,18 +521,28 @@ class ReaderScreen(MDScreen):
     def show_toc(self):
         if not self._chapter_titles:
             return
-        items = []
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.boxlayout import BoxLayout
+
+        scroll = ScrollView(size_hint_y=None, height=dp(400))
+        toc_list = MDList()
         for i, title in enumerate(self._chapter_titles):
-            items.append(
+            toc_list.add_widget(
                 OneLineListItem(
                     text=f"{i + 1}. {title}",
                     on_release=lambda x, idx=i: self._toc_jump(idx),
                 )
             )
+        scroll.add_widget(toc_list)
+
+        container = BoxLayout(orientation='vertical', size_hint_y=None)
+        container.height = dp(400)
+        container.add_widget(scroll)
+
         self._toc_dialog = MDDialog(
             title="Table of Contents",
-            type="simple",
-            items=items,
+            type="custom",
+            content_cls=container,
         )
         self._toc_dialog.open()
 
