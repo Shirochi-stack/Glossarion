@@ -31,6 +31,10 @@ src/**
 # Explicitly include application icon in src
 !src/Halgakos.ico
 
+# Allow android subfolder (Kivy/KivyMD Android entry point)
+!src/android/
+!src/android/**
+
 # Never commit secrets and configs anywhere
 **/config.json
 *.key
