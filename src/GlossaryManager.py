@@ -667,6 +667,14 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             output_dir = os.path.join(override_dir, leaf)
     except Exception as e:
         print(f"⚠️ OUTPUT_DIRECTORY override failed: {e}")
+    # On macOS .app bundles, cwd can be '/' (read-only root).
+    # Resolve relative output paths against the input file's directory.
+    if not os.path.isabs(output_dir):
+        epub_path_ref = os.getenv("EPUB_PATH", "")
+        if epub_path_ref and os.path.exists(epub_path_ref):
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(epub_path_ref)), output_dir)
+        else:
+            output_dir = os.path.abspath(output_dir)
     print(f"📁 Glossary output directory: {os.path.abspath(output_dir)}")
     
     # Check stop flag at start

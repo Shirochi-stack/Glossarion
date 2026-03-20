@@ -11333,7 +11333,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 glossary_base_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_base_dir = "Glossary"
-                
+            # On macOS .app bundles, cwd can be '/' (read-only root).
+            # Resolve relative paths against the first selected file's directory.
+            if not os.path.isabs(glossary_base_dir) and self.selected_files:
+                glossary_base_dir = os.path.join(os.path.dirname(os.path.abspath(self.selected_files[0])), glossary_base_dir)
             os.makedirs(glossary_base_dir, exist_ok=True)
             
             # ========== NEW: APPLY OPF-BASED SORTING ==========
@@ -11422,7 +11425,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     glossary_dir = os.path.join(override_dir, "Glossary")
                 else:
                     glossary_dir = "Glossary"
-                
+                # On macOS .app bundles, cwd can be '/' (read-only root).
+                if not os.path.isabs(glossary_dir):
+                    glossary_dir = os.path.join(os.path.dirname(os.path.abspath(text_file)), glossary_dir)
                 os.makedirs(glossary_dir, exist_ok=True)
                 output_path = os.path.join(glossary_dir, f"{base_name}_glossary.json")
                 os.environ["OUTPUT_PATH"] = output_path
@@ -11505,6 +11510,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Default output dir if not provided
             if not output_dir:
                 output_dir = "Glossary"
+            # On macOS .app bundles, cwd can be '/' (read-only root).
+            if not os.path.isabs(output_dir) and image_files:
+                output_dir = os.path.join(os.path.dirname(os.path.abspath(image_files[0])), output_dir)
             
             # Initialize folder-specific progress manager for images
             self.glossary_progress_manager = self._init_image_glossary_progress_manager(folder_name, output_dir)
@@ -12146,7 +12154,9 @@ Important rules:
                 output_dir = os.path.join(override_dir, "Glossary")
             else:
                 output_dir = "Glossary"
-                
+            # On macOS .app bundles, cwd can be '/' (read-only root).
+            if not os.path.isabs(output_dir) and hasattr(self, 'selected_files') and self.selected_files:
+                output_dir = os.path.join(os.path.dirname(os.path.abspath(self.selected_files[0])), output_dir)
             os.makedirs(output_dir, exist_ok=True)
             output_file = os.path.join(output_dir, f"{folder_name}_glossary.json")
             
@@ -12270,7 +12280,9 @@ Important rules:
                 glossary_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_dir = "Glossary"
-            
+            # On macOS .app bundles, cwd can be '/' (read-only root).
+            if not os.path.isabs(glossary_dir):
+                glossary_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), glossary_dir)
             os.makedirs(glossary_dir, exist_ok=True)
             output_path = os.path.join(glossary_dir, f"{epub_base}_glossary.json")
             
@@ -16716,6 +16728,9 @@ Important rules:
                 glossary_base_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_base_dir = "Glossary"
+            # On macOS .app bundles, cwd can be '/' (read-only root).
+            if not os.path.isabs(glossary_base_dir) and hasattr(self, 'selected_files') and self.selected_files:
+                glossary_base_dir = os.path.join(os.path.dirname(os.path.abspath(self.selected_files[0])), glossary_base_dir)
             
             if not os.path.isdir(glossary_base_dir):
                 self.append_log(f"📑 No Glossary folder found after extraction")
