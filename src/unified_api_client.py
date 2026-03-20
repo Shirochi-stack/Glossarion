@@ -13397,6 +13397,8 @@ class UnifiedClient:
             current_block_type = None  # track content_block_start type
             first_text_ts = None  # timestamp of first text delta
             first_thinking_ts = None  # timestamp of first thinking delta
+            _anth_in_think_tag = False  # track <think>...</think> inline reasoning
+            _anth_think_buf = ""  # buffer for partial tag detection
 
             try:
                 for raw_line in raw_resp.iter_lines():
@@ -13442,28 +13444,107 @@ class UnifiedClient:
                         if delta_type == "text_delta":
                             frag = delta.get("text", "")
                             if frag:
-                                if first_text_ts is None:
-                                    first_text_ts = _t.time()
-                                    ttft = first_text_ts - start_ts
-                                    if not self._is_stop_requested():
-                                        thinking_note = f" (after {thinking_tokens_seen} thinking chunks)" if thinking_tokens_seen > 0 else ""
-                                        print(f"🛰️ [anthropic] First text token in {ttft:.1f}s{thinking_note}")
-                                text_parts.append(frag)
-                                if log_stream and not self._is_stop_requested():
-                                    combined = "".join(log_buf) + frag
-                                    temp_combined = combined
-                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                        temp_combined = temp_combined.replace(tag, tag + '\n')
-                                    if "\n" in temp_combined:
-                                        parts = temp_combined.split("\n")
-                                        for p in parts[:-1]:
-                                            print(p, flush=True)
-                                        log_buf = [parts[-1]]
+                                # Detect <think>...</think> inline reasoning tags
+                                # Some providers (ElectronHub) embed thinking in text deltas
+                                # when native thinking is not supported
+                                _anth_think_buf += frag
+                                _cleaned_frag = ""
+                                stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                                while _anth_think_buf:
+                                    if _anth_in_think_tag:
+                                        # Inside <think> — look for </think>
+                                        end_idx = _anth_think_buf.find("</think>")
+                                        if end_idx != -1:
+                                            # Found closing tag — extract thinking text
+                                            think_text = _anth_think_buf[:end_idx]
+                                            _anth_think_buf = _anth_think_buf[end_idx + 8:]
+                                            _anth_in_think_tag = False
+                                            # Route final thinking chunk to display
+                                            if think_text:
+                                                thinking_tokens_seen += 1
+                                                if log_stream and not self._is_stop_requested() and stream_thinking:
+                                                    thinking_log_buf.append(think_text)
+                                                    combined_think = "".join(thinking_log_buf)
+                                                    if "\n" in combined_think:
+                                                        tparts = combined_think.split("\n")
+                                                        for tp in tparts[:-1]:
+                                                            print(f"    {tp}", flush=True)
+                                                        thinking_log_buf = [tparts[-1]]
+                                            # Flush remaining thinking buffer and print complete
+                                            if log_stream and not self._is_stop_requested() and stream_thinking:
+                                                remainder = "".join(thinking_log_buf).rstrip("\n")
+                                                if remainder:
+                                                    for tp in remainder.split("\n"):
+                                                        print(f"    {tp}", flush=True)
+                                                thinking_log_buf = []
+                                                thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
+                                                print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
+                                        else:
+                                            # Haven't found </think> yet — buffer is all thinking
+                                            # Start thinking display if not already started
+                                            if not thinking_started:
+                                                thinking_started = True
+                                                if first_thinking_ts is None:
+                                                    first_thinking_ts = _t.time()
+                                                if log_stream and not self._is_stop_requested() and stream_thinking:
+                                                    print(f"🧠 [anthropic] Thinking...", flush=True)
+                                            think_chunk = _anth_think_buf
+                                            _anth_think_buf = ""
+                                            thinking_tokens_seen += 1
+                                            if log_stream and not self._is_stop_requested() and stream_thinking:
+                                                thinking_log_buf.append(think_chunk)
+                                                combined_think = "".join(thinking_log_buf)
+                                                if "\n" in combined_think:
+                                                    tparts = combined_think.split("\n")
+                                                    for tp in tparts[:-1]:
+                                                        print(f"    {tp}", flush=True)
+                                                    thinking_log_buf = [tparts[-1]]
+                                            break
                                     else:
-                                        log_buf.append(frag)
-                                        if len("".join(log_buf)) > 150:
-                                            print("".join(log_buf), end="", flush=True)
-                                            log_buf = []
+                                        # Outside <think> — look for <think>
+                                        start_idx = _anth_think_buf.find("<think>")
+                                        if start_idx != -1:
+                                            # Text before <think> is real content
+                                            _cleaned_frag += _anth_think_buf[:start_idx]
+                                            _anth_think_buf = _anth_think_buf[start_idx + 7:]
+                                            _anth_in_think_tag = True
+                                            # Start thinking display
+                                            if not thinking_started:
+                                                thinking_started = True
+                                                if first_thinking_ts is None:
+                                                    first_thinking_ts = _t.time()
+                                                if log_stream and not self._is_stop_requested() and stream_thinking:
+                                                    print(f"🧠 [anthropic] Thinking...", flush=True)
+                                        else:
+                                            # No <think> tag — all real content
+                                            _cleaned_frag += _anth_think_buf
+                                            _anth_think_buf = ""
+                                
+                                # Use cleaned fragment (with <think> tags stripped)
+                                frag = _cleaned_frag
+                                if frag:
+                                    if first_text_ts is None:
+                                        first_text_ts = _t.time()
+                                        ttft = first_text_ts - start_ts
+                                        if not self._is_stop_requested():
+                                            thinking_note = f" (after {thinking_tokens_seen} thinking chunks)" if thinking_tokens_seen > 0 else ""
+                                            print(f"🛰️ [anthropic] First text token in {ttft:.1f}s{thinking_note}")
+                                    text_parts.append(frag)
+                                    if log_stream and not self._is_stop_requested():
+                                        combined = "".join(log_buf) + frag
+                                        temp_combined = combined
+                                        for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                            temp_combined = temp_combined.replace(tag, tag + '\n')
+                                        if "\n" in temp_combined:
+                                            parts = temp_combined.split("\n")
+                                            for p in parts[:-1]:
+                                                print(p, flush=True)
+                                            log_buf = [parts[-1]]
+                                        else:
+                                            log_buf.append(frag)
+                                            if len("".join(log_buf)) > 150:
+                                                print("".join(log_buf), end="", flush=True)
+                                                log_buf = []
                         elif delta_type == "thinking_delta":
                             thinking_tokens_seen += 1
                             if first_thinking_ts is None:
