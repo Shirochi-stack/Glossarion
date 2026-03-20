@@ -10540,6 +10540,13 @@ class UnifiedClient:
                 except Exception:
                     pass
                 
+                # Block adaptive thinking on custom Anthropic endpoints (third-party proxies
+                # like ElectronHub don't support it — they require type=enabled + budget_tokens)
+                custom_anthropic_url = os.getenv('ANTHROPIC_BASE_URL', '').strip()
+                is_custom_endpoint = bool(custom_anthropic_url) and 'api.anthropic.com' not in custom_anthropic_url
+                if is_custom_endpoint:
+                    adaptive_blocked = True
+                
                 # Determine thinking mode:
                 # - opus 4.6: always adaptive (only mode it supports)
                 # - force_adaptive toggle: adaptive for all models
@@ -10547,7 +10554,10 @@ class UnifiedClient:
                 # - adaptive_blocked: model doesn't support adaptive, fall through to standard
                 use_adaptive = (is_opus_46 or force_adaptive) and not adaptive_blocked
                 if adaptive_blocked and (is_opus_46 or force_adaptive):
-                    print(f"🧠 Adaptive thinking not supported on {self.model}, using standard extended thinking")
+                    if is_custom_endpoint:
+                        print(f"🧠 Adaptive thinking disabled for custom endpoint ({custom_anthropic_url}), using standard extended thinking")
+                    else:
+                        print(f"🧠 Adaptive thinking not supported on {self.model}, using standard extended thinking")
                 
                 if use_adaptive:
                     data["thinking"] = {"type": "adaptive"}
@@ -10831,7 +10841,13 @@ class UnifiedClient:
                 and hasattr(self, 'model') and self.model
                 and 'claude' in self.model.lower()
                 and actual_provider != 'anthropic'):
-            logger.info(f"Force Native Anthropic: routing {self.model} to Anthropic handler")
+            # Strip provider prefix (e.g. 'eh/') — Anthropic-native endpoint expects bare model name
+            if '/' in self.model and not self.model.startswith('claude'):
+                orig_model = self.model
+                self.model = self.model.split('/', 1)[1]
+                logger.info(f"Force Native Anthropic: routing {orig_model} → {self.model} to Anthropic handler")
+            else:
+                logger.info(f"Force Native Anthropic: routing {self.model} to Anthropic handler")
             handler = self._send_anthropic
         
         if not handler:
@@ -13338,7 +13354,8 @@ class UnifiedClient:
                         print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
 
-                elif raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower:
+                elif (raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower) or \
+                     (raw_resp.status_code == 422 and "input should be 'enabled'" in err_lower and '"adaptive"' in err_lower):
                     print(f"🧠 [anthropic] Adaptive thinking not supported — falling back to standard extended thinking")
                     model_name = data.get('model')
                     if model_name:
