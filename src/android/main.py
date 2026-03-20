@@ -1,7 +1,8 @@
 # main.py
 """
 Glossarion Android — Main entry point.
-Kivy/KivyMD app with Material Design 3 dark theme.
+Kivy/KivyMD app with Material Design dark theme.
+Compatible with KivyMD 1.2.0 (stable PyPI release).
 """
 
 import os
@@ -16,7 +17,6 @@ if _src_dir not in sys.path:
 os.environ['KIVY_LOG_LEVEL'] = 'info'
 
 from kivy.config import Config
-Config.set('kivy', 'window_icon', '')
 Config.set('graphics', 'multisamples', '0')
 
 from kivymd.app import MDApp
@@ -36,14 +36,13 @@ from android_config import load_config, save_config
 from android_file_utils import request_storage_permissions
 from android_notification import create_notification_channels
 
-# KV layout for the root screen manager and bottom navigation
+# KV layout — KivyMD 1.2.0 compatible
 KV = '''
 #:import SlideTransition kivy.uix.screenmanager.SlideTransition
 
-MDBoxLayout:
+BoxLayout:
     orientation: 'vertical'
 
-    # Main content area
     ScreenManager:
         id: screen_manager
         transition: SlideTransition(duration=0.25)
@@ -60,12 +59,9 @@ MDBoxLayout:
         TranslationScreen:
             name: 'translation'
 
-    # Bottom navigation bar (hidden when in reader)
     MDBottomNavigation:
         id: bottom_nav
-        #panel_color: app.theme_cls.surfaceColor
-        #text_color_active: app.theme_cls.primaryColor
-        selected_color_background: app.theme_cls.primaryColor
+        panel_color: app.theme_cls.bg_dark
         text_color_active: 1, 1, 1, 1
 
         MDBottomNavigationItem:
@@ -97,14 +93,15 @@ class GlossarionApp(MDApp):
         self.title = 'Glossarion'
 
     def build(self):
-        # Set Material Design 3 dark theme
+        # Set dark theme
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "Blue"
+        self.theme_cls.material_style = "M3"
 
         # Set window background for desktop testing
         if platform != 'android':
-            Window.size = (412, 915)  # ~6" phone at 1080p
-            Window.clearcolor = (0.07, 0.07, 0.09, 1)  # #121217
+            Window.size = (412, 915)  # ~6" phone
+            Window.clearcolor = (0.07, 0.07, 0.09, 1)
 
         # Load config
         self.config_data = load_config()
@@ -115,7 +112,6 @@ class GlossarionApp(MDApp):
 
     def on_start(self):
         """Called when the app starts."""
-        # Request storage permissions on Android
         if platform == 'android':
             request_storage_permissions()
             create_notification_channels()
@@ -130,33 +126,26 @@ class GlossarionApp(MDApp):
         except Exception:
             pass
 
-        # Initialize library screen
-        try:
-            lib_screen = self.root.ids.screen_manager.get_screen('library')
-            lib_screen.app = self
-            lib_screen.load_books()
-        except Exception as e:
-            print(f"Library init error: {e}")
-
-        # Pass app reference to all screens
-        for screen_name in ['reader', 'multikey', 'translation']:
+        # Initialize screens
+        for screen_name in ['library', 'reader', 'multikey', 'translation']:
             try:
                 screen = self.root.ids.screen_manager.get_screen(screen_name)
                 screen.app = self
             except Exception:
                 pass
 
+        try:
+            lib_screen = self.root.ids.screen_manager.get_screen('library')
+            lib_screen.load_books()
+        except Exception as e:
+            print(f"Library init error: {e}")
+
     def switch_screen(self, screen_name, **kwargs):
-        """Switch to a screen by name.
-        
-        Args:
-            screen_name: Name of the screen to switch to
-            **kwargs: Optional data to pass to the screen
-        """
+        """Switch to a screen by name."""
         sm = self.root.ids.screen_manager
         sm.current = screen_name
 
-        # Show/hide bottom nav based on screen
+        # Show/hide bottom nav for reader
         bottom_nav = self.root.ids.bottom_nav
         if screen_name == 'reader':
             bottom_nav.opacity = 0
@@ -173,25 +162,19 @@ class GlossarionApp(MDApp):
             screen.on_enter_data(**kwargs)
 
     def open_reader(self, file_path):
-        """Navigate to the reader screen with the given file."""
         self.switch_screen('reader', file_path=file_path)
 
     def open_translation(self, file_path=None):
-        """Navigate to the translation screen, optionally with a pre-selected file."""
         self.switch_screen('translation', file_path=file_path)
 
     def on_pause(self):
-        """Handle app pause (Android background)."""
-        # Save config
         save_config(self.config_data)
         return True
 
     def on_resume(self):
-        """Handle app resume (Android foreground)."""
         pass
 
     def on_stop(self):
-        """Handle app stop."""
         save_config(self.config_data)
 
 

@@ -14,7 +14,7 @@ version = 1.0.0
 # Dependencies (python-for-android recipes)
 # NOTE: Some packages may need recipes. Major ones like kivy, pillow, lxml
 # have recipes in python-for-android. Others compile from pip.
-requirements = python3,kivy==2.3.1,kivymd==2.0.1,pillow,beautifulsoup4,lxml,html5lib,ebooklib,requests,httpx,certifi,charset-normalizer,chardet,html2text,regex,langdetect,rapidfuzz,tqdm,plyer,pyjnius,cryptography,openssl
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,lxml,html5lib,ebooklib,requests,httpx,certifi,charset-normalizer,chardet,html2text,regex,langdetect,rapidfuzz,tqdm,plyer,pyjnius,cryptography,openssl
 
 # Entry point
 entrypoint = main.py
