@@ -108,6 +108,8 @@ KV = '''
                     id: btn_ko
                     text: "KO"
                     size_hint: 0.5, 1
+                    min_width: 0
+                    padding: 0
                     font_size: sp(10)
                     theme_text_color: "Custom"
                     text_color: [1,1,1,1] if root.viewing_language == 'ko' else [0.5,0.5,0.5,1]
@@ -118,6 +120,8 @@ KV = '''
                     id: btn_en
                     text: "EN"
                     size_hint: 0.5, 1
+                    min_width: 0
+                    padding: 0
                     font_size: sp(10)
                     theme_text_color: "Custom"
                     text_color: [1,1,1,1] if root.viewing_language == 'en' else [0.5,0.5,0.5,1]
