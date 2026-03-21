@@ -680,7 +680,7 @@ class ReaderScreen(MDScreen):
             except Exception:
                 self.current_text = raw[:2000] if raw else "(empty chapter)"
 
-        added_any = False
+        text_added = False
         try:
             from kivy.uix.image import AsyncImage
 
@@ -703,7 +703,7 @@ class ReaderScreen(MDScreen):
                     )
                     lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
                     box.add_widget(lbl)
-                    added_any = True
+                    text_added = True
                 elif btype == 'image':
                     img = AsyncImage(
                         source=str(bcontent),
@@ -719,12 +719,11 @@ class ReaderScreen(MDScreen):
                             instance.height = min(dp(600), max_w / max(aspect, 0.1))
                     img.bind(texture=_on_texture)
                     box.add_widget(img)
-                    added_any = True
         except Exception as e:
             logger.error(f"_render_original block render error ch {index}: {e}")
 
-        # If nothing was rendered from blocks, show plain text fallback
-        if not added_any and self.current_text.strip():
+        # If no text blocks were rendered, show the extracted plain text
+        if not text_added and self.current_text.strip():
             lbl = MDLabel(
                 text=self.current_text,
                 size_hint_y=None,
