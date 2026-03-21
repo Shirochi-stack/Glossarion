@@ -1512,8 +1512,11 @@ class EpubReaderDialog(QDialog):
             if _HAS_WEBENGINE:
                 w = QWebEngineView()
                 w.setContextMenuPolicy(Qt.NoContextMenu)
-                # Block navigation
                 w.setUrl(QUrl("about:blank"))
+                # Set page background to match theme (prevents white flash)
+                from PySide6.QtGui import QColor
+                t = self._get_theme()
+                w.page().setBackgroundColor(QColor(t['bg']))
             else:
                 w = QTextBrowser()
                 w.setOpenExternalLinks(False)
@@ -1580,6 +1583,15 @@ class EpubReaderDialog(QDialog):
         self._content_widget.hide()
         root.addWidget(self._content_widget, 1)
 
+        # Search bar (hidden by default)
+        self._search_bar = QLineEdit()
+        self._search_bar.setPlaceholderText("Search across EPUB... (Enter = next, Esc = close)")
+        self._search_bar.hide()
+        self._search_bar.textChanged.connect(self._on_search_text_changed)
+        self._search_bar.returnPressed.connect(self._on_search_next)
+        self._search_chapter_idx = 0  # track which chapter we last searched
+        root.addWidget(self._search_bar)
+
         self._apply_reader_style()
 
         # Shortcuts (work regardless of child focus)
@@ -1589,6 +1601,8 @@ class EpubReaderDialog(QDialog):
         QShortcut(QKeySequence("Ctrl+="), self, lambda: self._change_font_size(1))
         QShortcut(QKeySequence("Ctrl++"), self, lambda: self._change_font_size(1))
         QShortcut(QKeySequence("Ctrl+-"), self, lambda: self._change_font_size(-1))
+        QShortcut(QKeySequence("Ctrl+F"), self, self._toggle_search)
+        QShortcut(QKeySequence(Qt.Key_Escape), self, self._close_search)
 
     # ── Event filter (block wheel scroll in paginated modes) ──────────────
 
@@ -1748,10 +1762,86 @@ class EpubReaderDialog(QDialog):
             QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}
             QListWidget::item:selected {{ background: {border}; color: {t['heading']}; }}
             QListWidget::item:hover {{ background: {t['code_bg']}; }}
+            QScrollBar:vertical {{ width: 8px; background: {bg}; }}
+            QScrollBar::handle:vertical {{ background: {border}; border-radius: 4px; min-height: 20px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar:horizontal {{ height: 8px; background: {bg}; }}
+            QScrollBar::handle:horizontal {{ background: {border}; border-radius: 4px; min-width: 20px; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
         """)
+        self._toc_list.viewport().setStyleSheet(f"background: {bg};")
         self._nav_bar.setStyleSheet(f"background: {bg}; border-top: 1px solid {border};")
         self._loading_widget.setStyleSheet(f"background: {bg};")
         self._splitter.setStyleSheet(f"QSplitter::handle {{ background: {border}; width: 1px; }}")
+        self._search_bar.setStyleSheet(f"""
+            QLineEdit {{
+                background: {t['code_bg']}; color: {fg}; border: 1px solid {border};
+                border-radius: 4px; padding: 6px 12px; font-size: 10pt;
+                margin: 4px 40px;
+            }}
+        """)
+
+    def _toggle_search(self):
+        if self._search_bar.isVisible():
+            self._close_search()
+        else:
+            self._search_bar.show()
+            self._search_bar.setFocus()
+            self._search_bar.selectAll()
+            self._search_chapter_idx = self._current_row
+
+    def _close_search(self):
+        self._search_bar.hide()
+        self._search_bar.clear()
+        if _HAS_WEBENGINE:
+            for w in [self._reader, self._reader_left, self._reader_right]:
+                if hasattr(w, 'findText'):
+                    w.findText("")
+
+    def _on_search_text_changed(self, text):
+        """Live highlight in current chapter as user types."""
+        if not _HAS_WEBENGINE:
+            return
+        self._search_chapter_idx = self._current_row
+        if not text:
+            for w in [self._reader, self._reader_left, self._reader_right]:
+                if hasattr(w, 'findText'):
+                    w.findText("")
+            return
+        self._reader.findText(text)
+
+    def _on_search_next(self):
+        """Enter pressed: find next match across all chapters."""
+        text = self._search_bar.text().strip()
+        if not text or not self._chapters:
+            return
+        import re
+        _TAG_RE = re.compile(r'<[^>]+>')
+        n = len(self._chapters)
+        # Search from _search_chapter_idx onward (wrap around)
+        for offset in range(n):
+            idx = (self._search_chapter_idx + offset) % n
+            _, html = self._chapters[idx]
+            plain = _TAG_RE.sub('', html)
+            if text.lower() in plain.lower():
+                if idx != self._current_row:
+                    # Navigate to that chapter
+                    self._toc_list.blockSignals(True)
+                    self._toc_list.setCurrentRow(idx)
+                    self._toc_list.blockSignals(False)
+                    self._on_chapter_selected(idx)
+                    # After load finishes, highlight — use a short timer
+                    QTimer.singleShot(300, lambda t=text: self._reader.findText(t))
+                else:
+                    # Same chapter — just do findText (advances to next match)
+                    self._reader.findText(text)
+                # Advance for next Enter press
+                self._search_chapter_idx = (idx + 1) % n
+                return
+        # No match found anywhere
+        self._search_bar.setStyleSheet(
+            self._search_bar.styleSheet() + " QLineEdit { border-color: #c04040; }")
+        QTimer.singleShot(800, lambda: self._apply_reader_style())
 
     def _toggle_toc(self):
         """Show or hide the TOC sidebar using splitter sizes."""
@@ -1801,6 +1891,14 @@ class EpubReaderDialog(QDialog):
 
     def _on_theme_changed(self, index):
         self._theme_index = index
+        # Update QWebEngineView page backgrounds to prevent flash
+        if _HAS_WEBENGINE:
+            from PySide6.QtGui import QColor
+            t = self._get_theme()
+            bg = QColor(t['bg'])
+            for w in [self._reader, self._reader_left, self._reader_right]:
+                if hasattr(w, 'page'):
+                    w.page().setBackgroundColor(bg)
         self._apply_reader_style()
         self._loaded_chapter = -1  # force re-render for inline styles
         self._render_current()
