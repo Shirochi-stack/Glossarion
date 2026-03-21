@@ -1531,6 +1531,7 @@ class EpubReaderDialog(QDialog):
         elif self._layout_mode == LAYOUT_DOUBLE:
             self._reader_stack.setCurrentIndex(1)
             self._nav_bar.show()
+            self._double_loads_pending = 2  # track both panes
             if row < len(self._chapters):
                 html = self._process_html(self._chapters[row][1])
                 full = self._wrap_html(html, paginated=True)
@@ -1570,6 +1571,12 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode == LAYOUT_SINGLE:
             self._finalize_single_page()
         elif self._layout_mode == LAYOUT_DOUBLE:
+            # Wait for both panes to finish loading
+            pending = getattr(self, '_double_loads_pending', 0)
+            if pending > 1:
+                self._double_loads_pending = pending - 1
+                return
+            self._double_loads_pending = 0
             self._finalize_double_page()
 
     def _js_scroll_to(self, browser, page_num):
@@ -1611,6 +1618,7 @@ class EpubReaderDialog(QDialog):
         def on_count(count):
             self._chapter_page_cache[self._current_row] = int(count)
             self._js_scroll_to(self._reader, self._current_page)
+            self._js_reveal(self._reader)
             self._update_nav_buttons()
         self._js_page_count(self._reader, on_count)
 
@@ -1620,6 +1628,8 @@ class EpubReaderDialog(QDialog):
             self._chapter_page_cache[self._current_row] = int(count)
             self._js_scroll_to(self._reader_left, self._current_page)
             self._js_scroll_to(self._reader_right, self._current_page + 1)
+            self._js_reveal(self._reader_left)
+            self._js_reveal(self._reader_right)
             self._update_nav_buttons()
         self._js_page_count(self._reader_left, on_count)
 
@@ -1633,6 +1643,13 @@ class EpubReaderDialog(QDialog):
         self._js_scroll_to(self._reader_left, self._current_page)
         self._js_scroll_to(self._reader_right, self._current_page + 1)
         self._update_nav_buttons()
+
+    def _js_reveal(self, browser):
+        """Show the #columns element after positioning."""
+        if _HAS_WEBENGINE:
+            browser.page().runJavaScript(
+                "var c = document.getElementById('columns'); if (c) c.style.opacity = '1';"
+            )
 
     def resizeEvent(self, event):
         """Invalidate page cache on resize so page count recalculates."""
@@ -1818,8 +1835,6 @@ class EpubReaderDialog(QDialog):
                 f"  _PAGE_W = window.innerWidth;"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
-                f"  c.style.transform = 'translateX(0px)';"
-                f"  c.style.opacity = '1';"
                 f"}}"
                 f"document.addEventListener('DOMContentLoaded', _setupColumns);"
                 f"window.addEventListener('resize', _setupColumns);"
