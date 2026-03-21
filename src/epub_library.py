@@ -1055,6 +1055,8 @@ class EpubReaderDialog(QDialog):
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 20px; }
+            QComboBox::down-arrow { image: none; }
+            QComboBox::drop-down::after { content: '▾'; color: #888; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e; font-size: 8.5pt;
@@ -1085,12 +1087,15 @@ class EpubReaderDialog(QDialog):
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow { image: none; }
+            QComboBox::drop-down::after { content: '▾'; color: #888; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
             }
         """)
-        self._spacing_combo.currentTextChanged.connect(self._on_spacing_changed)
+        self._spacing_combo.activated.connect(lambda idx: self._on_spacing_changed(self._spacing_combo.itemText(idx)))
+        self._spacing_combo.lineEdit().editingFinished.connect(lambda: self._on_spacing_changed(self._spacing_combo.currentText()))
         self._spacing_combo.setFocusPolicy(Qt.StrongFocus)
         self._spacing_combo.installEventFilter(self)
         toolbar.addWidget(self._spacing_combo)
@@ -1125,6 +1130,8 @@ class EpubReaderDialog(QDialog):
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow { image: none; }
+            QComboBox::drop-down::after { content: '▾'; color: #888; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
