@@ -323,6 +323,7 @@ class EpubLibraryDialog(QDialog):
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📚 Glossarion Library")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         self.resize(900, 650)
         self.setMinimumSize(500, 400)
         self._config = config or {}
@@ -335,6 +336,15 @@ class EpubLibraryDialog(QDialog):
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
         self._setup_ui()
         self._load_books()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F11:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+        else:
+            super().keyPressEvent(event)
 
     def _make_sort_btn(self, text, tooltip, mode):
         btn = QPushButton(text)
