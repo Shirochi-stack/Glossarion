@@ -3564,13 +3564,13 @@ Recent translations to summarize:
                                 status_text = f"✓ Credentials: {os.path.basename(creds_path)} (Project: {project_id})"
                             
                             self.gcloud_status_label.setText(status_text)
-                            self.gcloud_status_label.setStyleSheet("color: green; font-size: 9pt;")
+                            self.gcloud_status_label.setStyleSheet("color: green; font-size: 8pt;")
                     except:
                         self.gcloud_status_label.setText("⚠ Error reading credentials")
-                        self.gcloud_status_label.setStyleSheet("color: red; font-size: 9pt;")
+                        self.gcloud_status_label.setStyleSheet("color: red; font-size: 8pt;")
                 else:
                     self.gcloud_status_label.setText("⚠ Credentials file not found")
-                    self.gcloud_status_label.setStyleSheet("color: red; font-size: 9pt;")
+                    self.gcloud_status_label.setStyleSheet("color: red; font-size: 8pt;")
             else:
                 # Different prompts for different services
                 if model == 'google-translate':
@@ -18237,6 +18237,15 @@ Important rules:
 
                 # EPUB layout mode
                 ('epub_layout_mode', ['epub_layout_mode_var', ('config', 'epub_layout_mode')], 'auto', str),
+
+                # EPUB reader settings (persisted by EpubReaderDialog.closeEvent)
+                ('epub_reader_font_size', [('config', 'epub_reader_font_size')], 12, int),
+                ('epub_reader_line_spacing', [('config', 'epub_reader_line_spacing')], 1.6, float),
+                ('epub_reader_theme', [('config', 'epub_reader_theme')], 0, int),
+                ('epub_reader_layout', [('config', 'epub_reader_layout')], 'scroll', str),
+                # EPUB library settings (persisted by EpubLibraryDialog.closeEvent)
+                ('epub_library_sort', [('config', 'epub_library_sort')], 'date', str),
+                ('epub_library_card_size', [('config', 'epub_library_card_size')], 'compact', str),
 
                 # Extraction settings - NOTE: these are only created in Other Settings dialog
                 ('enable_parallel_extraction', ['enable_parallel_extraction_var'], False, bool),
