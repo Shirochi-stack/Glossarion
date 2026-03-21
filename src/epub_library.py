@@ -329,8 +329,9 @@ class EpubLibraryDialog(QDialog):
         self._books: list[dict] = []
         self._cards: list[_BookCard] = []
         self._cover_threads: list[_CoverLoader] = []
-        self._sort_mode = SORT_DATE
-        self._card_size = SIZE_COMPACT
+        # Restore persisted settings
+        self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
+        self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
         self._setup_ui()
         self._load_books()
@@ -607,7 +608,7 @@ class EpubLibraryDialog(QDialog):
             # Set loading cursor
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
-            reader = EpubReaderDialog(book["path"], parent=self)
+            reader = EpubReaderDialog(book["path"], config=self._config, parent=self)
             QApplication.restoreOverrideCursor()
             reader.exec()
         except Exception as exc:
@@ -856,15 +857,18 @@ _READER_THEMES = [
 class EpubReaderDialog(QDialog):
     """EPUB reader with chapter navigation, layout modes, and theme support."""
 
-    def __init__(self, epub_path: str, parent=None):
+    def __init__(self, epub_path: str, config: dict | None = None, parent=None):
         super().__init__(parent)
         self._epub_path = epub_path
+        self._config = config or {}
         self._chapters: list[tuple[str, str]] = []
         self._images: dict[str, bytes] = {}
-        self._font_size = 14
-        self._line_spacing = 1.8
-        self._theme_index = 0  # Dark (matches translator GUI)
-        self._layout_mode = LAYOUT_SCROLL
+        # Restore persisted reader settings
+        self._font_size = self._config.get('epub_reader_font_size', 14)
+        self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
+        self._theme_index = self._config.get('epub_reader_theme', 0)
+        layout_key = self._config.get('epub_reader_layout', LAYOUT_SCROLL)
+        self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SCROLL
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
         self._loader_thread: _EpubLoaderThread | None = None
@@ -1034,19 +1038,23 @@ class EpubReaderDialog(QDialog):
         self._reader = QTextBrowser()
         self._reader.setOpenExternalLinks(False)
         self._reader.setOpenLinks(False)
+        self._reader.viewport().installEventFilter(self)
         self._reader_stack.addWidget(self._reader)
 
         # Page 1: double-page layout (two QTextBrowsers side by side)
         double_widget = QWidget()
+        self._double_widget = double_widget  # keep ref for styling
         double_layout = QHBoxLayout(double_widget)
         double_layout.setContentsMargins(0, 0, 0, 0)
         double_layout.setSpacing(2)
         self._reader_left = QTextBrowser()
         self._reader_left.setOpenExternalLinks(False)
         self._reader_left.setOpenLinks(False)
+        self._reader_left.viewport().installEventFilter(self)
         self._reader_right = QTextBrowser()
         self._reader_right.setOpenExternalLinks(False)
         self._reader_right.setOpenLinks(False)
+        self._reader_right.viewport().installEventFilter(self)
         double_layout.addWidget(self._reader_left)
         double_layout.addWidget(self._reader_right)
         self._reader_stack.addWidget(double_widget)
@@ -1095,6 +1103,30 @@ class EpubReaderDialog(QDialog):
 
         self._apply_reader_style()
         self.setStyleSheet("QDialog { background: #12121e; }")
+
+    # ── Event filter (block wheel scroll in paginated modes) ──────────────
+
+    def eventFilter(self, obj, event):
+        """Block wheel events on reader viewports in paginated modes."""
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Wheel and self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return True  # swallow the event
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        """Arrow keys for page/chapter navigation, F11 for fullscreen."""
+        key = event.key()
+        if key == Qt.Key_Left:
+            self._prev_chapter()
+        elif key == Qt.Key_Right:
+            self._next_chapter()
+        elif key == Qt.Key_F11:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+        else:
+            super().keyPressEvent(event)
 
     def _make_toolbar_btn(self, text, tooltip, width=36):
         btn = QPushButton(text)
@@ -1155,16 +1187,23 @@ class EpubReaderDialog(QDialog):
 
     def _apply_reader_style(self):
         t = self._get_theme()
+        bg = t['bg']
         css = f"""
             QTextBrowser {{
-                background: {t['bg']}; color: {t['fg']}; border: none;
+                background: {bg}; color: {t['fg']}; border: none;
                 padding: 20px 30px; font-size: {self._font_size}pt;
             }}
             QTextBrowser a {{ color: {t['link']}; }}
+            QScrollBar:vertical {{ width: 8px; background: {bg}; }}
+            QScrollBar::handle:vertical {{ background: {t['border']}; border-radius: 4px; min-height: 20px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """
         self._reader.setStyleSheet(css)
         self._reader_left.setStyleSheet(css + f"QTextBrowser {{ border-right: 1px solid {t['border']}; }}")
         self._reader_right.setStyleSheet(css)
+        # Match surrounding containers to theme background so there's no "smudge"
+        self._reader_stack.setStyleSheet(f"QStackedWidget {{ background: {bg}; border: none; }}")
+        self._double_widget.setStyleSheet(f"background: {bg};")
 
     def _change_font_size(self, delta):
         self._font_size = max(8, min(32, self._font_size + delta))
