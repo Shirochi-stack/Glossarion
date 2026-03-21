@@ -1681,19 +1681,23 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and self._chapters:
             # Proportion-based: map old position to new page count
             proportion = old_page / max(1, old_count) if old_count > 0 else 0
+            # Hide content immediately to prevent image flash during resize
+            _hide_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'none'; c.style.opacity = '0'; }"
+            _reveal_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'transform 0.25s ease'; c.style.opacity = '1'; }"
+            if self._layout_mode == LAYOUT_SINGLE:
+                self._reader.page().runJavaScript(_hide_js)
+            else:
+                self._reader_left.page().runJavaScript(_hide_js)
+                self._reader_right.page().runJavaScript(_hide_js)
             def _on_resize_recount():
                 if self._layout_mode == LAYOUT_SINGLE:
                     def on_count(count):
                         count = int(count)
                         self._chapter_page_cache[self._current_row] = count
                         self._current_page = min(max(0, round(proportion * count)), count - 1)
-                        # Disable transition during resize to prevent shuffle
-                        self._reader.page().runJavaScript(
-                            "var c = document.getElementById('columns'); if (c) c.style.transition = 'none';")
                         self._js_scroll_to(self._reader, self._current_page)
-                        # Re-enable transition after a frame
-                        QTimer.singleShot(50, lambda: self._reader.page().runJavaScript(
-                            "var c = document.getElementById('columns'); if (c) c.style.transition = 'transform 0.25s ease';"))
+                        # Reveal after scroll
+                        QTimer.singleShot(30, lambda: self._reader.page().runJavaScript(_reveal_js))
                         self._update_nav_buttons()
                     self._js_page_count(self._reader, on_count)
                 else:
@@ -1701,13 +1705,9 @@ class EpubReaderDialog(QDialog):
                         count = int(count)
                         self._chapter_page_cache[self._current_row] = count
                         self._current_page = min(max(0, round(proportion * count)), count - 1)
-                        for br in (self._reader_left, self._reader_right):
-                            br.page().runJavaScript(
-                                "var c = document.getElementById('columns'); if (c) c.style.transition = 'none';")
                         self._js_scroll_to(self._reader_left, self._current_page)
                         self._js_scroll_to(self._reader_right, self._current_page + 1)
-                        QTimer.singleShot(50, lambda: [br.page().runJavaScript(
-                            "var c = document.getElementById('columns'); if (c) c.style.transition = 'transform 0.25s ease';")
+                        QTimer.singleShot(30, lambda: [br.page().runJavaScript(_reveal_js)
                             for br in (self._reader_left, self._reader_right)])
                         self._update_nav_buttons()
                     self._js_page_count(self._reader_left, on_count)
