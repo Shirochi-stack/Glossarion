@@ -590,8 +590,7 @@ class ReaderScreen(MDScreen):
         try:
             box = self.ids.content_box
             box.clear_widgets()
-            lbl = self._make_text_label(text)
-            box.add_widget(lbl)
+            self._add_paragraphs(box, text)
         except Exception:
             pass
 
@@ -629,8 +628,7 @@ class ReaderScreen(MDScreen):
             except Exception:
                 # Absolute last resort
                 box.clear_widgets()
-                lbl = self._make_text_label(f"ERROR rendering ch {index}:\n{err}")
-                box.add_widget(lbl)
+                self._add_paragraphs(box, f"ERROR rendering ch {index}:\n{err}")
 
         # Always scroll to top and save
         try:
@@ -678,23 +676,14 @@ class ReaderScreen(MDScreen):
             cleaned = cleaned.replace(ch, '')
         return cleaned
 
-    def _make_text_label(self, text, markup=False):
-        """Create a plain Kivy Label for chapter text."""
-        from kivy.uix.label import Label
+    def _add_paragraphs(self, box, text, markup=False):
+        """Split text into paragraphs and add one MDLabel per paragraph.
 
-        # Sanitize text to remove chars that break SDL2 rendering
-        clean_text = self._sanitize_text(str(text))
-
-        # ALWAYS use markup mode — Kivy's MarkupLabel handles CJK font
-        # fallback correctly, while the basic Label path can produce a solid
-        # black texture for Korean/Japanese/Chinese text.
-        if not markup:
-            # Escape [ and ] so they aren't interpreted as markup tags
-            clean_text = clean_text.replace('&', '&amp;')
-            clean_text = clean_text.replace('[', '&bl;')
-            clean_text = clean_text.replace(']', '&br;')
-
-        # Get actual container width
+        A single Label with 6000+ chars creates an SDL2 texture too large
+        to render (produces a solid black rectangle). Splitting into
+        paragraphs keeps each texture small and renderable.
+        """
+        # Get container width
         container_width = 400
         try:
             cw = self.ids.content_box.width
@@ -704,21 +693,33 @@ class ReaderScreen(MDScreen):
         except Exception:
             pass
 
-        lbl = Label(
-            text=clean_text,
-            markup=True,  # ALWAYS markup — fixes CJK rendering
-            size_hint_y=None,
-            size_hint_x=1,
-            font_size=self.font_size_px,
-            line_height=self.line_spacing,
-            color=self.text_color,
-            halign=self.text_align,
-            valign='top',
-            text_size=(container_width, None),
-        )
-        lbl.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)) if w > 50 else None)
-        lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
-        return lbl
+        # Sanitize
+        clean = self._sanitize_text(str(text))
+
+        # Split into paragraphs on double-newline
+        paragraphs = [p.strip() for p in clean.split('\n\n') if p.strip()]
+        if not paragraphs:
+            paragraphs = [clean.strip() or '(empty)']
+
+        for para in paragraphs:
+            lbl = MDLabel(
+                text=para,
+                markup=markup,
+                theme_text_color='Custom',
+                text_color=self.text_color,
+                size_hint_y=None,
+                font_size=self.font_size_px,
+                halign=self.text_align,
+            )
+            lbl.bind(
+                width=lambda inst, w: setattr(inst, 'text_size', (w, None)) if w > 50 else None
+            )
+            lbl.bind(
+                texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(12))
+            )
+            # Set initial text_size so wrapping works immediately
+            lbl.text_size = (container_width, None)
+            box.add_widget(lbl)
 
     def _render_translated(self, box, index):
         """Render the translated version of a chapter."""
@@ -727,19 +728,15 @@ class ReaderScreen(MDScreen):
             self._render_original(box, index)
             return
         self.current_text = translated_text
-        lbl = self._make_text_label(translated_text, markup=True)
-        box.add_widget(lbl)
+        self._add_paragraphs(box, translated_text, markup=True)
 
     def _render_original(self, box, index):
-        """Render the original KO chapter — simplified, no-nonsense version."""
-        # Step 1: Get raw HTML for this chapter and strip tags to get plain text
+        """Render the original chapter text and images."""
+        # Extract text from raw HTML
         chapter_text = ''
-
-        # Primary: extract from raw HTML using simple regex (no bs4 needed)
         if index < len(self._raw_chapters):
             raw_html = self._raw_chapters[index]
             if raw_html:
-                # Strip HTML tags with regex
                 import re as _re
                 text = _re.sub(r'<script[^>]*>.*?</script>', '', raw_html, flags=_re.DOTALL | _re.IGNORECASE)
                 text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
@@ -752,14 +749,13 @@ class ReaderScreen(MDScreen):
                 text = _re.sub(r'\n{3,}', '\n\n', text)
                 chapter_text = text.strip()
 
-        # Secondary fallback: extract from blocks
+        # Fallback: extract from blocks
         if not chapter_text:
             blocks = self.chapters[index]
             parts = []
             for b in blocks:
-                if isinstance(b, (list, tuple)) and len(b) >= 2:
-                    if b[0] == 'text':
-                        parts.append(str(b[1]))
+                if isinstance(b, (list, tuple)) and len(b) >= 2 and b[0] == 'text':
+                    parts.append(str(b[1]))
                 elif isinstance(b, str):
                     parts.append(b)
             chapter_text = '\n\n'.join(parts)
@@ -768,9 +764,8 @@ class ReaderScreen(MDScreen):
             chapter_text = '(No text content in this chapter)'
 
         self.current_text = chapter_text
-        logger.info(f"_render_original ch {index}: text_len={len(chapter_text)}")
 
-        # Step 2: Render images from blocks
+        # Render images
         blocks = self.chapters[index]
         try:
             from kivy.uix.image import AsyncImage
@@ -787,9 +782,8 @@ class ReaderScreen(MDScreen):
         except Exception:
             pass
 
-        # Step 3: ALWAYS add the text
-        lbl = self._make_text_label(chapter_text)
-        box.add_widget(lbl)
+        # Add text as paragraphs
+        self._add_paragraphs(box, chapter_text)
 
     def _render_raw_fallback(self, box, index):
         """Last-resort fallback."""
@@ -802,8 +796,7 @@ class ReaderScreen(MDScreen):
                 text = _re.sub(r'\s+', ' ', text).strip()
                 fallback = text[:5000] or '(empty chapter)'
         self.current_text = fallback
-        lbl = self._make_text_label(fallback)
-        box.add_widget(lbl)
+        self._add_paragraphs(box, fallback)
 
     def next_chapter(self):
         if self.current_chapter_index < len(self.chapters) - 1:
@@ -1156,8 +1149,32 @@ class ReaderScreen(MDScreen):
         try:
             box = self.ids.content_box
             box.clear_widgets()
-            # Create a label for streaming output
-            self._stream_label = self._make_text_label('', markup=True)
+            # Get container width for text wrapping
+            container_width = 400
+            try:
+                cw = box.width
+                pad = self.margin_px * 2 if hasattr(self, 'margin_px') else 48
+                if cw and cw > 50:
+                    container_width = cw - pad
+            except Exception:
+                pass
+            # Create a single MDLabel for streaming output
+            self._stream_label = MDLabel(
+                text='',
+                markup=True,
+                theme_text_color='Custom',
+                text_color=self.text_color,
+                size_hint_y=None,
+                font_size=self.font_size_px,
+                halign=self.text_align,
+            )
+            self._stream_label.text_size = (container_width, None)
+            self._stream_label.bind(
+                width=lambda inst, w: setattr(inst, 'text_size', (w, None)) if w > 50 else None
+            )
+            self._stream_label.bind(
+                texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20))
+            )
             box.add_widget(self._stream_label)
         except Exception:
             self._stream_label = None
