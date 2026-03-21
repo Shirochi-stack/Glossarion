@@ -798,7 +798,8 @@ class EpubLibraryDialog(QDialog):
         self._grid_container = QWidget()
         self._grid_layout = QGridLayout(self._grid_container)
         self._grid_layout.setContentsMargins(1, 1, 1, 1)
-        self._grid_spacer = None  # tracked to avoid accumulation
+        self._grid_spacer = QWidget()
+        self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         scroll.setWidget(self._grid_container)
         root.addWidget(scroll, 1)
 
@@ -945,12 +946,7 @@ class EpubLibraryDialog(QDialog):
             self._grid_layout.setColumnStretch(c, 0)
         self._grid_layout.setColumnStretch(cols, 1)
 
-        # Tracked bottom spacer (delete old one first)
-        if self._grid_spacer is not None:
-            self._grid_spacer.setParent(None)
-            self._grid_spacer.deleteLater()
-        self._grid_spacer = QWidget()
-        self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Reposition the persistent spacer
         self._grid_layout.addWidget(self._grid_spacer, (len(books) - 1) // cols + 1, 0)
 
     def _on_cover_loaded(self, epub_path, cover_path):
@@ -1186,12 +1182,7 @@ class EpubLibraryDialog(QDialog):
             self._grid_layout.setColumnStretch(c, 0)
         self._grid_layout.setColumnStretch(cols, 1)
 
-        # Reuse tracked spacer
-        if self._grid_spacer is not None:
-            self._grid_spacer.setParent(None)
-            self._grid_spacer.deleteLater()
-        self._grid_spacer = QWidget()
-        self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Reposition the persistent spacer
         self._grid_layout.addWidget(self._grid_spacer, (len(self._cards) - 1) // cols + 1, 0)
 
     def closeEvent(self, event):
