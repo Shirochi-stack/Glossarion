@@ -2206,6 +2206,8 @@ class EpubReaderDialog(QDialog):
                 f".full-page-img h1, .full-page-img h2, .full-page-img h3, "
                 f".full-page-img h4, .full-page-img h5, .full-page-img h6 "
                 f"{{ margin: 4px 0 8px 0; flex-shrink: 0; }}"
+                f".full-page-img p {{ margin: 4px 0; flex-shrink: 0; text-align: center; "
+                f"font-size: 0.9em; max-width: 80%; }}"
                 f"p {{ margin: 0.6em 0; orphans: 2; widows: 2; }}"
                 f"a {{ color: {t['link']}; }}"
                 f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
