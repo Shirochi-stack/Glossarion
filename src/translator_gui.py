@@ -15796,15 +15796,22 @@ Important rules:
         try:
             from epub_library import EpubLibraryDialog
             dlg = EpubLibraryDialog(config=self.config, parent=self)
-            dlg.exec()
-            # Persist any settings changed inside the library/reader dialogs
-            try:
-                self.save_config()
-            except Exception:
-                pass
+            dlg.setModal(False)
+            dlg.setAttribute(Qt.WA_DeleteOnClose)
+            dlg.destroyed.connect(lambda: self._on_library_closed())
+            self._epub_library_dialog = dlg  # prevent GC
+            dlg.show()
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Library Error", f"Could not open EPUB Library:\n{e}")
+
+    def _on_library_closed(self):
+        """Persist config when library/reader dialogs close."""
+        try:
+            self.save_config()
+        except Exception:
+            pass
+        self._epub_library_dialog = None
 
     # Note: open_other_settings method is bound from other_settings.py during __init__
     # No need to define it here - it's injected dynamically

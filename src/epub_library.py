@@ -631,7 +631,10 @@ class EpubLibraryDialog(QDialog):
             QApplication.processEvents()
             reader = EpubReaderDialog(book["path"], config=self._config, parent=self)
             QApplication.restoreOverrideCursor()
-            reader.exec()
+            reader.setModal(False)
+            reader.setAttribute(Qt.WA_DeleteOnClose)
+            self._active_reader = reader  # prevent GC
+            reader.show()
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             tb = traceback.format_exc()
@@ -1039,10 +1042,10 @@ class EpubReaderDialog(QDialog):
         self._theme_combo.installEventFilter(self)
         toolbar.addWidget(self._theme_combo)
 
-        toolbar_widget = QWidget()
-        toolbar_widget.setLayout(toolbar)
-        toolbar_widget.setStyleSheet("background: #12121e; border-bottom: 1px solid #2a2a3e;")
-        root.addWidget(toolbar_widget)
+        self._toolbar_widget = QWidget()
+        self._toolbar_widget.setLayout(toolbar)
+        self._toolbar_widget.setStyleSheet("background: #1e1e1e; border-bottom: 1px solid #333333;")
+        root.addWidget(self._toolbar_widget)
 
         # ── Loading indicator ──
         self._loading_widget = QWidget()
@@ -1064,7 +1067,7 @@ class EpubReaderDialog(QDialog):
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 8px;")
         loading_layout.addWidget(loading_text)
-        self._loading_widget.setStyleSheet("background: #12121e;")
+        self._loading_widget.setStyleSheet("background: #1e1e1e;")
         root.addWidget(self._loading_widget)
 
         # ── Main content (hidden until loaded) ──
@@ -1190,6 +1193,7 @@ class EpubReaderDialog(QDialog):
     # ── Loading ────────────────────────────────────────────────────────────
 
     def _start_loading(self):
+        self._toolbar_widget.hide()
         self._loading_widget.show()
         self._content_widget.hide()
         self._loader_thread = _EpubLoaderThread(self._epub_path, self)
@@ -1208,6 +1212,7 @@ class EpubReaderDialog(QDialog):
             item = QListWidgetItem(title)
             self._toc_list.addItem(item)
 
+        self._toolbar_widget.show()
         self._loading_widget.hide()
         self._content_widget.show()
 
@@ -1233,6 +1238,7 @@ class EpubReaderDialog(QDialog):
         return (offset + self._current_page + 1, total)
 
     def _on_epub_error(self, error_msg):
+        self._toolbar_widget.show()
         self._loading_widget.hide()
         self._content_widget.show()
         self._reader_stack.setCurrentIndex(0)
@@ -1542,7 +1548,7 @@ class EpubReaderDialog(QDialog):
     def _process_html(self, html_content: str) -> str:
         """Process chapter HTML: inject inline images as base64 data URIs."""
         try:
-            from bs4 import BeautifulSoup
+            from bs4 import BeautifulSoup, NavigableString
             import base64
 
             soup = BeautifulSoup(html_content, "html.parser")
@@ -1565,9 +1571,10 @@ class EpubReaderDialog(QDialog):
                     mime = mime_map.get(ext, "image/jpeg")
                     b64 = base64.b64encode(image_data).decode("ascii")
                     img_tag["src"] = f"data:{mime};base64,{b64}"
-                    style = img_tag.get("style", "")
-                    if "max-width" not in style:
-                        img_tag["style"] = f"{style}; max-width: 100%; height: auto;"
+                    img_tag["style"] = "max-width: 100%; height: auto;"
+                    # Wrap img in a dedicated <div> so QTextBrowser treats it as a block
+                    wrapper = soup.new_tag("div", style="text-align: center; margin: 12px 0;")
+                    img_tag.wrap(wrapper)
 
             return str(soup)
         except Exception:
