@@ -632,6 +632,24 @@ class ReaderScreen(MDScreen):
                 lbl = self._make_text_label(f"ERROR rendering ch {index}:\n{err}")
                 box.add_widget(lbl)
 
+        # DEBUG: add a banner showing how many widgets are in the box and text info
+        from kivy.uix.label import Label as _DebugLabel
+        dbg_text = (f"[DEBUG] ch={index} widgets={len(box.children)} "
+                     f"text_len={len(self.current_text)} "
+                     f"raw_ch={len(self._raw_chapters)} "
+                     f"box_w={box.width:.0f}")
+        dbg = _DebugLabel(
+            text=dbg_text,
+            color=[1, 0.2, 0.2, 1],
+            size_hint_y=None,
+            height=dp(30),
+            font_size=sp(10),
+            halign='left',
+            valign='middle',
+            text_size=(400, None),
+        )
+        box.add_widget(dbg, index=len(box.children))  # add at top
+
         # Always scroll to top and save
         try:
             self.ids.content_scroll.scroll_y = 1.0
