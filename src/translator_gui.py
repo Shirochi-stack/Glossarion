@@ -15824,18 +15824,25 @@ Important rules:
                pass
 
     def _open_epub_library(self):
-        """Open the EPUB Library dialog to browse and read translated EPUBs."""
+        """Open the Library dialog — reuses existing instance (show/hide pattern)."""
         try:
             from epub_library import EpubLibraryDialog
-            dlg = EpubLibraryDialog(config=self.config, parent=self)
-            dlg.setModal(False)
-            dlg.setAttribute(Qt.WA_DeleteOnClose)
-            dlg.destroyed.connect(lambda: self._on_library_closed())
-            self._epub_library_dialog = dlg  # prevent GC
-            dlg.show()
+            dlg = getattr(self, '_epub_library_dialog', None)
+            if dlg is None:
+                dlg = EpubLibraryDialog(config=self.config, parent=self)
+                dlg.setModal(False)
+                self._epub_library_dialog = dlg
+            if dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+            else:
+                dlg._auto_refresh()  # lightweight — only reloads if file list changed
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "Library Error", f"Could not open EPUB Library:\n{e}")
+            QMessageBox.warning(self, "Library Error", f"Could not open Library:\n{e}")
 
     def _on_library_closed(self):
         """Persist config when library/reader dialogs close."""

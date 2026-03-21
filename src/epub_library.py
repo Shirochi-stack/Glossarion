@@ -560,12 +560,21 @@ class EpubLibraryDialog(QDialog):
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
         self._setup_ui()
-        self._load_books()
+        # Defer initial load so the dialog has its correct width when populating the grid
+        QTimer.singleShot(0, self._load_books)
         # Auto-refresh library every 2 seconds
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(2000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh)
         self._auto_refresh_timer.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Reflow grid after show to fix column count with correct width
+        if self._cards:
+            preset = _SIZE_PRESETS[self._card_size]
+            cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
+            self._reflow_grid(cols)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
@@ -679,6 +688,19 @@ class EpubLibraryDialog(QDialog):
             "QPushButton:hover { color: #e0e0e0; }")
         refresh_btn.clicked.connect(self._load_books)
         header.addWidget(refresh_btn)
+
+        # Subtle toggle to force-show the organize banner
+        self._banner_toggle = QPushButton("↕")
+        self._banner_toggle.setToolTip("Show/hide organize banner")
+        self._banner_toggle.setFixedSize(24, 24)
+        self._banner_toggle.setCursor(Qt.PointingHandCursor)
+        self._banner_toggle.setStyleSheet(
+            "QPushButton { background: transparent; border: none; font-size: 10pt; "
+            "color: #555; padding: 0; }"
+            "QPushButton:hover { color: #e0e0e0; }")
+        self._banner_toggle.clicked.connect(self._toggle_banner)
+        header.addWidget(self._banner_toggle)
+
         root.addLayout(header)
         root.addSpacing(6)
 
@@ -792,6 +814,22 @@ class EpubLibraryDialog(QDialog):
         elif self._sort_mode == SORT_SIZE:
             return sorted(books, key=lambda b: b["size"], reverse=True)
         return sorted(books, key=lambda b: b["mtime"], reverse=True)
+
+    def _toggle_banner(self):
+        """Force-toggle the organize banner visibility."""
+        if self._relocate_banner.isVisible():
+            self._relocate_banner.hide()
+        else:
+            outside = [b for b in self._books if not b.get("in_library")]
+            if outside:
+                self._banner_lbl.setText(
+                    f"💡  {len(outside)} file{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
+            elif self._last_move_log:
+                self._banner_lbl.setText(f"✅  Files moved to Library.")
+            else:
+                self._banner_lbl.setText("📁  All files are already in your Library folder.")
+            self._undo_btn.setVisible(bool(self._last_move_log))
+            self._relocate_banner.show()
 
     def _refresh_view(self):
         query = self._search.text().strip().lower()
@@ -949,9 +987,10 @@ class EpubLibraryDialog(QDialog):
         open_action.triggered.connect(lambda: self._on_card_clicked(book))
         menu.addSeparator()
         folder_action = menu.addAction("📂  Open Output Folder")
-        # Use original_path if available (for files moved to Library)
+        # Use original_path's directory if available (for files moved to Library)
         original = book.get("original_path", book["path"])
-        folder_action.triggered.connect(lambda: _open_folder_in_explorer(original))
+        output_folder = os.path.dirname(original)
+        folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
         lib_action = menu.addAction("📁  Open Library Folder")
         lib_action.triggered.connect(lambda: _open_folder_in_explorer(get_library_dir()))
         menu.addSeparator()
@@ -1092,20 +1131,41 @@ class EpubLibraryDialog(QDialog):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._cards:
-            preset = _SIZE_PRESETS[self._card_size]
-            new_cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
-            current_cols = max(1, self._grid_layout.columnCount())
-            if new_cols != current_cols:
-                self._grid_container.hide()
-                self._refresh_view()
-                self._grid_container.show()
+        if not self._cards:
+            return
+        preset = _SIZE_PRESETS[self._card_size]
+        new_cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
+        current_cols = max(1, self._grid_layout.columnCount())
+        if new_cols != current_cols:
+            self._reflow_grid(new_cols)
+
+    def _reflow_grid(self, cols: int):
+        """Re-position existing cards in the grid without destroying them."""
+        # Remove all items from layout without deleting widgets
+        while self._grid_layout.count():
+            self._grid_layout.takeAt(0)
+
+        # Re-add existing cards in new column arrangement
+        for idx, card in enumerate(self._cards):
+            row, col = divmod(idx, cols)
+            self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
+
+        # Update column stretches
+        for c in range(cols):
+            self._grid_layout.setColumnStretch(c, 0)
+        self._grid_layout.setColumnStretch(cols, 1)
+
+        # Bottom spacer
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._grid_layout.addWidget(spacer, (len(self._cards) - 1) // cols + 1, 0)
 
     def closeEvent(self, event):
-        """Persist library settings back into config."""
+        """Hide the dialog instead of closing — persist settings."""
         self._config['epub_library_sort'] = self._sort_mode
         self._config['epub_library_card_size'] = self._card_size
-        super().closeEvent(event)
+        event.ignore()
+        self.hide()
 
 
 # ---------------------------------------------------------------------------
