@@ -25,8 +25,16 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer, QSizeF
+from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer, QSizeF, QUrl
 from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
+
+# Use QWebEngineView for full CSS support (images, block layout, etc.)
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    _HAS_WEBENGINE = True
+except ImportError:
+    _HAS_WEBENGINE = False
 
 logger = logging.getLogger(__name__)
 
@@ -1173,27 +1181,30 @@ class EpubReaderDialog(QDialog):
         # Reader area — single browser for scroll/single, an HBox for double-page
         self._reader_stack = QStackedWidget()
 
+        def _make_reader_widget():
+            if _HAS_WEBENGINE:
+                w = QWebEngineView()
+                w.setContextMenuPolicy(Qt.NoContextMenu)
+                # Block navigation
+                w.setUrl(QUrl("about:blank"))
+            else:
+                w = QTextBrowser()
+                w.setOpenExternalLinks(False)
+                w.setOpenLinks(False)
+            return w
+
         # Page 0: single reader (for scroll, single page, all-scroll)
-        self._reader = QTextBrowser()
-        self._reader.setOpenExternalLinks(False)
-        self._reader.setOpenLinks(False)
-        self._reader.viewport().installEventFilter(self)
+        self._reader = _make_reader_widget()
         self._reader_stack.addWidget(self._reader)
 
-        # Page 1: double-page layout (two QTextBrowsers side by side)
+        # Page 1: double-page layout (two browsers side by side)
         double_widget = QWidget()
         self._double_widget = double_widget  # keep ref for styling
         double_layout = QHBoxLayout(double_widget)
         double_layout.setContentsMargins(0, 0, 0, 0)
         double_layout.setSpacing(2)
-        self._reader_left = QTextBrowser()
-        self._reader_left.setOpenExternalLinks(False)
-        self._reader_left.setOpenLinks(False)
-        self._reader_left.viewport().installEventFilter(self)
-        self._reader_right = QTextBrowser()
-        self._reader_right.setOpenExternalLinks(False)
-        self._reader_right.setOpenLinks(False)
-        self._reader_right.viewport().installEventFilter(self)
+        self._reader_left = _make_reader_widget()
+        self._reader_right = _make_reader_widget()
         double_layout.addWidget(self._reader_left)
         double_layout.addWidget(self._reader_right)
         self._reader_stack.addWidget(double_widget)
@@ -1265,8 +1276,6 @@ class EpubReaderDialog(QDialog):
                 else:
                     self._change_font_size(-1)
                 return True
-            if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-                return True  # block wheel on reader in paginated modes
         return super().eventFilter(obj, event)
 
     def _toggle_fullscreen(self):
@@ -1379,19 +1388,26 @@ class EpubReaderDialog(QDialog):
         bg = t['bg']
         fg = t['fg']
         border = t['border']
-        css = f"""
-            QTextBrowser {{
-                background: {bg}; color: {fg}; border: none;
-                padding: 20px 30px; font-size: {self._font_size}pt;
-            }}
-            QTextBrowser a {{ color: {t['link']}; }}
-            QScrollBar:vertical {{ width: 8px; background: {bg}; }}
-            QScrollBar::handle:vertical {{ background: {border}; border-radius: 4px; min-height: 20px; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-        """
-        self._reader.setStyleSheet(css)
-        self._reader_left.setStyleSheet(css + f"QTextBrowser {{ border-right: 1px solid {border}; }}")
-        self._reader_right.setStyleSheet(css)
+        if _HAS_WEBENGINE:
+            # For QWebEngineView, styling is done via CSS in _wrap_html.
+            # We style surrounding containers only.
+            self._reader.setStyleSheet(f"background: {bg}; border: none;")
+            self._reader_left.setStyleSheet(f"background: {bg}; border: none; border-right: 1px solid {border};")
+            self._reader_right.setStyleSheet(f"background: {bg}; border: none;")
+        else:
+            css = f"""
+                QTextBrowser {{
+                    background: {bg}; color: {fg}; border: none;
+                    padding: 20px 30px; font-size: {self._font_size}pt;
+                }}
+                QTextBrowser a {{ color: {t['link']}; }}
+                QScrollBar:vertical {{ width: 8px; background: {bg}; }}
+                QScrollBar::handle:vertical {{ background: {border}; border-radius: 4px; min-height: 20px; }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            """
+            self._reader.setStyleSheet(css)
+            self._reader_left.setStyleSheet(css + f"QTextBrowser {{ border-right: 1px solid {border}; }}")
+            self._reader_right.setStyleSheet(css)
         # Theme all surrounding containers
         self.setStyleSheet(f"QDialog {{ background: {bg}; }}")
         self._reader_stack.setStyleSheet(f"QStackedWidget {{ background: {bg}; border: none; }}")
@@ -1453,24 +1469,36 @@ class EpubReaderDialog(QDialog):
         self._render_current()
 
     def _render_current(self):
-        """Re-render based on current layout mode and selected chapter."""
+        """Re-render the current chapter in the active layout mode."""
         if not self._chapters:
             return
+        self._apply_reader_style()  # refresh theme
 
         row = self._current_row
+
+        def _set_html(browser, html):
+            """Set HTML on either QWebEngineView or QTextBrowser.
+
+            QWebEngineView.setHtml() has a ~2MB limit — base64 images
+            easily exceed this.  Write to a temp file and load via URL.
+            """
+            if _HAS_WEBENGINE:
+                tmp_dir = _epub_cache_dir()
+                tmp_path = os.path.join(tmp_dir, f"_reader_{id(browser)}.html")
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                browser.setUrl(QUrl.fromLocalFile(tmp_path))
+            else:
+                browser.setHtml(html)
 
         if self._layout_mode == LAYOUT_ALL:
             self._reader_stack.setCurrentIndex(0)
             self._nav_bar.hide()
-            self._reader.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            self._reader.setUpdatesEnabled(False)
             all_html = ""
             for idx, (title, content) in enumerate(self._chapters):
                 processed = self._process_html(content)
                 all_html += f"<h2 style='color: {self._get_theme()['heading']}; border-bottom: 1px solid {self._get_theme()['border']}; padding-bottom: 6px; margin-top: 30px;'>Chapter {idx + 1}: {title}</h2>\n{processed}\n<hr style='border: none; border-top: 1px solid {self._get_theme()['border']}; margin: 20px 0;'>"
-            self._reader.setHtml(self._wrap_html(all_html))
-            self._reader.verticalScrollBar().setValue(0)
-            self._reader.setUpdatesEnabled(True)
+            _set_html(self._reader, self._wrap_html(all_html))
             self._loaded_chapter = -1
             self._toc_list.blockSignals(True)
             self._toc_list.setCurrentRow(-1)
@@ -1479,104 +1507,90 @@ class EpubReaderDialog(QDialog):
         elif self._layout_mode == LAYOUT_DOUBLE:
             self._reader_stack.setCurrentIndex(1)
             self._nav_bar.show()
-            self._reader_left.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            self._reader_right.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             if row < len(self._chapters):
-                self._reader_left.setUpdatesEnabled(False)
-                self._reader_right.setUpdatesEnabled(False)
                 html = self._process_html(self._chapters[row][1])
                 full = self._wrap_html(html)
-                self._reader_left.setHtml(full)
-                self._reader_right.setHtml(full)
+                _set_html(self._reader_left, full)
+                _set_html(self._reader_right, full)
                 self._loaded_chapter = row
-                QTimer.singleShot(50, self._finalize_double_page)
+                QTimer.singleShot(200, self._finalize_double_page)
             else:
-                self._reader_left.setHtml(self._wrap_html(""))
-                self._reader_right.setHtml(self._wrap_html(""))
+                _set_html(self._reader_left, self._wrap_html(""))
+                _set_html(self._reader_right, self._wrap_html(""))
             self._update_nav_buttons()
 
         elif self._layout_mode == LAYOUT_SINGLE:
             self._reader_stack.setCurrentIndex(0)
             self._nav_bar.show()
-            self._reader.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             if row < len(self._chapters):
-                self._reader.setUpdatesEnabled(False)
                 html = self._process_html(self._chapters[row][1])
-                self._reader.setHtml(self._wrap_html(html))
+                _set_html(self._reader, self._wrap_html(html))
                 self._loaded_chapter = row
-                QTimer.singleShot(50, self._finalize_single_page)
+                QTimer.singleShot(200, self._finalize_single_page)
             self._update_nav_buttons()
 
         else:  # LAYOUT_SCROLL
             self._reader_stack.setCurrentIndex(0)
             self._nav_bar.hide()
-            self._reader.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             if row < len(self._chapters):
                 html = self._process_html(self._chapters[row][1])
-                self._reader.setHtml(self._wrap_html(html))
-                self._reader.verticalScrollBar().setValue(0)
+                _set_html(self._reader, self._wrap_html(html))
                 self._loaded_chapter = row
 
-    # ── Pagination helpers (no-flicker) ────────────────────────────────────
+    # ── Pagination helpers ──────────────────────────────────────────────────
 
-    def _page_count(self, browser):
-        """Get page count using QTextDocument layout."""
-        doc = browser.document()
-        vp = browser.viewport()
-        w, h = vp.width(), vp.height()
-        if w <= 0 or h <= 0:
-            return 1
-        doc.setPageSize(QSizeF(w, h))
-        return max(1, doc.pageCount())
+    def _js_scroll_to(self, browser, page_num):
+        """Scroll browser to the given page."""
+        if _HAS_WEBENGINE:
+            js = f"window.scrollTo(0, {page_num} * window.innerHeight);"
+            browser.page().runJavaScript(js)
+        else:
+            vp = browser.viewport()
+            h = vp.height()
+            if h > 0:
+                browser.verticalScrollBar().setValue(page_num * h)
+
+    def _js_page_count(self, browser, callback):
+        """Get page count via JS for WebEngine, QTextDocument for fallback."""
+        if _HAS_WEBENGINE:
+            js = "Math.max(1, Math.ceil(document.body.scrollHeight / window.innerHeight));"
+            browser.page().runJavaScript(js, callback)
+        else:
+            doc = browser.document()
+            vp = browser.viewport()
+            w, h = vp.width(), vp.height()
+            if w <= 0 or h <= 0:
+                callback(1)
+                return
+            doc.setPageSize(QSizeF(w, h))
+            callback(max(1, doc.pageCount()))
 
     def _finalize_single_page(self):
-        """After HTML load: position page, cache count, re-enable updates."""
-        try:
-            vp = self._reader.viewport()
-            h = vp.height()
-            if h > 0:
-                doc = self._reader.document()
-                doc.setPageSize(QSizeF(vp.width(), h))
-                self._chapter_page_cache[self._current_row] = max(1, doc.pageCount())
-                self._reader.verticalScrollBar().setValue(self._current_page * h)
-        finally:
-            self._reader.setUpdatesEnabled(True)
-        self._update_nav_buttons()
+        """After HTML load: position page and cache count."""
+        def on_count(count):
+            self._chapter_page_cache[self._current_row] = int(count)
+            self._js_scroll_to(self._reader, self._current_page)
+            self._update_nav_buttons()
+        self._js_page_count(self._reader, on_count)
 
     def _finalize_double_page(self):
-        """After HTML load: position both panes, cache count, re-enable."""
-        try:
-            vp = self._reader_left.viewport()
-            h = vp.height()
-            if h > 0:
-                for browser in (self._reader_left, self._reader_right):
-                    browser.document().setPageSize(QSizeF(vp.width(), h))
-                self._chapter_page_cache[self._current_row] = max(1, self._reader_left.document().pageCount())
-                self._reader_left.verticalScrollBar().setValue(self._current_page * h)
-                self._reader_right.verticalScrollBar().setValue((self._current_page + 1) * h)
-        finally:
-            self._reader_left.setUpdatesEnabled(True)
-            self._reader_right.setUpdatesEnabled(True)
-        self._update_nav_buttons()
+        """After HTML load: position both panes and cache count."""
+        def on_count(count):
+            self._chapter_page_cache[self._current_row] = int(count)
+            self._js_scroll_to(self._reader_left, self._current_page)
+            self._js_scroll_to(self._reader_right, self._current_page + 1)
+            self._update_nav_buttons()
+        self._js_page_count(self._reader_left, on_count)
 
     def _scroll_to_page_single(self):
         """Scroll single-page reader to current page (no HTML reload)."""
-        vp = self._reader.viewport()
-        h = vp.height()
-        if h > 0:
-            self._reader.document().setPageSize(QSizeF(vp.width(), h))
-            self._reader.verticalScrollBar().setValue(self._current_page * h)
+        self._js_scroll_to(self._reader, self._current_page)
         self._update_nav_buttons()
 
     def _scroll_to_page_double(self):
         """Scroll double-page panes to current page (no HTML reload)."""
-        vp = self._reader_left.viewport()
-        h = vp.height()
-        if h > 0:
-            for b in (self._reader_left, self._reader_right):
-                b.document().setPageSize(QSizeF(vp.width(), h))
-            self._reader_left.verticalScrollBar().setValue(self._current_page * h)
-            self._reader_right.verticalScrollBar().setValue((self._current_page + 1) * h)
+        self._js_scroll_to(self._reader_left, self._current_page)
+        self._js_scroll_to(self._reader_right, self._current_page + 1)
         self._update_nav_buttons()
 
     def _update_nav_buttons(self):
@@ -1667,21 +1681,14 @@ class EpubReaderDialog(QDialog):
         self._render_current()
 
     def _process_html(self, html_content: str) -> str:
-        """Process chapter HTML: inject images as base64 and isolate them in block elements.
-
-        QTextBrowser ignores CSS display:block and <div> wrappers.  The only
-        reliable way to prevent text from overlapping images is to place each
-        <img> inside its own <p> (or <table>) element with NO surrounding text.
-        """
+        """Process chapter HTML: inject inline images as base64 data URIs."""
         try:
-            from bs4 import BeautifulSoup, Tag
+            from bs4 import BeautifulSoup
             import base64
 
             soup = BeautifulSoup(html_content, "html.parser")
 
-            # Collect all img tags first (modifying tree while iterating)
-            img_tags = list(soup.find_all("img"))
-            for img_tag in img_tags:
+            for img_tag in soup.find_all("img"):
                 src = img_tag.get("src", "")
                 if not src:
                     continue
@@ -1691,45 +1698,15 @@ class EpubReaderDialog(QDialog):
                     if candidate in self._images:
                         image_data = self._images[candidate]
                         break
-                if not image_data:
-                    continue
-
-                ext = os.path.splitext(src)[1].lower()
-                mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                            ".png": "image/png", ".gif": "image/gif",
-                            ".svg": "image/svg+xml", ".webp": "image/webp"}
-                mime = mime_map.get(ext, "image/jpeg")
-                b64 = base64.b64encode(image_data).decode("ascii")
-                img_tag["src"] = f"data:{mime};base64,{b64}"
-
-                # Remove any existing width/height/style that might conflict
-                for attr in ["style", "width", "height"]:
-                    if attr in img_tag.attrs:
-                        del img_tag.attrs[attr]
-
-                # Extract the image from whatever parent it's in and place
-                # it in a standalone <p> so QTextBrowser treats it as its
-                # own block — no text can overlap.
-                parent = img_tag.parent
-                # Build a standalone image block using <table> which QTextBrowser
-                # reliably renders as a block element with proper sizing.
-                img_block = soup.new_tag("table", width="100%", cellpadding="0", cellspacing="0")
-                img_block["style"] = "margin-top:8px; margin-bottom:8px;"
-                tr = soup.new_tag("tr")
-                td = soup.new_tag("td", align="center")
-                new_img = soup.new_tag("img", src=img_tag["src"], width="100%")
-                td.append(new_img)
-                tr.append(td)
-                img_block.append(tr)
-
-                if parent and parent.name in ("p", "span", "a", "div", "em", "strong"):
-                    # Insert the image block AFTER the parent element
-                    parent.insert_after(img_block)
-                    # Remove the original inline img from the parent
-                    img_tag.decompose()
-                else:
-                    # Replace the img in-place
-                    img_tag.replace_with(img_block)
+                if image_data:
+                    ext = os.path.splitext(src)[1].lower()
+                    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                ".png": "image/png", ".gif": "image/gif",
+                                ".svg": "image/svg+xml", ".webp": "image/webp"}
+                    mime = mime_map.get(ext, "image/jpeg")
+                    b64 = base64.b64encode(image_data).decode("ascii")
+                    img_tag["src"] = f"data:{mime};base64,{b64}"
+                    # CSS handles sizing via the img rule in _wrap_html
 
             return str(soup)
         except Exception:
@@ -1746,9 +1723,14 @@ class EpubReaderDialog(QDialog):
             f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
             f"padding: 10px 20px; max-width: 800px; margin: auto; }}"
             f"h1, h2, h3 {{ color: {t['heading']}; }}"
+            f"img {{ display: block; max-width: 100%; height: auto; "
+            f"border-radius: 4px; margin: 12px auto; }}"
             f"p {{ margin: 0.6em 0; }}"
+            f"a {{ color: {t['link']}; }}"
             f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
-            f"table {{ border: none; }}"
+            f"::-webkit-scrollbar {{ width: 8px; }}"
+            f"::-webkit-scrollbar-track {{ background: {t['bg']}; }}"
+            f"::-webkit-scrollbar-thumb {{ background: {t['border']}; border-radius: 4px; }}"
             f"</style></head><body>{body_html}</body></html>"
         )
 
