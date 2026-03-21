@@ -400,7 +400,7 @@ KV = '''
                         spacing: dp(12)
 
                         MDLabel:
-                            text: "Glossary (Reader)"
+                            text: "Load Glossary"
                             size_hint_x: 0.7
 
                         MDSwitch:

@@ -49,8 +49,8 @@ jobs:
           pip install --upgrade pip setuptools wheel
           pip install buildozer==1.5.0 cython virtualenv
       
-      - name: Cache Buildozer (NDK/SDK)
-        uses: actions/cache@v4
+      - name: Restore Buildozer cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.buildozer
@@ -58,7 +58,6 @@ jobs:
           key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
           restore-keys: |
             buildozer-${{ runner.os }}-
-          save-always: true
       
       - name: Copy shared backend files
         run: |
@@ -226,11 +225,17 @@ jobs:
           # Clean the bin directory to force a fresh APK packaging
           rm -rf bin/
           
-          # Build
+          # Build — capture exit code properly (tee resets $?)
+          set -o pipefail
           buildozer android debug 2>&1 | tee build.log
+          BUILD_EXIT=$?
+          echo "=== Build exit code: $BUILD_EXIT ==="
           
-          # Show build result
-          echo "=== Build exit code: $? ==="
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "❌ Buildozer failed! Last 200 lines of log:"
+            tail -200 build.log
+            exit $BUILD_EXIT
+          fi
       
       - name: Find APK
         id: find_apk
@@ -260,9 +265,9 @@ jobs:
           else
             echo "apk_found=false" >> $GITHUB_OUTPUT
             echo "❌ No APK found anywhere!"
-            # Show the last 50 lines of build log for clues
-            echo "=== Last 50 lines of build.log ==="
-            tail -50 src/android/build.log 2>/dev/null || true
+            # Show last 200 lines of build log for clues
+            echo "=== Last 200 lines of build.log ==="
+            tail -200 src/android/build.log 2>/dev/null || true
           fi
       
       - name: Upload APK artifact
@@ -287,4 +292,13 @@ jobs:
           files: src/android/bin/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save Buildozer cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.buildozer
+            src/android/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
 

@@ -993,6 +993,30 @@ class ReaderScreen(MDScreen):
         )
         self._translation_thread.start()
 
+    @staticmethod
+    def _md_to_kivy_markup(text):
+        """Convert markdown formatting to Kivy markup for real-time display.
+
+        Supports: bold, italic, headers (h1-h3), line breaks.
+        Kivy uses [b], [i], [size=X], [color=X] tags.
+        """
+        import re as _re
+        # Bold: **text** or __text__
+        text = _re.sub(r'\*\*(.+?)\*\*', r'[b]\1[/b]', text)
+        text = _re.sub(r'__(.+?)__', r'[b]\1[/b]', text)
+        # Italic: *text* or _text_  (but not inside bold markers)
+        text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'[i]\1[/i]', text)
+        text = _re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'[i]\1[/i]', text)
+        # Headers: ### -> size 18, ## -> size 22, # -> size 26
+        text = _re.sub(r'^### +(.+)$', r'[size=18][b]\1[/b][/size]', text, flags=_re.MULTILINE)
+        text = _re.sub(r'^## +(.+)$', r'[size=22][b]\1[/b][/size]', text, flags=_re.MULTILINE)
+        text = _re.sub(r'^# +(.+)$', r'[size=26][b]\1[/b][/size]', text, flags=_re.MULTILINE)
+        # Horizontal rules
+        text = _re.sub(r'^---+$', r'━━━━━━━━━━━━━━━━━━━━', text, flags=_re.MULTILINE)
+        # Inline code: `code`
+        text = _re.sub(r'`([^`]+)`', r'[color=80cbc4]\1[/color]', text)
+        return text
+
     def _prepare_streaming_view(self):
         """Clear content area and insert a streaming label for real-time output."""
         try:
@@ -1023,11 +1047,12 @@ class ReaderScreen(MDScreen):
             config_data = self.app.config_data.copy() if self.app else {}
 
             def _on_chunk(text):
-                """Real-time streaming — append to the content area label."""
+                """Real-time streaming — append and render with markdown→Kivy markup."""
                 def _update(dt, t=text):
                     self.streaming_text += t
                     if self._stream_label:
-                        self._stream_label.text = self.streaming_text
+                        # Convert accumulated text through markdown→Kivy markup
+                        self._stream_label.text = self._md_to_kivy_markup(self.streaming_text)
                     # Auto-scroll to bottom
                     try:
                         self.ids.content_scroll.scroll_y = 0
