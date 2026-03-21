@@ -1,5 +1,16 @@
 import sys
 import os
+import warnings
+
+# Suppress requests version compatibility warnings (cosmetic - urllib3/chardet/charset_normalizer
+# version mismatches don't affect functionality)
+warnings.filterwarnings('ignore', message='urllib3.*or chardet.*doesn.t match a supported version',
+                        category=DeprecationWarning)
+try:
+    from requests.exceptions import RequestsDependencyWarning
+    warnings.filterwarnings('ignore', category=RequestsDependencyWarning)
+except ImportError:
+    pass
 
 # Add the current directory to Python path so we can import our modules
 current_dir = os.path.dirname(os.path.abspath(__file__))

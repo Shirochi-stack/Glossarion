@@ -48,6 +48,12 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
     except:
         pass
 
+# Collect google.ai.generativelanguage submodules for gRPC Gemini client
+try:
+    hiddenimports.extend(collect_submodules('google.ai.generativelanguage_v1beta'))
+except:
+    pass
+
 # ============================================================================
 # APPLICATION FILES
 # ============================================================================
@@ -368,6 +374,17 @@ api_modules = [
     'google.protobuf.reflection',
     'google.rpc',
     'google.type',
+    
+    # Google AI Generative Language (gRPC Gemini client)
+    'google.ai',
+    'google.ai.generativelanguage',
+    'google.ai.generativelanguage_v1beta',
+    'google.ai.generativelanguage_v1beta.services',
+    'google.ai.generativelanguage_v1beta.services.generative_service',
+    'google.ai.generativelanguage_v1beta.types',
+    'google.ai.generativelanguage_v1beta.types.content',
+    'google.ai.generativelanguage_v1beta.types.generative_service',
+    'google.ai.generativelanguage_v1beta.types.safety_setting',
     
     # Azure (for Azure OpenAI endpoints - NOT Computer Vision)
     'azure',
