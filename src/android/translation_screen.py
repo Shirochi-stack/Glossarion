@@ -369,6 +369,46 @@ KV = '''
                             on_text: root.output_language = self.text
                             size_hint_x: 0.6
 
+                # ── Reader: Enable Thinking ──
+                MDCard:
+                    size_hint: 1, None
+                    height: dp(72)
+                    padding: dp(16)
+                    elevation: 1
+
+                    BoxLayout:
+                        spacing: dp(12)
+
+                        MDLabel:
+                            text: "Enable Thinking"
+                            size_hint_x: 0.7
+
+                        MDSwitch:
+                            id: thinking_switch
+                            active: root.reader_enable_thinking
+                            on_active: root.reader_enable_thinking = self.active
+                            size_hint_x: 0.3
+
+                # ── Reader: Load Glossary ──
+                MDCard:
+                    size_hint: 1, None
+                    height: dp(72)
+                    padding: dp(16)
+                    elevation: 1
+
+                    BoxLayout:
+                        spacing: dp(12)
+
+                        MDLabel:
+                            text: "Glossary (Reader)"
+                            size_hint_x: 0.7
+
+                        MDSwitch:
+                            id: reader_glossary_switch
+                            active: root.reader_enable_glossary
+                            on_active: root.reader_enable_glossary = self.active
+                            size_hint_x: 0.3
+
                 # Spacer for FAB
                 Widget:
                     size_hint_y: None
@@ -445,6 +485,8 @@ class TranslationScreen(MDScreen):
     glossary_mode = StringProperty('Balanced')
     output_language = StringProperty('English')
     prompt_expanded = BooleanProperty(False)
+    reader_enable_thinking = BooleanProperty(False)
+    reader_enable_glossary = BooleanProperty(False)
 
     is_translating = BooleanProperty(False)
     log_text = StringProperty('')
@@ -484,6 +526,8 @@ class TranslationScreen(MDScreen):
         if self.glossary_mode == 'No_glossary':
             self.glossary_mode = 'No Glossary'
         self.output_language = cfg.get('output_language', 'English')
+        self.reader_enable_thinking = cfg.get('reader_enable_thinking', False)
+        self.reader_enable_glossary = cfg.get('reader_enable_glossary', False)
 
         # Load system prompt for active profile
         self.system_prompt = self._get_prompt_for_profile(self.active_profile)
@@ -588,6 +632,8 @@ class TranslationScreen(MDScreen):
         cfg['auto_glossary_mode'] = self.glossary_mode.lower().replace(' ', '_')
         cfg['output_language'] = self.output_language
         cfg['active_system_prompt'] = self.system_prompt
+        cfg['reader_enable_thinking'] = self.reader_enable_thinking
+        cfg['reader_enable_glossary'] = self.reader_enable_glossary
 
         # Save prompt to profile
         profiles = cfg.get('prompt_profiles', {})

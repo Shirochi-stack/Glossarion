@@ -93,7 +93,7 @@ KV = '''
             # KO / EN pill toggle
             BoxLayout:
                 size_hint: None, None
-                size: dp(100), dp(36)
+                size: dp(76), dp(30)
                 pos_hint: {"center_y": 0.5}
                 spacing: 0
                 canvas.before:
@@ -102,26 +102,26 @@ KV = '''
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
-                        radius: [dp(18)]
+                        radius: [dp(15)]
 
                 MDFlatButton:
                     id: btn_ko
                     text: "KO"
                     size_hint: 0.5, 1
-                    font_size: sp(13)
+                    font_size: sp(11)
                     theme_text_color: "Custom"
-                    text_color: [1,1,1,1] if root.viewing_language == 'ko' else [0.55,0.55,0.55,1]
-                    md_bg_color: [0.35, 0.35, 0.40, 1] if root.viewing_language == 'ko' else [0,0,0,0]
+                    text_color: [1,1,1,1] if root.viewing_language == 'ko' else [0.5,0.5,0.5,1]
+                    md_bg_color: [0.35, 0.35, 0.42, 1] if root.viewing_language == 'ko' else [0,0,0,0]
                     on_release: root.toggle_language('ko')
 
                 MDFlatButton:
                     id: btn_en
                     text: "EN"
                     size_hint: 0.5, 1
-                    font_size: sp(13)
+                    font_size: sp(11)
                     theme_text_color: "Custom"
-                    text_color: [1,1,1,1] if root.viewing_language == 'en' else [0.55,0.55,0.55,1]
-                    md_bg_color: [0.35, 0.35, 0.40, 1] if root.viewing_language == 'en' else [0,0,0,0]
+                    text_color: [1,1,1,1] if root.viewing_language == 'en' else [0.5,0.5,0.5,1]
+                    md_bg_color: [0.35, 0.35, 0.42, 1] if root.viewing_language == 'en' else [0,0,0,0]
                     on_release: root.toggle_language('en')
 
             # Toolbar icons
@@ -163,91 +163,35 @@ KV = '''
                 height: self.minimum_height
                 padding: [root.margin_px, dp(16)]
 
-        # ── Streaming output overlay ──
+        # ── Thin translate status bar (visible only during translation) ──
         BoxLayout:
-            id: stream_panel
-            orientation: 'vertical'
+            id: translate_status_bar
             size_hint_y: None
             height: 0
             opacity: 0
-            padding: [dp(12), dp(6)]
+            padding: [dp(12), dp(2)]
+            spacing: dp(4)
             canvas.before:
                 Color:
-                    rgba: [0.08, 0.08, 0.1, 0.95]
-                Rectangle:
-                    pos: self.pos
-                    size: self.size
-
-            BoxLayout:
-                size_hint_y: None
-                height: dp(32)
-                MDLabel:
-                    text: "Translating..."
-                    font_style: "Caption"
-                    theme_text_color: "Custom"
-                    text_color: [0.4, 0.8, 1, 1]
-                    size_hint_x: 0.6
-                MDIconButton:
-                    icon: "console"
-                    theme_text_color: "Custom"
-                    text_color: [0.6, 0.6, 0.6, 1]
-                    on_release: root._toggle_thinking_panel()
-                MDIconButton:
-                    icon: "stop-circle-outline"
-                    theme_text_color: "Custom"
-                    text_color: [1, 0.4, 0.4, 1]
-                    on_release: root._stop_translation()
-
-            ScrollView:
-                id: stream_scroll
-                size_hint_y: None
-                height: dp(100)
-                do_scroll_x: False
-                MDLabel:
-                    id: stream_label
-                    text: root.streaming_text
-                    markup: True
-                    size_hint_y: None
-                    height: self.texture_size[1] + dp(10)
-                    font_size: sp(12)
-                    color: [0.85, 0.85, 0.85, 1]
-
-        # ── Thinking terminal (collapsed by default) ──
-        BoxLayout:
-            id: thinking_panel
-            orientation: 'vertical'
-            size_hint_y: None
-            height: 0
-            opacity: 0
-            padding: [dp(12), dp(4)]
-            canvas.before:
-                Color:
-                    rgba: [0.05, 0.05, 0.07, 0.98]
+                    rgba: [0.08, 0.08, 0.12, 0.95]
                 Rectangle:
                     pos: self.pos
                     size: self.size
 
             MDLabel:
-                text: "Thinking Output"
+                text: "Translating..."
                 font_style: "Caption"
                 theme_text_color: "Custom"
-                text_color: [0.6, 0.4, 0.9, 1]
-                size_hint_y: None
-                height: dp(24)
+                text_color: [0.4, 0.8, 1, 1]
+                size_hint_x: 0.8
 
-            ScrollView:
-                id: thinking_scroll
-                size_hint_y: None
-                height: dp(120)
-                do_scroll_x: False
-                MDLabel:
-                    id: thinking_label
-                    text: root.thinking_text
-                    markup: True
-                    size_hint_y: None
-                    height: self.texture_size[1] + dp(10)
-                    font_size: sp(11)
-                    color: [0.65, 0.55, 0.85, 1]
+            MDIconButton:
+                icon: "stop-circle-outline"
+                theme_text_color: "Custom"
+                text_color: [1, 0.4, 0.4, 1]
+                size_hint_x: None
+                width: dp(36)
+                on_release: root._stop_translation()
 
         # ── Chapter nav bar ──
         BoxLayout:
@@ -454,6 +398,7 @@ class ReaderScreen(MDScreen):
         self._stop_event = threading.Event()
         self._translation_thread = None
         self._translations_dir = None    # set when EPUB loaded
+        self._stream_label = None        # streaming display label
 
     def on_enter_data(self, file_path=None, **kwargs):
         if file_path and file_path != self.file_path:
@@ -1016,14 +961,9 @@ class ReaderScreen(MDScreen):
         if idx >= len(self._raw_chapters):
             return
 
-        # Get the text content for this chapter
-        chapter_text = ''
-        blocks = self.chapters[idx]
-        for btype, bcontent in blocks:
-            if btype == 'text':
-                chapter_text += bcontent + '\n\n'
-
-        if not chapter_text.strip():
+        # Get raw HTML for this single chapter
+        raw_html = self._raw_chapters[idx]
+        if not raw_html or not raw_html.strip():
             return
 
         self.is_translating = True
@@ -1031,29 +971,64 @@ class ReaderScreen(MDScreen):
         self.thinking_text = ''
         self._stop_event.clear()
 
-        # Show streaming overlay
-        self._show_stream_panel(True)
+        # Clear the content area and prepare for streaming
+        self._prepare_streaming_view()
+
+        # Show thin status bar
+        self._show_translate_status(True)
+
+        # Scroll to top
+        try:
+            self.ids.content_scroll.scroll_y = 1.0
+        except Exception:
+            pass
 
         # Run in background thread
         self._translation_thread = threading.Thread(
             target=self._translation_worker_inline,
-            args=(idx, chapter_text),
+            args=(idx, raw_html),
             daemon=True,
         )
         self._translation_thread.start()
 
-    def _translation_worker_inline(self, chapter_idx, chapter_text):
-        """Background thread: call the translation API."""
+    def _prepare_streaming_view(self):
+        """Clear content area and insert a streaming label for real-time output."""
+        try:
+            box = self.ids.content_box
+            box.clear_widgets()
+            # Create a label for streaming output
+            self._stream_label = MDLabel(
+                text='',
+                markup=True,
+                size_hint_y=None,
+                font_size=self.font_size_px,
+                line_height=self.line_spacing,
+                color=self.text_color,
+                halign=self.text_align,
+            )
+            self._stream_label.bind(
+                texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20))
+            )
+            box.add_widget(self._stream_label)
+        except Exception:
+            self._stream_label = None
+
+    def _translation_worker_inline(self, chapter_idx, raw_html):
+        """Background thread: call the translation API with raw HTML."""
         try:
             from reader_translator import translate_chapter_streaming
 
-            config_data = self.app.config_data if self.app else {}
+            config_data = self.app.config_data.copy() if self.app else {}
 
             def _on_chunk(text):
+                """Real-time streaming — append to the content area label."""
                 def _update(dt, t=text):
                     self.streaming_text += t
+                    if self._stream_label:
+                        self._stream_label.text = self.streaming_text
+                    # Auto-scroll to bottom
                     try:
-                        self.ids.stream_scroll.scroll_y = 0
+                        self.ids.content_scroll.scroll_y = 0
                     except Exception:
                         pass
                 Clock.schedule_once(_update)
@@ -1061,10 +1036,6 @@ class ReaderScreen(MDScreen):
             def _on_thinking(text):
                 def _update(dt, t=text):
                     self.thinking_text += t
-                    try:
-                        self.ids.thinking_scroll.scroll_y = 0
-                    except Exception:
-                        pass
                 Clock.schedule_once(_update)
 
             def _on_complete(translated):
@@ -1074,18 +1045,20 @@ class ReaderScreen(MDScreen):
                     self.is_translating = False
                     self.viewing_language = 'en'
                     self._show_chapter(ci)
-                    # Auto-hide stream panel after a delay
-                    Clock.schedule_once(lambda dt: self._show_stream_panel(False), 2.0)
+                    # Auto-hide status bar
+                    Clock.schedule_once(lambda dt: self._show_translate_status(False), 1.0)
                 Clock.schedule_once(_finish)
 
             def _on_error(err):
                 def _show_err(dt, e=err):
-                    self.streaming_text += f'\n[color=ff4444]Error: {e}[/color]'
+                    if self._stream_label:
+                        self._stream_label.text += f'\n[color=ff4444]Error: {e}[/color]'
                     self.is_translating = False
+                    self._show_translate_status(False)
                 Clock.schedule_once(_show_err)
 
             translate_chapter_streaming(
-                chapter_text=chapter_text,
+                raw_html=raw_html,
                 config_data=config_data,
                 on_chunk=_on_chunk,
                 on_thinking=_on_thinking,
@@ -1096,8 +1069,12 @@ class ReaderScreen(MDScreen):
         except Exception as e:
             import traceback
             err_msg = str(e)
-            Clock.schedule_once(lambda dt, m=err_msg: setattr(self, 'streaming_text', self.streaming_text + f'\n[color=ff4444]{m}[/color]'))
-            Clock.schedule_once(lambda dt: setattr(self, 'is_translating', False))
+            def _show_err(dt, m=err_msg):
+                if self._stream_label:
+                    self._stream_label.text += f'\n[color=ff4444]{m}[/color]'
+                self.is_translating = False
+                self._show_translate_status(False)
+            Clock.schedule_once(_show_err)
 
     def _stop_translation(self):
         """Cancel an in-progress translation."""
@@ -1113,24 +1090,17 @@ class ReaderScreen(MDScreen):
         except Exception:
             pass
         self.is_translating = False
-        self.streaming_text += '\n[color=ffaa00]Translation cancelled.[/color]'
+        if self._stream_label:
+            self._stream_label.text += '\n[color=ffaa00]Translation cancelled.[/color]'
+        self._show_translate_status(False)
 
-    def _show_stream_panel(self, show):
-        """Animate the streaming output panel."""
-        panel = self.ids.stream_panel
+    def _show_translate_status(self, show):
+        """Animate the thin translate status bar."""
+        bar = self.ids.translate_status_bar
         if show:
-            Animation(height=dp(160), opacity=1, d=0.25).start(panel)
+            Animation(height=dp(36), opacity=1, d=0.2).start(bar)
         else:
-            Animation(height=0, opacity=0, d=0.2).start(panel)
-
-    def _toggle_thinking_panel(self):
-        """Show/hide the thinking terminal."""
-        self.show_thinking = not self.show_thinking
-        panel = self.ids.thinking_panel
-        if self.show_thinking:
-            Animation(height=dp(160), opacity=1, d=0.2).start(panel)
-        else:
-            Animation(height=0, opacity=0, d=0.15).start(panel)
+            Animation(height=0, opacity=0, d=0.15).start(bar)
 
     # ── Translation cache ──
 

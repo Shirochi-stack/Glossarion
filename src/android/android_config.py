@@ -57,6 +57,8 @@ DEFAULT_CONFIG = {
     'reading_progress': {},  # {file_path: {chapter, scroll_pos, percent}}
     'reader_default_language': 'ko',         # 'ko' or 'en' — which view opens by default
     'reader_stream_translation': True,       # show streaming output during translation
+    'reader_enable_thinking': False,         # enable LLM thinking/reasoning for reader translation
+    'reader_enable_glossary': False,         # load glossary terms for reader translation
 
     # Library settings
     'library_scan_dirs': [],
