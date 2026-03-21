@@ -570,21 +570,13 @@ class EpubLibraryDialog(QDialog):
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
-        self._first_show = True
         self._setup_ui()
+        self._load_books()
         # Auto-refresh library every 2 seconds
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(2000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh)
         self._auto_refresh_timer.start()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if self._first_show:
-            self._first_show = False
-            self._load_books()
-        elif self._cards:
-            self._load_books()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
