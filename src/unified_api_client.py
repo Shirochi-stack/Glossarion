@@ -6410,8 +6410,8 @@ class UnifiedClient:
                     import traceback
                     http_status = getattr(e, "http_status", None)
                     error_str_lower = str(e).lower()
-                    # For transient errors (rate limit / server), show full error but skip noisy traceback.
-                    if http_status in (429, 500, 502, 503, 504) or '429' in error_str_lower or ('resource' in error_str_lower and 'exhausted' in error_str_lower):
+                    # For transient / deterministic errors, show the message but skip the noisy traceback.
+                    if http_status in (400, 429, 500, 502, 503, 504) or '429' in error_str_lower or ('resource' in error_str_lower and 'exhausted' in error_str_lower):
                         print(f"{log_prefix} ❌ UnifiedClientError: {e}")
                         continue
                     tb = traceback.format_exc()
@@ -6685,7 +6685,7 @@ class UnifiedClient:
                     if ue.error_type == "cancelled":
                         raise ue
                     
-                    # For other client errors, log and continue to next key
+                    # For client errors, log the message (no traceback — these are deterministic API rejections)
                     print(f"[FALLBACK DIRECT {idx+1}] ❌ UnifiedClientError: {ue}")
                     continue
 
