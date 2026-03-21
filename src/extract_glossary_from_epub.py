@@ -3993,22 +3993,28 @@ def main(log_callback=None, stop_callback=None):
                                         glossary.append(entry)
                                 
                                 # Check if this was actually a failure (empty/refused content)
-                                _resp_text = resp or ''
-                                _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
-                                
-                                if _is_empty_failure:
-                                    print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                                    if idx not in failed:
-                                        failed.append(idx)
-                                else:
+                                # BUT skip this check for merged children — they intentionally have
+                                # empty data/resp because their content was processed via the parent chapter
+                                if 'merged_into' in result:
+                                    # Merged child: content was handled by parent, just mark completed
                                     completed.append(idx)
+                                else:
+                                    _resp_text = resp or ''
+                                    _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
                                     
-                                    # Mark truncated chapters as failed so they get retried
-                                    ch_finish = result.get('finish_reason', 'stop')
-                                    if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
-                                        print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                    if _is_empty_failure:
+                                        print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
                                         if idx not in failed:
                                             failed.append(idx)
+                                    else:
+                                        completed.append(idx)
+                                        
+                                        # Mark truncated chapters as failed so they get retried
+                                        ch_finish = result.get('finish_reason', 'stop')
+                                        if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                            print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                            if idx not in failed:
+                                                failed.append(idx)
                                 
                                 # Store history for parent chapter only
                                 if contextual_enabled and resp and chap and 'merged_into' not in result:
