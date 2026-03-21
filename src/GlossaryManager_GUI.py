@@ -89,6 +89,18 @@ class GlossaryManagerMixin:
 
     def glossary_manager(self):
         """Open comprehensive glossary management dialog"""
+        # Reuse existing dialog if it hasn't been destroyed
+        if hasattr(self, '_glossary_dialog') and self._glossary_dialog is not None:
+            try:
+                # Dialog still alive — just bring it back
+                self._glossary_dialog.show()
+                self._glossary_dialog.raise_()
+                self._glossary_dialog.activateWindow()
+                return
+            except RuntimeError:
+                # Underlying C++ object deleted; fall through to create a new one
+                self._glossary_dialog = None
+
         # Create PySide6 dialog parented to the main translator window
         dialog = QDialog(self)
         dialog.setWindowTitle("Glossary Settings")
@@ -99,6 +111,24 @@ class GlossaryManagerMixin:
         # Qt.Window flag gives it its own taskbar entry and standard window buttons.
         dialog.setModal(False)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.Window)
+
+        # Override closeEvent so the dialog hides instead of being destroyed
+        # while the parent translator window is still open
+        def _hide_on_close(event):
+            try:
+                parent = dialog.parent()
+                if parent is not None and parent.isVisible():
+                    dialog.hide()
+                    event.ignore()
+                    return
+            except RuntimeError:
+                pass
+            # Parent gone — allow normal close / destruction
+            event.accept()
+        dialog.closeEvent = _hide_on_close
+
+        # Keep a reference so we can reuse it
+        self._glossary_dialog = dialog
         
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
@@ -743,7 +773,7 @@ class GlossaryManagerMixin:
                 
                 self.append_log("✅ Glossary settings saved successfully")
                 self.append_log("✅ Environment variables reinitialized")
-                dialog.accept()
+                dialog.hide()
                 
             except Exception as e:
                 import traceback
@@ -759,7 +789,7 @@ class GlossaryManagerMixin:
         control_layout.addWidget(save_button)
         
         cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(dialog.reject)
+        cancel_button.clicked.connect(dialog.hide)
         cancel_button.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
         control_layout.addWidget(cancel_button)
         
