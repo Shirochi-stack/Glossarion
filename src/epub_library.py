@@ -559,9 +559,8 @@ class EpubLibraryDialog(QDialog):
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
+        self._first_show = True
         self._setup_ui()
-        # Defer initial load so the dialog has its correct width when populating the grid
-        QTimer.singleShot(0, self._load_books)
         # Auto-refresh library every 2 seconds
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(2000)
@@ -570,8 +569,10 @@ class EpubLibraryDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Reflow grid after show to fix column count with correct width
-        if self._cards:
+        if self._first_show:
+            self._first_show = False
+            self._load_books()
+        elif self._cards:
             preset = _SIZE_PRESETS[self._card_size]
             cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
             self._reflow_grid(cols)
@@ -689,14 +690,14 @@ class EpubLibraryDialog(QDialog):
         refresh_btn.clicked.connect(self._load_books)
         header.addWidget(refresh_btn)
 
-        # Subtle toggle to force-show the organize banner
+        # Toggle to show/hide the organize banner
         self._banner_toggle = QPushButton("↕")
-        self._banner_toggle.setToolTip("Show/hide organize banner")
-        self._banner_toggle.setFixedSize(24, 24)
+        self._banner_toggle.setToolTip("Show/hide the organize & undo banner")
+        self._banner_toggle.setFixedSize(28, 28)
         self._banner_toggle.setCursor(Qt.PointingHandCursor)
         self._banner_toggle.setStyleSheet(
-            "QPushButton { background: transparent; border: none; font-size: 10pt; "
-            "color: #555; padding: 0; }"
+            "QPushButton { background: transparent; border: none; font-size: 12pt; "
+            "color: #aaa; padding: 0; }"
             "QPushButton:hover { color: #e0e0e0; }")
         self._banner_toggle.clicked.connect(self._toggle_banner)
         header.addWidget(self._banner_toggle)
