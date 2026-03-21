@@ -6,8 +6,22 @@ Encrypts only specific API key fields including multi-key support
 import os
 import json
 import base64
-from cryptography.fernet import Fernet
 from pathlib import Path
+
+try:
+    from cryptography.fernet import Fernet
+    _HAS_CRYPTOGRAPHY = True
+except ImportError:
+    _HAS_CRYPTOGRAPHY = False
+    Fernet = None
+
+
+class _NullCipher:
+    """Passthrough cipher when cryptography is unavailable — no encryption."""
+    def encrypt(self, data: bytes) -> bytes:
+        return base64.b64encode(data)
+    def decrypt(self, token: bytes) -> bytes:
+        return base64.b64decode(token)
 
 
 class APIKeyEncryption:
@@ -15,6 +29,24 @@ class APIKeyEncryption:
     
     def __init__(self):
         import sys
+        try:
+            self._init_cipher(sys)
+        except Exception as e:
+            # Absolute last resort: if anything goes wrong, use a null cipher
+            # so the app doesn't crash on startup
+            print(f"⚠️ API key encryption init failed ({e}) — keys will not be encrypted")
+            self.cipher = _NullCipher() if not _HAS_CRYPTOGRAPHY else Fernet(Fernet.generate_key())
+            self.key_file = None
+        
+        # Define which fields to encrypt
+        self.api_key_fields = [
+            'api_key',
+            'replicate_api_key',
+            # Add more field names here if needed
+        ]
+    
+    def _init_cipher(self, sys):
+        """Initialize cipher with proper error handling."""
         # Determine writable directory for the encryption key file
         if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
             # macOS .app bundles: Contents/MacOS/ is read-only on DMGs
@@ -28,30 +60,36 @@ class APIKeyEncryption:
         # On macOS use a plain .txt file (easier to find/manage)
         if sys.platform == 'darwin':
             self.key_file = _app_dir / 'glossarion_key.txt'
+            # Auto-migrate old .glossarion_key → glossarion_key.txt
+            old_key = _app_dir / '.glossarion_key'
+            if old_key.exists() and not self.key_file.exists():
+                try:
+                    old_key.rename(self.key_file)
+                    print(f"✅ Migrated encryption key: .glossarion_key → glossarion_key.txt")
+                except Exception:
+                    pass
         else:
             self.key_file = _app_dir / '.glossarion_key'
         self.cipher = self._get_or_create_cipher()
-        
-        # Define which fields to encrypt
-        self.api_key_fields = [
-            'api_key',
-            'replicate_api_key',
-            # Add more field names here if needed
-        ]
     
     def _get_or_create_cipher(self):
         """Get existing cipher or create new one"""
-        if self.key_file.exists():
+        if not _HAS_CRYPTOGRAPHY:
+            print("⚠️ cryptography package not installed — using passthrough (keys stored unencrypted)")
+            return _NullCipher()
+        
+        if self.key_file and self.key_file.exists():
             try:
                 key = self.key_file.read_bytes()
                 return Fernet(key)
-            except:
+            except Exception:
                 pass
         
         # Generate new key
         key = Fernet.generate_key()
         try:
-            self.key_file.write_bytes(key)
+            if self.key_file:
+                self.key_file.write_bytes(key)
         except OSError:
             # Fallback: write to home directory if primary path is read-only
             try:
@@ -186,16 +224,41 @@ _handler = None
 def get_handler():
     global _handler
     if _handler is None:
-        _handler = APIKeyEncryption()
+        try:
+            _handler = APIKeyEncryption()
+        except Exception as e:
+            print(f"⚠️ Failed to create encryption handler: {e}")
+            # Return a safe no-op handler
+            _handler = _NullHandler()
     return _handler
+
+
+class _NullHandler:
+    """No-op handler that passes config through unchanged."""
+    api_key_fields = ['api_key', 'replicate_api_key']
+    def encrypt_config(self, config):
+        return config
+    def decrypt_config(self, config):
+        return config
+    def encrypt_value(self, value):
+        return value
+    def decrypt_value(self, value):
+        return value
+
 
 def encrypt_config(config):
     """Encrypt API keys in config"""
-    return get_handler().encrypt_config(config)
+    try:
+        return get_handler().encrypt_config(config)
+    except Exception:
+        return config
 
 def decrypt_config(config):
     """Decrypt API keys in config"""
-    return get_handler().decrypt_config(config)
+    try:
+        return get_handler().decrypt_config(config)
+    except Exception:
+        return config
 
 def migrate_config_file(config_file='config.json'):
     """Migrate existing config to encrypted format"""
