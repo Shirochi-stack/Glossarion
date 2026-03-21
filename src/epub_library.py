@@ -1059,7 +1059,7 @@ class EpubReaderDialog(QDialog):
 
         # Layout mode dropdown
         self._layout_combo = QComboBox()
-        self._layout_combo.addItems(["📄 Single Page", "📖 Double Page", "📜 Scroll", "📃 Scroll All"])
+        self._layout_combo.addItems(["📄 Single Page", "📖 Double Page (broken)", "📜 Scroll", "📃 Scroll All"])
         self._layout_combo.setFixedWidth(145)
         self._layout_combo.setCursor(Qt.PointingHandCursor)
         self._layout_combo.setStyleSheet("""
@@ -1670,13 +1670,48 @@ class EpubReaderDialog(QDialog):
             )
 
     def resizeEvent(self, event):
-        """Invalidate page cache on resize so page count recalculates."""
+        """Invalidate page cache on resize, preserving reading position."""
         super().resizeEvent(event)
         if not hasattr(self, '_chapter_page_cache'):
             return
+        # Save scroll proportion before clearing cache
+        old_count = self._chapter_page_cache.get(self._current_row, 0)
+        old_page = self._current_page
         self._chapter_page_cache.clear()
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and self._chapters:
-            QTimer.singleShot(100, lambda: self._finalize_single_page() if self._layout_mode == LAYOUT_SINGLE else self._finalize_double_page())
+            # Proportion-based: map old position to new page count
+            proportion = old_page / max(1, old_count) if old_count > 0 else 0
+            def _on_resize_recount():
+                if self._layout_mode == LAYOUT_SINGLE:
+                    def on_count(count):
+                        count = int(count)
+                        self._chapter_page_cache[self._current_row] = count
+                        self._current_page = min(max(0, round(proportion * count)), count - 1)
+                        # Disable transition during resize to prevent shuffle
+                        self._reader.page().runJavaScript(
+                            "var c = document.getElementById('columns'); if (c) c.style.transition = 'none';")
+                        self._js_scroll_to(self._reader, self._current_page)
+                        # Re-enable transition after a frame
+                        QTimer.singleShot(50, lambda: self._reader.page().runJavaScript(
+                            "var c = document.getElementById('columns'); if (c) c.style.transition = 'transform 0.25s ease';"))
+                        self._update_nav_buttons()
+                    self._js_page_count(self._reader, on_count)
+                else:
+                    def on_count(count):
+                        count = int(count)
+                        self._chapter_page_cache[self._current_row] = count
+                        self._current_page = min(max(0, round(proportion * count)), count - 1)
+                        for br in (self._reader_left, self._reader_right):
+                            br.page().runJavaScript(
+                                "var c = document.getElementById('columns'); if (c) c.style.transition = 'none';")
+                        self._js_scroll_to(self._reader_left, self._current_page)
+                        self._js_scroll_to(self._reader_right, self._current_page + 1)
+                        QTimer.singleShot(50, lambda: [br.page().runJavaScript(
+                            "var c = document.getElementById('columns'); if (c) c.style.transition = 'transform 0.25s ease';")
+                            for br in (self._reader_left, self._reader_right)])
+                        self._update_nav_buttons()
+                    self._js_page_count(self._reader_left, on_count)
+            QTimer.singleShot(100, _on_resize_recount)
 
     def _update_nav_buttons(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
