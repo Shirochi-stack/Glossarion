@@ -18242,7 +18242,7 @@ Important rules:
                 ('epub_reader_font_size', [('config', 'epub_reader_font_size')], 12, int),
                 ('epub_reader_line_spacing', [('config', 'epub_reader_line_spacing')], 1.6, float),
                 ('epub_reader_theme', [('config', 'epub_reader_theme')], 0, int),
-                ('epub_reader_layout', [('config', 'epub_reader_layout')], 'scroll', str),
+                ('epub_reader_layout', [('config', 'epub_reader_layout')], 'single_page', str),
                 # EPUB library settings (persisted by EpubLibraryDialog.closeEvent)
                 ('epub_library_sort', [('config', 'epub_library_sort')], 'date', str),
                 ('epub_library_card_size', [('config', 'epub_library_card_size')], 'compact', str),
