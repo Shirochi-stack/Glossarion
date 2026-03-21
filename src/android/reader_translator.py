@@ -85,11 +85,13 @@ def _setup_thinking_env(config_data):
     is_claude = 'claude' in model
 
     if is_gemini:
-        # Gemini always gets minimal thinking by default
+        # Gemini always gets thinking; control the LEVEL
         os.environ['ENABLE_THINKING'] = '1'
         if enable_thinking:
+            os.environ['GEMINI_THINKING_LEVEL'] = 'high'
             os.environ['GEMINI_THINKING_BUDGET'] = '8192'
         else:
+            os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
             os.environ['GEMINI_THINKING_BUDGET'] = '1024'
         os.environ['EXTENDED_THINKING'] = '0'
     elif is_gpt:

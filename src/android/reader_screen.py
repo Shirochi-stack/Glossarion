@@ -93,7 +93,7 @@ KV = '''
             # KO / EN pill toggle
             BoxLayout:
                 size_hint: None, None
-                size: dp(76), dp(30)
+                size: dp(60), dp(28)
                 pos_hint: {"center_y": 0.5}
                 spacing: 0
                 canvas.before:
@@ -102,13 +102,13 @@ KV = '''
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
-                        radius: [dp(15)]
+                        radius: [dp(14)]
 
                 MDFlatButton:
                     id: btn_ko
                     text: "KO"
                     size_hint: 0.5, 1
-                    font_size: sp(11)
+                    font_size: sp(10)
                     theme_text_color: "Custom"
                     text_color: [1,1,1,1] if root.viewing_language == 'ko' else [0.5,0.5,0.5,1]
                     md_bg_color: [0.35, 0.35, 0.42, 1] if root.viewing_language == 'ko' else [0,0,0,0]
@@ -118,7 +118,7 @@ KV = '''
                     id: btn_en
                     text: "EN"
                     size_hint: 0.5, 1
-                    font_size: sp(11)
+                    font_size: sp(10)
                     theme_text_color: "Custom"
                     text_color: [1,1,1,1] if root.viewing_language == 'en' else [0.5,0.5,0.5,1]
                     md_bg_color: [0.35, 0.35, 0.42, 1] if root.viewing_language == 'en' else [0,0,0,0]
