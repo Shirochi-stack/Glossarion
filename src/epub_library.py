@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QApplication, QMenu, QComboBox, QStackedWidget
 )
 from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer, QSizeF
-from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence
+from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,50 @@ def _cover_cache_dir() -> str:
     d = os.path.join(tempfile.gettempdir(), "Glossarion_CoverCache")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _epub_cache_dir() -> str:
+    d = os.path.join(tempfile.gettempdir(), "Glossarion_EpubCache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _epub_cache_key(epub_path: str) -> str:
+    """Generate a cache key from path + file modification time."""
+    try:
+        mtime = os.path.getmtime(epub_path)
+    except OSError:
+        mtime = 0
+    raw = f"{epub_path}|{mtime}".encode("utf-8")
+    return hashlib.md5(raw).hexdigest()[:16]
+
+
+def _load_epub_cache(epub_path: str):
+    """Try to load cached EPUB data. Returns (chapters, images) or None."""
+    import pickle
+    try:
+        key = _epub_cache_key(epub_path)
+        cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
+        if os.path.isfile(cache_file):
+            with open(cache_file, "rb") as f:
+                data = pickle.load(f)
+            if isinstance(data, dict) and "chapters" in data and "images" in data:
+                return data["chapters"], data["images"]
+    except Exception:
+        pass
+    return None
+
+
+def _save_epub_cache(epub_path: str, chapters, images):
+    """Save parsed EPUB data to disk cache."""
+    import pickle
+    try:
+        key = _epub_cache_key(epub_path)
+        cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
+        with open(cache_file, "wb") as f:
+            pickle.dump({"chapters": chapters, "images": images}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
 
 def _find_halgakos_icon() -> str | None:
@@ -1051,18 +1095,28 @@ class EpubReaderDialog(QDialog):
         self._loading_widget = QWidget()
         loading_layout = QVBoxLayout(self._loading_widget)
         loading_layout.setAlignment(Qt.AlignCenter)
-        # Spinning icon via animated label
-        loading_icon = QLabel()
+        # Spinning icon via QTimer rotation
+        self._spin_label = QLabel()
         icon_path = _find_halgakos_icon()
         if icon_path:
             pm = QPixmap(icon_path)
             if not pm.isNull():
-                loading_icon.setPixmap(pm.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._spin_pixmap = pm.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._spin_label.setPixmap(self._spin_pixmap)
+            else:
+                self._spin_pixmap = None
         else:
-            loading_icon.setText("📖")
-            loading_icon.setStyleSheet("font-size: 32pt;")
-        loading_icon.setAlignment(Qt.AlignCenter)
-        loading_layout.addWidget(loading_icon)
+            self._spin_pixmap = None
+        if not self._spin_pixmap:
+            self._spin_label.setText("📖")
+            self._spin_label.setStyleSheet("font-size: 32pt;")
+        self._spin_label.setAlignment(Qt.AlignCenter)
+        self._spin_label.setFixedSize(72, 72)
+        loading_layout.addWidget(self._spin_label, 0, Qt.AlignCenter)
+        self._spin_angle = 0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(30)  # ~33 fps
+        self._spin_timer.timeout.connect(self._rotate_spinner)
         loading_text = QLabel("Loading EPUB…")
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 8px;")
@@ -1190,18 +1244,37 @@ class EpubReaderDialog(QDialog):
             "QPushButton:hover { background: #3a3a5e; }")
         return btn
 
+    def _rotate_spinner(self):
+        """Rotate the Halgakos icon by 5° each tick."""
+        if self._spin_pixmap:
+            self._spin_angle = (self._spin_angle + 5) % 360
+            t = QTransform().rotate(self._spin_angle)
+            rotated = self._spin_pixmap.transformed(t, Qt.SmoothTransformation)
+            # Center the rotated pixmap in the label
+            self._spin_label.setPixmap(rotated)
+
     # ── Loading ────────────────────────────────────────────────────────────
 
     def _start_loading(self):
         self._toolbar_widget.hide()
         self._loading_widget.show()
         self._content_widget.hide()
+        self._spin_angle = 0
+        self._spin_timer.start()
+        # Try cache first
+        cached = _load_epub_cache(self._epub_path)
+        if cached:
+            QTimer.singleShot(0, lambda: self._on_epub_loaded(cached[0], cached[1]))
+            return
         self._loader_thread = _EpubLoaderThread(self._epub_path, self)
         self._loader_thread.finished.connect(self._on_epub_loaded)
         self._loader_thread.error.connect(self._on_epub_error)
         self._loader_thread.start()
 
     def _on_epub_loaded(self, chapters, images):
+        self._spin_timer.stop()
+        # Save to cache for next time
+        _save_epub_cache(self._epub_path, chapters, images)
         self._chapters = chapters
         self._images = images
         self._chapter_page_cache = {}  # {chapter_index: page_count}
@@ -1238,6 +1311,7 @@ class EpubReaderDialog(QDialog):
         return (offset + self._current_page + 1, total)
 
     def _on_epub_error(self, error_msg):
+        self._spin_timer.stop()
         self._toolbar_widget.show()
         self._loading_widget.hide()
         self._content_widget.show()
