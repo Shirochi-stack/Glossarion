@@ -856,8 +856,13 @@ class EpubLibraryDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 class _EpubLoaderThread(QThread):
-    """Load the EPUB in a background thread so the UI stays responsive."""
-    finished = Signal(list, dict)       # (chapters, images)
+    """Load the EPUB in a background thread and write result to cache.
+
+    Emitting large binary data (images) through Qt signals across threads
+    can crash the GUI.  Instead, write to a cache file and emit a
+    lightweight success signal.
+    """
+    done = Signal()          # success — data available via cache
     error = Signal(str)
 
     def __init__(self, epub_path: str, parent=None):
@@ -908,7 +913,9 @@ class _EpubLoaderThread(QThread):
                 except Exception:
                     logger.debug("Skipped chapter: %s", traceback.format_exc())
 
-            self.finished.emit(chapters, images)
+            # Write to cache (avoids emitting large data through Qt signals)
+            _save_epub_cache(self._epub_path, chapters, images)
+            self.done.emit()
         except Exception as exc:
             logger.error("EPUB load error: %s\n%s", exc, traceback.format_exc())
             self.error.emit(f"{exc}\n\n{traceback.format_exc()}")
@@ -1128,12 +1135,24 @@ class EpubReaderDialog(QDialog):
         loading_layout.addWidget(self._spin_label, 0, Qt.AlignCenter)
         self._spin_angle = 0
         self._spin_timer = QTimer(self)
-        self._spin_timer.setInterval(30)  # ~33 fps
+        self._spin_timer.setInterval(25)  # ~40 fps
         self._spin_timer.timeout.connect(self._rotate_spinner)
         loading_text = QLabel("Loading EPUB…")
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 8px;")
         loading_layout.addWidget(loading_text)
+        # Indeterminate progress bar
+        from PySide6.QtWidgets import QProgressBar
+        self._loading_bar = QProgressBar()
+        self._loading_bar.setRange(0, 0)  # indeterminate
+        self._loading_bar.setFixedWidth(220)
+        self._loading_bar.setFixedHeight(6)
+        self._loading_bar.setTextVisible(False)
+        self._loading_bar.setStyleSheet("""
+            QProgressBar { background: #2a2a2a; border: none; border-radius: 3px; }
+            QProgressBar::chunk { background: #6c63ff; border-radius: 3px; }
+        """)
+        loading_layout.addWidget(self._loading_bar, 0, Qt.AlignCenter)
         self._loading_widget.setStyleSheet("background: #1e1e1e;")
         root.addWidget(self._loading_widget)
 
@@ -1268,12 +1287,11 @@ class EpubReaderDialog(QDialog):
         return btn
 
     def _rotate_spinner(self):
-        """Rotate the Halgakos icon by 5° each tick."""
+        """Rotate the Halgakos icon by 15° each tick."""
         if self._spin_pixmap:
-            self._spin_angle = (self._spin_angle + 5) % 360
+            self._spin_angle = (self._spin_angle + 15) % 360
             t = QTransform().rotate(self._spin_angle)
-            rotated = self._spin_pixmap.transformed(t, Qt.SmoothTransformation)
-            # Center the rotated pixmap in the label
+            rotated = self._spin_pixmap.transformed(t, Qt.FastTransformation)
             self._spin_label.setPixmap(rotated)
 
     # ── Loading ────────────────────────────────────────────────────────────
@@ -1287,17 +1305,23 @@ class EpubReaderDialog(QDialog):
         # Try cache first
         cached = _load_epub_cache(self._epub_path)
         if cached:
-            QTimer.singleShot(0, lambda: self._on_epub_loaded(cached[0], cached[1]))
+            QTimer.singleShot(0, lambda: self._on_epub_loaded_from_cache(cached[0], cached[1]))
             return
         self._loader_thread = _EpubLoaderThread(self._epub_path, self)
-        self._loader_thread.finished.connect(self._on_epub_loaded)
+        self._loader_thread.done.connect(self._on_loader_done)
         self._loader_thread.error.connect(self._on_epub_error)
         self._loader_thread.start()
 
-    def _on_epub_loaded(self, chapters, images):
+    def _on_loader_done(self):
+        """Loader finished — read data from cache file (avoids large signal data)."""
+        cached = _load_epub_cache(self._epub_path)
+        if cached:
+            self._on_epub_loaded_from_cache(cached[0], cached[1])
+        else:
+            self._on_epub_error("Failed to read EPUB cache after loading.")
+
+    def _on_epub_loaded_from_cache(self, chapters, images):
         self._spin_timer.stop()
-        # Save to cache for next time
-        _save_epub_cache(self._epub_path, chapters, images)
         self._chapters = chapters
         self._images = images
         self._chapter_page_cache = {}  # {chapter_index: page_count}
