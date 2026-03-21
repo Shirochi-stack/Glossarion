@@ -293,7 +293,8 @@ class _BookCard(QFrame):
         self.setFixedWidth(self._card_w)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("""
-            _BookCard { background: #1e1e2e; border: 1px solid #2a2a3e; border-radius: 6px; }
+            _BookCard { background: #1e1e2e; border: 1px solid #2a2a3e; border-radius: 6px;
+                transition: all 0.3s ease; }
             _BookCard:hover { border: 1px solid #6c63ff; background: #252540; }
         """)
 
@@ -388,6 +389,11 @@ class EpubLibraryDialog(QDialog):
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
         self._setup_ui()
         self._load_books()
+        # Auto-refresh library every 2 seconds
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(2000)
+        self._auto_refresh_timer.timeout.connect(self._auto_refresh)
+        self._auto_refresh_timer.start()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
@@ -477,13 +483,14 @@ class EpubLibraryDialog(QDialog):
         self._search.textChanged.connect(self._apply_filter)
         header.addWidget(self._search)
 
-        refresh_btn = QPushButton("🔄")
+        refresh_btn = QPushButton("🔄  Refresh")
         refresh_btn.setToolTip("Refresh library")
-        refresh_btn.setFixedSize(28, 28)
+        refresh_btn.setFixedHeight(28)
         refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.setStyleSheet(
-            "QPushButton { background: #2a2a3e; border-radius: 6px; font-size: 12pt; border: none; }"
-            "QPushButton:hover { background: #3a3a5e; }")
+            "QPushButton { background: transparent; border: none; font-size: 9pt; "
+            "color: #888; padding: 2px 8px; }"
+            "QPushButton:hover { color: #e0e0e0; }")
         refresh_btn.clicked.connect(self._load_books)
         header.addWidget(refresh_btn)
         root.addLayout(header)
@@ -599,6 +606,18 @@ class EpubLibraryDialog(QDialog):
         if query:
             books = [b for b in books if query in b["name"].lower()]
         self._populate_grid(self._sorted_books(books))
+
+    def _auto_refresh(self):
+        """Lightweight auto-refresh: only reload if file list changed."""
+        try:
+            new_books = scan_for_epubs(self._config)
+            new_paths = {b["path"] for b in new_books}
+            old_paths = {b["path"] for b in self._books}
+            if new_paths != old_paths:
+                self._books = new_books
+                self._refresh_view()
+        except Exception:
+            pass
 
     def _load_books(self):
         for t in self._cover_threads:
@@ -1195,6 +1214,8 @@ class EpubReaderDialog(QDialog):
 
         # Page 0: single reader (for scroll, single page, all-scroll)
         self._reader = _make_reader_widget()
+        if _HAS_WEBENGINE:
+            self._reader.loadFinished.connect(self._on_reader_load_finished)
         self._reader_stack.addWidget(self._reader)
 
         # Page 1: double-page layout (two browsers side by side)
@@ -1498,7 +1519,7 @@ class EpubReaderDialog(QDialog):
             for idx, (title, content) in enumerate(self._chapters):
                 processed = self._process_html(content)
                 all_html += f"<h2 style='color: {self._get_theme()['heading']}; border-bottom: 1px solid {self._get_theme()['border']}; padding-bottom: 6px; margin-top: 30px;'>Chapter {idx + 1}: {title}</h2>\n{processed}\n<hr style='border: none; border-top: 1px solid {self._get_theme()['border']}; margin: 20px 0;'>"
-            _set_html(self._reader, self._wrap_html(all_html))
+            _set_html(self._reader, self._wrap_html(all_html, paginated=False))
             self._loaded_chapter = -1
             self._toc_list.blockSignals(True)
             self._toc_list.setCurrentRow(-1)
@@ -1509,14 +1530,14 @@ class EpubReaderDialog(QDialog):
             self._nav_bar.show()
             if row < len(self._chapters):
                 html = self._process_html(self._chapters[row][1])
-                full = self._wrap_html(html)
+                full = self._wrap_html(html, paginated=True)
                 _set_html(self._reader_left, full)
                 _set_html(self._reader_right, full)
                 self._loaded_chapter = row
-                QTimer.singleShot(200, self._finalize_double_page)
+                # finalization happens via loadFinished signal
             else:
-                _set_html(self._reader_left, self._wrap_html(""))
-                _set_html(self._reader_right, self._wrap_html(""))
+                _set_html(self._reader_left, self._wrap_html("", paginated=True))
+                _set_html(self._reader_right, self._wrap_html("", paginated=True))
             self._update_nav_buttons()
 
         elif self._layout_mode == LAYOUT_SINGLE:
@@ -1524,9 +1545,9 @@ class EpubReaderDialog(QDialog):
             self._nav_bar.show()
             if row < len(self._chapters):
                 html = self._process_html(self._chapters[row][1])
-                _set_html(self._reader, self._wrap_html(html))
+                _set_html(self._reader, self._wrap_html(html, paginated=True))
                 self._loaded_chapter = row
-                QTimer.singleShot(200, self._finalize_single_page)
+                # finalization happens via loadFinished signal
             self._update_nav_buttons()
 
         else:  # LAYOUT_SCROLL
@@ -1534,15 +1555,28 @@ class EpubReaderDialog(QDialog):
             self._nav_bar.hide()
             if row < len(self._chapters):
                 html = self._process_html(self._chapters[row][1])
-                _set_html(self._reader, self._wrap_html(html))
+                _set_html(self._reader, self._wrap_html(html, paginated=False))
                 self._loaded_chapter = row
 
-    # ── Pagination helpers ──────────────────────────────────────────────────
+    # ── Pagination helpers (CSS column-based) ───────────────────────────────
+
+    def _on_reader_load_finished(self, ok):
+        """Called when QWebEngineView finishes loading HTML."""
+        if not ok or self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        if self._layout_mode == LAYOUT_SINGLE:
+            self._finalize_single_page()
+        elif self._layout_mode == LAYOUT_DOUBLE:
+            self._finalize_double_page()
 
     def _js_scroll_to(self, browser, page_num):
-        """Scroll browser to the given page."""
+        """Navigate to a CSS column page by translating the #columns wrapper."""
         if _HAS_WEBENGINE:
-            js = f"window.scrollTo(0, {page_num} * window.innerHeight);"
+            js = (
+                f"var c = document.getElementById('columns');"
+                f"var w = _PAGE_W || window.innerWidth;"
+                f"if (c) c.style.transform = 'translateX(' + (-{page_num} * w) + 'px)';"
+            )
             browser.page().runJavaScript(js)
         else:
             vp = browser.viewport()
@@ -1551,9 +1585,13 @@ class EpubReaderDialog(QDialog):
                 browser.verticalScrollBar().setValue(page_num * h)
 
     def _js_page_count(self, browser, callback):
-        """Get page count via JS for WebEngine, QTextDocument for fallback."""
+        """Get page count from CSS column layout (#columns scrollWidth / page width)."""
         if _HAS_WEBENGINE:
-            js = "Math.max(1, Math.ceil(document.body.scrollHeight / window.innerHeight));"
+            js = (
+                "var c = document.getElementById('columns');"
+                "var w = _PAGE_W || window.innerWidth;"
+                "c ? Math.max(1, Math.round(c.scrollWidth / w)) : 1;"
+            )
             browser.page().runJavaScript(js, callback)
         else:
             doc = browser.document()
@@ -1566,7 +1604,7 @@ class EpubReaderDialog(QDialog):
             callback(max(1, doc.pageCount()))
 
     def _finalize_single_page(self):
-        """After HTML load: position page and cache count."""
+        """After HTML load: get page count and scroll to current page."""
         def on_count(count):
             self._chapter_page_cache[self._current_row] = int(count)
             self._js_scroll_to(self._reader, self._current_page)
@@ -1574,7 +1612,7 @@ class EpubReaderDialog(QDialog):
         self._js_page_count(self._reader, on_count)
 
     def _finalize_double_page(self):
-        """After HTML load: position both panes and cache count."""
+        """After HTML load: get page count and position both panes."""
         def on_count(count):
             self._chapter_page_cache[self._current_row] = int(count)
             self._js_scroll_to(self._reader_left, self._current_page)
@@ -1583,15 +1621,24 @@ class EpubReaderDialog(QDialog):
         self._js_page_count(self._reader_left, on_count)
 
     def _scroll_to_page_single(self):
-        """Scroll single-page reader to current page (no HTML reload)."""
+        """Navigate single-page reader to current page."""
         self._js_scroll_to(self._reader, self._current_page)
         self._update_nav_buttons()
 
     def _scroll_to_page_double(self):
-        """Scroll double-page panes to current page (no HTML reload)."""
+        """Navigate double-page panes to current page."""
         self._js_scroll_to(self._reader_left, self._current_page)
         self._js_scroll_to(self._reader_right, self._current_page + 1)
         self._update_nav_buttons()
+
+    def resizeEvent(self, event):
+        """Invalidate page cache on resize so page count recalculates."""
+        super().resizeEvent(event)
+        if not hasattr(self, '_chapter_page_cache'):
+            return
+        self._chapter_page_cache.clear()
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and self._chapters:
+            QTimer.singleShot(100, lambda: self._finalize_single_page() if self._layout_mode == LAYOUT_SINGLE else self._finalize_double_page())
 
     def _update_nav_buttons(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
@@ -1713,26 +1760,68 @@ class EpubReaderDialog(QDialog):
             logger.debug("HTML processing failed: %s", traceback.format_exc())
             return html_content
 
-    def _wrap_html(self, body_html: str) -> str:
-        """Wrap processed HTML in a full styled document."""
+    def _wrap_html(self, body_html: str, paginated: bool = False) -> str:
+        """Wrap processed HTML in a full styled document.
+
+        When *paginated* is True, a proper CSS multi-column layout is used:
+          html/body — zero-padded, overflow:hidden (viewport clip)
+          #columns  — column layout container (translateX for navigation)
+          #content  — inner padding for readability
+        """
         t = self._get_theme()
-        return (
-            f"<html><head><style>"
-            f"body {{ background: {t['bg']}; color: {t['fg']}; "
-            f"font-family: 'Georgia', 'Noto Serif', serif; "
-            f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
-            f"padding: 10px 20px; max-width: 800px; margin: auto; }}"
-            f"h1, h2, h3 {{ color: {t['heading']}; }}"
-            f"img {{ display: block; max-width: 100%; height: auto; "
-            f"border-radius: 4px; margin: 12px auto; }}"
-            f"p {{ margin: 0.6em 0; }}"
-            f"a {{ color: {t['link']}; }}"
-            f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
-            f"::-webkit-scrollbar {{ width: 8px; }}"
-            f"::-webkit-scrollbar-track {{ background: {t['bg']}; }}"
-            f"::-webkit-scrollbar-thumb {{ background: {t['border']}; border-radius: 4px; }}"
-            f"</style></head><body>{body_html}</body></html>"
-        )
+        if paginated:
+            return (
+                f"<html><head><style>"
+                f"* {{ box-sizing: border-box; }}"
+                f"html, body {{ margin: 0; padding: 20px 0; overflow: hidden; "
+                f"background: {t['bg']}; color: {t['fg']}; }}"
+                f"#columns {{ column-fill: auto; column-gap: 0; "
+                f"font-family: 'Georgia', 'Noto Serif', serif; "
+                f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
+                f"#content {{ padding: 20px 40px; }}"
+                f"h1, h2, h3 {{ color: {t['heading']}; }}"
+                f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
+                f"height: auto; object-fit: contain; "
+                f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
+                f"p {{ margin: 0.6em 0; orphans: 2; widows: 2; }}"
+                f"a {{ color: {t['link']}; }}"
+                f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
+                f"</style>"
+                f"<script>"
+                f"var _PAGE_W = 0;"
+                f"function _setupColumns() {{"
+                f"  var c = document.getElementById('columns');"
+                f"  if (!c) return;"
+                f"  _PAGE_W = window.innerWidth;"
+                f"  c.style.columnWidth = _PAGE_W + 'px';"
+                f"  c.style.height = (window.innerHeight - 40) + 'px';"
+                f"  c.style.transform = 'translateX(0px)';"
+                f"}}"
+                f"document.addEventListener('DOMContentLoaded', _setupColumns);"
+                f"window.addEventListener('resize', _setupColumns);"
+                f"</script>"
+                f"</head><body>"
+                f"<div id='columns'><div id='content'>{body_html}</div></div>"
+                f"</body></html>"
+            )
+        else:
+            return (
+                f"<html><head><style>"
+                f"body {{ background: {t['bg']}; color: {t['fg']}; "
+                f"font-family: 'Georgia', 'Noto Serif', serif; "
+                f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
+                f"padding: 10px 20px; margin: 0 auto; }}"
+                f"h1, h2, h3 {{ color: {t['heading']}; }}"
+                f"img {{ display: block; max-width: 100%; height: auto; "
+                f"border-radius: 4px; margin: 12px auto; }}"
+                f"p {{ margin: 0.6em 0; }}"
+                f"a {{ color: {t['link']}; }}"
+                f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
+                f"::-webkit-scrollbar {{ width: 8px; }}"
+                f"::-webkit-scrollbar-track {{ background: {t['bg']}; }}"
+                f"::-webkit-scrollbar-thumb {{ background: {t['border']}; border-radius: 4px; }}"
+                f"</style></head><body>{body_html}</body></html>"
+            )
 
 
 # ---------------------------------------------------------------------------
