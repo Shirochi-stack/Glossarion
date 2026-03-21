@@ -2892,6 +2892,7 @@ Recent translations to summarize:
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
             ('emergency_image_restore_var', 'emergency_image_restore', False),
+            ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', False),
             ('contextual_var', 'contextual', False),
             ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),
@@ -2955,10 +2956,14 @@ Recent translations to summarize:
             ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
             ('break_split_count_var', 'break_split_count', ''),
             ('auto_glossary_mode_var', 'auto_glossary_mode', 'balanced'),
+            ('emergency_glossary_compliance_mode_var', 'emergency_glossary_compliance_mode', 'characters'),
         ]
         
         for var_name, key, default in str_vars:
             setattr(self, var_name, create_var(str, key, str(default)))
+        
+        # Emergency glossary compliance custom types (list)
+        self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
         
         # NEW: Initialize extraction mode variable
         self.extraction_mode_var = self.config.get('extraction_mode', 'smart')
@@ -11109,6 +11114,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var else "0",
             'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var else "0",
             'EMERGENCY_IMAGE_RESTORE': "1" if getattr(self, 'emergency_image_restore_var', False) else "0",
+            'EMERGENCY_GLOSSARY_COMPLIANCE': "1" if getattr(self, 'emergency_glossary_compliance_var', False) else "0",
+            'EMERGENCY_GLOSSARY_COMPLIANCE_MODE': str(getattr(self, 'emergency_glossary_compliance_mode_var', 'characters')),
+            'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES': json.dumps(getattr(self, 'emergency_glossary_compliance_custom_types_var', [])),
             'COMPRESSION_FACTOR': str(self.compression_factor_var),
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
@@ -16376,6 +16384,12 @@ Important rules:
                     "bg": "#1e2636", "accent": "#90a8c8",
                 },
                 {
+                    "key": "emergency_glossary_compliance", "emoji": "📖", "title": "Emergency Glossary Compliance",
+                    "desc": "Pre-edits source text with glossary entries (raw→translated)\nbefore sending to AI for guaranteed name compliance.",
+                    "default": False,
+                    "bg": "#1e3626", "accent": "#90c8a8",
+                },
+                {
                     "key": "request_merging_enabled", "emoji": "🔗", "title": "Request Merging (default 3)",
                     "desc": "Merges multiple chapter requests into 1.\nNot recommended — may degrade translation quality due to increased context.",
                     "default": False,
@@ -16780,6 +16794,10 @@ Important rules:
                     self.config['emergency_image_restore'] = tb_img_restore
                     self.emergency_image_restore_var = tb_img_restore
                     if tb_img_restore: enabled_toggles.append("Emergency Image Restoration")
+                    tb_glossary_compliance = toggle_states.get('emergency_glossary_compliance', False)
+                    self.config['emergency_glossary_compliance'] = tb_glossary_compliance
+                    self.emergency_glossary_compliance_var = tb_glossary_compliance
+                    if tb_glossary_compliance: enabled_toggles.append("Emergency Glossary Compliance")
                     tb_req_merge = toggle_states.get('request_merging_enabled', False)
                     self.config['request_merging_enabled'] = tb_req_merge
                     self.request_merging_enabled_var = tb_req_merge
@@ -18092,6 +18110,9 @@ Important rules:
                 ('skip_txt_title_translation', ['skip_txt_title_translation_var'], False, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
+                ('emergency_glossary_compliance', ['emergency_glossary_compliance_var'], False, bool),
+                ('emergency_glossary_compliance_mode', ['emergency_glossary_compliance_mode_var'], 'characters', str),
+                ('emergency_glossary_compliance_custom_types', ['emergency_glossary_compliance_custom_types_var'], [], list),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
                 ('enable_thoughts', ['enable_thoughts_var'], True, bool),

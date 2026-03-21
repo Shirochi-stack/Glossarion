@@ -4578,6 +4578,8 @@ class BatchTranslationProcessor:
                     # If wait_for_chunks is enabled, continue processing
                 
                 # Build user prompt for this chunk
+                # Apply emergency glossary compliance pre-edit
+                chunk_html = apply_emergency_glossary_compliance(chunk_html, self.out_dir)
                 if total_chunks > 1:
                     chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\\n{chunk_html}")
                     user_prompt = chunk_prompt_template.format(
@@ -5927,6 +5929,9 @@ class BatchTranslationProcessor:
             if getattr(self.config, 'ASSISTANT_PROMPT', '') and self.config.ASSISTANT_PROMPT.strip():
                 assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
 
+            # Apply emergency glossary compliance pre-edit to merged content
+            merged_content = apply_emergency_glossary_compliance(merged_content, self.out_dir)
+
             msgs = [{"role": "system", "content": chapter_system_prompt}] + rolling_summary_msgs + memory_msgs + assistant_prefill_msgs + [
                 {"role": "user", "content": merged_content}
             ]
@@ -6613,6 +6618,150 @@ def find_glossary_file(output_dir):
         if os.path.exists(p):
             return p
     return None
+
+def apply_emergency_glossary_compliance(content, output_dir):
+    """Pre-edit source text by replacing glossary raw_names with translated_names.
+    
+    Reads EMERGENCY_GLOSSARY_COMPLIANCE, EMERGENCY_GLOSSARY_COMPLIANCE_MODE,
+    and EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES env vars to decide what to replace.
+    Supports CSV, token-efficient (parsed), and JSON glossary formats.
+    Returns the modified content (unchanged if feature is disabled or no glossary found).
+    """
+    if os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE", "0") != "1":
+        return content
+    
+    mode = os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters").lower()
+    custom_types = []
+    if mode == "custom":
+        try:
+            custom_types = json.loads(os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES", "[]"))
+        except Exception:
+            custom_types = []
+    
+    glossary_path = find_glossary_file(output_dir)
+    if not glossary_path or not os.path.exists(glossary_path):
+        print("⚠️ Emergency Glossary Compliance: No glossary file found — skipping")
+        return content
+    
+    try:
+        with open(glossary_path, "r", encoding="utf-8") as gf:
+            raw = gf.read()
+    except Exception as e:
+        print(f"⚠️ Emergency Glossary Compliance: Failed to read glossary: {e}")
+        return content
+    
+    # Parse glossary entries as list of (type, raw_name, translated_name)
+    entries = []
+    
+    # Detect format
+    is_json = glossary_path.endswith(".json")
+    is_token_efficient = "=== " in raw and "* " in raw
+    
+    if is_json:
+        # JSON format
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if isinstance(value, dict):
+                        entry_type = value.get("type", "term").lower()
+                        raw_name = value.get("raw_name", value.get("raw", key))
+                        translated = value.get("translated_name", value.get("translated", ""))
+                        if raw_name and translated:
+                            entries.append((entry_type, raw_name, translated))
+                    elif isinstance(value, str) and value:
+                        entries.append(("term", key, value))
+            elif isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict):
+                        entry_type = entry.get("type", "term").lower()
+                        raw_name = entry.get("raw_name", entry.get("raw", ""))
+                        translated = entry.get("translated_name", entry.get("translated", ""))
+                        if raw_name and translated:
+                            entries.append((entry_type, raw_name, translated))
+        except Exception as e:
+            print(f"⚠️ Emergency Glossary Compliance: JSON parse error: {e}")
+    elif is_token_efficient:
+        # Token-efficient / parsed CSV format
+        # === CHARACTERS ===
+        # * TranslatedName (RawName) [gender]: Description
+        current_type = "term"
+        for line in raw.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("=== ") and stripped.endswith(" ==="):
+                # Extract type from section header, e.g. "=== CHARACTERS ===" -> "character"
+                section = stripped[4:-4].strip().lower()
+                if section.endswith("s"):
+                    section = section[:-1]
+                current_type = section
+            elif stripped.startswith("* "):
+                # Parse: * TranslatedName (RawName) [gender]: Description
+                entry_text = stripped[2:]
+                # Extract raw name from parentheses
+                paren_start = entry_text.find("(")
+                paren_end = entry_text.find(")", paren_start) if paren_start != -1 else -1
+                if paren_start != -1 and paren_end != -1:
+                    translated = entry_text[:paren_start].strip()
+                    raw_name = entry_text[paren_start + 1:paren_end].strip()
+                    if raw_name and translated:
+                        entries.append((current_type, raw_name, translated))
+    else:
+        # Raw CSV format: type,raw_name,translated_name[,gender[,description]]
+        import csv as _csv
+        import io as _io
+        reader = _csv.reader(_io.StringIO(raw))
+        header_skipped = False
+        for row in reader:
+            if not row or len(row) < 3:
+                continue
+            if not header_skipped and row[0].strip().lower() == "type":
+                header_skipped = True
+                continue
+            entry_type = row[0].strip().lower()
+            raw_name = row[1].strip()
+            translated = row[2].strip()
+            if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                entries.append((entry_type, raw_name, translated))
+    
+    if not entries:
+        print("⚠️ Emergency Glossary Compliance: No entries parsed from glossary")
+        return content
+    
+    # Filter by mode
+    if mode == "characters":
+        entries = [(t, r, tr) for t, r, tr in entries if t == "character"]
+    elif mode == "custom" and custom_types:
+        allowed = set(t.lower() for t in custom_types)
+        entries = [(t, r, tr) for t, r, tr in entries if t in allowed]
+    # mode == "all" keeps everything
+    
+    if not entries:
+        print(f"⚠️ Emergency Glossary Compliance: No entries match mode '{mode}'")
+        return content
+    
+    # Build replacement map sorted longest-first to avoid partial matches
+    # Deduplicate: if same raw_name appears, keep the first
+    seen = set()
+    replacements = []
+    for entry_type, raw_name, translated in entries:
+        if raw_name not in seen:
+            seen.add(raw_name)
+            replacements.append((raw_name, translated))
+    replacements.sort(key=lambda x: len(x[0]), reverse=True)
+    
+    # Apply replacements
+    count = 0
+    for raw_name, translated in replacements:
+        if raw_name in content:
+            content = content.replace(raw_name, translated)
+            count += 1
+    
+    if count > 0:
+        print(f"🔄 Emergency Glossary Compliance: replaced {count} entries (mode: {mode}, total candidates: {len(replacements)})")
+    else:
+        print(f"🔄 Emergency Glossary Compliance: 0 matches found in content (mode: {mode}, {len(replacements)} candidates)")
+    
+    return content
 
 def clean_memory_artifacts(text):
     """Remove any memory/summary artifacts"""

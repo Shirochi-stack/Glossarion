@@ -6654,6 +6654,177 @@ def _create_processing_options_section(self, parent):
     img_restore_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(img_restore_desc)
     
+    # Emergency Glossary Compliance
+    glossary_compliance_cb = self._create_styled_checkbox("Emergency Glossary Compliance")
+    try:
+        if not hasattr(self, 'emergency_glossary_compliance_var'):
+            self.emergency_glossary_compliance_var = self.config.get('emergency_glossary_compliance', False)
+        glossary_compliance_cb.setChecked(bool(self.emergency_glossary_compliance_var))
+    except Exception:
+        pass
+    
+    # Row for dropdown + configure button
+    glossary_compliance_row = QWidget()
+    glossary_compliance_row_layout = QHBoxLayout(glossary_compliance_row)
+    glossary_compliance_row_layout.setContentsMargins(20, 0, 0, 0)
+    glossary_compliance_row_layout.setSpacing(8)
+    
+    glossary_compliance_mode_combo = QComboBox()
+    glossary_compliance_mode_combo.addItems(["Characters", "All", "Custom"])
+    glossary_compliance_mode_combo.setFixedWidth(140)
+    try:
+        if not hasattr(self, 'emergency_glossary_compliance_mode_var'):
+            self.emergency_glossary_compliance_mode_var = self.config.get('emergency_glossary_compliance_mode', 'characters')
+        mode_map = {'characters': 0, 'all': 1, 'custom': 2}
+        glossary_compliance_mode_combo.setCurrentIndex(mode_map.get(str(self.emergency_glossary_compliance_mode_var).lower(), 0))
+    except Exception:
+        pass
+    self._disable_combobox_mousewheel(glossary_compliance_mode_combo)
+    self._add_combobox_arrow(glossary_compliance_mode_combo)
+    glossary_compliance_row_layout.addWidget(glossary_compliance_mode_combo)
+    
+    glossary_compliance_configure_btn = QPushButton("Configure…")
+    glossary_compliance_configure_btn.setFixedWidth(100)
+    glossary_compliance_configure_btn.setStyleSheet("background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
+    glossary_compliance_configure_btn.setVisible(glossary_compliance_mode_combo.currentIndex() == 2)
+    glossary_compliance_row_layout.addWidget(glossary_compliance_configure_btn)
+    glossary_compliance_row_layout.addStretch()
+    
+    glossary_compliance_desc = QLabel("Pre-edits source text with glossary entries (raw→translated)<br>before sending to AI for guaranteed name compliance")
+    glossary_compliance_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    glossary_compliance_desc.setContentsMargins(20, 0, 0, 5)
+    glossary_compliance_desc.setTextFormat(Qt.RichText)
+    
+    # Initialize custom types list
+    if not hasattr(self, 'emergency_glossary_compliance_custom_types_var'):
+        self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
+    
+    def _on_glossary_compliance_toggle(checked):
+        try:
+            self.emergency_glossary_compliance_var = bool(checked)
+            glossary_compliance_row.setVisible(checked)
+            glossary_compliance_desc.setVisible(checked)
+        except Exception:
+            pass
+    glossary_compliance_cb.toggled.connect(_on_glossary_compliance_toggle)
+    
+    def _on_glossary_compliance_mode_change(index):
+        try:
+            mode_list = ['characters', 'all', 'custom']
+            self.emergency_glossary_compliance_mode_var = mode_list[index]
+            glossary_compliance_configure_btn.setVisible(index == 2)
+        except Exception:
+            pass
+    glossary_compliance_mode_combo.currentIndexChanged.connect(_on_glossary_compliance_mode_change)
+    
+    def _open_glossary_compliance_custom_dialog():
+        """Open dialog to select custom entry types for glossary compliance"""
+        try:
+            from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton, QLabel, QScrollArea, QWidget
+            
+            dlg = QDialog(self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self)
+            dlg.setWindowTitle("Custom Glossary Compliance Types")
+            dlg.setMinimumSize(350, 300)
+            dlg_layout = QVBoxLayout(dlg)
+            
+            dlg_layout.addWidget(QLabel("Select which entry types to pre-edit:"))
+            
+            # Discover types from the glossary file
+            discovered_types = set()
+            try:
+                output_dir = os.environ.get('OUTPUT_DIR', '')
+                if not output_dir:
+                    # Try to derive from selected EPUB
+                    override = os.environ.get('OUTPUT_DIRECTORY', '')
+                    epub_path = os.environ.get('EPUB_PATH', '')
+                    if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
+                        for f in self.selected_files:
+                            if str(f).lower().endswith('.epub'):
+                                epub_path = str(f)
+                                break
+                    if epub_path:
+                        base_name = os.path.splitext(os.path.basename(epub_path))[0]
+                        if override:
+                            output_dir = os.path.join(override, base_name)
+                        else:
+                            output_dir = base_name
+                
+                if output_dir and os.path.isdir(output_dir):
+                    from TransateKRtoEN import find_glossary_file
+                    gpath = find_glossary_file(output_dir)
+                    if gpath and os.path.exists(gpath):
+                        with open(gpath, 'r', encoding='utf-8') as gf:
+                            content = gf.read()
+                        # Parse types from all formats
+                        import re as _re
+                        # Token-efficient: === TYPE ===
+                        for m in _re.finditer(r'^=== (\w+?)S? ===$', content, _re.MULTILINE):
+                            discovered_types.add(m.group(1).lower())
+                        # CSV: type,raw_name,...
+                        for line in content.split('\n'):
+                            line = line.strip()
+                            if line and ',' in line and not line.lower().startswith('type,') and not line.startswith('=') and not line.startswith('*') and not line.startswith('Glossary'):
+                                parts = line.split(',')
+                                if len(parts) >= 3 and _re.match(r'^[a-z_]+$', parts[0].strip()):
+                                    discovered_types.add(parts[0].strip().lower())
+            except Exception:
+                pass
+            
+            # Fallback defaults
+            if not discovered_types:
+                discovered_types = {'character', 'term', 'location', 'ability', 'item', 'organization', 'title', 'book'}
+            
+            # Sort: character first, then alphabetical
+            type_list = sorted(discovered_types, key=lambda t: (0 if t == 'character' else 1, t))
+            
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll_widget = QWidget()
+            scroll_layout = QVBoxLayout(scroll_widget)
+            
+            current_custom = list(self.emergency_glossary_compliance_custom_types_var or [])
+            type_checkboxes = {}
+            for entry_type in type_list:
+                cb = self._create_styled_checkbox(entry_type.capitalize())
+                cb.setChecked(entry_type in current_custom)
+                scroll_layout.addWidget(cb)
+                type_checkboxes[entry_type] = cb
+            scroll_layout.addStretch()
+            scroll.setWidget(scroll_widget)
+            dlg_layout.addWidget(scroll)
+            
+            btn_row = QHBoxLayout()
+            save_btn = QPushButton("Save")
+            save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 16px;")
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 6px 16px;")
+            btn_row.addStretch()
+            btn_row.addWidget(save_btn)
+            btn_row.addWidget(cancel_btn)
+            dlg_layout.addLayout(btn_row)
+            
+            def _save_custom():
+                selected = [t for t, cb in type_checkboxes.items() if cb.isChecked()]
+                self.emergency_glossary_compliance_custom_types_var = selected
+                dlg.accept()
+            save_btn.clicked.connect(_save_custom)
+            cancel_btn.clicked.connect(dlg.reject)
+            dlg.exec()
+        except Exception as e:
+            print(f"Error opening custom glossary compliance dialog: {e}")
+    
+    glossary_compliance_configure_btn.clicked.connect(_open_glossary_compliance_custom_dialog)
+    
+    # Initial visibility
+    is_enabled = glossary_compliance_cb.isChecked()
+    glossary_compliance_row.setVisible(is_enabled)
+    glossary_compliance_desc.setVisible(is_enabled)
+    
+    glossary_compliance_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(glossary_compliance_cb)
+    left_v.addWidget(glossary_compliance_row)
+    left_v.addWidget(glossary_compliance_desc)
+    
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
     try:
