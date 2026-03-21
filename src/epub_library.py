@@ -1792,6 +1792,7 @@ class EpubReaderDialog(QDialog):
                 f"html, body {{ margin: 0; padding: 20px 0; overflow: hidden; "
                 f"background: {t['bg']}; color: {t['fg']}; }}"
                 f"#columns {{ column-fill: auto; column-gap: 0; "
+                f"transition: transform 0.3s ease; "
                 f"font-family: 'Georgia', 'Noto Serif', serif; "
                 f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 20px 40px; }}"
