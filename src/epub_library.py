@@ -52,6 +52,31 @@ def get_library_dir() -> str:
     return str(docs)
 
 
+def _origins_file() -> str:
+    """Path to the library origins mapping file."""
+    return os.path.join(get_library_dir(), "library_origins.txt")
+
+
+def _load_origins() -> dict[str, str]:
+    """Load {library_basename: original_source_path} mapping."""
+    import json
+    try:
+        with open(_origins_file(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_origins(origins: dict[str, str]):
+    """Save the origins mapping."""
+    import json
+    try:
+        with open(_origins_file(), "w", encoding="utf-8") as f:
+            json.dump(origins, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
+
+
 def _cover_cache_dir() -> str:
     d = os.path.join(tempfile.gettempdir(), "Glossarion_CoverCache")
     os.makedirs(d, exist_ok=True)
@@ -251,6 +276,14 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
     _walk(app_dir)
 
     results.sort(key=lambda r: r["mtime"], reverse=True)
+
+    # Attach original source paths for files that were moved to Library
+    origins = _load_origins()
+    for r in results:
+        basename = os.path.basename(r["path"])
+        if basename in origins:
+            r["original_path"] = origins[basename]
+
     return results
 
 
@@ -287,16 +320,16 @@ _SIZE_PRESETS = {
 }
 
 
-def _find_folder_cover(file_path: str) -> str | None:
-    """Find a cover image in the same directory as a PDF/TXT file.
+def _find_folder_cover(file_path: str, config: dict | None = None, original_path: str | None = None) -> str | None:
+    """Find a cover image for a PDF/TXT file.
 
-    Looks for image files with 'cover' in the name, sorted numerically,
-    and returns the first match.
+    Search order:
+      1. *cover* images in the file's own directory
+      2. Original source path directory (from library_origins.txt)
+      3. Output folder by base name — covers files moved to Library
     """
     import re as _re
     folder = os.path.dirname(file_path)
-    if not os.path.isdir(folder):
-        return None
 
     _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
@@ -305,38 +338,76 @@ def _find_folder_cover(file_path: str) -> str | None:
         nums = _re.findall(r'\d+', name)
         return int(nums[0]) if nums else 0
 
-    cover_candidates = []
-    try:
-        for entry in os.scandir(folder):
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            name_lower = entry.name.lower()
-            ext = os.path.splitext(name_lower)[1]
-            if ext in _IMG_EXTS and "cover" in name_lower:
-                cover_candidates.append(entry.path)
-    except (PermissionError, OSError):
-        return None
-
-    if cover_candidates:
-        cover_candidates.sort(key=_natural_key)
-        return cover_candidates[0]
-
-    # Fallback: first image (numerically sorted) in an 'images' subfolder
-    images_dir = os.path.join(folder, "images")
-    if os.path.isdir(images_dir):
-        img_candidates = []
+    def _scan_for_cover(search_dir: str) -> str | None:
+        """Look for *cover* images in search_dir, then any image in images/ subfolder."""
+        if not os.path.isdir(search_dir):
+            return None
+        candidates = []
         try:
-            for entry in os.scandir(images_dir):
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                ext = os.path.splitext(entry.name.lower())[1]
-                if ext in _IMG_EXTS:
-                    img_candidates.append(entry.path)
+            for entry in os.scandir(search_dir):
+                if entry.is_file(follow_symlinks=False):
+                    nl = entry.name.lower()
+                    ext = os.path.splitext(nl)[1]
+                    if ext in _IMG_EXTS and "cover" in nl:
+                        candidates.append(entry.path)
         except (PermissionError, OSError):
             pass
-        if img_candidates:
-            img_candidates.sort(key=_natural_key)
-            return img_candidates[0]
+        if candidates:
+            candidates.sort(key=_natural_key)
+            return candidates[0]
+
+        # Check images/ subfolder
+        img_dir = os.path.join(search_dir, "images")
+        if os.path.isdir(img_dir):
+            img_cands = []
+            try:
+                for entry in os.scandir(img_dir):
+                    if entry.is_file(follow_symlinks=False):
+                        ext = os.path.splitext(entry.name.lower())[1]
+                        if ext in _IMG_EXTS:
+                            img_cands.append(entry.path)
+            except (PermissionError, OSError):
+                pass
+            if img_cands:
+                img_cands.sort(key=_natural_key)
+                return img_cands[0]
+        return None
+
+    # 1. Check the file's own directory
+    result = _scan_for_cover(folder)
+    if result:
+        return result
+
+    # 2. Check original source path directory (persisted when moved to Library)
+    if original_path:
+        orig_dir = os.path.dirname(original_path)
+        result = _scan_for_cover(orig_dir)
+        if result:
+            return result
+
+    # 3. Check the original output folder by base name
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    config = config or {}
+    output_dirs_to_check = []
+
+    override = os.environ.get("OUTPUT_DIRECTORY") or config.get("output_directory")
+    if override and os.path.isdir(override):
+        output_dirs_to_check.append(os.path.join(os.path.abspath(override), base_name))
+
+    # App directory (same logic as scan_for_epubs)
+    if platform.system() == "Windows":
+        if getattr(sys, "frozen", False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+    else:
+        app_dir = os.getcwd()
+    output_dirs_to_check.append(os.path.join(app_dir, base_name))
+
+    for out_dir in output_dirs_to_check:
+        result = _scan_for_cover(out_dir)
+        if result:
+            return result
 
     return None
 
@@ -344,16 +415,20 @@ def _find_folder_cover(file_path: str) -> str | None:
 class _CoverLoader(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, file_path: str, file_type: str = "epub", parent=None):
+    def __init__(self, file_path: str, file_type: str = "epub", config: dict | None = None,
+                 original_path: str | None = None, parent=None):
         super().__init__(parent)
         self._file_path = file_path
         self._file_type = file_type
+        self._config = config or {}
+        self._original_path = original_path
 
     def run(self):
         if self._file_type == "epub":
             cover = _extract_cover(self._file_path)
         else:
-            cover = _find_folder_cover(self._file_path)
+            cover = _find_folder_cover(self._file_path, config=self._config,
+                                       original_path=self._original_path)
         self.finished.emit(self._file_path, cover or "")
 
 
@@ -372,8 +447,7 @@ class _BookCard(QFrame):
         self.setFixedWidth(self._card_w)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("""
-            _BookCard { background: #1e1e2e; border: 1px solid #2a2a3e; border-radius: 6px;
-                transition: all 0.3s ease; }
+            _BookCard { background: #1e1e2e; border: 1px solid #2a2a3e; border-radius: 6px; }
             _BookCard:hover { border: 1px solid #6c63ff; background: #252540; }
         """)
 
@@ -803,7 +877,9 @@ class EpubLibraryDialog(QDialog):
             self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
 
             # Load covers for all file types
-            loader = _CoverLoader(book["path"], file_type=book.get("type", "epub"), parent=self)
+            loader = _CoverLoader(book["path"], file_type=book.get("type", "epub"),
+                                   config=self._config, original_path=book.get("original_path"),
+                                   parent=self)
             loader.finished.connect(self._on_cover_loaded)
             self._cover_threads.append(loader)
             loader.start()
@@ -873,7 +949,9 @@ class EpubLibraryDialog(QDialog):
         open_action.triggered.connect(lambda: self._on_card_clicked(book))
         menu.addSeparator()
         folder_action = menu.addAction("📂  Open Output Folder")
-        folder_action.triggered.connect(lambda: _open_folder_in_explorer(book["path"]))
+        # Use original_path if available (for files moved to Library)
+        original = book.get("original_path", book["path"])
+        folder_action.triggered.connect(lambda: _open_folder_in_explorer(original))
         lib_action = menu.addAction("📁  Open Library Folder")
         lib_action.triggered.connect(lambda: _open_folder_in_explorer(get_library_dir()))
         menu.addSeparator()
@@ -930,6 +1008,13 @@ class EpubLibraryDialog(QDialog):
                 errors.append(f"{os.path.basename(src)}: {exc}")
 
         self._last_move_log = move_log
+
+        # Persist original source paths for cover lookup and Open Output Folder
+        if move_log:
+            origins = _load_origins()
+            for src, dst in move_log:
+                origins[os.path.basename(dst)] = src
+            _save_origins(origins)
 
         summary = f"Moved {moved} file{'s' if moved != 1 else ''} to Library."
         if move_log:
@@ -989,6 +1074,13 @@ class EpubLibraryDialog(QDialog):
                 restored += 1
             except Exception as exc:
                 errors.append(f"{os.path.basename(dst)}: {exc}")
+
+        # Remove origins entries for undone files
+        if restored:
+            origins = _load_origins()
+            for src, dst in self._last_move_log:
+                origins.pop(os.path.basename(dst), None)
+            _save_origins(origins)
 
         self._last_move_log.clear()
 
