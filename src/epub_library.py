@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QApplication, QMenu, QComboBox, QStackedWidget
 )
 from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer, QSizeF
-from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor
+from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence
 
 logger = logging.getLogger(__name__)
 
@@ -1138,6 +1138,11 @@ class EpubReaderDialog(QDialog):
         self._apply_reader_style()
         self.setStyleSheet("QDialog { background: #12121e; }")
 
+        # Shortcuts (work regardless of child focus)
+        QShortcut(QKeySequence(Qt.Key_Left), self, self._prev_chapter)
+        QShortcut(QKeySequence(Qt.Key_Right), self, self._next_chapter)
+        QShortcut(QKeySequence(Qt.Key_F11), self, self._toggle_fullscreen)
+
     # ── Event filter (block wheel scroll in paginated modes) ──────────────
 
     def eventFilter(self, obj, event):
@@ -1147,20 +1152,11 @@ class EpubReaderDialog(QDialog):
             return True  # swallow the event
         return super().eventFilter(obj, event)
 
-    def keyPressEvent(self, event):
-        """Arrow keys for page/chapter navigation, F11 for fullscreen."""
-        key = event.key()
-        if key == Qt.Key_Left:
-            self._prev_chapter()
-        elif key == Qt.Key_Right:
-            self._next_chapter()
-        elif key == Qt.Key_F11:
-            if self.isFullScreen():
-                self.showNormal()
-            else:
-                self.showFullScreen()
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
         else:
-            super().keyPressEvent(event)
+            self.showFullScreen()
 
     def _make_toolbar_btn(self, text, tooltip, width=36):
         btn = QPushButton(text)
