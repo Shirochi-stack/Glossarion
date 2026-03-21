@@ -198,6 +198,9 @@ app_files = [
 
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
+
+	# EPUB Library & Reader
+	('epub_library.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -267,6 +270,7 @@ app_modules = [
 	'authgpt_auth',  # ChatGPT subscription OAuth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
+	'epub_library',  # EPUB Library & Reader
 ]
 # GUI Framework
 gui_modules = [
