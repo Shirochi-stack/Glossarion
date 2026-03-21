@@ -12741,6 +12741,8 @@ def main(log_callback=None, stop_callback=None):
                             chunk_html=""  # Provide empty string for backward compatibility
                         )
                     }]
+                # Apply emergency glossary compliance pre-edit
+                chunk_html = apply_emergency_glossary_compliance(chunk_html, out)
                 user_prompt = chunk_html
                 
                 if config.CONTEXTUAL:

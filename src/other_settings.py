@@ -6680,7 +6680,6 @@ def _create_processing_options_section(self, parent):
     except Exception:
         pass
     self._disable_combobox_mousewheel(glossary_compliance_mode_combo)
-    self._add_combobox_arrow(glossary_compliance_mode_combo)
     glossary_compliance_row_layout.addWidget(glossary_compliance_mode_combo)
     
     glossary_compliance_configure_btn = QPushButton("Configure…")
