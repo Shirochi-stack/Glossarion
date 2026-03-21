@@ -12,9 +12,9 @@ source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 version = 1.0.0
 
 # Dependencies (python-for-android recipes)
-# NOTE: Some packages may need recipes. Major ones like kivy, pillow, lxml
-# have recipes in python-for-android. Others compile from pip.
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,lxml,requests,certifi,charset-normalizer,chardet,html2text,regex,tqdm,plyer,pyjnius,six,setuptools
+# NOTE: lxml removed — p4a's lxml 4.8.0 recipe is incompatible with Python 3.11.
+# All BeautifulSoup usage uses html.parser instead.
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,requests,certifi,charset-normalizer,chardet,html2text,regex,tqdm,plyer,pyjnius,six,setuptools
 
 # Entry point
 entrypoint = main.py
