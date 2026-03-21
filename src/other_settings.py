@@ -6757,8 +6757,8 @@ def _create_processing_options_section(self, parent):
                             content = gf.read()
                         # Parse types from all formats
                         import re as _re
-                        # Token-efficient: === TYPE ===
-                        for m in _re.finditer(r'^=== (\w+?)S? ===$', content, _re.MULTILINE):
+                        # Token-efficient: === TYPE === (keep as-is, e.g. "characters", "terms")
+                        for m in _re.finditer(r'^=== (\w+) ===$', content, _re.MULTILINE):
                             discovered_types.add(m.group(1).lower())
                         # CSV: type,raw_name,...
                         for line in content.split('\n'):
@@ -6772,7 +6772,7 @@ def _create_processing_options_section(self, parent):
             
             # Fallback defaults
             if not discovered_types:
-                discovered_types = {'character', 'term', 'location', 'ability', 'item', 'organization', 'title', 'book'}
+                discovered_types = {'character', 'terms', 'locations', 'abilities', 'items', 'organizations', 'titles', 'book'}
             
             # Sort: character first, then alphabetical
             type_list = sorted(discovered_types, key=lambda t: (0 if t == 'character' else 1, t))

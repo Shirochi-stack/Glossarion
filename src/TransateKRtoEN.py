@@ -6731,7 +6731,16 @@ def apply_emergency_glossary_compliance(content, output_dir):
     if mode == "characters":
         entries = [(t, r, tr) for t, r, tr in entries if t == "character"]
     elif mode == "custom" and custom_types:
-        allowed = set(t.lower() for t in custom_types)
+        # Normalize: build set with both singular and plural forms so
+        # e.g. user selecting "terms" matches CSV type "term" and vice-versa
+        allowed = set()
+        for t in custom_types:
+            t_lower = t.lower().strip()
+            allowed.add(t_lower)
+            if t_lower.endswith("s"):
+                allowed.add(t_lower[:-1])  # terms -> term
+            else:
+                allowed.add(t_lower + "s")  # term -> terms
         entries = [(t, r, tr) for t, r, tr in entries if t in allowed]
     # mode == "all" keeps everything
     
