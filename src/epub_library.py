@@ -191,7 +191,7 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
 
     library_dir = os.path.normpath(os.path.abspath(get_library_dir()))
 
-    def _add(path: str):
+    def _add(path: str, file_type: str = "epub"):
         norm = os.path.normpath(os.path.abspath(path))
         if norm in seen:
             return
@@ -205,6 +205,7 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
                 "size": stat.st_size,
                 "mtime": stat.st_mtime,
                 "in_library": in_lib,
+                "type": file_type,
             })
         except OSError:
             pass
@@ -216,8 +217,14 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
             with os.scandir(root) as it:
                 for entry in it:
                     try:
-                        if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".epub"):
-                            _add(entry.path)
+                        if entry.is_file(follow_symlinks=False):
+                            lower = entry.name.lower()
+                            if lower.endswith(".epub"):
+                                _add(entry.path, "epub")
+                            elif lower.endswith(".pdf"):
+                                _add(entry.path, "pdf")
+                            elif lower.endswith(".txt") and "_translated" in lower:
+                                _add(entry.path, "txt")
                         elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
                             _walk(entry.path, max_depth, depth + 1)
                     except (PermissionError, OSError):
@@ -280,16 +287,74 @@ _SIZE_PRESETS = {
 }
 
 
+def _find_folder_cover(file_path: str) -> str | None:
+    """Find a cover image in the same directory as a PDF/TXT file.
+
+    Looks for image files with 'cover' in the name, sorted numerically,
+    and returns the first match.
+    """
+    import re as _re
+    folder = os.path.dirname(file_path)
+    if not os.path.isdir(folder):
+        return None
+
+    _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+    def _natural_key(p):
+        name = os.path.basename(p)
+        nums = _re.findall(r'\d+', name)
+        return int(nums[0]) if nums else 0
+
+    cover_candidates = []
+    try:
+        for entry in os.scandir(folder):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            name_lower = entry.name.lower()
+            ext = os.path.splitext(name_lower)[1]
+            if ext in _IMG_EXTS and "cover" in name_lower:
+                cover_candidates.append(entry.path)
+    except (PermissionError, OSError):
+        return None
+
+    if cover_candidates:
+        cover_candidates.sort(key=_natural_key)
+        return cover_candidates[0]
+
+    # Fallback: first image (numerically sorted) in an 'images' subfolder
+    images_dir = os.path.join(folder, "images")
+    if os.path.isdir(images_dir):
+        img_candidates = []
+        try:
+            for entry in os.scandir(images_dir):
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                ext = os.path.splitext(entry.name.lower())[1]
+                if ext in _IMG_EXTS:
+                    img_candidates.append(entry.path)
+        except (PermissionError, OSError):
+            pass
+        if img_candidates:
+            img_candidates.sort(key=_natural_key)
+            return img_candidates[0]
+
+    return None
+
+
 class _CoverLoader(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, epub_path: str, parent=None):
+    def __init__(self, file_path: str, file_type: str = "epub", parent=None):
         super().__init__(parent)
-        self._epub_path = epub_path
+        self._file_path = file_path
+        self._file_type = file_type
 
     def run(self):
-        cover = _extract_cover(self._epub_path)
-        self.finished.emit(self._epub_path, cover or "")
+        if self._file_type == "epub":
+            cover = _extract_cover(self._file_path)
+        else:
+            cover = _find_folder_cover(self._file_path)
+        self.finished.emit(self._file_path, cover or "")
 
 
 class _BookCard(QFrame):
@@ -343,6 +408,14 @@ class _BookCard(QFrame):
         size_lbl = QLabel(size_str)
         size_lbl.setStyleSheet("color: #888; font-size: 7.5pt;")
         layout.addWidget(size_lbl)
+
+        # File type badge
+        file_type = book.get("type", "epub")
+        type_info = {"epub": ("📕 EPUB", "#6c63ff"), "pdf": ("📄 PDF", "#e74c3c"), "txt": ("📝 TXT", "#2ecc71")}
+        badge_text, badge_color = type_info.get(file_type, ("📕 EPUB", "#6c63ff"))
+        badge_lbl = QLabel(badge_text)
+        badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold;")
+        layout.addWidget(badge_lbl)
 
     def _set_fallback_icon(self, icon_path: str):
         try:
@@ -710,7 +783,8 @@ class EpubLibraryDialog(QDialog):
             row, col = divmod(idx, cols)
             self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
 
-            loader = _CoverLoader(book["path"], self)
+            # Load covers for all file types
+            loader = _CoverLoader(book["path"], file_type=book.get("type", "epub"), parent=self)
             loader.finished.connect(self._on_cover_loaded)
             self._cover_threads.append(loader)
             loader.start()
@@ -736,6 +810,21 @@ class EpubLibraryDialog(QDialog):
         self._refresh_view()
 
     def _on_card_clicked(self, book):
+        file_type = book.get("type", "epub")
+        if file_type in ("pdf", "txt"):
+            # Open PDFs and TXTs with OS default application
+            try:
+                path = book["path"]
+                if platform.system() == "Windows":
+                    os.startfile(path)
+                elif platform.system() == "Darwin":
+                    subprocess.Popen(["open", path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
+            except Exception as exc:
+                logger.error("Could not open file: %s\n%s", exc, traceback.format_exc())
+                QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
+            return
         try:
             # Set loading cursor
             QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -760,7 +849,8 @@ class EpubLibraryDialog(QDialog):
             QMenu::item { padding: 6px 20px; border-radius: 3px; }
             QMenu::item:selected { background: #3a3a5e; }
         """)
-        open_action = menu.addAction("📖  Open in Reader")
+        open_label = "📖  Open in Reader" if book.get("type", "epub") == "epub" else "📂  Open File"
+        open_action = menu.addAction(open_label)
         open_action.triggered.connect(lambda: self._on_card_clicked(book))
         menu.addSeparator()
         folder_action = menu.addAction("📂  Open Output Folder")
@@ -777,7 +867,8 @@ class EpubLibraryDialog(QDialog):
         if not outside:
             return
 
-        names = "\n".join(f"  \u2022 {b['name']}.epub" for b in outside[:20])
+        ext = os.path.splitext(outside[0]['path'])[1] if outside else '.epub'
+        names = "\n".join(f"  \u2022 {b['name']}{os.path.splitext(b['path'])[1]}" for b in outside[:20])
         if len(outside) > 20:
             names += f"\n  \u2026 and {len(outside) - 20} more"
 
