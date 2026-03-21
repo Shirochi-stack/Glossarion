@@ -611,7 +611,6 @@ class ReaderScreen(MDScreen):
             title = self._chapter_titles[index] if index < len(self._chapter_titles) else ""
 
             # Language indicator in chapter info
-            lang_tag = " [EN]" if self.viewing_language == 'en' and index in self._translated_chapters else ""
             en_avail = " ✓EN" if index in self._translated_chapters else ""
             self.chapter_info = f"{title}  ({index + 1}/{len(self.chapters)}){en_avail}"
 
@@ -621,14 +620,13 @@ class ReaderScreen(MDScreen):
             if index not in self._translated_chapters:
                 self.viewing_language = 'ko'
 
+            box = self.ids.content_box
+            box.clear_widgets()
+
             if use_translated:
                 translated_text = self._translated_chapters[index]
-                # Build plain text
                 self.current_text = translated_text
-                # Show as a single text block
                 try:
-                    box = self.ids.content_box
-                    box.clear_widgets()
                     lbl = MDLabel(
                         text=translated_text,
                         markup=True,
@@ -640,23 +638,35 @@ class ReaderScreen(MDScreen):
                     )
                     lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
                     box.add_widget(lbl)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"_show_chapter translated render error ch {index}: {e}")
+                    self._show_text_only(f"Error rendering translation:\n{e}")
             else:
                 # Build plain text for search and bookmarks
-                self.current_text = '\n\n'.join(b[1] for b in blocks if b[0] == 'text')
+                text_parts = []
+                for b in blocks:
+                    if isinstance(b, (list, tuple)) and len(b) >= 2 and b[0] == 'text':
+                        text_parts.append(str(b[1]))
+                    elif isinstance(b, str):
+                        text_parts.append(b)
+                self.current_text = '\n\n'.join(text_parts)
 
                 # Populate the content_box with interleaved text/image widgets
                 try:
                     from kivy.uix.image import AsyncImage
 
-                    box = self.ids.content_box
-                    box.clear_widgets()
+                    for block in blocks:
+                        # Handle both tuple format and plain strings
+                        if isinstance(block, str):
+                            block_type, block_content = 'text', block
+                        elif isinstance(block, (list, tuple)) and len(block) >= 2:
+                            block_type, block_content = block[0], block[1]
+                        else:
+                            continue
 
-                    for block_type, block_content in blocks:
                         if block_type == 'text':
                             lbl = MDLabel(
-                                text=block_content,
+                                text=str(block_content),
                                 markup=True,
                                 size_hint_y=None,
                                 font_size=self.font_size_px,
@@ -668,13 +678,12 @@ class ReaderScreen(MDScreen):
                             box.add_widget(lbl)
                         elif block_type == 'image':
                             img = AsyncImage(
-                                source=block_content,
+                                source=str(block_content),
                                 size_hint_y=None,
                                 height=dp(300),
                                 fit_mode='contain',
                                 allow_stretch=True,
                             )
-                            # Adjust height on load to maintain aspect ratio
                             def _on_texture(instance, texture, *args):
                                 if texture:
                                     aspect = texture.width / max(texture.height, 1)
@@ -682,8 +691,18 @@ class ReaderScreen(MDScreen):
                                     instance.height = min(dp(600), max_w / max(aspect, 0.1))
                             img.bind(texture=_on_texture)
                             box.add_widget(img)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"_show_chapter render error ch {index}: {e}")
+                    # Fallback: show plain text
+                    if self.current_text:
+                        lbl = MDLabel(
+                            text=self.current_text,
+                            size_hint_y=None,
+                            font_size=self.font_size_px,
+                            color=self.text_color,
+                        )
+                        lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+                        box.add_widget(lbl)
 
             try:
                 self.ids.content_scroll.scroll_y = 1.0
