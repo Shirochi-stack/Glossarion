@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer, QSizeF, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, Slot, QThread, QTimer, QSizeF, QUrl
 from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
@@ -1384,6 +1384,7 @@ class EpubReaderDialog(QDialog):
         self._loader_thread.error.connect(self._on_epub_error)
         self._loader_thread.start()
 
+    @Slot()
     def _on_loader_done(self):
         """Loader finished — read data from cache file (avoids large signal data)."""
         cached = _load_epub_cache(self._epub_path)
@@ -1640,7 +1641,7 @@ class EpubReaderDialog(QDialog):
         if _HAS_WEBENGINE:
             js = (
                 f"var c = document.getElementById('columns');"
-                f"var w = _PAGE_W || window.innerWidth;"
+                f"var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
                 f"if (c) c.style.transform = 'translateX(' + (-{page_num} * w) + 'px)';"
             )
             browser.page().runJavaScript(js)
@@ -1655,7 +1656,7 @@ class EpubReaderDialog(QDialog):
         if _HAS_WEBENGINE:
             js = (
                 "var c = document.getElementById('columns');"
-                "var w = _PAGE_W || window.innerWidth;"
+                "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
                 "c ? Math.max(1, Math.round(c.scrollWidth / w)) : 1;"
             )
             browser.page().runJavaScript(js, callback)
