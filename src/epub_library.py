@@ -2133,28 +2133,24 @@ class EpubReaderDialog(QDialog):
                     mime = mime_map.get(ext, "image/jpeg")
                     b64 = base64.b64encode(image_data).decode("ascii")
                     img_tag["src"] = f"data:{mime};base64,{b64}"
-                    # Check dimensions — large images get their own page
-                    try:
-                        qimg = QImage()
-                        qimg.loadFromData(image_data)
-                        if qimg.width() > 300 or qimg.height() > 400:
-                            wrapper = soup.new_tag("div")
-                            wrapper["class"] = "full-page-img"
-                            # Find the block-level container of this img
-                            # (typically <p><img/></p> or <div><img/></div>)
-                            container = img_tag
-                            if img_tag.parent and img_tag.parent.name in ('p', 'div', 'figure'):
-                                container = img_tag.parent
-                            # Check container's previous sibling for a header
-                            prev = container.find_previous_sibling()
-                            if prev and prev.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-                                prev.extract()
-                                container.wrap(wrapper)
-                                wrapper.insert(0, prev)
-                            else:
-                                container.wrap(wrapper)
-                    except Exception:
-                        pass
+                    # Wrap sizeable images in full-page containers
+                    # (skip tiny icons/bullets — use byte-size as fast proxy)
+                    if len(image_data) > 5120:
+                        wrapper = soup.new_tag("div")
+                        wrapper["class"] = "full-page-img"
+                        # Find the block-level container of this img
+                        # (typically <p><img/></p> or <div><img/></div>)
+                        container = img_tag
+                        if img_tag.parent and img_tag.parent.name in ('p', 'div', 'figure'):
+                            container = img_tag.parent
+                        # Check container's previous sibling for a header
+                        prev = container.find_previous_sibling()
+                        if prev and prev.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                            prev.extract()
+                            container.wrap(wrapper)
+                            wrapper.insert(0, prev)
+                        else:
+                            container.wrap(wrapper)
 
             return str(soup)
         except Exception:
@@ -2194,11 +2190,6 @@ class EpubReaderDialog(QDialog):
                 f".full-page-img h1, .full-page-img h2, .full-page-img h3, "
                 f".full-page-img h4, .full-page-img h5, .full-page-img h6 "
                 f"{{ margin: 4px 0 8px 0; flex-shrink: 0; }}"
-                f".grouped-img {{ break-inside: avoid; "
-                f"display: flex; flex-direction: column; align-items: center; justify-content: center; "
-                f"min-height: auto; overflow: hidden; "
-                f"padding: 4px 0; margin: 0; }}"
-                f".grouped-img img {{ margin: 0 auto; }}"
                 f"p {{ margin: 0.6em 0; orphans: 2; widows: 2; }}"
                 f"a {{ color: {t['link']}; }}"
                 f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
@@ -2221,28 +2212,6 @@ class EpubReaderDialog(QDialog):
                 f"      toRemove.parentNode.removeChild(toRemove);"
                 f"    }}"
                 f"  }});"
-                f"  /* Group consecutive full-page images to share the page */"
-                f"  var allFpi = Array.from(c.querySelectorAll('.full-page-img'));"
-                f"  var i = 0;"
-                f"  while (i < allFpi.length) {{"
-                f"    var run = [allFpi[i]];"
-                f"    var j = i + 1;"
-                f"    while (j < allFpi.length) {{"
-                f"      var between = allFpi[j-1].nextElementSibling;"
-                f"      if (between === allFpi[j]) {{ run.push(allFpi[j]); j++; }}"
-                f"      else {{ break; }}"
-                f"    }}"
-                f"    if (run.length > 1) {{"
-                f"      var vh = window.innerHeight - 40;"
-                f"      var perImg = Math.floor(vh / run.length) - 8;"
-                f"      run.forEach(function(el) {{"
-                f"        el.className = 'grouped-img';"
-                f"        var img = el.querySelector('img');"
-                f"        if (img) {{ img.style.maxHeight = perImg + 'px'; }}"
-                f"      }});"
-                f"    }}"
-                f"    i = j;"
-                f"  }}"
                 f"}}"
                 f"document.addEventListener('DOMContentLoaded', _setupColumns);"
                 f"window.addEventListener('resize', _setupColumns);"
