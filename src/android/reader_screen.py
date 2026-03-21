@@ -781,45 +781,76 @@ class ReaderScreen(MDScreen):
     def toggle_bookmark(self):
         if not self.app:
             return
-        from android_config import add_bookmark, get_bookmarks, remove_bookmark
-        bookmarks = get_bookmarks(self.app.config_data, self.file_path)
-        for i, bm in enumerate(bookmarks):
-            if bm['chapter'] == self.current_chapter_index:
-                remove_bookmark(self.app.config_data, self.file_path, i)
-                return
-        scroll_pos = self.ids.content_scroll.scroll_y
-        title = self._chapter_titles[self.current_chapter_index] if self.current_chapter_index < len(self._chapter_titles) else ''
-        add_bookmark(self.app.config_data, self.file_path, self.current_chapter_index, scroll_pos, title)
+        try:
+            from android_config import add_bookmark, get_bookmarks, remove_bookmark
+            bookmarks = get_bookmarks(self.app.config_data, self.file_path)
+            for i, bm in enumerate(bookmarks):
+                if bm['chapter'] == self.current_chapter_index:
+                    remove_bookmark(self.app.config_data, self.file_path, i)
+                    try:
+                        from kivymd.toast import toast
+                        toast("Bookmark removed")
+                    except Exception:
+                        pass
+                    return
+            scroll_pos = self.ids.content_scroll.scroll_y
+            title = self._chapter_titles[self.current_chapter_index] if self.current_chapter_index < len(self._chapter_titles) else ''
+            add_bookmark(self.app.config_data, self.file_path, self.current_chapter_index, scroll_pos, title)
+            try:
+                from kivymd.toast import toast
+                toast("Bookmark added")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"toggle_bookmark error: {e}")
+            try:
+                from kivymd.toast import toast
+                toast(f"Bookmark error: {e}")
+            except Exception:
+                pass
 
     # ── TOC ──
 
     def show_toc(self):
         if not self._chapter_titles:
+            try:
+                from kivymd.toast import toast
+                toast("No table of contents available")
+            except Exception:
+                pass
             return
-        from kivy.uix.scrollview import ScrollView
-        from kivy.uix.boxlayout import BoxLayout
+        try:
+            from kivy.uix.scrollview import ScrollView
+            from kivy.uix.boxlayout import BoxLayout
 
-        scroll = ScrollView(size_hint_y=None, height=dp(400))
-        toc_list = MDList()
-        for i, title in enumerate(self._chapter_titles):
-            toc_list.add_widget(
-                OneLineListItem(
-                    text=f"{i + 1}. {title}",
-                    on_release=lambda x, idx=i: self._toc_jump(idx),
+            scroll = ScrollView(size_hint_y=None, height=dp(400))
+            toc_list = MDList()
+            for i, title in enumerate(self._chapter_titles):
+                toc_list.add_widget(
+                    OneLineListItem(
+                        text=f"{i + 1}. {title}",
+                        on_release=lambda x, idx=i: self._toc_jump(idx),
+                    )
                 )
+            scroll.add_widget(toc_list)
+
+            container = BoxLayout(orientation='vertical', size_hint_y=None)
+            container.height = dp(400)
+            container.add_widget(scroll)
+
+            self._toc_dialog = MDDialog(
+                title="Table of Contents",
+                type="custom",
+                content_cls=container,
             )
-        scroll.add_widget(toc_list)
-
-        container = BoxLayout(orientation='vertical', size_hint_y=None)
-        container.height = dp(400)
-        container.add_widget(scroll)
-
-        self._toc_dialog = MDDialog(
-            title="Table of Contents",
-            type="custom",
-            content_cls=container,
-        )
-        self._toc_dialog.open()
+            self._toc_dialog.open()
+        except Exception as e:
+            logger.error(f"show_toc error: {e}")
+            try:
+                from kivymd.toast import toast
+                toast(f"TOC error: {e}")
+            except Exception:
+                pass
 
     def _toc_jump(self, idx):
         self._show_chapter(idx)
@@ -901,19 +932,32 @@ class ReaderScreen(MDScreen):
     # ══════════════════════════════════════════════════
 
     def toggle_language(self, lang=None):
-        """Cycle between KO (original) and EN (translated) views."""
+        """Cycle between KO (original) and EN (translated) views.
+
+        Works seamlessly during streaming — just switches what's displayed
+        without interrupting the background translation.
+        """
+        idx = self.current_chapter_index
+
         if self.viewing_language == 'en':
-            # Switch back to original
+            # Switch back to original KO view
             self.viewing_language = 'ko'
-            self._show_chapter(self.current_chapter_index)
+            self._show_chapter(idx)
         else:
             # Try to show English
-            idx = self.current_chapter_index
             if idx in self._translated_chapters:
+                # Completed translation exists
                 self.viewing_language = 'en'
                 self._show_chapter(idx)
+            elif self.is_translating:
+                # Translation in progress — show streaming view
+                self.viewing_language = 'en'
+                if self._stream_label and self.streaming_text:
+                    # Re-show accumulated streaming text
+                    self._prepare_streaming_view()
+                    self._stream_label.text = self._md_to_kivy_markup(self.streaming_text)
             else:
-                # No translation yet — start one
+                # No translation yet — start one (guard against empty pages)
                 self.translate_current_chapter()
 
     def translate_current_chapter(self):
@@ -936,6 +980,12 @@ class ReaderScreen(MDScreen):
         # Get raw HTML for this single chapter
         raw_html = self._raw_chapters[idx]
         if not raw_html or not raw_html.strip():
+            # Empty page (cover, images-only, etc.) — nothing to translate
+            try:
+                from kivymd.toast import toast
+                toast("No text to translate on this page")
+            except Exception:
+                pass
             return
 
         self.is_translating = True
