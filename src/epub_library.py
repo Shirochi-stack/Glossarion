@@ -524,8 +524,6 @@ class _BookCard(QFrame):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit(self.book)
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
