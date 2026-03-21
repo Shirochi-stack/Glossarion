@@ -40,18 +40,6 @@ READER_THEMES = {
 }
 
 KV = '''
-<LangToggle@BoxLayout>:
-    size_hint: None, None
-    size: dp(100), dp(36)
-    spacing: 0
-    canvas.before:
-        Color:
-            rgba: [0.2, 0.2, 0.22, 1]
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(18)]
-
 <ReaderScreen>:
     BoxLayout:
         orientation: 'vertical'
@@ -90,43 +78,20 @@ KV = '''
                 color: root.text_color
                 valign: "center"
 
-            # KO / EN pill toggle
-            BoxLayout:
+            # KO / EN toggle button
+            MDFlatButton:
+                id: btn_lang
+                text: root.viewing_language.upper()
                 size_hint: None, None
-                size: dp(60), dp(28)
+                size: dp(36), dp(28)
+                min_width: 0
+                padding: 0
                 pos_hint: {"center_y": 0.5}
-                spacing: 0
-                canvas.before:
-                    Color:
-                        rgba: [0.2, 0.2, 0.24, 1]
-                    RoundedRectangle:
-                        pos: self.pos
-                        size: self.size
-                        radius: [dp(14)]
-
-                MDFlatButton:
-                    id: btn_ko
-                    text: "KO"
-                    size_hint: 0.5, 1
-                    min_width: 0
-                    padding: 0
-                    font_size: sp(10)
-                    theme_text_color: "Custom"
-                    text_color: [1,1,1,1] if root.viewing_language == 'ko' else [0.5,0.5,0.5,1]
-                    md_bg_color: [0.35, 0.35, 0.42, 1] if root.viewing_language == 'ko' else [0,0,0,0]
-                    on_release: root.toggle_language('ko')
-
-                MDFlatButton:
-                    id: btn_en
-                    text: "EN"
-                    size_hint: 0.5, 1
-                    min_width: 0
-                    padding: 0
-                    font_size: sp(10)
-                    theme_text_color: "Custom"
-                    text_color: [1,1,1,1] if root.viewing_language == 'en' else [0.5,0.5,0.5,1]
-                    md_bg_color: [0.35, 0.35, 0.42, 1] if root.viewing_language == 'en' else [0,0,0,0]
-                    on_release: root.toggle_language('en')
+                font_size: sp(10)
+                theme_text_color: "Custom"
+                text_color: [0.4, 0.8, 1, 1] if root.viewing_language == 'en' else [1,1,1,1]
+                md_bg_color: [0.2, 0.2, 0.24, 1]
+                on_release: root.toggle_language()
 
             # Toolbar icons
             MDIconButton:
@@ -652,6 +617,9 @@ class ReaderScreen(MDScreen):
 
             # Decide which content to display
             use_translated = (self.viewing_language == 'en' and index in self._translated_chapters)
+            # Reset language state if no translation exists for this chapter
+            if index not in self._translated_chapters:
+                self.viewing_language = 'ko'
 
             if use_translated:
                 translated_text = self._translated_chapters[index]
@@ -932,11 +900,14 @@ class ReaderScreen(MDScreen):
     #  IN-READER TRANSLATION
     # ══════════════════════════════════════════════════
 
-    def toggle_language(self, lang):
-        """Switch between KO (original) and EN (translated) views."""
-        if lang == self.viewing_language:
-            return
-        if lang == 'en':
+    def toggle_language(self, lang=None):
+        """Cycle between KO (original) and EN (translated) views."""
+        if self.viewing_language == 'en':
+            # Switch back to original
+            self.viewing_language = 'ko'
+            self._show_chapter(self.current_chapter_index)
+        else:
+            # Try to show English
             idx = self.current_chapter_index
             if idx in self._translated_chapters:
                 self.viewing_language = 'en'
@@ -944,9 +915,6 @@ class ReaderScreen(MDScreen):
             else:
                 # No translation yet — start one
                 self.translate_current_chapter()
-        else:
-            self.viewing_language = 'ko'
-            self._show_chapter(self.current_chapter_index)
 
     def translate_current_chapter(self):
         """Translate the current chapter using the configured LLM."""
