@@ -25,8 +25,9 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, Signal, Slot, QThread, QTimer, QSizeF, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, Slot, QThread, QTimer, QSizeF, QUrl, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
+from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
@@ -513,9 +514,19 @@ class _BookCard(QFrame):
             pm = QPixmap(image_path)
             if not pm.isNull():
                 scaled = pm.scaled(self._card_w - 8, self._cover_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Fade-in animation
+                opacity = QGraphicsOpacityEffect(self.cover_label)
+                opacity.setOpacity(0.0)
+                self.cover_label.setGraphicsEffect(opacity)
                 self.cover_label.setPixmap(scaled)
                 self.cover_label.setText("")
                 self._has_cover = True
+                anim = QPropertyAnimation(opacity, b"opacity", self)
+                anim.setDuration(350)
+                anim.setStartValue(0.0)
+                anim.setEndValue(1.0)
+                anim.setEasingCurve(QEasingCurve.InOutQuad)
+                anim.start(QPropertyAnimation.DeleteWhenStopped)
         except Exception:
             logger.debug("Set cover failed: %s", traceback.format_exc())
 
@@ -754,15 +765,16 @@ class EpubLibraryDialog(QDialog):
         self._banner_lbl.setStyleSheet("color: #8ab4d0; font-size: 8.5pt;")
         banner_layout.addWidget(self._banner_lbl)
         banner_layout.addStretch()
-        relocate_btn = QPushButton("Organize into Library")
-        relocate_btn.setCursor(Qt.PointingHandCursor)
-        relocate_btn.setToolTip("Copy these files into your Library folder for easy access")
-        relocate_btn.setStyleSheet(
+        self._organize_btn = QPushButton("Organize into Library")
+        self._organize_btn.setCursor(Qt.PointingHandCursor)
+        self._organize_btn.setToolTip("Copy these files into your Library folder for easy access")
+        self._organize_btn.setStyleSheet(
             "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
             "padding: 3px 10px; font-size: 8.5pt; font-weight: bold; border: none; }"
             "QPushButton:hover { background: #4a6a8a; }")
-        relocate_btn.clicked.connect(self._relocate_to_library)
-        banner_layout.addWidget(relocate_btn)
+        self._organize_btn.clicked.connect(self._relocate_to_library)
+        self._organize_btn.hide()
+        banner_layout.addWidget(self._organize_btn)
         # Undo button (hidden by default, shown after a move)
         self._undo_btn = QPushButton("↩ Undo Move")
         self._undo_btn.setCursor(Qt.PointingHandCursor)
@@ -830,6 +842,7 @@ class EpubLibraryDialog(QDialog):
                 self._banner_lbl.setText(f"✅  Files moved to Library.")
             else:
                 self._banner_lbl.setText("📁  All files are already in your Library folder.")
+            self._organize_btn.setVisible(bool(outside))
             self._undo_btn.setVisible(has_origins)
             self._relocate_banner.show()
 
@@ -897,8 +910,9 @@ class EpubLibraryDialog(QDialog):
                     f"💡  {len(outside)} file{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
             elif self._last_move_log:
                 self._banner_lbl.setText(f"✅  Files moved to Library.")
-            self._relocate_banner.show()
+            self._organize_btn.setVisible(bool(outside))
             self._undo_btn.setVisible(has_origins)
+            self._relocate_banner.show()
         else:
             self._relocate_banner.hide()
 
