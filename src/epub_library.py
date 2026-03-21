@@ -566,16 +566,21 @@ class EpubLibraryDialog(QDialog):
 
         header = QHBoxLayout()
         header.setSpacing(8)
-        # Halgakos icon next to title
+        # Halgakos icon next to title (HiDPI-aware)
         icon_path = _find_halgakos_icon()
         if icon_path:
             icon_lbl = QLabel()
             pm = QPixmap(icon_path)
             if not pm.isNull():
-                icon_lbl.setPixmap(pm.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                icon_lbl.setFixedSize(30, 30)
+                dpr = self.devicePixelRatio() or 1.0
+                logical_size = 28
+                raw = int(logical_size * dpr)
+                scaled = pm.scaled(raw, raw, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled.setDevicePixelRatio(dpr)
+                icon_lbl.setPixmap(scaled)
+                icon_lbl.setFixedSize(logical_size + 2, logical_size + 2)
                 header.addWidget(icon_lbl)
-        title = QLabel("Glossarion Library")
+        title = QLabel("📚  Glossarion Library")
         title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #e0e0e0;")
         header.addWidget(title)
         header.addStretch()

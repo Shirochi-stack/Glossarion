@@ -5708,7 +5708,31 @@ Recent translations to summarize:
         # ── 📚 Library button (above Other Settings, below glossary status) ──
         self.library_btn = QPushButton("📚  Library")
         self.library_btn.setCursor(Qt.PointingHandCursor)
-        self.library_btn.setToolTip("Browse and read your translated EPUBs")
+        self.library_btn.setToolTip("Browse and read your translated files")
+        # Add Halgakos icon to button (HiDPI-aware)
+        try:
+            _halgakos = None
+            for _cand in [
+                os.path.join(os.path.dirname(__file__), "Halgakos.ico"),
+                os.path.join(os.path.dirname(__file__), "Halgakos.png"),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "Halgakos.png"),
+            ]:
+                if os.path.isfile(_cand):
+                    _halgakos = _cand
+                    break
+            if getattr(sys, "frozen", False):
+                _exe_dir = os.path.dirname(sys.executable)
+                for _cand in [os.path.join(_exe_dir, "Halgakos.ico"), os.path.join(_exe_dir, "Halgakos.png")]:
+                    if os.path.isfile(_cand):
+                        _halgakos = _cand
+                        break
+            if _halgakos:
+                self.library_btn.setIcon(QIcon(_halgakos))
+                dpr = self.devicePixelRatio() or 1.0
+                icon_logical = 22
+                self.library_btn.setIconSize(QSize(int(icon_logical), int(icon_logical)))
+        except Exception:
+            pass
         self.library_btn.setStyleSheet(
             "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 6px 14px; border-radius: 4px; border: none; }"
