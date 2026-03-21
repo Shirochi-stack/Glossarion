@@ -822,14 +822,15 @@ class EpubLibraryDialog(QDialog):
             self._relocate_banner.hide()
         else:
             outside = [b for b in self._books if not b.get("in_library")]
+            has_origins = bool(self._last_move_log) or bool(_load_origins())
             if outside:
                 self._banner_lbl.setText(
                     f"💡  {len(outside)} file{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
-            elif self._last_move_log:
+            elif has_origins:
                 self._banner_lbl.setText(f"✅  Files moved to Library.")
             else:
                 self._banner_lbl.setText("📁  All files are already in your Library folder.")
-            self._undo_btn.setVisible(bool(self._last_move_log))
+            self._undo_btn.setVisible(has_origins)
             self._relocate_banner.show()
 
     def _refresh_view(self):
@@ -886,8 +887,9 @@ class EpubLibraryDialog(QDialog):
         self._empty_label.hide()
         self._count_label.setText(f"{len(books)} file{'s' if len(books) != 1 else ''}")
 
-        # Suggestion banner — show count of outside EPUBs
+        # Suggestion banner — show count of outside files or recent move
         outside = [b for b in self._books if not b.get("in_library")]
+        has_origins = bool(self._last_move_log) or bool(_load_origins())
         show_banner = bool(outside) or bool(self._last_move_log)
         if show_banner:
             if outside:
@@ -896,7 +898,7 @@ class EpubLibraryDialog(QDialog):
             elif self._last_move_log:
                 self._banner_lbl.setText(f"✅  Files moved to Library.")
             self._relocate_banner.show()
-            self._undo_btn.setVisible(bool(self._last_move_log))
+            self._undo_btn.setVisible(has_origins)
         else:
             self._relocate_banner.hide()
 
@@ -1069,21 +1071,30 @@ class EpubLibraryDialog(QDialog):
         self._load_books()
 
     def _undo_relocate(self):
-        """Move EPUBs back to their original locations."""
-        if not self._last_move_log:
+        """Move files back to their original locations (session or persisted)."""
+        # Use in-memory log if available, otherwise rebuild from library_origins.txt
+        move_pairs = list(self._last_move_log)  # [(original_src, library_dst), ...]
+        if not move_pairs:
+            origins = _load_origins()
+            lib_dir = get_library_dir()
+            for lib_name, orig_src in origins.items():
+                lib_dst = os.path.join(lib_dir, lib_name)
+                if os.path.isfile(lib_dst):
+                    move_pairs.append((orig_src, lib_dst))
+        if not move_pairs:
             return
 
         names = "\n".join(
             f"  \u2022 {os.path.basename(dst)}  \u2192  {os.path.dirname(src)}"
-            for src, dst in self._last_move_log[:15]
+            for src, dst in move_pairs[:15]
         )
-        if len(self._last_move_log) > 15:
-            names += f"\n  \u2026 and {len(self._last_move_log) - 15} more"
+        if len(move_pairs) > 15:
+            names += f"\n  \u2026 and {len(move_pairs) - 15} more"
 
         msg = QMessageBox(self)
         msg.setWindowTitle("Undo Move")
         msg.setText(
-            f"Move {len(self._last_move_log)} file{'s' if len(self._last_move_log) != 1 else ''} back to "
+            f"Move {len(move_pairs)} file{'s' if len(move_pairs) != 1 else ''} back to "
             f"their original locations?\n\n{names}"
         )
         msg.setIcon(QMessageBox.Question)
@@ -1098,7 +1109,7 @@ class EpubLibraryDialog(QDialog):
 
         restored = 0
         errors = []
-        for src, dst in self._last_move_log:
+        for src, dst in move_pairs:
             if not os.path.isfile(dst):
                 errors.append(f"{os.path.basename(dst)}: file not found in Library")
                 continue
