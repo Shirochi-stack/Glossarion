@@ -197,19 +197,20 @@ def resolve_path(path):
 
 
 def copy_file_to_documents(source_path):
-    """Copy a file to the Glossarion documents directory.
+    """Copy a file to the Glossarion Library directory.
     
-    Useful for importing files from Downloads or other locations.
+    Imports files directly into the Library/ subfolder so they
+    appear in the library scan.
     
     Args:
         source_path: Path to the source file
         
     Returns:
-        str: Path to the copied file in documents, or source_path if copy failed
+        str: Path to the copied file in the library, or source_path if copy failed
     """
     try:
-        docs = get_documents_dir()
-        dest = os.path.join(docs, os.path.basename(source_path))
+        lib_dir = get_library_dir()
+        dest = os.path.join(lib_dir, os.path.basename(source_path))
         if os.path.abspath(source_path) == os.path.abspath(dest):
             return dest
         shutil.copy2(source_path, dest)

@@ -974,8 +974,10 @@ class ReaderScreen(MDScreen):
         # Clear the content area and prepare for streaming
         self._prepare_streaming_view()
 
-        # Show thin status bar
-        self._show_translate_status(True)
+        # Show thin status bar only if thinking is enabled
+        thinking_on = self.app.config_data.get('reader_enable_thinking', False) if self.app else False
+        if thinking_on:
+            self._show_translate_status(True)
 
         # Scroll to top
         try:
