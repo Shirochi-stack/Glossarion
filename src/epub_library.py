@@ -582,8 +582,13 @@ class EpubLibraryDialog(QDialog):
             self._cover_threads.append(loader)
             loader.start()
 
+        # Force card columns to their natural width; extra space goes to a trailing stretch column
+        for c in range(cols):
+            self._grid_layout.setColumnStretch(c, 0)
+        self._grid_layout.setColumnStretch(cols, 1)
+
         spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._grid_layout.addWidget(spacer, (len(books) - 1) // cols + 1, 0)
 
     def _on_cover_loaded(self, epub_path, cover_path):
