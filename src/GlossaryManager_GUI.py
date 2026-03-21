@@ -92,6 +92,21 @@ class GlossaryManagerMixin:
         # Reuse existing dialog if it hasn't been destroyed
         if hasattr(self, '_glossary_dialog') and self._glossary_dialog is not None:
             try:
+                # Re-sync checkbox states from config before showing,
+                # because the auto glossary shortcut combo may have changed them
+                # while the dialog was hidden.
+                _sync_pairs = [
+                    ('append_glossary_checkbox', 'append_glossary', False),
+                    ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load', False),
+                    ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
+                ]
+                for attr, cfg_key, default in _sync_pairs:
+                    if hasattr(self, attr):
+                        cb = getattr(self, attr)
+                        cb.blockSignals(True)
+                        cb.setChecked(bool(self.config.get(cfg_key, default)))
+                        cb.blockSignals(False)
+
                 # Dialog still alive — just bring it back
                 self._glossary_dialog.show()
                 self._glossary_dialog.raise_()
