@@ -963,15 +963,36 @@ class EpubLibraryDialog(QDialog):
     def _on_card_clicked(self, book):
         file_type = book.get("type", "epub")
         if file_type in ("pdf", "txt"):
-            # Open PDFs and TXTs with OS default application
+            # Open with best available editor/viewer (cross-platform)
             try:
                 path = book["path"]
-                if platform.system() == "Windows":
-                    os.startfile(path)
-                elif platform.system() == "Darwin":
-                    subprocess.Popen(["open", path])
+                _no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+                if sys.platform == 'win32':
+                    if file_type == "txt":
+                        # Prefer Notepad++ for text files
+                        _npp_paths = [
+                            r'C:\Program Files\Notepad++\notepad++.exe',
+                            r'C:\Program Files (x86)\Notepad++\notepad++.exe',
+                        ]
+                        _npp = next((p for p in _npp_paths if os.path.exists(p)), None)
+                        if _npp:
+                            subprocess.Popen([_npp, path], creationflags=_no_window)
+                        else:
+                            subprocess.Popen(['notepad.exe', path], creationflags=_no_window)
+                    else:
+                        os.startfile(path)  # PDF → default viewer
+                elif sys.platform == 'darwin':
+                    if file_type == "txt" and shutil.which('code'):
+                        subprocess.Popen(['code', path])
+                    else:
+                        subprocess.Popen(['open', path])
                 else:
-                    subprocess.Popen(["xdg-open", path])
+                    if file_type == "txt":
+                        _editors = ['gedit', 'kate', 'code', 'mousepad', 'xed', 'pluma']
+                        _editor = next((e for e in _editors if shutil.which(e)), 'xdg-open')
+                        subprocess.Popen([_editor, path])
+                    else:
+                        subprocess.Popen(['xdg-open', path])
             except Exception as exc:
                 logger.error("Could not open file: %s\n%s", exc, traceback.format_exc())
                 QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
