@@ -798,6 +798,7 @@ class EpubLibraryDialog(QDialog):
         self._grid_container = QWidget()
         self._grid_layout = QGridLayout(self._grid_container)
         self._grid_layout.setContentsMargins(1, 1, 1, 1)
+        self._grid_spacer = None  # tracked to avoid accumulation
         scroll.setWidget(self._grid_container)
         root.addWidget(scroll, 1)
 
@@ -940,13 +941,17 @@ class EpubLibraryDialog(QDialog):
             loader.start()
 
         # Force card columns to their natural width; extra space goes to a trailing stretch column
-        for c in range(cols):
+        for c in range(self._grid_layout.columnCount()):
             self._grid_layout.setColumnStretch(c, 0)
         self._grid_layout.setColumnStretch(cols, 1)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._grid_layout.addWidget(spacer, (len(books) - 1) // cols + 1, 0)
+        # Tracked bottom spacer (delete old one first)
+        if self._grid_spacer is not None:
+            self._grid_spacer.setParent(None)
+            self._grid_spacer.deleteLater()
+        self._grid_spacer = QWidget()
+        self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._grid_layout.addWidget(self._grid_spacer, (len(books) - 1) // cols + 1, 0)
 
     def _on_cover_loaded(self, epub_path, cover_path):
         if not cover_path:
@@ -1176,15 +1181,18 @@ class EpubLibraryDialog(QDialog):
             row, col = divmod(idx, cols)
             self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
 
-        # Update column stretches
-        for c in range(cols):
+        # Reset ALL column stretches, then set trailing stretch
+        for c in range(self._grid_layout.columnCount()):
             self._grid_layout.setColumnStretch(c, 0)
         self._grid_layout.setColumnStretch(cols, 1)
 
-        # Bottom spacer
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._grid_layout.addWidget(spacer, (len(self._cards) - 1) // cols + 1, 0)
+        # Reuse tracked spacer
+        if self._grid_spacer is not None:
+            self._grid_spacer.setParent(None)
+            self._grid_spacer.deleteLater()
+        self._grid_spacer = QWidget()
+        self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._grid_layout.addWidget(self._grid_spacer, (len(self._cards) - 1) // cols + 1, 0)
 
     def closeEvent(self, event):
         """Hide the dialog instead of closing — persist settings."""
