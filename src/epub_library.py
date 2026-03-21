@@ -2140,14 +2140,19 @@ class EpubReaderDialog(QDialog):
                         if qimg.width() > 300 or qimg.height() > 400:
                             wrapper = soup.new_tag("div")
                             wrapper["class"] = "full-page-img"
-                            # Check if previous sibling is a header — keep them together
-                            prev = img_tag.find_previous_sibling()
+                            # Find the block-level container of this img
+                            # (typically <p><img/></p> or <div><img/></div>)
+                            container = img_tag
+                            if img_tag.parent and img_tag.parent.name in ('p', 'div', 'figure'):
+                                container = img_tag.parent
+                            # Check container's previous sibling for a header
+                            prev = container.find_previous_sibling()
                             if prev and prev.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
                                 prev.extract()
-                                img_tag.wrap(wrapper)
+                                container.wrap(wrapper)
                                 wrapper.insert(0, prev)
                             else:
-                                img_tag.wrap(wrapper)
+                                container.wrap(wrapper)
                     except Exception:
                         pass
 
@@ -2181,13 +2186,16 @@ class EpubReaderDialog(QDialog):
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
                 f".full-page-img {{ break-inside: avoid; "
-                f"display: flex; align-items: center; justify-content: center; "
+                f"display: flex; flex-direction: column; align-items: center; justify-content: center; "
                 f"min-height: calc(100vh - 40px); overflow: hidden; "
                 f"padding: 0; margin: 0; }}"
                 f".full-page-img + .full-page-img {{ margin-top: 0; }}"
-                f".full-page-img img {{ margin: 0 auto; }}"
+                f".full-page-img img {{ margin: 0 auto; max-height: calc(100vh - 100px); }}"
+                f".full-page-img h1, .full-page-img h2, .full-page-img h3, "
+                f".full-page-img h4, .full-page-img h5, .full-page-img h6 "
+                f"{{ margin: 4px 0 8px 0; flex-shrink: 0; }}"
                 f".grouped-img {{ break-inside: avoid; "
-                f"display: flex; align-items: center; justify-content: center; "
+                f"display: flex; flex-direction: column; align-items: center; justify-content: center; "
                 f"min-height: auto; overflow: hidden; "
                 f"padding: 4px 0; margin: 0; }}"
                 f".grouped-img img {{ margin: 0 auto; }}"
