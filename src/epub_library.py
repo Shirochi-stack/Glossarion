@@ -1760,7 +1760,14 @@ class EpubReaderDialog(QDialog):
                         if qimg.width() > 300 or qimg.height() > 400:
                             wrapper = soup.new_tag("div")
                             wrapper["class"] = "full-page-img"
-                            img_tag.wrap(wrapper)
+                            # Check if previous sibling is a header — keep them together
+                            prev = img_tag.find_previous_sibling()
+                            if prev and prev.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                                prev.extract()
+                                img_tag.wrap(wrapper)
+                                wrapper.insert(0, prev)
+                            else:
+                                img_tag.wrap(wrapper)
                     except Exception:
                         pass
 
@@ -1788,7 +1795,7 @@ class EpubReaderDialog(QDialog):
                 f"font-family: 'Georgia', 'Noto Serif', serif; "
                 f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 20px 40px; }}"
-                f"h1, h2, h3 {{ color: {t['heading']}; }}"
+                f"h1, h2, h3 {{ color: {t['heading']}; margin: 0.3em 0 0.2em; }}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
