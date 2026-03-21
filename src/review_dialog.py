@@ -1130,6 +1130,26 @@ class ReviewDialog(QDialog):
         import queue
         self._review_queue = queue.Queue()
 
+        # ── Hijack sys.stdout so print() calls from streaming/thinking code
+        #    are routed through the review dialog queue instead of main GUI ──
+        self._original_stdout = sys.stdout
+        _review_queue_ref = self._review_queue
+        _active_flag = self  # reference to self for checking _review_log_active
+
+        class _ReviewStdoutWriter:
+            def write(self, text):
+                if text and text.strip() and getattr(_active_flag, '_review_log_active', False):
+                    _review_queue_ref.put(('log', text.strip()))
+            def flush(self):
+                pass
+
+        sys.stdout = _ReviewStdoutWriter()
+
+        # ── Respect the streaming toggle from settings ──
+        stream_on = bool(self.translator_gui.config.get('enable_streaming', False))
+        os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+
+
         def _log(msg):
             # Send through the hijacked append_log (reaches both main GUI and review dialog)
             # Prefix each line with [Review], but skip separator-only and blank lines
@@ -1341,6 +1361,26 @@ class ReviewDialog(QDialog):
         # Message queue for thread → main-thread
         import queue
         self._review_queue = queue.Queue()
+
+        # Hijack sys.stdout so print() from streaming/thinking goes to review dialog
+        self._original_stdout = sys.stdout
+        _review_queue_ref = self._review_queue
+        _active_flag = self
+
+        class _ReviewStdoutWriter:
+            def write(self, text):
+                if text and text.strip() and getattr(_active_flag, '_review_log_active', False):
+                    _review_queue_ref.put(('log', text.strip()))
+            def flush(self):
+                pass
+
+        sys.stdout = _ReviewStdoutWriter()
+
+        # Respect the streaming toggle from settings
+        stream_on = bool(self.translator_gui.config.get('enable_streaming', False))
+        os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+
+
         all_paths = list(self._all_epub_paths)
         total = len(all_paths)
 
@@ -1963,8 +2003,15 @@ class ReviewDialog(QDialog):
         scrollbar.setValue(scrollbar.maximum())
 
     def _unhijack_log(self):
-        """Restore the original translator_gui.append_log and flush backlog."""
+        """Restore the original translator_gui.append_log and sys.stdout, flush backlog."""
         self._review_log_active = False
+        # Restore sys.stdout first
+        if hasattr(self, '_original_stdout') and self._original_stdout is not None:
+            try:
+                sys.stdout = self._original_stdout
+                self._original_stdout = None
+            except Exception:
+                pass
         if hasattr(self, '_original_append_log'):
             try:
                 self.translator_gui.append_log = self._original_append_log
