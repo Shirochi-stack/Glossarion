@@ -392,22 +392,31 @@ KV = '''
                 # ── Reader: Load Glossary ──
                 MDCard:
                     size_hint: 1, None
-                    height: dp(72)
+                    height: dp(90)
                     padding: dp(16)
                     elevation: 1
 
                     BoxLayout:
-                        spacing: dp(12)
+                        orientation: 'vertical'
+                        spacing: dp(4)
+
+                        BoxLayout:
+                            spacing: dp(12)
+
+                            MDLabel:
+                                text: "Glossary (CSV)"
+                                size_hint_x: 0.6
+
+                            MDRaisedButton:
+                                text: "Browse"
+                                size_hint_x: 0.4
+                                on_release: root._pick_glossary()
 
                         MDLabel:
-                            text: "Load Glossary"
-                            size_hint_x: 0.7
-
-                        MDSwitch:
-                            id: reader_glossary_switch
-                            active: root.reader_enable_glossary
-                            on_active: root.reader_enable_glossary = self.active
-                            size_hint_x: 0.3
+                            id: glossary_path_label
+                            text: root.reader_glossary_path if root.reader_glossary_path else "No glossary loaded"
+                            font_style: "Caption"
+                            theme_text_color: "Hint"
 
                 # Spacer for FAB
                 Widget:
@@ -486,7 +495,7 @@ class TranslationScreen(MDScreen):
     output_language = StringProperty('English')
     prompt_expanded = BooleanProperty(False)
     reader_enable_thinking = BooleanProperty(False)
-    reader_enable_glossary = BooleanProperty(False)
+    reader_glossary_path = StringProperty('')
 
     is_translating = BooleanProperty(False)
     log_text = StringProperty('')
@@ -527,7 +536,7 @@ class TranslationScreen(MDScreen):
             self.glossary_mode = 'No Glossary'
         self.output_language = cfg.get('output_language', 'English')
         self.reader_enable_thinking = cfg.get('reader_enable_thinking', False)
-        self.reader_enable_glossary = cfg.get('reader_enable_glossary', False)
+        self.reader_glossary_path = cfg.get('reader_glossary_path', '')
 
         # Load system prompt for active profile
         self.system_prompt = self._get_prompt_for_profile(self.active_profile)
@@ -633,7 +642,7 @@ class TranslationScreen(MDScreen):
         cfg['output_language'] = self.output_language
         cfg['active_system_prompt'] = self.system_prompt
         cfg['reader_enable_thinking'] = self.reader_enable_thinking
-        cfg['reader_enable_glossary'] = self.reader_enable_glossary
+        cfg['reader_glossary_path'] = self.reader_glossary_path
 
         # Save prompt to profile
         profiles = cfg.get('prompt_profiles', {})
@@ -642,6 +651,34 @@ class TranslationScreen(MDScreen):
 
         from android_config import save_config
         save_config(cfg)
+
+    # ── Glossary File Picker ──
+
+    def _pick_glossary(self):
+        """Open a file picker to select a glossary CSV file."""
+        try:
+            from plyer import filechooser
+            filechooser.open_file(
+                title="Select Glossary CSV",
+                filters=[("CSV files", "*.csv")],
+                on_selection=self._on_glossary_selected,
+                multiple=False,
+            )
+        except Exception as e:
+            logger.error(f"Glossary file picker error: {e}")
+
+    def _on_glossary_selected(self, selection):
+        """Handle glossary file selection."""
+        if selection:
+            path = selection[0] if isinstance(selection, list) else selection
+            if path and os.path.isfile(path):
+                self.reader_glossary_path = path
+                # Show just the filename in a toast
+                try:
+                    from kivymd.toast import toast
+                    toast(f"Loaded: {os.path.basename(path)}")
+                except Exception:
+                    pass
 
     # ── AuthGPT OAuth ──
 

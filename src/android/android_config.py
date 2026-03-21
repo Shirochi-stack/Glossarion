@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     'reader_default_language': 'ko',         # 'ko' or 'en' — which view opens by default
     'reader_stream_translation': True,       # show streaming output during translation
     'reader_enable_thinking': False,         # enable LLM thinking/reasoning for reader translation
-    'reader_enable_glossary': False,         # load glossary terms for reader translation
+    'reader_glossary_path': '',               # path to glossary CSV for reader translation
 
     # Library settings
     'library_scan_dirs': [],

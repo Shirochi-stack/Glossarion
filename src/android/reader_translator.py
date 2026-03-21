@@ -258,6 +258,13 @@ def translate_chapter_streaming(
         os.environ['ENABLE_STREAMING'] = '1'
         os.environ['LOG_STREAM_CHUNKS'] = '1'
 
+        # Wire glossary CSV if configured
+        glossary_path = config_data.get('reader_glossary_path', '')
+        if glossary_path and os.path.isfile(glossary_path):
+            os.environ['MANUAL_GLOSSARY'] = glossary_path
+        else:
+            os.environ.pop('MANUAL_GLOSSARY', None)
+
         # Set thinking env vars
         _setup_thinking_env(config_data)
 
