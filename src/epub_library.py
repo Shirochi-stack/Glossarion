@@ -377,8 +377,15 @@ class EpubLibraryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("📚 Glossarion Library")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
-        self.resize(900, 650)
-        self.setMinimumSize(500, 400)
+        # Ratio-based sizing relative to screen
+        screen = self.screen()
+        if screen:
+            avail = screen.availableGeometry()
+            self.resize(int(avail.width() * 0.55), int(avail.height() * 0.65))
+            self.setMinimumSize(int(avail.width() * 0.35), int(avail.height() * 0.4))
+        else:
+            self.resize(900, 650)
+            self.setMinimumSize(500, 400)
         self._config = config or {}
         self._books: list[dict] = []
         self._cards: list[_BookCard] = []
@@ -996,8 +1003,15 @@ class EpubReaderDialog(QDialog):
 
         self.setWindowTitle(f"📖 {os.path.splitext(os.path.basename(epub_path))[0]}")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
-        self.resize(950, 700)
-        self.setMinimumSize(600, 400)
+        # Ratio-based sizing relative to screen
+        screen = self.screen()
+        if screen:
+            avail = screen.availableGeometry()
+            self.resize(int(avail.width() * 0.55), int(avail.height() * 0.7))
+            self.setMinimumSize(int(avail.width() * 0.4), int(avail.height() * 0.4))
+        else:
+            self.resize(950, 700)
+            self.setMinimumSize(600, 400)
 
         self._setup_ui()
         # Restore combo positions after UI is built
@@ -1055,8 +1069,7 @@ class EpubReaderDialog(QDialog):
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 20px; }
-            QComboBox::down-arrow { image: none; }
-            QComboBox::drop-down::after { content: '▾'; color: #888; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e; font-size: 8.5pt;
@@ -1087,8 +1100,7 @@ class EpubReaderDialog(QDialog):
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 18px; }
-            QComboBox::down-arrow { image: none; }
-            QComboBox::drop-down::after { content: '▾'; color: #888; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
@@ -1130,8 +1142,7 @@ class EpubReaderDialog(QDialog):
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 18px; }
-            QComboBox::down-arrow { image: none; }
-            QComboBox::drop-down::after { content: '▾'; color: #888; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
