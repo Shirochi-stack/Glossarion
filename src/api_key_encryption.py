@@ -25,7 +25,11 @@ class APIKeyEncryption:
             _app_dir = Path(sys.executable).parent
         else:
             _app_dir = Path(__file__).parent
-        self.key_file = _app_dir / '.glossarion_key'
+        # On macOS use a plain .txt file (easier to find/manage)
+        if sys.platform == 'darwin':
+            self.key_file = _app_dir / 'glossarion_key.txt'
+        else:
+            self.key_file = _app_dir / '.glossarion_key'
         self.cipher = self._get_or_create_cipher()
         
         # Define which fields to encrypt
@@ -51,7 +55,11 @@ class APIKeyEncryption:
         except OSError:
             # Fallback: write to home directory if primary path is read-only
             try:
-                fallback = Path.home() / '.glossarion_key'
+                import sys as _sys
+                if _sys.platform == 'darwin':
+                    fallback = Path.home() / 'glossarion_key.txt'
+                else:
+                    fallback = Path.home() / '.glossarion_key'
                 fallback.write_bytes(key)
                 self.key_file = fallback
             except OSError:
