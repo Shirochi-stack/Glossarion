@@ -2594,8 +2594,29 @@ class UnifiedClient:
                     self._apply_individual_key_endpoint_if_needed()
                     return
                 else:
-                    # No keys available
-                    raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
+                    # No pool keys available (all disabled/cooldown) — fall back to main GUI key
+                    if hasattr(self, 'original_api_key') and self.original_api_key:
+                        print(f"[Thread-{thread_name}] ⚠️ All pool keys unavailable, falling back to main GUI key")
+                        tls.api_key = self.original_api_key
+                        tls.model = self.original_model
+                        tls.key_index = -1
+                        tls.key_identifier = "Main Key (fallback)"
+                        tls.google_credentials = None
+                        tls.azure_endpoint = None
+                        tls.azure_api_version = None
+                        tls.google_region = None
+                        tls.use_individual_endpoint = False
+                        tls.initialized = True
+                        tls.last_rotation = time.time()
+                        with self._model_lock:
+                            self.api_key = self.original_api_key
+                            self.model = self.original_model
+                            self.key_identifier = "Main Key (fallback)"
+                            self.current_key_index = -1
+                        self._setup_client()
+                        return
+                    else:
+                        raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
             else:
                 # Not rotating, ensure instance variables match thread-local
                 if tls.initialized:
@@ -2723,7 +2744,14 @@ class UnifiedClient:
             
             retry_count += 1
         
-        # If we've exhausted all retries, raise error
+        # If we've exhausted all retries, fall back to main GUI key
+        if hasattr(self, 'original_api_key') and self.original_api_key:
+            print(f"[THREAD-{thread_name}] ⚠️ All pool keys exhausted after {max_retries} retries, falling back to main GUI key")
+            self.api_key = self.original_api_key
+            self.model = self.original_model
+            self.key_identifier = "Main Key (fallback)"
+            self._setup_client()
+            return
         raise UnifiedClientError(f"No available API keys for thread after {max_retries} retries", error_type="no_keys")
 
     def _get_next_available_key(self) -> Optional[Tuple]:
@@ -4297,6 +4325,15 @@ class UnifiedClient:
                                         glossary_pool = self.__class__._glossary_key_pool
                                 except Exception:
                                     pass
+                        
+                        if glossary_pool and getattr(glossary_pool, 'keys', []):
+                            # Check if at least one glossary key is actually enabled
+                            # If all are disabled, skip the override and use the regular pool
+                            _has_enabled = any(
+                                getattr(k, 'enabled', True) for k in glossary_pool.keys
+                            )
+                            if not _has_enabled:
+                                glossary_pool = None  # Fall through to regular multi-key/single-key path
                         
                         if glossary_pool and getattr(glossary_pool, 'keys', []):
                             # Save original state
