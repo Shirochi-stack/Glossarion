@@ -55,9 +55,9 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
           restore-keys: |
-            buildozer-${{ runner.os }}-
+            buildozer-v2-${{ runner.os }}-
       
       - name: Copy shared backend files
         run: |
@@ -219,6 +219,13 @@ jobs:
           # Set JAVA_HOME for Buildozer
           export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
           
+          # Unset system NDK env vars — buildozer must use its own NDK (r25b)
+          # The system NDK r27 has ALooper_pollAll marked unavailable, breaking SDL2
+          unset ANDROID_NDK
+          unset ANDROID_NDK_HOME
+          unset ANDROID_NDK_ROOT
+          unset ANDROID_NDK_LATEST_HOME
+          
           # Add _backend to PYTHONPATH so modules can be found
           export PYTHONPATH="$(pwd)/_backend:$PYTHONPATH"
           
@@ -300,5 +307,5 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
 
