@@ -18,8 +18,18 @@ import zipfile
 import shutil
 import traceback
 import subprocess
+import platform
 
 _IS_MACOS = (sys.platform == 'darwin')
+
+def _get_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -4399,7 +4409,7 @@ class RetranslationMixin:
         
         # File info
         file_info = []
-        script_dir = os.getcwd()
+        script_dir = _get_app_dir()
         
         # Check each image for translations
         for img_path in sorted(image_files):
@@ -4670,7 +4680,7 @@ class RetranslationMixin:
                 return
         
         # Look for output folder in the SCRIPT'S directory, not relative to the selected folder
-        script_dir = os.getcwd()  # Current working directory where the script is running
+        script_dir = _get_app_dir()  # Application directory where output is generated
         
         # Check multiple possible output folder patterns IN THE SCRIPT DIRECTORY
         possible_output_dirs = [

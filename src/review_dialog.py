@@ -5,6 +5,8 @@ Launched from the "Generate Review" button in translator_gui.py.
 """
 
 import os
+import sys
+import platform
 import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -22,6 +24,15 @@ from review_generator import (
     generate_review,
     generate_chunked_review,
 )
+
+
+def _get_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
 
 
 class ReviewDialog(QDialog):
@@ -51,7 +62,7 @@ class ReviewDialog(QDialog):
 
         # Icon
         try:
-            base_dir = getattr(translator_gui, 'base_dir', os.getcwd())
+            base_dir = getattr(translator_gui, 'base_dir', _get_app_dir())
             icon_path = os.path.join(base_dir, 'Halgakos.ico')
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
@@ -947,7 +958,7 @@ class ReviewDialog(QDialog):
             if override_dir:
                 output_dir = os.path.join(os.path.abspath(override_dir), epub_base)
             else:
-                output_dir = os.path.join(os.getcwd(), epub_base)
+                output_dir = os.path.join(_get_app_dir(), epub_base)
             return os.path.join(output_dir, "review", "review.md")
         except Exception:
             return None
@@ -1080,7 +1091,7 @@ class ReviewDialog(QDialog):
         if override_dir:
             output_dir = os.path.join(os.path.abspath(override_dir), epub_base)
         else:
-            output_dir = os.path.join(os.getcwd(), epub_base)
+            output_dir = os.path.join(_get_app_dir(), epub_base)
 
         # UI state
         self.start_btn.hide()
@@ -1338,7 +1349,7 @@ class ReviewDialog(QDialog):
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
             if override_dir:
                 return os.path.join(os.path.abspath(override_dir), epub_base)
-            return os.path.join(os.getcwd(), epub_base)
+            return os.path.join(_get_app_dir(), epub_base)
 
         def _stop_check():
             return self._stop_requested

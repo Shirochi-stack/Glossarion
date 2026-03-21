@@ -37,6 +37,14 @@ import platform
 
 _IS_WINDOWS = platform.system().lower().startswith('win')
 
+def _get_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
 # Natural/numerical sort helper function
 def _natural_sort_key(text):
     """Generate a key for natural/numerical sorting.
@@ -8314,7 +8322,7 @@ class MangaTranslationTab(QObject):
                         output_dir = translated_folders[0]
                     else:
                         # Fall back to default output folder in current working directory
-                        output_dir = os.path.join(os.getcwd(), 'output')
+                        output_dir = os.path.join(_get_app_dir(), 'output')
                         if not os.path.exists(output_dir):
                             try:
                                 os.makedirs(output_dir, exist_ok=True)
@@ -8323,7 +8331,7 @@ class MangaTranslationTab(QObject):
                                 return
             else:
                 # No selected files - use default output folder
-                output_dir = os.path.join(os.getcwd(), 'output')
+                output_dir = os.path.join(_get_app_dir(), 'output')
                 if not os.path.exists(output_dir):
                     try:
                         os.makedirs(output_dir, exist_ok=True)

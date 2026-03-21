@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import platform
+import traceback
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -107,7 +108,7 @@ def _extract_cover(epub_path: str) -> str | None:
                 f.write(cover_data)
             return cached
     except Exception as exc:
-        logger.debug("Cover extraction failed for %s: %s", epub_path, exc)
+        logger.debug("Cover extraction failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
     return None
 
 
@@ -124,7 +125,7 @@ def _open_folder_in_explorer(path: str):
         else:
             subprocess.Popen(["xdg-open", folder])
     except Exception as exc:
-        logger.warning("Failed to open folder: %s", exc)
+        logger.warning("Failed to open folder: %s\n%s", exc, traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +287,7 @@ class _BookCard(QFrame):
                 self.cover_label.setPixmap(scaled)
                 self.cover_label.setText("")
         except Exception:
+            logger.debug("Fallback icon failed: %s", traceback.format_exc())
             self.cover_label.setText("📖")
 
     def set_cover(self, image_path: str):
@@ -297,7 +299,7 @@ class _BookCard(QFrame):
                 self.cover_label.setText("")
                 self._has_cover = True
         except Exception:
-            pass
+            logger.debug("Set cover failed: %s", traceback.format_exc())
 
     def mouseDoubleClickEvent(self, event):
         self.clicked.emit(self.book)
@@ -604,7 +606,9 @@ class EpubLibraryDialog(QDialog):
             reader.exec()
         except Exception as exc:
             QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Error", f"Could not open EPUB:\n{exc}")
+            tb = traceback.format_exc()
+            logger.error("Could not open EPUB: %s\n%s", exc, tb)
+            QMessageBox.warning(self, "Error", f"Could not open EPUB:\n{exc}\n\nDetails:\n{tb}")
 
     def _show_context_menu(self, book, pos):
         menu = QMenu(self)
@@ -808,11 +812,12 @@ class _EpubLoaderThread(QThread):
                         title = title[:47] + "…"
                     chapters.append((title, content))
                 except Exception:
-                    pass
+                    logger.debug("Skipped chapter: %s", traceback.format_exc())
 
             self.finished.emit(chapters, images)
         except Exception as exc:
-            self.error.emit(str(exc))
+            logger.error("EPUB load error: %s\n%s", exc, traceback.format_exc())
+            self.error.emit(f"{exc}\n\n{traceback.format_exc()}")
 
 
 # ---------------------------------------------------------------------------
@@ -1287,6 +1292,7 @@ class EpubReaderDialog(QDialog):
 
             return str(soup)
         except Exception:
+            logger.debug("HTML processing failed: %s", traceback.format_exc())
             return html_content
 
     def _wrap_html(self, body_html: str) -> str:

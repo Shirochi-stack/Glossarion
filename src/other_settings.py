@@ -9,6 +9,7 @@ import os
 import json
 import re
 import sys
+import platform
 
 # PySide6 imports (fully migrated from Tkinter)
 from PySide6.QtWidgets import (
@@ -31,6 +32,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtCore import QObject, Signal
+
+
+def _get_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
 
 class ConnTestBridge(QObject):
     finished = Signal(list)
@@ -1889,7 +1900,7 @@ def _create_danger_zone_section(self, parent):
             
             if msg.exec() == QMessageBox.Yes:
                 # Delete config.json
-                config_path = os.path.join(os.getcwd(), CONFIG_FILE)
+                config_path = os.path.join(_get_app_dir(), CONFIG_FILE)
                 if os.path.exists(config_path):
                     try:
                         # Write temporary config with just the preserved keys

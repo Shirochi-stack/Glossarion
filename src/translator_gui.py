@@ -350,6 +350,20 @@ def _atomic_json_write(filepath, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _get_app_dir() -> str:
+    """Return the application's base directory.
+
+    On Windows the CWD can be Downloads/Desktop when launching a .exe,
+    so we always use the exe/script directory.  On macOS/Linux the CWD
+    is typically reliable (set by the launcher), so we keep it.
+    """
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
 # --- Robust file logging and crash tracing setup ---
 _FAULT_LOG_FH = None
 
@@ -405,7 +419,7 @@ def _setup_file_logging():
             pass
         
         # 5) Last resort: current working directory
-        fallback = os.path.join(os.getcwd(), "logs")
+        fallback = os.path.join(_get_app_dir(), "logs")
         os.makedirs(fallback, exist_ok=True)
         return fallback
     
@@ -1145,7 +1159,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Center window on screen
         self.move(rect.center() - self.rect().center())
         
-        self.payloads_dir = os.path.join(os.getcwd(), "Payloads")
+        self.payloads_dir = os.path.join(_get_app_dir(), "Payloads")
         
         # Auto-scroll control: delay forcing scroll on new runs
         self._autoscroll_delay_until = 0.0  # epoch seconds
@@ -5412,7 +5426,7 @@ Recent translations to summarize:
                     if override_dir:
                         _root = os.path.abspath(override_dir)
                     else:
-                        _root = os.getcwd()
+                        _root = _get_app_dir()
 
                     # 1. Shared Glossary/ folder at root: <root>/Glossary/<base>_glossary.*
                     gdir = os.path.join(_root, 'Glossary')
@@ -5565,7 +5579,7 @@ Recent translations to summarize:
                         backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), base, 'Backups'))
                     else:
                         backup_dirs_to_check.append(os.path.join('Glossary', 'Backups'))
-                        backup_dirs_to_check.append(os.path.join(os.getcwd(), base, 'Backups'))
+                        backup_dirs_to_check.append(os.path.join(_get_app_dir(), base, 'Backups'))
                     for bdir in backup_dirs_to_check:
                         if not os.path.isdir(bdir):
                             continue
@@ -5866,6 +5880,30 @@ Recent translations to summarize:
         mode_name = "user message" if self.system_prompt_to_user_var else "system message"
         self.append_log(f"🔀 System prompt will be sent as {mode_name}")
     
+    def _get_output_base_dir(self, input_file: str = "") -> str:
+        """Return the base directory where translation output folders are created.
+
+        On Windows the translation engine writes output relative to the
+        script / exe directory, NOT the input file's location.  On macOS
+        CWD can be '/' due to App Translocation so we prefer the input
+        file's parent there, with the script dir as fallback.
+        """
+        # Candidate 1: the script / exe directory (where the engine outputs)
+        if getattr(sys, 'frozen', False):
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        if platform.system() == 'Windows':
+            return script_dir
+
+        # macOS / Linux — prefer input file dir, fall back to script dir
+        if input_file:
+            input_dir = os.path.dirname(os.path.abspath(input_file))
+            if input_dir and input_dir != '/':
+                return input_dir
+        return script_dir
+
     def open_output_folder(self):
         """Open the output folder that is expected to be created"""
         import subprocess
@@ -5898,13 +5936,7 @@ Recent translations to summarize:
             if override_dir:
                 output_path = os.path.join(override_dir, folder_name)
             else:
-                # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
-                if files[0]:
-                    base_dir = os.path.dirname(os.path.abspath(files[0]))
-                elif platform.system() == 'Windows':
-                    base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-                else:
-                    base_dir = os.getcwd()
+                base_dir = self._get_output_base_dir(files[0])
                 output_path = os.path.join(base_dir, folder_name)
             self._open_single_output_folder(output_path)
             return
@@ -5915,8 +5947,7 @@ Recent translations to summarize:
             if override_dir:
                 output_path = os.path.join(override_dir, base_name)
             else:
-                # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
-                base_dir = os.path.dirname(os.path.abspath(files[0]))
+                base_dir = self._get_output_base_dir(files[0])
                 output_path = os.path.join(base_dir, base_name)
             self._open_single_output_folder(output_path)
             return
@@ -5985,8 +6016,7 @@ Recent translations to summarize:
             if override_dir:
                 output_path = os.path.join(override_dir, base_name)
             else:
-                # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
-                base_dir = os.path.dirname(os.path.abspath(file_path))
+                base_dir = self._get_output_base_dir(file_path)
                 output_path = os.path.join(base_dir, base_name)
             
             exists = os.path.exists(output_path)
@@ -10956,7 +10986,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PROFILE_NAME': self.lang_var.lower(),
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
-            'EPUB_OUTPUT_DIR': os.getcwd(),
+            'EPUB_OUTPUT_DIR': _get_app_dir(),
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
@@ -12933,7 +12963,7 @@ Important rules:
            if override_dir:
                review_path = os.path.join(os.path.abspath(override_dir), file_base, "review", "review.md")
            else:
-               review_path = os.path.join(os.getcwd(), file_base, "review", "review.md")
+               review_path = os.path.join(_get_app_dir(), file_base, "review", "review.md")
            if os.path.exists(review_path):
                self.review_indicator_label.show()
            else:
@@ -17249,7 +17279,7 @@ Important rules:
 
             # 2) CWD Glossary/
             try:
-                cwd_glossary_dir = os.path.join(os.getcwd(), 'Glossary')
+                cwd_glossary_dir = os.path.join(_get_app_dir(), 'Glossary')
                 hit = _find_in_dir(cwd_glossary_dir)
                 if hit:
                     return hit
