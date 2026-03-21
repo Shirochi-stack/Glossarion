@@ -855,8 +855,8 @@ LAYOUT_ALL    = "all_scroll"    # All chapters concatenated, scrollable
 
 # Reader themes — first one is the default and matches translator_gui.py's dark palette
 _READER_THEMES = [
-    {"name": "Dark",     "bg": "#1e1e2e", "fg": "#d4d4d4", "heading": "#c8c8f0",
-     "link": "#6c9bd2", "code_bg": "#252540", "border": "#2a2a3e"},
+    {"name": "Dark",     "bg": "#1a1a2e", "fg": "#d4d4d4", "heading": "#c8c8f0",
+     "link": "#6c9bd2", "code_bg": "#222240", "border": "#2a2a3e"},
     {"name": "Light",    "bg": "#faf9f6", "fg": "#2c2c2c", "heading": "#333333",
      "link": "#1a73e8", "code_bg": "#eeeeee", "border": "#dddddd"},
     {"name": "Sepia",    "bg": "#f4ecd8", "fg": "#5b4636", "heading": "#3e2c1c",
@@ -928,6 +928,12 @@ class EpubReaderDialog(QDialog):
         title_lbl.setStyleSheet("font-size: 11pt; font-weight: bold; color: #e0e0e0;")
         title_lbl.setMaximumWidth(400)
         toolbar.addWidget(title_lbl)
+
+        # TOC toggle button
+        self._toc_btn = self._make_toolbar_btn("📑", "Toggle table of contents")
+        self._toc_btn.clicked.connect(self._toggle_toc)
+        toolbar.addWidget(self._toc_btn)
+
         toolbar.addStretch()
 
         # Layout mode dropdown
@@ -1055,13 +1061,6 @@ class EpubReaderDialog(QDialog):
         # TOC sidebar
         self._toc_list = QListWidget()
         self._toc_list.setFixedWidth(220)
-        self._toc_list.setStyleSheet("""
-            QListWidget { background: #16162a; border: none; border-right: 1px solid #2a2a3e;
-                color: #c0c0d0; font-size: 9pt; padding: 4px; }
-            QListWidget::item { padding: 6px 8px; border-radius: 4px; }
-            QListWidget::item:selected { background: #2a2a4e; color: #e0e0ff; }
-            QListWidget::item:hover { background: #222240; }
-        """)
         self._toc_list.currentRowChanged.connect(self._on_chapter_selected)
         splitter.addWidget(self._toc_list)
 
@@ -1096,6 +1095,7 @@ class EpubReaderDialog(QDialog):
         splitter.addWidget(self._reader_stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        self._splitter = splitter  # keep ref for styling
         content_layout.addWidget(splitter, 1)
 
         # Bottom nav bar for single-page mode
@@ -1128,7 +1128,6 @@ class EpubReaderDialog(QDialog):
         """)
         self._next_btn.clicked.connect(self._next_chapter)
         nav_layout.addWidget(self._next_btn)
-        self._nav_bar.setStyleSheet("background: #12121e; border-top: 1px solid #2a2a3e;")
         self._nav_bar.hide()
         content_layout.addWidget(self._nav_bar)
 
@@ -1136,7 +1135,6 @@ class EpubReaderDialog(QDialog):
         root.addWidget(self._content_widget, 1)
 
         self._apply_reader_style()
-        self.setStyleSheet("QDialog { background: #12121e; }")
 
         # Shortcuts (work regardless of child focus)
         QShortcut(QKeySequence(Qt.Key_Left), self, self._prev_chapter)
@@ -1187,7 +1185,7 @@ class EpubReaderDialog(QDialog):
 
         self._toc_list.clear()
         for idx, (title, _) in enumerate(self._chapters):
-            item = QListWidgetItem(f"{idx + 1}. {title}")
+            item = QListWidgetItem(title)
             self._toc_list.addItem(item)
 
         self._loading_widget.hide()
@@ -1232,22 +1230,39 @@ class EpubReaderDialog(QDialog):
     def _apply_reader_style(self):
         t = self._get_theme()
         bg = t['bg']
+        fg = t['fg']
+        border = t['border']
         css = f"""
             QTextBrowser {{
-                background: {bg}; color: {t['fg']}; border: none;
+                background: {bg}; color: {fg}; border: none;
                 padding: 20px 30px; font-size: {self._font_size}pt;
             }}
             QTextBrowser a {{ color: {t['link']}; }}
             QScrollBar:vertical {{ width: 8px; background: {bg}; }}
-            QScrollBar::handle:vertical {{ background: {t['border']}; border-radius: 4px; min-height: 20px; }}
+            QScrollBar::handle:vertical {{ background: {border}; border-radius: 4px; min-height: 20px; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """
         self._reader.setStyleSheet(css)
-        self._reader_left.setStyleSheet(css + f"QTextBrowser {{ border-right: 1px solid {t['border']}; }}")
+        self._reader_left.setStyleSheet(css + f"QTextBrowser {{ border-right: 1px solid {border}; }}")
         self._reader_right.setStyleSheet(css)
-        # Match surrounding containers to theme background so there's no "smudge"
+        # Theme all surrounding containers
+        self.setStyleSheet(f"QDialog {{ background: {bg}; }}")
         self._reader_stack.setStyleSheet(f"QStackedWidget {{ background: {bg}; border: none; }}")
         self._double_widget.setStyleSheet(f"background: {bg};")
+        self._toc_list.setStyleSheet(f"""
+            QListWidget {{ background: {bg}; border: none; border-right: 1px solid {border};
+                color: {fg}; font-size: 9pt; padding: 4px; }}
+            QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background: {border}; color: {t['heading']}; }}
+            QListWidget::item:hover {{ background: {t['code_bg']}; }}
+        """)
+        self._nav_bar.setStyleSheet(f"background: {bg}; border-top: 1px solid {border};")
+        self._loading_widget.setStyleSheet(f"background: {bg};")
+        self._splitter.setStyleSheet(f"QSplitter::handle {{ background: {border}; width: 1px; }}")
+
+    def _toggle_toc(self):
+        """Show or hide the TOC sidebar."""
+        self._toc_list.setVisible(not self._toc_list.isVisible())
 
     def _change_font_size(self, delta):
         self._font_size = max(8, min(32, self._font_size + delta))
