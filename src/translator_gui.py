@@ -5899,7 +5899,12 @@ Recent translations to summarize:
                 output_path = os.path.join(override_dir, folder_name)
             else:
                 # Use input file's parent dir (os.getcwd() is / on macOS App Translocation)
-                base_dir = os.path.dirname(os.path.abspath(files[0])) if files[0] else os.getcwd()
+                if files[0]:
+                    base_dir = os.path.dirname(os.path.abspath(files[0]))
+                elif platform.system() == 'Windows':
+                    base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+                else:
+                    base_dir = os.getcwd()
                 output_path = os.path.join(base_dir, folder_name)
             self._open_single_output_folder(output_path)
             return

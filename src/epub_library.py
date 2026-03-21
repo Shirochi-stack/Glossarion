@@ -178,8 +178,17 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
     if override and os.path.isdir(override):
         _walk(os.path.abspath(override))
 
-    cwd = os.getcwd()
-    _walk(cwd)
+    # 3. App directory — on Windows, CWD can be Downloads/Desktop when
+    #    launching an .exe, which is far too broad.  Use the exe/script dir instead.
+    if platform.system() == "Windows":
+        if getattr(sys, "frozen", False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+    else:
+        # macOS / Linux: CWD is typically the project folder
+        app_dir = os.getcwd()
+    _walk(app_dir)
 
     results.sort(key=lambda r: r["mtime"], reverse=True)
     return results
