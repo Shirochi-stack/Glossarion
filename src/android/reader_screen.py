@@ -590,16 +590,7 @@ class ReaderScreen(MDScreen):
         try:
             box = self.ids.content_box
             box.clear_widgets()
-            lbl = MDLabel(
-                text=text,
-                markup=True,
-                size_hint_y=None,
-                font_size=self.font_size_px,
-                line_height=self.line_spacing,
-                color=self.text_color,
-                halign=self.text_align,
-            )
-            lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+            lbl = self._make_text_label(text)
             box.add_widget(lbl)
         except Exception:
             pass
@@ -625,14 +616,21 @@ class ReaderScreen(MDScreen):
         box.clear_widgets()
 
         try:
-            if use_translated:
+            if use_translated and index in self._translated_chapters:
                 self._render_translated(box, index)
             else:
                 self._render_original(box, index)
         except Exception as e:
-            logger.error(f"_show_chapter render crash ch {index}: {e}")
-            # Ultimate fallback — show raw text from _raw_chapters
-            self._render_raw_fallback(box, index)
+            import traceback
+            err = traceback.format_exc()
+            logger.error(f"_show_chapter crash ch {index}: {err}")
+            try:
+                self._render_raw_fallback(box, index)
+            except Exception:
+                # Absolute last resort
+                box.clear_widgets()
+                lbl = self._make_text_label(f"ERROR rendering ch {index}:\n{err}")
+                box.add_widget(lbl)
 
         # Always scroll to top and save
         try:
@@ -641,56 +639,88 @@ class ReaderScreen(MDScreen):
             pass
         self._save_progress()
 
-    def _render_translated(self, box, index):
-        """Render the translated version of a chapter."""
-        translated_text = self._translated_chapters[index]
-        self.current_text = translated_text
-        lbl = MDLabel(
-            text=translated_text,
-            markup=True,
+    def _make_text_label(self, text, markup=False):
+        """Create a plain Kivy Label for chapter text."""
+        from kivy.uix.label import Label
+
+        # Get actual container width — this MUST be a real value
+        container_width = 400
+        try:
+            cw = self.ids.content_box.width
+            pad = self.margin_px * 2 if hasattr(self, 'margin_px') else 48
+            if cw and cw > 50:
+                container_width = cw - pad
+        except Exception:
+            pass
+
+        lbl = Label(
+            text=str(text),
+            markup=markup,
             size_hint_y=None,
+            size_hint_x=1,
             font_size=self.font_size_px,
             line_height=self.line_spacing,
             color=self.text_color,
             halign=self.text_align,
+            valign='top',
+            text_size=(container_width, None),
         )
+        lbl.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
         lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+        return lbl
+
+    def _render_translated(self, box, index):
+        """Render the translated version of a chapter."""
+        translated_text = self._translated_chapters.get(index, '')
+        if not translated_text:
+            self._render_original(box, index)
+            return
+        self.current_text = translated_text
+        lbl = self._make_text_label(translated_text, markup=True)
         box.add_widget(lbl)
 
     def _render_original(self, box, index):
-        """Render the original KO chapter with text and images."""
-        blocks = self.chapters[index]
+        """Render the original KO chapter — simplified, no-nonsense version."""
+        # Step 1: Get raw HTML for this chapter and strip tags to get plain text
+        chapter_text = ''
 
-        # --- ALWAYS extract text from raw HTML as the primary source ---
-        raw_text = ''
+        # Primary: extract from raw HTML using simple regex (no bs4 needed)
         if index < len(self._raw_chapters):
-            raw = self._raw_chapters[index]
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(raw, 'html.parser')
-                raw_text = soup.get_text(separator='\n').strip()
-            except Exception:
-                raw_text = raw[:3000] if raw else ''
+            raw_html = self._raw_chapters[index]
+            if raw_html:
+                # Strip HTML tags with regex
+                import re as _re
+                text = _re.sub(r'<script[^>]*>.*?</script>', '', raw_html, flags=_re.DOTALL | _re.IGNORECASE)
+                text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+                text = _re.sub(r'<[^>]+>', '\n', text)
+                text = _re.sub(r'&nbsp;', ' ', text)
+                text = _re.sub(r'&lt;', '<', text)
+                text = _re.sub(r'&gt;', '>', text)
+                text = _re.sub(r'&amp;', '&', text)
+                text = _re.sub(r'&#\d+;', '', text)
+                text = _re.sub(r'\n{3,}', '\n\n', text)
+                chapter_text = text.strip()
 
-        # Also try from blocks
-        block_text_parts = []
-        for b in blocks:
-            if isinstance(b, (list, tuple)) and len(b) >= 2 and b[0] == 'text':
-                block_text_parts.append(str(b[1]))
-            elif isinstance(b, str):
-                block_text_parts.append(b)
-        block_text = '\n\n'.join(block_text_parts)
+        # Secondary fallback: extract from blocks
+        if not chapter_text:
+            blocks = self.chapters[index]
+            parts = []
+            for b in blocks:
+                if isinstance(b, (list, tuple)) and len(b) >= 2:
+                    if b[0] == 'text':
+                        parts.append(str(b[1]))
+                elif isinstance(b, str):
+                    parts.append(b)
+            chapter_text = '\n\n'.join(parts)
 
-        # Use whichever has more content
-        self.current_text = block_text if len(block_text) >= len(raw_text) else raw_text
-        if not self.current_text.strip():
-            self.current_text = raw_text or block_text or '(empty chapter)'
+        if not chapter_text.strip():
+            chapter_text = '(No text content in this chapter)'
 
-        logger.info(f"_render_original ch {index}: blocks={len(blocks)}, "
-                     f"block_text_len={len(block_text)}, raw_text_len={len(raw_text)}, "
-                     f"block_types={[b[0] if isinstance(b,(list,tuple)) and b else type(b).__name__ for b in blocks[:5]]}")
+        self.current_text = chapter_text
+        logger.info(f"_render_original ch {index}: text_len={len(chapter_text)}")
 
-        # --- Render images from blocks ---
+        # Step 2: Render images from blocks
+        blocks = self.chapters[index]
         try:
             from kivy.uix.image import AsyncImage
             for block in blocks:
@@ -702,50 +732,26 @@ class ReaderScreen(MDScreen):
                         fit_mode='contain',
                         allow_stretch=True,
                     )
-                    def _on_texture(instance, texture, *args):
-                        if texture:
-                            aspect = texture.width / max(texture.height, 1)
-                            max_w = instance.parent.width if instance.parent else 400
-                            instance.height = min(dp(600), max_w / max(aspect, 0.1))
-                    img.bind(texture=_on_texture)
                     box.add_widget(img)
-        except Exception as e:
-            logger.error(f"_render_original image error ch {index}: {e}")
+        except Exception:
+            pass
 
-        # --- ALWAYS add a text label with the chapter text ---
-        if self.current_text.strip():
-            lbl = MDLabel(
-                text=self.current_text,
-                size_hint_y=None,
-                font_size=self.font_size_px,
-                line_height=self.line_spacing,
-                color=self.text_color,
-                halign=self.text_align,
-            )
-            lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
-            box.add_widget(lbl)
+        # Step 3: ALWAYS add the text
+        lbl = self._make_text_label(chapter_text)
+        box.add_widget(lbl)
 
     def _render_raw_fallback(self, box, index):
-        """Last-resort fallback: extract text from raw HTML and display it."""
-        fallback_text = "(Could not render chapter)"
+        """Last-resort fallback."""
+        import re as _re
+        fallback = '(Could not render chapter)'
         if index < len(self._raw_chapters):
             raw = self._raw_chapters[index]
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(raw, 'html.parser')
-                fallback_text = soup.get_text(separator='\n').strip() or "(empty chapter)"
-            except Exception:
-                fallback_text = raw[:3000] if raw else "(empty chapter)"
-        self.current_text = fallback_text
-        lbl = MDLabel(
-            text=fallback_text,
-            size_hint_y=None,
-            font_size=self.font_size_px,
-            line_height=self.line_spacing,
-            color=self.text_color,
-            halign=self.text_align,
-        )
-        lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
+            if raw:
+                text = _re.sub(r'<[^>]+>', ' ', raw)
+                text = _re.sub(r'\s+', ' ', text).strip()
+                fallback = text[:5000] or '(empty chapter)'
+        self.current_text = fallback
+        lbl = self._make_text_label(fallback)
         box.add_widget(lbl)
 
     def next_chapter(self):
@@ -1100,18 +1106,7 @@ class ReaderScreen(MDScreen):
             box = self.ids.content_box
             box.clear_widgets()
             # Create a label for streaming output
-            self._stream_label = MDLabel(
-                text='',
-                markup=True,
-                size_hint_y=None,
-                font_size=self.font_size_px,
-                line_height=self.line_spacing,
-                color=self.text_color,
-                halign=self.text_align,
-            )
-            self._stream_label.bind(
-                texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20))
-            )
+            self._stream_label = self._make_text_label('', markup=True)
             box.add_widget(self._stream_label)
         except Exception:
             self._stream_label = None
