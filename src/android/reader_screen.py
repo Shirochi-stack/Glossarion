@@ -614,10 +614,8 @@ class ReaderScreen(MDScreen):
         en_avail = " ✓EN" if index in self._translated_chapters else ""
         self.chapter_info = f"{title}  ({index + 1}/{len(self.chapters)}){en_avail}"
 
-        # Reset language state if no translation exists for this chapter
+        # Check if we should show the translated version
         use_translated = (self.viewing_language == 'en' and index in self._translated_chapters)
-        if index not in self._translated_chapters:
-            self.viewing_language = 'ko'
 
         box = self.ids.content_box
         box.clear_widgets()
@@ -693,7 +691,6 @@ class ReaderScreen(MDScreen):
                 if btype == 'text':
                     lbl = MDLabel(
                         text=str(bcontent),
-                        markup=True,
                         size_hint_y=None,
                         font_size=self.font_size_px,
                         line_height=self.line_spacing,
@@ -999,10 +996,10 @@ class ReaderScreen(MDScreen):
     # ══════════════════════════════════════════════════
 
     def toggle_language(self, lang=None):
-        """Cycle between KO (original) and EN (translated) views.
+        """Cycle between KO and EN views.
 
-        Works seamlessly during streaming — just switches what's displayed
-        without interrupting the background translation.
+        Only switches the displayed content — never triggers translation.
+        The translate button (文A icon) handles that.
         """
         idx = self.current_chapter_index
 
@@ -1011,21 +1008,19 @@ class ReaderScreen(MDScreen):
             self.viewing_language = 'ko'
             self._show_chapter(idx)
         else:
-            # Try to show English
+            # Switch to EN view
+            self.viewing_language = 'en'
             if idx in self._translated_chapters:
-                # Completed translation exists
-                self.viewing_language = 'en'
+                # Completed translation — show it
                 self._show_chapter(idx)
-            elif self.is_translating:
-                # Translation in progress — show streaming view
-                self.viewing_language = 'en'
-                if self._stream_label and self.streaming_text:
-                    # Re-show accumulated streaming text
-                    self._prepare_streaming_view()
-                    self._stream_label.text = self._md_to_kivy_markup(self.streaming_text)
+            elif self.is_translating and self._stream_label and self.streaming_text:
+                # Translation in progress — show streaming output
+                self._prepare_streaming_view()
+                self._stream_label.text = self._md_to_kivy_markup(self.streaming_text)
             else:
-                # No translation yet — start one (guard against empty pages)
-                self.translate_current_chapter()
+                # No translation yet — just show EN state on the button
+                # User can hit the translate button to start one
+                pass
 
     def translate_current_chapter(self):
         """Translate the current chapter using the configured LLM."""
