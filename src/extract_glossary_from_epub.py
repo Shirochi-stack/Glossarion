@@ -3992,14 +3992,23 @@ def main(log_callback=None, stop_callback=None):
                                         print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                         glossary.append(entry)
                                 
-                                completed.append(idx)
+                                # Check if this was actually a failure (empty/refused content)
+                                _resp_text = resp or ''
+                                _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
                                 
-                                # Mark truncated chapters as failed so they get retried
-                                ch_finish = result.get('finish_reason', 'stop')
-                                if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
-                                    print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                if _is_empty_failure:
+                                    print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
                                     if idx not in failed:
                                         failed.append(idx)
+                                else:
+                                    completed.append(idx)
+                                    
+                                    # Mark truncated chapters as failed so they get retried
+                                    ch_finish = result.get('finish_reason', 'stop')
+                                    if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                        print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                        if idx not in failed:
+                                            failed.append(idx)
                                 
                                 # Store history for parent chapter only
                                 if contextual_enabled and resp and chap and 'merged_into' not in result:
@@ -4046,14 +4055,23 @@ def main(log_callback=None, stop_callback=None):
                                     # Add entry immediately WITHOUT deduplication
                                     glossary.append(entry)
                             
-                            completed.append(idx)
+                            # Check if this was actually a failure (empty/refused content)
+                            _resp_text = resp or ''
+                            _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
                             
-                            # Mark truncated chapters as failed so they get retried
-                            ch_finish = result.get('finish_reason', 'stop')
-                            if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
-                                print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                            if _is_empty_failure:
+                                print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
                                 if idx not in failed:
                                     failed.append(idx)
+                            else:
+                                completed.append(idx)
+                                
+                                # Mark truncated chapters as failed so they get retried
+                                ch_finish = result.get('finish_reason', 'stop')
+                                if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                    print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                    if idx not in failed:
+                                        failed.append(idx)
                             
                             # Store history entry for this chapter (will be added after batch completes)
                             if contextual_enabled and resp and chap:
@@ -4954,30 +4972,47 @@ def main(log_callback=None, stop_callback=None):
                         
                         print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')    
                     
-                # Apply skip logic and save
-                glossary.extend(data)
-                glossary[:] = skip_duplicate_entries(glossary)
-                completed.append(idx)
+                # Check if this was actually a failure (empty/refused content)
+                _resp_text = locals().get('resp', '') or ''
+                _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
                 
-                # Mark truncated chapters as failed so they get retried
-                # finish_reason comes from single-chapter mode, chunk_finish_reason from chunked mode
-                _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
-                if _fr in ('length', 'MAX_TOKENS', 'max_tokens'):
-                    print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                if _is_empty_failure:
+                    # Empty/refused response — mark as failed so it gets retried
+                    print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
                     if idx not in failed:
                         failed.append(idx)
-                
-                # If this was a merged request, also mark child chapters as completed
-                if idx in merge_groups:
-                    marked_children = []
-                    for g_idx, _ in merge_groups[idx]:
-                        if g_idx != idx and g_idx not in completed:
-                            completed.append(g_idx)
-                            marked_children.append(g_idx + 1)
-                        if g_idx != idx and g_idx not in merged_indices:
-                            merged_indices.append(g_idx)
-                    if marked_children:
-                        print(f"   ✅ Marked chapters {marked_children} as completed (merged with {idx+1})")
+                    # Also mark merged children as failed
+                    if idx in merge_groups:
+                        for g_idx, _ in merge_groups[idx]:
+                            if g_idx != idx and g_idx not in failed:
+                                failed.append(g_idx)
+                            if g_idx != idx and g_idx not in merged_indices:
+                                merged_indices.append(g_idx)
+                else:
+                    # Apply skip logic and save
+                    glossary.extend(data)
+                    glossary[:] = skip_duplicate_entries(glossary)
+                    completed.append(idx)
+                    
+                    # Mark truncated chapters as failed so they get retried
+                    # finish_reason comes from single-chapter mode, chunk_finish_reason from chunked mode
+                    _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
+                    if _fr in ('length', 'MAX_TOKENS', 'max_tokens'):
+                        print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                        if idx not in failed:
+                            failed.append(idx)
+                    
+                    # If this was a merged request, also mark child chapters as completed
+                    if idx in merge_groups:
+                        marked_children = []
+                        for g_idx, _ in merge_groups[idx]:
+                            if g_idx != idx and g_idx not in completed:
+                                completed.append(g_idx)
+                                marked_children.append(g_idx + 1)
+                            if g_idx != idx and g_idx not in merged_indices:
+                                merged_indices.append(g_idx)
+                        if marked_children:
+                            print(f"   ✅ Marked chapters {marked_children} as completed (merged with {idx+1})")
 
                 # Only add to history if contextual is enabled
                 if contextual_enabled:
