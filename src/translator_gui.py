@@ -15797,6 +15797,11 @@ Important rules:
             from epub_library import EpubLibraryDialog
             dlg = EpubLibraryDialog(config=self.config, parent=self)
             dlg.exec()
+            # Persist any settings changed inside the library/reader dialogs
+            try:
+                self.save_config()
+            except Exception:
+                pass
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Library Error", f"Could not open EPUB Library:\n{e}")

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer
+from PySide6.QtCore import Qt, QSize, Signal, QThread, QTimer, QSizeF
 from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor
 
 logger = logging.getLogger(__name__)
@@ -763,6 +763,12 @@ class EpubLibraryDialog(QDialog):
             if new_cols != current_cols:
                 self._refresh_view()
 
+    def closeEvent(self, event):
+        """Persist library settings back into config."""
+        self._config['epub_library_sort'] = self._sort_mode
+        self._config['epub_library_card_size'] = self._card_size
+        super().closeEvent(event)
+
 
 # ---------------------------------------------------------------------------
 # EPUB Reader — background loader thread
@@ -867,8 +873,8 @@ class EpubReaderDialog(QDialog):
         self._font_size = self._config.get('epub_reader_font_size', 14)
         self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
         self._theme_index = self._config.get('epub_reader_theme', 0)
-        layout_key = self._config.get('epub_reader_layout', LAYOUT_SCROLL)
-        self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SCROLL
+        layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
+        self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
         self._loader_thread: _EpubLoaderThread | None = None
@@ -878,6 +884,23 @@ class EpubReaderDialog(QDialog):
         self.setMinimumSize(600, 400)
 
         self._setup_ui()
+        # Restore combo positions after UI is built
+        modes = [LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_SCROLL, LAYOUT_ALL]
+        if self._layout_mode in modes:
+            self._layout_combo.blockSignals(True)
+            self._layout_combo.setCurrentIndex(modes.index(self._layout_mode))
+            self._layout_combo.blockSignals(False)
+        if 0 <= self._theme_index < len(_READER_THEMES):
+            self._theme_combo.blockSignals(True)
+            self._theme_combo.setCurrentIndex(self._theme_index)
+            self._theme_combo.blockSignals(False)
+        # Restore spacing combo
+        spacing_str = str(self._line_spacing)
+        idx = self._spacing_combo.findText(spacing_str)
+        if idx >= 0:
+            self._spacing_combo.blockSignals(True)
+            self._spacing_combo.setCurrentIndex(idx)
+            self._spacing_combo.blockSignals(False)
         self._start_loading()
 
     def _setup_ui(self):
@@ -898,7 +921,7 @@ class EpubReaderDialog(QDialog):
 
         # Layout mode dropdown
         self._layout_combo = QComboBox()
-        self._layout_combo.addItems(["📜 Scroll", "📄 Single Page", "📖 Double Page", "📃 All Chapters"])
+        self._layout_combo.addItems(["📄 Single Page", "📖 Double Page", "📜 Scroll", "📃 Scroll All"])
         self._layout_combo.setFixedWidth(145)
         self._layout_combo.setCursor(Qt.PointingHandCursor)
         self._layout_combo.setStyleSheet("""
@@ -1226,8 +1249,8 @@ class EpubReaderDialog(QDialog):
     # ── Layout mode ────────────────────────────────────────────────────────
 
     def _on_layout_changed(self, index):
-        modes = [LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL]
-        self._layout_mode = modes[index] if index < len(modes) else LAYOUT_SCROLL
+        modes = [LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_SCROLL, LAYOUT_ALL]
+        self._layout_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
         self._current_page = 0  # reset pagination on layout change
         self._render_current()
 
@@ -1290,38 +1313,45 @@ class EpubReaderDialog(QDialog):
                 self._reader.setHtml(self._wrap_html(html))
                 self._reader.verticalScrollBar().setValue(0)
 
-    # ── Viewport pagination helpers ────────────────────────────────────────
+    # ── Document-based pagination (à la Calibre) ────────────────────────────
 
-    def _viewport_page_count(self, browser):
-        """How many viewport-sized pages the content spans."""
-        sb = browser.verticalScrollBar()
-        vh = browser.viewport().height()
-        if vh <= 0:
+    def _page_count(self, browser):
+        """Get the number of pages for the given browser using QTextDocument layout."""
+        doc = browser.document()
+        vp = browser.viewport()
+        w, h = vp.width(), vp.height()
+        if w <= 0 or h <= 0:
             return 1
-        return max(1, (sb.maximum() + vh + vh - 1) // vh)  # ceiling division
+        doc.setPageSize(QSizeF(w, h))
+        return max(1, doc.pageCount())
 
     def _apply_single_page_position(self):
-        """Scroll the reader to the correct viewport-page."""
-        vh = self._reader.viewport().height()
-        if vh <= 0:
+        """Position the reader at the correct document page."""
+        vp = self._reader.viewport()
+        h = vp.height()
+        if h <= 0:
             return
-        self._reader.verticalScrollBar().setValue(self._current_page * vh)
+        doc = self._reader.document()
+        doc.setPageSize(QSizeF(vp.width(), h))
+        self._reader.verticalScrollBar().setValue(self._current_page * h)
         self._update_nav_buttons()
 
     def _apply_double_page_position(self):
-        """Position left pane at _current_page, right pane at _current_page+1."""
-        vh = self._reader_left.viewport().height()
-        if vh <= 0:
+        """Position left pane at page N, right pane at page N+1."""
+        vp = self._reader_left.viewport()
+        h = vp.height()
+        if h <= 0:
             return
-        self._reader_left.verticalScrollBar().setValue(self._current_page * vh)
-        self._reader_right.verticalScrollBar().setValue((self._current_page + 1) * vh)
+        for browser in (self._reader_left, self._reader_right):
+            browser.document().setPageSize(QSizeF(vp.width(), h))
+        self._reader_left.verticalScrollBar().setValue(self._current_page * h)
+        self._reader_right.verticalScrollBar().setValue((self._current_page + 1) * h)
         self._update_nav_buttons()
 
     def _update_nav_buttons(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            # Viewport pagination within the current chapter
             browser = self._reader if self._layout_mode == LAYOUT_SINGLE else self._reader_left
-            total_pages = self._viewport_page_count(browser)
+            total_pages = self._page_count(browser)
             step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
             self._prev_btn.setEnabled(self._current_page > 0 or self._current_row > 0)
             self._next_btn.setEnabled(
@@ -1341,18 +1371,15 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
             if self._current_page >= step:
-                # Go back a page within same chapter
                 self._current_page -= step
                 self._render_current()
             elif self._current_row > 0:
-                # Go to previous chapter, last page
                 self._current_row -= 1
                 self._toc_list.blockSignals(True)
                 self._toc_list.setCurrentRow(self._current_row)
                 self._toc_list.blockSignals(False)
-                self._current_page = 999  # will be clamped after render
+                self._current_page = 999
                 self._render_current()
-                # Clamp to actual last page
                 browser = self._reader if self._layout_mode == LAYOUT_SINGLE else self._reader_left
                 QTimer.singleShot(80, lambda: self._goto_last_page(browser))
         else:
@@ -1367,7 +1394,7 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
             browser = self._reader if self._layout_mode == LAYOUT_SINGLE else self._reader_left
-            total_pages = self._viewport_page_count(browser)
+            total_pages = self._page_count(browser)
             if self._current_page + step < total_pages:
                 # Go forward a page within same chapter
                 self._current_page += step
@@ -1390,9 +1417,17 @@ class EpubReaderDialog(QDialog):
 
     def _goto_last_page(self, browser):
         """Clamp _current_page to the actual last page and re-render."""
-        total_pages = self._viewport_page_count(browser)
+        total_pages = self._page_count(browser)
         self._current_page = max(0, total_pages - 1)
         self._render_current()
+
+    def closeEvent(self, event):
+        """Persist reader settings back into config."""
+        self._config['epub_reader_font_size'] = self._font_size
+        self._config['epub_reader_line_spacing'] = self._line_spacing
+        self._config['epub_reader_theme'] = self._theme_index
+        self._config['epub_reader_layout'] = self._layout_mode
+        super().closeEvent(event)
 
     # ── Chapter rendering ──────────────────────────────────────────────────
 
