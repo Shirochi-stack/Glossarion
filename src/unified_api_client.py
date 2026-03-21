@@ -4278,7 +4278,8 @@ class UnifiedClient:
             _original_api_key = None
             _original_model = None
             _original_multi_key_mode = None
-            _original_api_key_pool = None
+            _had_instance_pool = False
+            _original_instance_pool = None
             if context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name):
                 try:
                     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
@@ -4302,10 +4303,15 @@ class UnifiedClient:
                             _original_api_key = self.api_key
                             _original_model = self.model
                             _original_multi_key_mode = self._multi_key_mode
-                            _original_api_key_pool = self.__class__._api_key_pool
+                            # Save instance-level pool override (if any)
+                            _had_instance_pool = '_api_key_pool' in self.__dict__
+                            _original_instance_pool = self.__dict__.get('_api_key_pool', None)
                             
                             # Swap the key pool to the glossary pool
-                            self.__class__._api_key_pool = glossary_pool
+                            # CRITICAL: Only override at INSTANCE level, NOT class level.
+                            # Modifying cls._api_key_pool corrupts the shared pool that the
+                            # Multi API Key Manager dialog binds to via _bind_shared_pool,
+                            # causing it to save glossary keys as multi_api_keys in config.
                             self._multi_key_mode = True
                             self._api_key_pool = glossary_pool
                             
@@ -4383,7 +4389,10 @@ class UnifiedClient:
                             except Exception as e:
                                 print(f"[GLOSSARY KEYS] ⚠️ Failed to get glossary key from pool: {e}")
                                 # Restore state on failure
-                                self.__class__._api_key_pool = _original_api_key_pool
+                                if _had_instance_pool:
+                                    self._api_key_pool = _original_instance_pool
+                                elif '_api_key_pool' in self.__dict__:
+                                    del self._api_key_pool
                                 self._multi_key_mode = _original_multi_key_mode
                 except Exception as e:
                     print(f"[GLOSSARY KEYS] ⚠️ Failed to apply glossary key override: {e}")
@@ -4484,8 +4493,11 @@ class UnifiedClient:
                     self.model = _original_model
                 if _original_multi_key_mode is not None:
                     self._multi_key_mode = _original_multi_key_mode
-                if _original_api_key_pool is not None:
-                    self.__class__._api_key_pool = _original_api_key_pool
+                # Restore instance-level pool override (don't touch class-level)
+                if _had_instance_pool:
+                    self._api_key_pool = _original_instance_pool
+                elif '_api_key_pool' in self.__dict__:
+                    del self._api_key_pool
                 self._setup_client()
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)

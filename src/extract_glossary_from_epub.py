@@ -102,18 +102,37 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
         
         os.environ['USE_MULTI_API_KEYS'] = '1'
         os.environ['USE_MULTI_KEYS'] = '1'
+        os.environ['USE_GLOSSARY_KEYS'] = '1'
         os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
         os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
 
-        # Store glossary keys in-memory and initialize the shared pool
+        # Store glossary keys in their DEDICATED glossary pool — NOT the shared
+        # multi-key pool.  Using set_in_memory_multi_keys here would overwrite
+        # the multi-key pool object in-place, corrupting the 6-key pool that
+        # the Multi API Key Manager dialog references via _bind_shared_pool.
         try:
-            UnifiedClient.set_in_memory_multi_keys(
+            UnifiedClient.set_in_memory_glossary_keys(
                 glossary_keys,
                 force_rotation=config.get('force_key_rotation', True),
                 rotation_frequency=config.get('rotation_frequency', 1),
             )
         except Exception:
             pass
+        
+        # ALSO load the regular multi-keys (if configured) so that
+        # UnifiedClient.__init__ can enter multi-key mode for rotation/fallback.
+        # This keeps the multi-key pool intact (loaded with the real multi-keys)
+        # while the glossary pool holds the glossary-specific keys separately.
+        regular_multi_keys = config.get('multi_api_keys', [])
+        if regular_multi_keys and config.get('use_multi_api_keys', False):
+            try:
+                UnifiedClient.set_in_memory_multi_keys(
+                    regular_multi_keys,
+                    force_rotation=config.get('force_key_rotation', True),
+                    rotation_frequency=config.get('rotation_frequency', 1),
+                )
+            except Exception:
+                pass
         
         print(f"   • Glossary keys configured: {len(glossary_keys)}")
         print(f"   • Force rotation: {config.get('force_key_rotation', True)}")
