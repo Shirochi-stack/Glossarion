@@ -2149,14 +2149,24 @@ class EpubReaderDialog(QDialog):
                         container = img_tag
                         if img_tag.parent and img_tag.parent.name in ('p', 'div', 'figure'):
                             container = img_tag.parent
-                        # Check container's previous sibling for a header
+                        # Collect preceding siblings to pull into the wrapper:
+                        #   header + p + img, header + img, p + img, or just img
+                        _HEADERS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6')
+                        to_pull = []  # elements to insert before the image
                         prev = container.find_previous_sibling()
-                        if prev and prev.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-                            prev.extract()
-                            container.wrap(wrapper)
-                            wrapper.insert(0, prev)
-                        else:
-                            container.wrap(wrapper)
+                        if prev and prev.name == 'p' and not prev.find('img'):
+                            to_pull.append(prev)
+                            prev2 = prev.find_previous_sibling()
+                            if prev2 and prev2.name in _HEADERS:
+                                to_pull.append(prev2)
+                        elif prev and prev.name in _HEADERS:
+                            to_pull.append(prev)
+                        # Extract siblings, wrap container, then re-insert in order
+                        for el in to_pull:
+                            el.extract()
+                        container.wrap(wrapper)
+                        for el in reversed(to_pull):
+                            wrapper.insert(0, el)
 
             return str(soup)
         except Exception:
