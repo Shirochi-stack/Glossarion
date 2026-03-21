@@ -584,9 +584,7 @@ class EpubLibraryDialog(QDialog):
             self._first_show = False
             self._load_books()
         elif self._cards:
-            preset = _SIZE_PRESETS[self._card_size]
-            cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
-            self._reflow_grid(cols)
+            self._load_books()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
@@ -1181,30 +1179,12 @@ class EpubLibraryDialog(QDialog):
         super().resizeEvent(event)
         if not self._cards:
             return
-        preset = _SIZE_PRESETS[self._card_size]
-        new_cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
-        current_cols = max(1, self._grid_layout.columnCount())
-        if new_cols != current_cols:
-            self._reflow_grid(new_cols)
-
-    def _reflow_grid(self, cols: int):
-        """Re-position existing cards in the grid without destroying them."""
-        # Remove all items from layout without deleting widgets
-        while self._grid_layout.count():
-            self._grid_layout.takeAt(0)
-
-        # Re-add existing cards in new column arrangement
-        for idx, card in enumerate(self._cards):
-            row, col = divmod(idx, cols)
-            self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
-
-        # Reset ALL column stretches, then set trailing stretch
-        for c in range(self._grid_layout.columnCount()):
-            self._grid_layout.setColumnStretch(c, 0)
-        self._grid_layout.setColumnStretch(cols, 1)
-
-        # Reposition the persistent spacer
-        self._grid_layout.addWidget(self._grid_spacer, (len(self._cards) - 1) // cols + 1, 0)
+        # Debounce: reload after user stops resizing (300ms)
+        if not hasattr(self, '_resize_timer'):
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._load_books)
+        self._resize_timer.start(300)
 
     def closeEvent(self, event):
         """Hide the dialog instead of closing — persist settings."""
