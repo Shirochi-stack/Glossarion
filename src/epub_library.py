@@ -1013,10 +1013,12 @@ class EpubReaderDialog(QDialog):
         # Restore spacing combo
         spacing_str = str(self._line_spacing)
         idx = self._spacing_combo.findText(spacing_str)
+        self._spacing_combo.blockSignals(True)
         if idx >= 0:
-            self._spacing_combo.blockSignals(True)
             self._spacing_combo.setCurrentIndex(idx)
-            self._spacing_combo.blockSignals(False)
+        else:
+            self._spacing_combo.setCurrentText(spacing_str)
+        self._spacing_combo.blockSignals(False)
         self._start_loading()
 
     def _setup_ui(self):
@@ -1072,8 +1074,8 @@ class EpubReaderDialog(QDialog):
         toolbar.addWidget(spacing_lbl)
 
         self._spacing_combo = QComboBox()
-        self._spacing_combo.addItems(["1.0", "1.2", "1.4", "1.6", "1.8", "2.0", "2.4"])
-        self._spacing_combo.setCurrentIndex(4)  # 1.8 default
+        self._spacing_combo.setEditable(True)
+        self._spacing_combo.addItems(["1.0", "1.2", "1.4", "1.6", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8", "3.0"])
         self._spacing_combo.setFixedWidth(58)
         self._spacing_combo.setCursor(Qt.PointingHandCursor)
         self._spacing_combo.setStyleSheet("""
@@ -1466,7 +1468,8 @@ class EpubReaderDialog(QDialog):
 
     def _on_spacing_changed(self, text):
         try:
-            self._line_spacing = float(text)
+            val = float(text)
+            self._line_spacing = max(1.0, min(3.0, val))
         except ValueError:
             self._line_spacing = 1.8
         self._chapter_page_cache.clear()
@@ -1789,14 +1792,14 @@ class EpubReaderDialog(QDialog):
             return (
                 f"<html><head><style>"
                 f"* {{ box-sizing: border-box; }}"
-                f"html, body {{ margin: 0; padding: 20px 0; overflow: hidden; "
+                f"html, body {{ margin: 0; padding: 10px 0; overflow: hidden; "
                 f"background: {t['bg']}; color: {t['fg']}; }}"
                 f"#columns {{ column-fill: auto; column-gap: 0; "
                 f"transition: transform 0.3s ease; opacity: 0; "
                 f"font-family: 'Georgia', 'Noto Serif', serif; "
                 f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
-                f"#content {{ padding: 20px 40px; }}"
-                f"h1, h2, h3 {{ color: {t['heading']}; margin: 0; }}"
+                f"#content {{ padding: 0 40px; }}"
+                f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
@@ -1814,7 +1817,7 @@ class EpubReaderDialog(QDialog):
                 f"  if (!c) return;"
                 f"  _PAGE_W = window.innerWidth;"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
-                f"  c.style.height = (window.innerHeight - 40) + 'px';"
+                f"  c.style.height = (window.innerHeight - 20) + 'px';"
                 f"  c.style.transform = 'translateX(0px)';"
                 f"  c.style.opacity = '1';"
                 f"}}"
