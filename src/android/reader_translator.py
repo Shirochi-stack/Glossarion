@@ -74,28 +74,41 @@ def _html_to_text(raw_html, use_html2text=True):
 def _setup_thinking_env(config_data):
     """Set thinking environment variables based on config.
 
-    Default: thinking OFF.
-    When enabled: Gemini gets minimal budget, GPT gets none.
+    Default: Gemini = minimal thinking (budget 1024), GPT = none.
+    When enabled: Gemini = larger budget, Claude = thinking enabled.
     """
     enable_thinking = config_data.get('reader_enable_thinking', False)
-
-    if not enable_thinking:
-        os.environ['ENABLE_THINKING'] = '0'
-        os.environ['EXTENDED_THINKING'] = '0'
-        return
-
-    # Thinking enabled — set minimal budgets
     model = config_data.get('model', '').lower()
-    os.environ['ENABLE_THINKING'] = '1'
 
-    if 'gemini' in model:
-        # Gemini: minimal thinking budget
-        os.environ['GEMINI_THINKING_BUDGET'] = '1024'
-    elif 'gpt' in model or 'openai' in model or 'authgpt' in model:
-        # GPT: no extended thinking
+    is_gemini = 'gemini' in model
+    is_gpt = 'gpt' in model or 'openai' in model or 'authgpt' in model
+    is_claude = 'claude' in model
+
+    if is_gemini:
+        # Gemini always gets minimal thinking by default
+        os.environ['ENABLE_THINKING'] = '1'
+        if enable_thinking:
+            os.environ['GEMINI_THINKING_BUDGET'] = '8192'
+        else:
+            os.environ['GEMINI_THINKING_BUDGET'] = '1024'
         os.environ['EXTENDED_THINKING'] = '0'
-    elif 'claude' in model:
-        os.environ['THINKING_BUDGET'] = '1024'
+    elif is_gpt:
+        # GPT: no thinking unless explicitly enabled
+        os.environ['ENABLE_THINKING'] = '1' if enable_thinking else '0'
+        os.environ['EXTENDED_THINKING'] = '0'
+        os.environ.pop('GEMINI_THINKING_BUDGET', None)
+    elif is_claude:
+        # Claude: thinking off by default, enabled with budget when toggled
+        os.environ['ENABLE_THINKING'] = '1' if enable_thinking else '0'
+        if enable_thinking:
+            os.environ['THINKING_BUDGET'] = '4096'
+        else:
+            os.environ.pop('THINKING_BUDGET', None)
+        os.environ['EXTENDED_THINKING'] = '0'
+    else:
+        # Unknown model: follow the toggle
+        os.environ['ENABLE_THINKING'] = '1' if enable_thinking else '0'
+        os.environ['EXTENDED_THINKING'] = '0'
 
 
 class _StreamCapture:
