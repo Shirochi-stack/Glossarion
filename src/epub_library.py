@@ -25,9 +25,8 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, Signal, Slot, QThread, QTimer, QSizeF, QUrl, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QSize, Signal, Slot, QThread, QTimer, QSizeF, QUrl
 from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
-from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
@@ -514,19 +513,9 @@ class _BookCard(QFrame):
             pm = QPixmap(image_path)
             if not pm.isNull():
                 scaled = pm.scaled(self._card_w - 8, self._cover_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                # Fade-in animation
-                opacity = QGraphicsOpacityEffect(self.cover_label)
-                opacity.setOpacity(0.0)
-                self.cover_label.setGraphicsEffect(opacity)
                 self.cover_label.setPixmap(scaled)
                 self.cover_label.setText("")
                 self._has_cover = True
-                anim = QPropertyAnimation(opacity, b"opacity", self)
-                anim.setDuration(350)
-                anim.setStartValue(0.0)
-                anim.setEndValue(1.0)
-                anim.setEasingCurve(QEasingCurve.InOutQuad)
-                anim.start(QPropertyAnimation.DeleteWhenStopped)
         except Exception:
             logger.debug("Set cover failed: %s", traceback.format_exc())
 
