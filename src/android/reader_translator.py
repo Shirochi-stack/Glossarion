@@ -2,12 +2,12 @@
 """
 Lightweight single-chapter translation engine for the in-reader translator.
 Accepts raw HTML, extracts text (html2text or BS4), calls UnifiedClient,
-and captures real-time streaming output via stdout redirection.
+and captures real-time streaming output via a logging handler on the
+unified_api_client logger (which uses _gui_print → logger.log, not stdout).
 """
 
 import os
 import sys
-import io
 import threading
 import logging
 import re
@@ -113,58 +113,49 @@ def _setup_thinking_env(config_data):
         os.environ['EXTENDED_THINKING'] = '0'
 
 
-class _StreamCapture:
-    """Captures stdout writes during API call to extract streaming tokens.
+class _StreamLogHandler(logging.Handler):
+    """Logging handler that intercepts unified_api_client log messages.
 
-    The UnifiedClient prints streaming tokens to stdout.
-    This wrapper intercepts them and forwards to on_chunk callbacks.
+    unified_api_client shadows print() with _gui_print() which routes ALL
+    output through logger.log().  This means sys.stdout never sees streaming
+    tokens.  We attach this handler to the unified_api_client logger to
+    capture the actual streamed content and forward it to the on_chunk callback.
     """
-    def __init__(self, original_stdout, on_chunk=None, stop_event=None):
-        self._original = original_stdout
+
+    # Prefixes that indicate log/status messages — NOT translation content
+    _SKIP_PREFIXES = (
+        '[', '🔄', '⚡', '⏳', '📊', '✅', '❌', '⚠️', '🚨', '🛰️', '🧠',
+        '───', '---', '===', 'Model:', 'Provider:', 'Streaming',
+        'Temperature', 'Max tokens', 'API call', 'HTTP', 'Status',
+        'Time:', 'Tokens:', 'Rate limit', 'Retry', 'Error:',
+        'response_name', 'Request', 'Using ', 'Sending ', '   ',
+        'Content-Type', 'Authorization', 'Bearer', 'x-goog',
+        'Total tokens', 'Input tokens', 'Output tokens',
+        'finish_reason', 'Prompt tokens', 'Completion tokens',
+    )
+
+    def __init__(self, on_chunk, stop_event=None):
+        super().__init__()
         self._on_chunk = on_chunk
         self._stop_event = stop_event
-        self._buffer = io.StringIO()
-        self._lock = threading.Lock()
 
-    def write(self, text):
-        # Always write to original stdout for logging
+    def emit(self, record):
+        if self._stop_event and self._stop_event.is_set():
+            return
         try:
-            self._original.write(text)
-        except Exception:
-            pass
-
-        # Forward non-empty content to the chunk callback
-        if text and self._on_chunk and text.strip():
-            # Filter out log-style lines (timestamps, status messages)
-            # Only forward actual translation content
-            line = text.strip()
-            # Skip common log prefixes
-            if any(line.startswith(p) for p in [
-                '[', '🔄', '⚡', '⏳', '📊', '✅', '❌', '⚠️', '🚨',
-                '───', '---', '===', 'Model:', 'Provider:', 'Streaming',
-                'Temperature', 'Max tokens', 'API call', 'HTTP', 'Status',
-                'Time:', 'Tokens:', 'Rate limit', 'Retry', 'Error:',
-                'response_name', 'Request', 'Using ', 'Sending ',
-            ]):
+            msg = self.format(record)
+            if not msg or not msg.strip():
                 return
-            # Forward the text
-            self._on_chunk(text)
-
-    def flush(self):
-        try:
-            self._original.flush()
+            line = msg.strip()
+            # Skip log/status lines — only forward actual content
+            if any(line.startswith(p) for p in self._SKIP_PREFIXES):
+                return
+            # Skip very short fragments that are likely log noise
+            if len(line) < 2:
+                return
+            self._on_chunk(msg)
         except Exception:
             pass
-
-    def fileno(self):
-        return self._original.fileno()
-
-    def isatty(self):
-        return False
-
-    # Forward any other attribute access to original
-    def __getattr__(self, name):
-        return getattr(self._original, name)
 
 
 def translate_chapter_streaming(
@@ -176,23 +167,15 @@ def translate_chapter_streaming(
     on_error=None,
     stop_event=None,
 ):
-    """
-    Translate a single chapter's raw HTML using the configured LLM.
-    Runs synchronously (call from a background thread).
+    """Translate a single HTML chapter using streaming, with callbacks.
 
-    Args:
-        raw_html: The raw HTML of the single EPUB chapter to translate.
-        config_data: The app's config dict (from android_config).
-        on_chunk: Callback(text_fragment) for streaming content tokens.
-        on_thinking: Callback(text_fragment) for thinking/reasoning tokens.
-        on_complete: Callback(full_translated_text) when done.
-        on_error: Callback(error_message) on failure.
-        stop_event: threading.Event to signal cancellation.
+    Uses a logging handler on the unified_api_client logger to capture
+    streamed tokens (unified_api_client uses _gui_print → logger.log,
+    not sys.stdout).
     """
     if stop_event is None:
         stop_event = threading.Event()
-
-    original_stdout = sys.stdout
+    stream_handler = None
 
     try:
         # Pre-register Android stubs
@@ -273,6 +256,14 @@ def translate_chapter_streaming(
         if stop_event.is_set():
             return
 
+        # Install logging handler on the unified_api_client logger
+        # to capture streamed tokens (they go through logger, not stdout)
+        if on_chunk:
+            uac_logger = logging.getLogger('unified_api_client')
+            stream_handler = _StreamLogHandler(on_chunk, stop_event)
+            stream_handler.setLevel(logging.INFO)
+            uac_logger.addHandler(stream_handler)
+
         # Create client
         client = UnifiedClient(api_key=api_key, model=model)
 
@@ -282,14 +273,6 @@ def translate_chapter_streaming(
             {"role": "user", "content": chapter_text},
         ]
 
-        # Install stdout capture for real-time streaming
-        stream_capture = _StreamCapture(
-            original_stdout=original_stdout,
-            on_chunk=on_chunk,
-            stop_event=stop_event,
-        )
-        sys.stdout = stream_capture
-
         # Call the API
         response = client._get_response(
             messages=messages,
@@ -298,9 +281,6 @@ def translate_chapter_streaming(
             max_completion_tokens=None,
             response_name="reader_translate",
         )
-
-        # Restore stdout
-        sys.stdout = original_stdout
 
         if stop_event.is_set():
             return
@@ -332,8 +312,13 @@ def translate_chapter_streaming(
         if on_error:
             on_error(str(e))
     finally:
-        # Always restore stdout
-        sys.stdout = original_stdout
+        # Remove the streaming log handler
+        if stream_handler:
+            try:
+                uac_logger = logging.getLogger('unified_api_client')
+                uac_logger.removeHandler(stream_handler)
+            except Exception:
+                pass
         # Reset stop flags
         try:
             import unified_api_client
