@@ -1498,10 +1498,12 @@ class EpubReaderDialog(QDialog):
         content_layout.setSpacing(0)
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(2)
 
         # TOC sidebar
         self._toc_list = QListWidget()
-        self._toc_list.setFixedWidth(220)
+        self._toc_list.setMinimumWidth(100)
+        self._toc_list.resize(220, self._toc_list.height())
         self._toc_list.currentRowChanged.connect(self._on_chapter_selected)
         splitter.addWidget(self._toc_list)
 
@@ -1544,6 +1546,7 @@ class EpubReaderDialog(QDialog):
         splitter.addWidget(self._reader_stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([220, 680])
         self._splitter = splitter  # keep ref for styling
         content_layout.addWidget(splitter, 1)
 
