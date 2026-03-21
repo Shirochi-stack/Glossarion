@@ -343,6 +343,17 @@ class EpubLibraryDialog(QDialog):
                 self.showNormal()
             else:
                 self.showFullScreen()
+        elif event.modifiers() & Qt.ControlModifier:
+            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE]
+            idx = sizes.index(self._card_size) if self._card_size in sizes else 0
+            if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
+                if idx < len(sizes) - 1:
+                    self._set_card_size(sizes[idx + 1])
+            elif event.key() == Qt.Key_Minus:
+                if idx > 0:
+                    self._set_card_size(sizes[idx - 1])
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
 
@@ -954,6 +965,8 @@ class EpubReaderDialog(QDialog):
             }
         """)
         self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+        self._layout_combo.setFocusPolicy(Qt.StrongFocus)
+        self._layout_combo.installEventFilter(self)
         toolbar.addWidget(self._layout_combo)
 
         toolbar.addSpacing(8)
@@ -982,6 +995,8 @@ class EpubReaderDialog(QDialog):
             }
         """)
         self._spacing_combo.currentTextChanged.connect(self._on_spacing_changed)
+        self._spacing_combo.setFocusPolicy(Qt.StrongFocus)
+        self._spacing_combo.installEventFilter(self)
         toolbar.addWidget(self._spacing_combo)
 
         toolbar.addSpacing(8)
@@ -1020,6 +1035,8 @@ class EpubReaderDialog(QDialog):
             }
         """)
         self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        self._theme_combo.setFocusPolicy(Qt.StrongFocus)
+        self._theme_combo.installEventFilter(self)
         toolbar.addWidget(self._theme_combo)
 
         toolbar_widget = QWidget()
@@ -1144,10 +1161,13 @@ class EpubReaderDialog(QDialog):
     # ── Event filter (block wheel scroll in paginated modes) ──────────────
 
     def eventFilter(self, obj, event):
-        """Block wheel events on reader viewports in paginated modes."""
+        """Block wheel events on reader viewports (paginated) and on combo boxes."""
         from PySide6.QtCore import QEvent
-        if event.type() == QEvent.Wheel and self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            return True  # swallow the event
+        if event.type() == QEvent.Wheel:
+            if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                return True  # block wheel on reader in paginated modes
+            if isinstance(obj, QComboBox):
+                return True  # block wheel on all toolbar combos
         return super().eventFilter(obj, event)
 
     def _toggle_fullscreen(self):
