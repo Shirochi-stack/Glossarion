@@ -19749,6 +19749,11 @@ if __name__ == "__main__":
         except Exception:
             main_window.show()
         
+        # Re-enable quitOnLastWindowClosed now that the main window is visible.
+        # This was disabled in splash_utils to prevent macOS from auto-quitting
+        # during the gap between splash close and main window creation.
+        qapp.setQuitOnLastWindowClosed(True)
+        
         print("✅ Ready to use!")
         
         # Note: closeEvent is now handled by the TranslatorGUI.closeEvent method

@@ -123,6 +123,12 @@ class SplashManager(QObject):
             else:
                 self.app = QApplication.instance()
             
+            # CRITICAL: On macOS, Qt quits the app when the last visible window closes.
+            # Since the splash closes BEFORE the main window is created, macOS triggers
+            # app.quit() during that gap, causing the GUI to exit on launch.
+            # Disable this behaviour during startup; re-enabled after main window shows.
+            self.app.setQuitOnLastWindowClosed(False)
+            
             # Set Windows taskbar icon IMMEDIATELY (before creating any windows)
             self._set_windows_taskbar_icon()
             
