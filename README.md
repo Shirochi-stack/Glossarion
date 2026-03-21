@@ -4,7 +4,7 @@
 
 # 📚 Glossarion
 
-**Glossarion** is a comprehensive AI-powered translation suite for Korean, Japanese, and Chinese light novels, web novels, and manga. Built to transform EPUB files, raw .txt files, and manga images into high-quality, context-aware English translations. It supports multiple AI providers including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, Mistral, and more (including local LLM's using ollama), with a modern GUI that gives you total control over every step of the translation process.
+**Glossarion** is a comprehensive AI-powered translation suite for Korean, Japanese, and Chinese light novels, web novels, manga, and documents. Built to transform EPUB files, raw .txt files, PDFs, and manga images into high-quality, context-aware English translations. It supports **40+ AI providers** — including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, xAI Grok, Mistral, and local LLMs via Ollama — with a modern PySide6 GUI that gives you total control over every step of the translation process.
 
 ---
 
@@ -17,112 +17,133 @@
 [![GitHub release](https://img.shields.io/github/release/Shirochi-stack/Glossarion.svg)](https://GitHub.com/Shirochi-stack/Glossarion/releases/)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-7289da?style=flat&logo=discord&logoColor=white)](https://discord.gg/n7WXRXn533)
 
+---
+
 ## ✨ Key Features
 
 ### 📖 Novel Translation Engine
-* **Multi-Provider AI Support**
-  * OpenAI (GPT-4, o1-preview, o1-mini)
-  * Google Gemini (Flash, Pro, experimental models)
-  * Anthropic Claude (Opus, Sonnet, Haiku)
-  * DeepSeek, Mistral, Cohere, and more
+* **Multi-Provider AI Support** — 40+ providers out of the box (see [Supported Providers](#-supported-ai-providers) below)
 * **Advanced Context Management**
   * Rolling history window for consistent translations
   * Chunk-based processing for long chapters
   * Contextual memory with configurable depth
+  * Parallel chapter translation support
   * Full history export/import
 * **Smart Retry System**
-  * AI Hunter duplicate detection
-  * Automatic retry for timeouts and errors
-  * Intelligent truncation detection and recovery
+  * AI Hunter duplicate detection (ML-based similarity analysis with TF-IDF fingerprinting)
+  * Automatic retry for timeouts, truncation, and server errors
+  * Multi-key rotation with automatic failover on 429/5xx errors
   * Rate limit handling with exponential backoff
- 
+
 ### 🎌 Manga Translation Engine
-* **Dual API System: OCR + AI Translation**
-  * Google Cloud Vision API for text detection (OCR)
-  * Your chosen AI provider (OpenAI/Gemini/Claude/etc.) for actual translation
-  * Requires BOTH: Google Cloud credentials AND your AI API key
+* **Dual OCR System**
+  * Google Cloud Vision API for text detection
+  * Azure AI Vision / Document Intelligence as alternative OCR backends
+* **YOLO Bubble Detection**
+  * ONNX-based speech bubble detection for precise text region isolation
+  * Automatic bubble segmentation for complex page layouts
 * **Visual Context-Aware Translation**
   * AI sees the full manga page image for accurate context
   * Full page context mode for multi-bubble consistency
   * Character expressions inform translation tone
-  * **Best results with advanced models like o3**
-
 * **Advanced Text Rendering**
-  * Customizable fonts, colors, and backgrounds
-  * Text shadows and outlines for readability
-  * Smart inpainting to remove original text
+  * Customizable fonts, colors, backgrounds, shadows, and outlines
+  * Smart inpainting to remove original text (local ONNX or Replicate cloud)
   * Preserve original art option
 * **Batch Processing**
   * Process entire manga chapters automatically
-  * Stop/resume functionality
-  * Progress tracking and error recovery
+  * Stop/resume functionality with progress tracking
 
-### 🧠 AI Hunter
-* **Advanced Duplicate Detection**
-  * Machine learning-based content similarity analysis
-  * Semantic fingerprinting using TF-IDF
-  * Structural pattern recognition
-  * Configurable sensitivity thresholds
-* **Smart Filtering**
-  * Length ratio checks
-  * Key phrase verification
-  * Character name consistency
-  * Statistical outlier detection
+### 🧠 AI Hunter — Duplicate Detection
+* **ML-based content similarity analysis** with TF-IDF semantic fingerprinting
+* **Structural pattern recognition** and statistical outlier detection
+* **Configurable sensitivity thresholds** with length ratio checks
+* **Key phrase verification** and character name consistency checks
 
-### 📓 Glossary System v2.0
-* **Flexible Extraction**
-  * Custom field support
-  * Configurable prompts
-  * Multi-language support (KR/JP/CN)
-  * Duplicate merging strategies
-* **Advanced Management**
-  * Field-specific trimming controls
-  * Import/export with validation
-  * Automatic backup system
-  * JSON and Markdown formats
+### 📓 Glossary System
+* **AI-Powered Extraction** from EPUB and TXT files
+* Custom field support with configurable prompts
+* Multi-language support (KR/JP/CN)
+* Duplicate merging strategies
+* Import/export with validation (JSON and Markdown formats)
+* Automatic backup system
 
 ### 🛡️ Quality Assurance Suite
-* **Comprehensive Scanning**
-  * Duplicate content detection
-  * Non-English fragment identification
-  * Spacing and formatting issues
-  * Repetitive sentence patterns
-* **Multiple Report Formats**
-  * Interactive HTML reports
-  * Detailed JSON analysis
-  * CSV exports for spreadsheets
-  * Summary statistics
-
-### 🖼️ Image Translation
-* **Smart Processing**
-  * Auto-detection of text in images
-  * Tall image splitting for reliable OCR
-  * Batch processing with progress tracking
-  * Context preservation across chunks
+* **Comprehensive Scanning** — duplicate content, non-English fragments, spacing/formatting issues, repetitive patterns
+* **Multiple Report Formats** — interactive HTML, JSON analysis, CSV exports, summary statistics
 
 ### 📚 File Format Support
-* **EPUB Processing**
-  * Structure-preserving translation
-  * Metadata and cover retention
-  * Image gallery support
-  * Clean HTML generation
-* **Text File Support**
-  * Chapter detection algorithms
-  * Custom delimiters
-  * Encoding auto-detection
-  * Format preservation
+* **EPUB** — structure-preserving translation, metadata/cover retention, image gallery, clean HTML output, EPUB → translated EPUB conversion
+* **TXT** — chapter detection, custom delimiters, encoding auto-detection, format preservation
+* **PDF** — extraction via PyMuPDF, generation via WeasyPrint/xhtml2pdf
+* **HTML** — header translation, scan and batch processing
 
-### 🖥️ Modern GUI Interface
-* **User-Friendly Design**
-  * Dark/light theme support via ttkbootstrap
-  * Real-time translation progress
-  * Scrollable dialogs for all screens
-  * Comprehensive logging system
-* **Advanced Configuration**
-  * Per-language prompt profiles
-  * Temperature and token controls
-  * API endpoint customization
-  * Batch size optimization
+### 🖼️ Image Translation
+* Auto-detection of text in images
+* Tall image splitting for reliable OCR
+* Batch processing with progress tracking
+* Context preservation across chunks
+
+### 🖥️ Modern GUI (PySide6)
+* **Cross-Platform** — Windows 10/11, macOS (Apple Silicon & Intel)
+* DPI-aware scaling with high-DPI display support
+* Animated splash screen and spinner indicators
+* Real-time translation progress with API watchdog monitoring
+* Comprehensive logging system with rotating log files and crash tracing
+* Per-language prompt profiles, temperature/token controls, API endpoint customization
+
+### 🔐 Security & Configuration
+* **API Key Encryption** — keys encrypted at rest using the `cryptography` library
+* **Multi-Key Management** — key pool with rotation, rate limit caching, and per-key health tracking
+* **Config Backup System** — automatic JSON config backups with atomic writes
+* **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
+
+---
+
+## 🔑 Supported AI Providers
+
+| Provider | Model Prefix | Example Models (2026) |
+|----------|-------------|----------------------|
+| **OpenAI** | `gpt-*`, `o3-*` | gpt-5.4, gpt-5.4-pro, gpt-5.3-codex, gpt-5.2, gpt-5, gpt-5-mini, gpt-5-nano, o3 |
+| **Google Gemini** | `gemini-*` | gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-2.5-flash, gemini-2.5-pro |
+| **Anthropic Claude** | `claude-*` | claude-opus-4-6, claude-sonnet-4-6, claude-sonnet-4-5, claude-haiku-4-5 |
+| **xAI Grok** | `grok-*`, `xai/*` | grok-4.20-beta, grok-4-fast, grok-4-0709, grok-3, grok-3-mini |
+| **DeepSeek** | `deepseek-*` | deepseek-chat, deepseek-reasoner, deepseek-coder |
+| **Mistral** | `mistral-*`, `mixtral-*`, `codestral-*` | mistral-large, mixtral-8x22b, codestral-latest |
+| **Cohere** | `command-*` | command-r, command-r-plus |
+| **ElectronHub** | `eh/*` | eh/gpt-5-chat-latest, eh/claude-sonnet-4-6, eh/gemini-3.1-pro-preview, eh/grok-4-fast |
+| **OpenRouter** | `or/*` | or/openai/gpt-5.4, or/google/gemini-3.1-pro-preview, or/deepseek/deepseek-v3.2 |
+| **Poe** | `poe/*` | poe/gpt-4.5, poe/claude-4-opus, poe/gemini-2.5-pro |
+| **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
+| **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
+| **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
+| **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking, antigravity/gemini-3.1-pro |
+| **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
+| **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
+| **Fireworks** | `fireworks/*` | fireworks/llama-v3-70b |
+| **Together AI** | `together/*` | together/llama-3-70b |
+| **Perplexity** | `perplexity/*`, `pplx-*` | perplexity-70b-online, pplx-70b-online |
+| **AI21** | `j2-*`, `jamba-*` | j2-ultra, jamba-instruct |
+| **Qwen** | `qwen-*` | qwen-72b-chat, qwen-plus, qwen-turbo |
+| **Yi** | `yi-*` | yi-34b-chat-200k |
+| **DeepL** | `deepl` | deepl (traditional translation API) |
+| **Google Translate** | `google-translate*` | google-translate, google-translate-free |
+
+> **Note:** Many more providers are supported — including Baichuan, Zhipu AI (GLM), Moonshot/Kimi, Baidu ERNIE, Tencent Hunyuan, ByteDance Doubao, MiniMax, Meta Llama, Microsoft Phi, Falcon, and others. See `model_options.py` and `unified_api_client.py` for the full catalog.
+
+### API Key Setup
+1. **Direct Providers** — use API keys from OpenAI, Google, Anthropic, etc.
+2. **ElectronHub** — single API key for access to models from multiple providers
+3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
+4. **Antigravity** — local Cloud Code proxy on `localhost:8080` (no API key needed)
+5. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
+
+### Manga Translation Setup
+1. Create a Google Cloud Project (or Azure AI resource)
+2. Enable Cloud Vision API (or Azure AI Vision)
+3. Create service account credentials
+4. Download JSON key file
+5. Set path in Manga Translator interface
 
 ---
 
@@ -130,7 +151,7 @@
 
 ### Prerequisites
 - Python 3.10 or higher
-- Windows 10/11 (for full feature support)
+- Windows 10/11 or macOS (for full feature support)
 
 ### Quick Start
 
@@ -142,151 +163,95 @@
 
 2. Install dependencies:
    ```bash
+   # Windows
    pip install -r requirements.txt
+
+   # macOS
+   pip install -r requirements-macos.txt
    ```
 
 3. Launch the GUI:
    ```bash
+   cd src
    python translator_gui.py
    ```
 
 ### Building Executable (Optional)
+
 ```bash
 pip install pyinstaller
-pyinstaller translator.spec
+
+# Standard build
+pyinstaller src/translator.spec
+
+# Lite build
+pyinstaller src/translator_lite.spec
+
+# macOS
+pyinstaller src/translator_lite_mac.spec
 ```
 
 ---
 
-## 📋 Requirements
+## 📋 Key Dependencies
 
 ```text
-# Core Translation
-tiktoken>=0.5.0
-openai>=1.0.0
-google-generativeai>=0.3.0
-anthropic>=0.7.0
-mistralai>=0.0.7
-cohere>=4.0.0
+# GUI Framework
+PySide6==6.9.3
+
+# AI/API Clients
+openai, anthropic, mistralai, cohere, tiktoken
+google-genai, google-cloud-aiplatform, vertexai
+poe-api-wrapper, deepl, httpx, aiohttp
 
 # File Processing
-ebooklib>=0.18
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-html5lib>=1.1
+ebooklib, beautifulsoup4, lxml, html5lib, html2text
+pymupdf, weasyprint, xhtml2pdf
 
-# GUI Framework
-ttkbootstrap>=1.10.0
-tkinter (included with Python)
+# Image Processing & OCR
+Pillow, opencv-python-headless, numpy, scipy
+google-cloud-vision, azure-ai-vision-imageanalysis
+azure-ai-documentintelligence
 
-# Image Processing
-Pillow>=10.0.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-
-# Manga Translation
-google-cloud-vision>=3.4.0
+# Manga / Bubble Detection
+onnxruntime, ultralytics (YOLO)
+torch, torchvision, transformers
 
 # Text Analysis
-langdetect>=1.0.9
-chardet>=5.2.0
-datasketch>=1.6.0
-scipy>=1.11.0
+langdetect, chardet, datasketch, rapidfuzz, jellyfish, regex
 
-# Utilities
-requests>=2.31.0
-tqdm>=4.66.0
-regex>=2023.0.0
+# Security
+cryptography
 ```
 
 ---
 
-## 🔑 API Configuration
+## 🚀 Usage
 
-### Supported AI Providers
-
-Here's the updated API provider table based on the unified API client support:
-
-| Provider | Model Format | Example Models |
-|----------|--------------|----------------|
-| **OpenAI** | `gpt-*`, `o1-*`, `o3-*`, `o4-*` | gpt-4, gpt-4-turbo, gpt-4o, o1-preview, o1-mini, o3, o4-mini |
-| **Google Gemini** | `gemini-*` | gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro |
-| **Anthropic** | `claude-*` | claude-3-opus, claude-3-sonnet, claude-3-haiku, claude-3.5-sonnet |
-| **DeepSeek** | `deepseek-*` | deepseek-chat, deepseek-coder |
-| **Mistral** | `mistral-*`, `open-mistral-*` | mistral-large, mistral-medium, open-mistral-7b |
-| **Cohere** | `command-*` | command-r, command-r-plus |
-| **ElectronHub** | `eh/*`, `electronhub/*` | eh/gpt-4, eh/claude-3-opus, eh/gemini-2.5-flash, eh/yi-large |
-| **VertexAI** | `vertex/*`, `vertex_ai/*` | vertex/gemini-2.5-flash, vertex/gemini-2.5-pro
-| **Groq** | `groq/*`, `llama-*`, `mixtral-*` | groq/llama-3.1-70b, groq/mixtral-8x7b |
-| **POE** | [poe/*](https://github.com/Shirochi-stack/Glossarion/blob/main/docs/poeguide.md)     | poe/gemini-2.5-flash, poe/claude-3.5-instant, poe/anthropic-instant-v1 |
-| **Together AI** | `together/*`, `meta-llama/*` | together/llama-3-70b, meta-llama/Llama-3-70b |
-| **Fireworks** | `fireworks/*`, `accounts/fireworks/*` | fireworks/llama-v3-70b, accounts/fireworks/models/mixtral-8x7b |
-| OpenRouter | `or/*`, `openrouter/*` | or/google/gemini-2.5-flash, or/openai/chatgpt-4o-latest
-| Chutes | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.1
-| **Perplexity** | `perplexity/*`, `llama-*`, `pplx-*` | perplexity/llama-3.1-70b, pplx-7b-online |
-| **Anyscale** | `anyscale/*`, `meta-llama/*` | anyscale/llama-3-70b, meta-llama/Llama-3-70b |
-| **Hugging Face** | `huggingface/*` | huggingface/meta-llama/Llama-3-70b |
-| **Replicate** | `replicate/*`, `meta/*` | replicate/meta/llama-3-70b |
-| **AI21** | `ai21/*`, `jamba-*`, `j2-*` | ai21/jamba-1.5-large, j2-ultra |
-| **Voyage AI** | `voyage/*` | voyage/voyage-3 |
-| **Reka** | `reka-*` | reka-flash, reka-core, reka-edge |
-| **xAI** | `xai/*`, `grok-*` | xai/grok-beta, grok-2 |
-| **LeptonAI** | `lepton/*`, `llama-*`, `mixtral-*` | lepton/llama-3.1-70b, lepton/mixtral-8x7b |
-| **DeepInfra** | `deepinfra/*` | deepinfra/meta-llama/Llama-3-70b |
-| **Qwen** | `qwen-*`, `qwen/*` | qwen-max, qwen-plus, qwen-turbo |
-| **Yi** | `yi-*`, `yi/*`, `zero-one-ai/*` | yi-large, yi-medium, zero-one-ai/yi-34b |
-| **Moonshot** | `moonshot-*` | moonshot-v1-128k, moonshot-v1-32k |
-| **GLM** | `glm-*` | glm-4-plus, glm-4, glm-3-turbo |
-
-### Additional Supported Providers
-Yi, Qwen, Baichuan, Zhipu AI, Moonshot, Groq, Baidu, Tencent, iFLYTEK, ByteDance, MiniMax, Together AI, Perplexity, and many more. See the full list in `unified_api_client.py`.
-
-### API Key Setup
-1. **Direct Providers**: Use API keys from OpenAI, Google, Anthropic, etc.
-2. **ElectronHub**: Single API key for access to models from multiple providers
-3. **Custom Endpoints**: Configure base URL for self-hosted or alternative endpoints
-
-### Model Selection
-- Enter the model name exactly as shown in the provider's documentation
-- The tool automatically detects the provider based on the model prefix
-- For ElectronHub, prefix any supported model with `eh/`, `electronhub/`, or `electron/`
-  - Example: `eh/gpt-4`, `electronhub/claude-3-opus`, `electron/yi-34b-chat`
-
-### Manga Translation Setup
-1. Create a Google Cloud Project
-2. Enable Cloud Vision API
-3. Create service account credentials
-4. Download JSON key file
-5. Set path in Manga Translator interface
-
----
-
-## 🚀 Usage Examples
-
-### Basic Novel Translation
-1. Select your EPUB/TXT file
-2. Choose source language profile
-3. Enter your API key
-4. Configure translation settings
-5. Click "Run Translation"
+### Basic Translation
+1. Launch `translator_gui.py`
+2. Select your EPUB/TXT/PDF file
+3. Choose source language (Korean, Japanese, or Chinese)
+4. Enter your API key and select a model
+5. Configure translation settings (chunk size, context depth, etc.)
+6. Click **"Run Translation"**
 
 ### Manga Translation
-1. Open Manga Translator from Tools menu
-2. Set Google Cloud Vision credentials
-3. Select manga images
-4. Configure text rendering options
+1. Open **Manga Translator** from the Tools menu
+2. Set Google Cloud Vision (or Azure) credentials
+3. Select manga images or folder
+4. Configure text rendering options (font, color, inpainting)
 5. Start batch translation
 
 ### Glossary Extraction
-1. After translation completes
-2. Click "Extract Glossary"
-3. Review and edit entries
-4. Export to JSON/Markdown
+1. After translation completes, click **"Extract Glossary"**
+2. Review and edit entries
+3. Export to JSON or Markdown
 
 ### Quality Assurance
 1. Complete translation
-2. Click "QA Scan"
-3. Review HTML report
+2. Click **"QA Scan"**
+3. Review the interactive HTML report
 4. Fix identified issues
 
 ---
@@ -296,25 +261,40 @@ Yi, Qwen, Baichuan, Zhipu AI, Moonshot, Groq, Baidu, Tencent, iFLYTEK, ByteDance
 ```
 Glossarion/
 ├── src/
-│   ├── translator_gui.py          # Main GUI application
-│   ├── TransateKRtoEN.py         # Core translation engine
-│   ├── unified_api_client.py     # Multi-provider AI client
-│   ├── manga_translator.py       # Manga OCR and translation
-│   ├── manga_integration.py      # Manga GUI interface
-│   ├── ai_hunter_enhanced.py     # Advanced duplicate detection
-│   ├── history_manager.py        # Context management
-│   ├── extract_glossary_from_*.py # Glossary extractors
-│   ├── epub_converter.py         # EPUB processing
-│   ├── scan_html_folder.py       # QA scanner
-│   └── [other modules]
-├── assets/
-│   └── Halgakos.png             # Application icon
-├── docs/
-│   └── [documentation]
-├── translator.spec              # PyInstaller config
-├── requirements.txt
-├── README.md
-└── LICENSE
+│   ├── translator_gui.py           # Main GUI entry point (PySide6)
+│   ├── TransateKRtoEN.py           # Core translation engine
+│   ├── unified_api_client.py       # Multi-provider AI client (40+ providers)
+│   ├── async_api_processor.py      # Async concurrent chapter processing
+│   ├── model_options.py            # Centralized model catalog
+│   ├── multi_api_key_manager.py    # API key pool & rotation
+│   ├── manga_translator.py         # Manga OCR and translation
+│   ├── manga_integration.py        # Manga GUI interface
+│   ├── bubble_detector.py          # YOLO-based speech bubble detection
+│   ├── local_inpainter.py          # ONNX local inpainting engine
+│   ├── ocr_manager.py              # OCR provider manager
+│   ├── ai_hunter_enhanced.py       # ML-based duplicate detection
+│   ├── epub_converter.py           # EPUB processing & conversion
+│   ├── pdf_extractor.py            # PDF text extraction (PyMuPDF)
+│   ├── scan_html_folder.py         # QA scanner
+│   ├── GlossaryManager.py          # Glossary management engine
+│   ├── extract_glossary_from_epub.py  # EPUB glossary extractor
+│   ├── review_dialog.py            # Translation review UI
+│   ├── other_settings.py           # Advanced settings dialogs
+│   ├── authgpt_auth.py             # ChatGPT OAuth integration
+│   ├── api_key_encryption.py       # API key encryption at rest
+│   ├── config_backup.py            # Config backup management
+│   ├── dpi_setup.py                # DPI awareness configuration
+│   ├── splash_utils.py             # Animated splash screen
+│   ├── update_manager.py           # Auto-update system
+
+│   └── ...
+├── assets/                         # App icons and images
+├── docs/                           # User guides and documentation
+├── .github/workflows/              # CI/CD (Windows, macOS)
+├── requirements.txt                # Windows dependencies
+├── requirements-macos.txt          # macOS dependencies
+├── translator.spec                 # PyInstaller build config
+└── LICENSE                         # MIT License
 ```
 
 ---
@@ -322,29 +302,33 @@ Glossarion/
 ## 🎯 Advanced Features
 
 ### Translation Profiles
-- **Japanese (Manga_JP)**: Optimized for manga with visual context
-- **Korean (Manga_KR)**: Manhwa-specific translations
-- **Chinese (Manga_CN)**: Manhua translations
-- **Novel profiles**: Separate profiles for text-only content
+- **Japanese** (Manga_JP / Novel) — optimized for manga and novel translation
+- **Korean** (Manga_KR / Novel) — manhwa and web novel translation
+- **Chinese** (Manga_CN / Novel) — manhua and web novel translation
 
 ### Context Window Management
-- **Rolling Window**: Maintains recent context only
-- **Reset on Limit**: Clears history at threshold
-- **Dynamic Adjustment**: Based on token limits
-- **Export/Import**: Save translation sessions
+- **Rolling Window** — maintains recent context for consistency
+- **Reset on Limit** — clears history at threshold
+- **Dynamic Adjustment** — adapts based on model token limits
+- **Export/Import** — save and resume translation sessions
 
-### Batch Processing Options
-- **Concurrent Chunks**: Process multiple sections simultaneously
-- **Auto-retry Failed**: Automatic error recovery
-- **Progress Persistence**: Resume interrupted translations
-- **Resource Management**: CPU/memory optimization
+### Batch Processing
+- **Concurrent Chunks** — process multiple sections simultaneously
+- **Auto-retry** — automatic error recovery with key rotation
+- **Progress Persistence** — resume interrupted translations via `translation_progress.json`
+- **Resource Management** — memory usage tracking and optimization
+
+### API Watchdog
+- Real-time monitoring of in-flight API requests
+- Per-request tracking with chapter/chunk labels
+- Retry attempt logging and duration tracking
 
 ---
 
 ## 🙏 Acknowledgments
 
 Built using:
-- OpenAI, Google, and Anthropic APIs
+- OpenAI, Google, Anthropic, xAI, and many more AI provider APIs
 - Designed with assistance from ChatGPT & Claude
 - Community feedback and contributions
 - Open source libraries and tools
@@ -354,7 +338,7 @@ Built using:
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ---
 
@@ -362,6 +346,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Issues**: [GitHub Issues](https://github.com/Shirochi-stack/Glossarion/issues)
 - **Discord**: [Join our Community](https://discord.gg/n7WXRXn533)
+
 ---
 
 <p align="center">Made with 🌸 for the translation community</p>
