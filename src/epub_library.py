@@ -1556,7 +1556,7 @@ class EpubReaderDialog(QDialog):
             f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
             f"padding: 10px 20px; max-width: 800px; margin: auto; }}"
             f"h1, h2, h3 {{ color: {t['heading']}; }}"
-            f"img {{ max-width: 100%; height: auto; border-radius: 4px; margin: 8px 0; }}"
+            f"img {{ display: block; max-width: 100%; height: auto; border-radius: 4px; margin: 12px auto; }}"
             f"p {{ margin: 0.6em 0; }}"
             f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
             f"</style></head><body>{body_html}</body></html>"
