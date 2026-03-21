@@ -403,19 +403,23 @@ class _BookCard(QFrame):
         title_lbl.setToolTip(book["name"])
         layout.addWidget(title_lbl)
 
+        # Size + file type badge on same row
+        file_type = book.get("type", "epub")
+        type_info = {"epub": ("📕EPUB", "#6c63ff"), "pdf": ("📄PDF", "#e74c3c"), "txt": ("📝TXT", "#2ecc71")}
+        badge_text, badge_color = type_info.get(file_type, ("📕EPUB", "#6c63ff"))
         size_mb = book["size"] / (1024 * 1024)
         size_str = f"{size_mb:.1f} MB" if size_mb >= 1 else f"{book['size'] / 1024:.0f} KB"
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(4)
         size_lbl = QLabel(size_str)
         size_lbl.setStyleSheet("color: #888; font-size: 7.5pt;")
-        layout.addWidget(size_lbl)
-
-        # File type badge
-        file_type = book.get("type", "epub")
-        type_info = {"epub": ("📕 EPUB", "#6c63ff"), "pdf": ("📄 PDF", "#e74c3c"), "txt": ("📝 TXT", "#2ecc71")}
-        badge_text, badge_color = type_info.get(file_type, ("📕 EPUB", "#6c63ff"))
+        info_row.addWidget(size_lbl)
         badge_lbl = QLabel(badge_text)
         badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold;")
-        layout.addWidget(badge_lbl)
+        info_row.addWidget(badge_lbl)
+        info_row.addStretch()
+        layout.addLayout(info_row)
 
     def _set_fallback_icon(self, icon_path: str):
         try:
@@ -562,7 +566,16 @@ class EpubLibraryDialog(QDialog):
 
         header = QHBoxLayout()
         header.setSpacing(8)
-        title = QLabel("📚  EPUB Library")
+        # Halgakos icon next to title
+        icon_path = _find_halgakos_icon()
+        if icon_path:
+            icon_lbl = QLabel()
+            pm = QPixmap(icon_path)
+            if not pm.isNull():
+                icon_lbl.setPixmap(pm.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                icon_lbl.setFixedSize(30, 30)
+                header.addWidget(icon_lbl)
+        title = QLabel("Glossarion Library")
         title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #e0e0e0;")
         header.addWidget(title)
         header.addStretch()
@@ -588,6 +601,7 @@ class EpubLibraryDialog(QDialog):
         refresh_btn.clicked.connect(self._load_books)
         header.addWidget(refresh_btn)
         root.addLayout(header)
+        root.addSpacing(6)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
@@ -640,7 +654,7 @@ class EpubLibraryDialog(QDialog):
         banner_layout.addStretch()
         relocate_btn = QPushButton("Organize into Library")
         relocate_btn.setCursor(Qt.PointingHandCursor)
-        relocate_btn.setToolTip("Copy these EPUBs into your Library folder for easy access")
+        relocate_btn.setToolTip("Copy these files into your Library folder for easy access")
         relocate_btn.setStyleSheet(
             "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
             "padding: 3px 10px; font-size: 8.5pt; font-weight: bold; border: none; }"
@@ -650,7 +664,7 @@ class EpubLibraryDialog(QDialog):
         # Undo button (hidden by default, shown after a move)
         self._undo_btn = QPushButton("↩ Undo Move")
         self._undo_btn.setCursor(Qt.PointingHandCursor)
-        self._undo_btn.setToolTip("Move the EPUBs back to their original locations")
+        self._undo_btn.setToolTip("Move the files back to their original locations")
         self._undo_btn.setStyleSheet(
             "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
             "padding: 3px 10px; font-size: 8.5pt; font-weight: bold; border: none; }"
@@ -673,7 +687,7 @@ class EpubLibraryDialog(QDialog):
         scroll.setWidget(self._grid_container)
         root.addWidget(scroll, 1)
 
-        self._empty_label = QLabel("No EPUB files found.\nTranslate a novel to see it here!")
+        self._empty_label = QLabel("No files found.\nTranslate a novel to see it here!")
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
         self._empty_label.hide()
@@ -752,7 +766,7 @@ class EpubLibraryDialog(QDialog):
             return
 
         self._empty_label.hide()
-        self._count_label.setText(f"{len(books)} EPUB{'s' if len(books) != 1 else ''}")
+        self._count_label.setText(f"{len(books)} file{'s' if len(books) != 1 else ''}")
 
         # Suggestion banner — show count of outside EPUBs
         outside = [b for b in self._books if not b.get("in_library")]
@@ -760,7 +774,7 @@ class EpubLibraryDialog(QDialog):
         if show_banner:
             if outside:
                 self._banner_lbl.setText(
-                    f"💡  {len(outside)} EPUB{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
+                    f"💡  {len(outside)} file{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
             elif self._last_move_log:
                 self._banner_lbl.setText(f"✅  Files moved to Library.")
             self._relocate_banner.show()
@@ -867,7 +881,6 @@ class EpubLibraryDialog(QDialog):
         if not outside:
             return
 
-        ext = os.path.splitext(outside[0]['path'])[1] if outside else '.epub'
         names = "\n".join(f"  \u2022 {b['name']}{os.path.splitext(b['path'])[1]}" for b in outside[:20])
         if len(outside) > 20:
             names += f"\n  \u2026 and {len(outside) - 20} more"
@@ -875,7 +888,7 @@ class EpubLibraryDialog(QDialog):
         msg = QMessageBox(self)
         msg.setWindowTitle("Organize into Library")
         msg.setText(
-            f"Move {len(outside)} EPUB{'s' if len(outside) != 1 else ''} into the Library folder?\n\n"
+            f"Move {len(outside)} file{'s' if len(outside) != 1 else ''} into the Library folder?\n\n"
             f"{names}\n\n"
             f"Destination:\n  {get_library_dir()}\n\n"
             f"You can undo this afterwards if needed."
@@ -940,7 +953,7 @@ class EpubLibraryDialog(QDialog):
         msg = QMessageBox(self)
         msg.setWindowTitle("Undo Move")
         msg.setText(
-            f"Move {len(self._last_move_log)} EPUB{'s' if len(self._last_move_log) != 1 else ''} back to "
+            f"Move {len(self._last_move_log)} file{'s' if len(self._last_move_log) != 1 else ''} back to "
             f"their original locations?\n\n{names}"
         )
         msg.setIcon(QMessageBox.Question)
