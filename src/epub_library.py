@@ -258,11 +258,19 @@ SORT_SIZE = "size"
 SIZE_COMPACT = "compact"
 SIZE_NORMAL = "normal"
 SIZE_LARGE = "large"
+SIZE_XL = "xl"
+SIZE_2XL = "2xl"
+SIZE_3XL = "3xl"
+SIZE_4XL = "4xl"
 
 _SIZE_PRESETS = {
     SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8pt", "title_max_len": 18, "spacing": 3},
     SIZE_NORMAL:  {"card_w": 140, "cover_h": 175, "title_size": "8.5pt", "title_max_len": 24, "spacing": 4},
     SIZE_LARGE:   {"card_w": 180, "cover_h": 225, "title_size": "9pt", "title_max_len": 32, "spacing": 5},
+    SIZE_XL:      {"card_w": 230, "cover_h": 290, "title_size": "9.5pt", "title_max_len": 40, "spacing": 6},
+    SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10pt", "title_max_len": 50, "spacing": 8},
+    SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "10.5pt", "title_max_len": 60, "spacing": 10},
+    SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11pt", "title_max_len": 70, "spacing": 12},
 }
 
 
@@ -409,7 +417,7 @@ class EpubLibraryDialog(QDialog):
             else:
                 self.showFullScreen()
         elif event.modifiers() & Qt.ControlModifier:
-            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE]
+            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL]
             idx = sizes.index(self._card_size) if self._card_size in sizes else 0
             if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
                 if idx < len(sizes) - 1:
@@ -425,7 +433,7 @@ class EpubLibraryDialog(QDialog):
     def wheelEvent(self, event):
         """Ctrl+Wheel to zoom card size."""
         if event.modifiers() & Qt.ControlModifier:
-            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE]
+            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_XXL]
             idx = sizes.index(self._card_size) if self._card_size in sizes else 0
             if event.angleDelta().y() > 0 and idx < len(sizes) - 1:
                 self._set_card_size(sizes[idx + 1])
@@ -525,6 +533,10 @@ class EpubLibraryDialog(QDialog):
             ("S", "Compact thumbnails", SIZE_COMPACT),
             ("M", "Normal thumbnails", SIZE_NORMAL),
             ("L", "Large thumbnails", SIZE_LARGE),
+            ("XL", "Extra large thumbnails", SIZE_XL),
+            ("2XL", "2XL thumbnails", SIZE_2XL),
+            ("3XL", "3XL thumbnails", SIZE_3XL),
+            ("4XL", "4XL thumbnails", SIZE_4XL),
         ]:
             btn = self._make_size_btn(text, tip, key)
             self._size_btns[key] = btn
@@ -876,7 +888,9 @@ class EpubLibraryDialog(QDialog):
             new_cols = max(1, (self.width() - 30) // (preset["card_w"] + preset["spacing"]))
             current_cols = max(1, self._grid_layout.columnCount())
             if new_cols != current_cols:
+                self._grid_container.hide()
                 self._refresh_view()
+                self._grid_container.show()
 
     def closeEvent(self, event):
         """Persist library settings back into config."""
