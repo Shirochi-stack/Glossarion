@@ -5684,7 +5684,21 @@ Recent translations to summarize:
         
         
         self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
-        self.frame.addWidget(self._gloss_status_row, 6, 4, Qt.AlignRight)
+        self.frame.addWidget(self._gloss_status_row, 5, 4, Qt.AlignRight)
+
+        # ── 📚 Library button (above Other Settings, below glossary status) ──
+        self.library_btn = QPushButton("📚  Library")
+        self.library_btn.setCursor(Qt.PointingHandCursor)
+        self.library_btn.setToolTip("Browse and read your translated EPUBs")
+        self.library_btn.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 6px 14px; border-radius: 4px; border: none; }"
+            "QPushButton:hover { background-color: #5a32a3; }"
+        )
+        self.library_btn.setMinimumWidth(120)
+        self.library_btn.clicked.connect(self._open_epub_library)
+        self.frame.addWidget(self.library_btn, 6, 4)
+
 
         # Output Token Limit tooltip (main output)
         try:
@@ -15742,8 +15756,19 @@ Important rules:
            except Exception:
                pass
 
+    def _open_epub_library(self):
+        """Open the EPUB Library dialog to browse and read translated EPUBs."""
+        try:
+            from epub_library import EpubLibraryDialog
+            dlg = EpubLibraryDialog(config=self.config, parent=self)
+            dlg.exec()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Library Error", f"Could not open EPUB Library:\n{e}")
+
     # Note: open_other_settings method is bound from other_settings.py during __init__
     # No need to define it here - it's injected dynamically
+
 
     def _show_glossary_mode_welcome(self):
         """Show a one-time welcome dialog explaining glossary modes, extraction formats,
