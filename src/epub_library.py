@@ -262,6 +262,10 @@ SIZE_XL = "xl"
 SIZE_2XL = "2xl"
 SIZE_3XL = "3xl"
 SIZE_4XL = "4xl"
+SIZE_5XL = "5xl"
+SIZE_6XL = "6xl"
+
+_ALL_SIZES = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL, SIZE_5XL, SIZE_6XL]
 
 _SIZE_PRESETS = {
     SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8pt", "title_max_len": 18, "spacing": 3},
@@ -271,6 +275,8 @@ _SIZE_PRESETS = {
     SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10pt", "title_max_len": 50, "spacing": 8},
     SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "10.5pt", "title_max_len": 60, "spacing": 10},
     SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11pt", "title_max_len": 70, "spacing": 12},
+    SIZE_5XL:     {"card_w": 530, "cover_h": 660, "title_size": "11.5pt", "title_max_len": 80, "spacing": 14},
+    SIZE_6XL:     {"card_w": 630, "cover_h": 790, "title_size": "12pt", "title_max_len": 90, "spacing": 16},
 }
 
 
@@ -417,7 +423,7 @@ class EpubLibraryDialog(QDialog):
             else:
                 self.showFullScreen()
         elif event.modifiers() & Qt.ControlModifier:
-            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL]
+            sizes = _ALL_SIZES
             idx = sizes.index(self._card_size) if self._card_size in sizes else 0
             if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
                 if idx < len(sizes) - 1:
@@ -433,7 +439,7 @@ class EpubLibraryDialog(QDialog):
     def wheelEvent(self, event):
         """Ctrl+Wheel to zoom card size."""
         if event.modifiers() & Qt.ControlModifier:
-            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_XXL]
+            sizes = _ALL_SIZES
             idx = sizes.index(self._card_size) if self._card_size in sizes else 0
             if event.angleDelta().y() > 0 and idx < len(sizes) - 1:
                 self._set_card_size(sizes[idx + 1])
@@ -537,6 +543,8 @@ class EpubLibraryDialog(QDialog):
             ("2XL", "2XL thumbnails", SIZE_2XL),
             ("3XL", "3XL thumbnails", SIZE_3XL),
             ("4XL", "4XL thumbnails", SIZE_4XL),
+            ("5XL", "5XL thumbnails", SIZE_5XL),
+            ("6XL", "6XL thumbnails", SIZE_6XL),
         ]:
             btn = self._make_size_btn(text, tip, key)
             self._size_btns[key] = btn
@@ -1494,8 +1502,16 @@ class EpubReaderDialog(QDialog):
         self._font_size = max(8, min(32, self._font_size + delta))
         self._font_label.setText(f"{self._font_size}pt")
         self._apply_reader_style()
-        self._chapter_page_cache.clear()  # pages change with font size
-        self._loaded_chapter = -1  # force re-render
+        self._chapter_page_cache.clear()
+        self._loaded_chapter = -1
+        # Hide content before re-render to prevent flash
+        _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
+        if _HAS_WEBENGINE:
+            if self._layout_mode == LAYOUT_DOUBLE:
+                self._reader_left.page().runJavaScript(_hide)
+                self._reader_right.page().runJavaScript(_hide)
+            else:
+                self._reader.page().runJavaScript(_hide)
         self._render_current()
 
     def _on_spacing_changed(self, text):
@@ -1506,6 +1522,14 @@ class EpubReaderDialog(QDialog):
             self._line_spacing = 1.8
         self._chapter_page_cache.clear()
         self._loaded_chapter = -1
+        # Hide content before re-render to prevent flash
+        _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
+        if _HAS_WEBENGINE:
+            if self._layout_mode == LAYOUT_DOUBLE:
+                self._reader_left.page().runJavaScript(_hide)
+                self._reader_right.page().runJavaScript(_hide)
+            else:
+                self._reader.page().runJavaScript(_hide)
         self._render_current()
 
     def _on_theme_changed(self, index):
