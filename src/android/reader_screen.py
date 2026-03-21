@@ -661,52 +661,42 @@ class ReaderScreen(MDScreen):
         """Render the original KO chapter with text and images."""
         blocks = self.chapters[index]
 
-        # Extract plain text for search/bookmarks
-        text_parts = []
-        for b in blocks:
-            if isinstance(b, (list, tuple)) and len(b) >= 2 and b[0] == 'text':
-                text_parts.append(str(b[1]))
-            elif isinstance(b, str):
-                text_parts.append(b)
-        self.current_text = '\n\n'.join(text_parts)
-
-        # If blocks produced no text, extract from raw HTML directly
-        if not self.current_text.strip() and index < len(self._raw_chapters):
+        # --- ALWAYS extract text from raw HTML as the primary source ---
+        raw_text = ''
+        if index < len(self._raw_chapters):
             raw = self._raw_chapters[index]
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(raw, 'html.parser')
-                self.current_text = soup.get_text(separator='\n').strip()
+                raw_text = soup.get_text(separator='\n').strip()
             except Exception:
-                self.current_text = raw[:2000] if raw else "(empty chapter)"
+                raw_text = raw[:3000] if raw else ''
 
-        text_added = False
+        # Also try from blocks
+        block_text_parts = []
+        for b in blocks:
+            if isinstance(b, (list, tuple)) and len(b) >= 2 and b[0] == 'text':
+                block_text_parts.append(str(b[1]))
+            elif isinstance(b, str):
+                block_text_parts.append(b)
+        block_text = '\n\n'.join(block_text_parts)
+
+        # Use whichever has more content
+        self.current_text = block_text if len(block_text) >= len(raw_text) else raw_text
+        if not self.current_text.strip():
+            self.current_text = raw_text or block_text or '(empty chapter)'
+
+        logger.info(f"_render_original ch {index}: blocks={len(blocks)}, "
+                     f"block_text_len={len(block_text)}, raw_text_len={len(raw_text)}, "
+                     f"block_types={[b[0] if isinstance(b,(list,tuple)) and b else type(b).__name__ for b in blocks[:5]]}")
+
+        # --- Render images from blocks ---
         try:
             from kivy.uix.image import AsyncImage
-
             for block in blocks:
-                if isinstance(block, str):
-                    btype, bcontent = 'text', block
-                elif isinstance(block, (list, tuple)) and len(block) >= 2:
-                    btype, bcontent = block[0], block[1]
-                else:
-                    continue
-
-                if btype == 'text':
-                    lbl = MDLabel(
-                        text=str(bcontent),
-                        size_hint_y=None,
-                        font_size=self.font_size_px,
-                        line_height=self.line_spacing,
-                        color=self.text_color,
-                        halign=self.text_align,
-                    )
-                    lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
-                    box.add_widget(lbl)
-                    text_added = True
-                elif btype == 'image':
+                if isinstance(block, (list, tuple)) and len(block) >= 2 and block[0] == 'image':
                     img = AsyncImage(
-                        source=str(bcontent),
+                        source=str(block[1]),
                         size_hint_y=None,
                         height=dp(300),
                         fit_mode='contain',
@@ -720,10 +710,10 @@ class ReaderScreen(MDScreen):
                     img.bind(texture=_on_texture)
                     box.add_widget(img)
         except Exception as e:
-            logger.error(f"_render_original block render error ch {index}: {e}")
+            logger.error(f"_render_original image error ch {index}: {e}")
 
-        # If no text blocks were rendered, show the extracted plain text
-        if not text_added and self.current_text.strip():
+        # --- ALWAYS add a text label with the chapter text ---
+        if self.current_text.strip():
             lbl = MDLabel(
                 text=self.current_text,
                 size_hint_y=None,
