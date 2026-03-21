@@ -632,24 +632,6 @@ class ReaderScreen(MDScreen):
                 lbl = self._make_text_label(f"ERROR rendering ch {index}:\n{err}")
                 box.add_widget(lbl)
 
-        # DEBUG: add a banner showing how many widgets are in the box and text info
-        from kivy.uix.label import Label as _DebugLabel
-        dbg_text = (f"[DEBUG] ch={index} widgets={len(box.children)} "
-                     f"text_len={len(self.current_text)} "
-                     f"raw_ch={len(self._raw_chapters)} "
-                     f"box_w={box.width:.0f}")
-        dbg = _DebugLabel(
-            text=dbg_text,
-            color=[1, 0.2, 0.2, 1],
-            size_hint_y=None,
-            height=dp(30),
-            font_size=sp(10),
-            halign='left',
-            valign='middle',
-            text_size=(400, None),
-        )
-        box.add_widget(dbg, index=len(box.children))  # add at top
-
         # Always scroll to top and save
         try:
             self.ids.content_scroll.scroll_y = 1.0
@@ -657,11 +639,62 @@ class ReaderScreen(MDScreen):
             pass
         self._save_progress()
 
+    @staticmethod
+    def _sanitize_text(text):
+        """Strip Unicode characters that crash Kivy's SDL2 text renderer.
+
+        Korean web novels often contain zero-width spaces, joiners, BOM marks,
+        and other invisible Unicode control characters that cause SDL2's text
+        provider to produce a solid black texture instead of rendered text.
+        """
+        if not text:
+            return text
+        # Remove zero-width and invisible Unicode characters
+        remove_chars = (
+            '\u200b'   # zero-width space (VERY common in Korean web novels)
+            '\u200c'   # zero-width non-joiner
+            '\u200d'   # zero-width joiner
+            '\u200e'   # left-to-right mark
+            '\u200f'   # right-to-left mark
+            '\u202a'   # left-to-right embedding
+            '\u202b'   # right-to-left embedding
+            '\u202c'   # pop directional formatting
+            '\u202d'   # left-to-right override
+            '\u202e'   # right-to-left override
+            '\u2060'   # word joiner
+            '\u2061'   # function application
+            '\u2062'   # invisible times
+            '\u2063'   # invisible separator
+            '\u2064'   # invisible plus
+            '\ufeff'   # BOM / zero-width no-break space
+            '\ufffe'   # invalid
+            '\x00'     # NUL
+            '\x0b'     # vertical tab
+            '\x0c'     # form feed
+            '\xad'     # soft hyphen
+        )
+        cleaned = text
+        for ch in remove_chars:
+            cleaned = cleaned.replace(ch, '')
+        return cleaned
+
     def _make_text_label(self, text, markup=False):
         """Create a plain Kivy Label for chapter text."""
         from kivy.uix.label import Label
 
-        # Get actual container width — this MUST be a real value
+        # Sanitize text to remove chars that break SDL2 rendering
+        clean_text = self._sanitize_text(str(text))
+
+        # ALWAYS use markup mode — Kivy's MarkupLabel handles CJK font
+        # fallback correctly, while the basic Label path can produce a solid
+        # black texture for Korean/Japanese/Chinese text.
+        if not markup:
+            # Escape [ and ] so they aren't interpreted as markup tags
+            clean_text = clean_text.replace('&', '&amp;')
+            clean_text = clean_text.replace('[', '&bl;')
+            clean_text = clean_text.replace(']', '&br;')
+
+        # Get actual container width
         container_width = 400
         try:
             cw = self.ids.content_box.width
@@ -672,8 +705,8 @@ class ReaderScreen(MDScreen):
             pass
 
         lbl = Label(
-            text=str(text),
-            markup=markup,
+            text=clean_text,
+            markup=True,  # ALWAYS markup — fixes CJK rendering
             size_hint_y=None,
             size_hint_x=1,
             font_size=self.font_size_px,
@@ -683,7 +716,7 @@ class ReaderScreen(MDScreen):
             valign='top',
             text_size=(container_width, None),
         )
-        lbl.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+        lbl.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)) if w > 50 else None)
         lbl.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + dp(20)))
         return lbl
 
