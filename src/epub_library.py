@@ -1757,7 +1757,7 @@ class EpubReaderDialog(QDialog):
         self._reader_stack.setStyleSheet(f"QStackedWidget {{ background: {bg}; border: none; }}")
         self._double_widget.setStyleSheet(f"background: {bg};")
         self._toc_list.setStyleSheet(f"""
-            QListWidget {{ background: {bg}; border: none; border-right: 1px solid {border};
+            QListWidget {{ background: {bg}; border: none;
                 color: {fg}; font-size: 9pt; padding: 4px; }}
             QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}
             QListWidget::item:selected {{ background: {border}; color: {t['heading']}; }}
@@ -1772,7 +1772,7 @@ class EpubReaderDialog(QDialog):
         self._toc_list.viewport().setStyleSheet(f"background: {bg};")
         self._nav_bar.setStyleSheet(f"background: {bg}; border-top: 1px solid {border};")
         self._loading_widget.setStyleSheet(f"background: {bg};")
-        self._splitter.setStyleSheet(f"QSplitter::handle {{ background: {border}; width: 1px; }}")
+        self._splitter.setStyleSheet(f"QSplitter::handle {{ background: transparent; width: 0px; }}")
         self._search_bar.setStyleSheet(f"""
             QLineEdit {{
                 background: {t['code_bg']}; color: {fg}; border: 1px solid {border};
