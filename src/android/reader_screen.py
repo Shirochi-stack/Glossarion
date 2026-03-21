@@ -614,8 +614,12 @@ class ReaderScreen(MDScreen):
         en_avail = " ✓EN" if index in self._translated_chapters else ""
         self.chapter_info = f"{title}  ({index + 1}/{len(self.chapters)}){en_avail}"
 
-        # Check if we should show the translated version
-        use_translated = (self.viewing_language == 'en' and index in self._translated_chapters)
+        # Auto-switch language based on translation availability
+        if index in self._translated_chapters:
+            self.viewing_language = 'en'
+        else:
+            self.viewing_language = 'ko'
+        use_translated = (self.viewing_language == 'en')
 
         box = self.ids.content_box
         box.clear_widgets()
