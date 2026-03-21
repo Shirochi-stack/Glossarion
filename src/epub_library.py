@@ -1753,7 +1753,16 @@ class EpubReaderDialog(QDialog):
                     mime = mime_map.get(ext, "image/jpeg")
                     b64 = base64.b64encode(image_data).decode("ascii")
                     img_tag["src"] = f"data:{mime};base64,{b64}"
-                    # CSS handles sizing via the img rule in _wrap_html
+                    # Check dimensions — large images get their own page
+                    try:
+                        qimg = QImage()
+                        qimg.loadFromData(image_data)
+                        if qimg.width() > 300 or qimg.height() > 400:
+                            wrapper = soup.new_tag("div")
+                            wrapper["class"] = "full-page-img"
+                            img_tag.wrap(wrapper)
+                    except Exception:
+                        pass
 
             return str(soup)
         except Exception:
@@ -1783,6 +1792,9 @@ class EpubReaderDialog(QDialog):
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
+                f".full-page-img {{ break-before: column; break-after: column; "
+                f"display: flex; align-items: center; justify-content: center; "
+                f"min-height: 50%; }}"
                 f"p {{ margin: 0.6em 0; orphans: 2; widows: 2; }}"
                 f"a {{ color: {t['link']}; }}"
                 f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
