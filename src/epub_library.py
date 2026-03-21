@@ -2108,10 +2108,16 @@ class EpubReaderDialog(QDialog):
         self._render_current()
 
     def _process_html(self, html_content: str) -> str:
-        """Process chapter HTML: inject inline images as base64 data URIs."""
+        """Process chapter HTML: resolve image paths to temp files."""
         try:
             from bs4 import BeautifulSoup
-            import base64
+
+            # Ensure temp image directory exists for this EPUB
+            if not hasattr(self, '_img_temp_dir') or not os.path.isdir(self._img_temp_dir):
+                epub_hash = hashlib.md5(self._epub_path.encode()).hexdigest()[:10]
+                self._img_temp_dir = os.path.join(
+                    tempfile.gettempdir(), "Glossarion_EpubImages", epub_hash)
+                os.makedirs(self._img_temp_dir, exist_ok=True)
 
             soup = BeautifulSoup(html_content, "html.parser")
 
@@ -2126,13 +2132,13 @@ class EpubReaderDialog(QDialog):
                         image_data = self._images[candidate]
                         break
                 if image_data:
-                    ext = os.path.splitext(src)[1].lower()
-                    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                                ".png": "image/png", ".gif": "image/gif",
-                                ".svg": "image/svg+xml", ".webp": "image/webp"}
-                    mime = mime_map.get(ext, "image/jpeg")
-                    b64 = base64.b64encode(image_data).decode("ascii")
-                    img_tag["src"] = f"data:{mime};base64,{b64}"
+                    # Write to temp file (skip if already cached)
+                    safe_name = os.path.basename(src).replace("/", "_").replace("\\", "_")
+                    img_path = os.path.join(self._img_temp_dir, safe_name)
+                    if not os.path.isfile(img_path):
+                        with open(img_path, "wb") as f:
+                            f.write(image_data)
+                    img_tag["src"] = QUrl.fromLocalFile(img_path).toString()
                     # Wrap sizeable images in full-page containers
                     # (skip tiny icons/bullets — use byte-size as fast proxy)
                     if len(image_data) > 5120:
