@@ -6239,6 +6239,9 @@ class UnifiedClient:
                     configured_fallbacks = json.loads(fallback_keys_json)
                     print(f"[DEBUG] Loaded {len(configured_fallbacks)} fallback keys from environment")
                     for fb in configured_fallbacks:
+                        # Skip disabled fallback keys
+                        if fb.get('enabled') is False:
+                            continue
                         fallback_keys.append({
                             'api_key': fb.get('api_key'),
                             'model': fb.get('model'),
