@@ -855,8 +855,8 @@ LAYOUT_ALL    = "all_scroll"    # All chapters concatenated, scrollable
 
 # Reader themes — first one is the default and matches translator_gui.py's dark palette
 _READER_THEMES = [
-    {"name": "Dark",     "bg": "#1a1a2e", "fg": "#d4d4d4", "heading": "#c8c8f0",
-     "link": "#6c9bd2", "code_bg": "#222240", "border": "#2a2a3e"},
+    {"name": "Dark",     "bg": "#1e1e1e", "fg": "#d4d4d4", "heading": "#c8c8f0",
+     "link": "#6c9bd2", "code_bg": "#252530", "border": "#333333"},
     {"name": "Light",    "bg": "#faf9f6", "fg": "#2c2c2c", "heading": "#333333",
      "link": "#1a73e8", "code_bg": "#eeeeee", "border": "#dddddd"},
     {"name": "Sepia",    "bg": "#f4ecd8", "fg": "#5b4636", "heading": "#3e2c1c",
@@ -1261,8 +1261,16 @@ class EpubReaderDialog(QDialog):
         self._splitter.setStyleSheet(f"QSplitter::handle {{ background: {border}; width: 1px; }}")
 
     def _toggle_toc(self):
-        """Show or hide the TOC sidebar."""
-        self._toc_list.setVisible(not self._toc_list.isVisible())
+        """Show or hide the TOC sidebar using splitter sizes."""
+        sizes = self._splitter.sizes()
+        if sizes[0] > 0:
+            # Hide TOC: remember width, set to 0
+            self._toc_saved_width = sizes[0]
+            self._splitter.setSizes([0, sizes[1] + sizes[0]])
+        else:
+            # Show TOC: restore saved width
+            w = getattr(self, '_toc_saved_width', 220)
+            self._splitter.setSizes([w, max(1, sizes[1] - w)])
 
     def _change_font_size(self, delta):
         self._font_size = max(8, min(32, self._font_size + delta))
