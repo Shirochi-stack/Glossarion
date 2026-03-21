@@ -180,6 +180,10 @@ def set_all_env_vars(config):
     # ── Concise logs ──
     os.environ['CONCISE_PIPELINE_LOGS'] = '1' if _get('concise_pipeline_logs', False) else '0'
 
+    # ── Emergency restoration (enabled by default on Android) ──
+    os.environ['EMERGENCY_IMAGE_RESTORE'] = '1' if _get('emergency_image_restore', True) else '0'
+    os.environ['EMERGENCY_PARAGRAPH_RESTORE'] = '1' if _get('emergency_paragraph_restore', True) else '0'
+
     logger.info("All environment variables set for translation engine")
 
 
