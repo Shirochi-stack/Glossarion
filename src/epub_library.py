@@ -401,6 +401,19 @@ class EpubLibraryDialog(QDialog):
         else:
             super().keyPressEvent(event)
 
+    def wheelEvent(self, event):
+        """Ctrl+Wheel to zoom card size."""
+        if event.modifiers() & Qt.ControlModifier:
+            sizes = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE]
+            idx = sizes.index(self._card_size) if self._card_size in sizes else 0
+            if event.angleDelta().y() > 0 and idx < len(sizes) - 1:
+                self._set_card_size(sizes[idx + 1])
+            elif event.angleDelta().y() < 0 and idx > 0:
+                self._set_card_size(sizes[idx - 1])
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
     def _make_sort_btn(self, text, tooltip, mode):
         btn = QPushButton(text)
         btn.setToolTip(tooltip)
@@ -1214,17 +1227,27 @@ class EpubReaderDialog(QDialog):
         QShortcut(QKeySequence(Qt.Key_Left), self, self._prev_chapter)
         QShortcut(QKeySequence(Qt.Key_Right), self, self._next_chapter)
         QShortcut(QKeySequence(Qt.Key_F11), self, self._toggle_fullscreen)
+        QShortcut(QKeySequence("Ctrl+="), self, lambda: self._change_font_size(1))
+        QShortcut(QKeySequence("Ctrl++"), self, lambda: self._change_font_size(1))
+        QShortcut(QKeySequence("Ctrl+-"), self, lambda: self._change_font_size(-1))
 
     # ── Event filter (block wheel scroll in paginated modes) ──────────────
 
     def eventFilter(self, obj, event):
-        """Block wheel events on reader viewports (paginated) and on combo boxes."""
+        """Block wheel on combos, handle Ctrl+Wheel for font zoom."""
         from PySide6.QtCore import QEvent
         if event.type() == QEvent.Wheel:
-            if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-                return True  # block wheel on reader in paginated modes
             if isinstance(obj, QComboBox):
                 return True  # block wheel on all toolbar combos
+            # Ctrl+Wheel = font zoom
+            if event.modifiers() & Qt.ControlModifier:
+                if event.angleDelta().y() > 0:
+                    self._change_font_size(1)
+                else:
+                    self._change_font_size(-1)
+                return True
+            if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                return True  # block wheel on reader in paginated modes
         return super().eventFilter(obj, event)
 
     def _toggle_fullscreen(self):
@@ -1620,14 +1643,21 @@ class EpubReaderDialog(QDialog):
         self._render_current()
 
     def _process_html(self, html_content: str) -> str:
-        """Process chapter HTML: inject inline images as base64 data URIs."""
+        """Process chapter HTML: inject images as base64 and isolate them in block elements.
+
+        QTextBrowser ignores CSS display:block and <div> wrappers.  The only
+        reliable way to prevent text from overlapping images is to place each
+        <img> inside its own <p> (or <table>) element with NO surrounding text.
+        """
         try:
-            from bs4 import BeautifulSoup, NavigableString
+            from bs4 import BeautifulSoup, Tag
             import base64
 
             soup = BeautifulSoup(html_content, "html.parser")
 
-            for img_tag in soup.find_all("img"):
+            # Collect all img tags first (modifying tree while iterating)
+            img_tags = list(soup.find_all("img"))
+            for img_tag in img_tags:
                 src = img_tag.get("src", "")
                 if not src:
                     continue
@@ -1637,18 +1667,45 @@ class EpubReaderDialog(QDialog):
                     if candidate in self._images:
                         image_data = self._images[candidate]
                         break
-                if image_data:
-                    ext = os.path.splitext(src)[1].lower()
-                    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                                ".png": "image/png", ".gif": "image/gif",
-                                ".svg": "image/svg+xml", ".webp": "image/webp"}
-                    mime = mime_map.get(ext, "image/jpeg")
-                    b64 = base64.b64encode(image_data).decode("ascii")
-                    img_tag["src"] = f"data:{mime};base64,{b64}"
-                    img_tag["style"] = "max-width: 100%; height: auto;"
-                    # Wrap img in a dedicated <div> so QTextBrowser treats it as a block
-                    wrapper = soup.new_tag("div", style="text-align: center; margin: 12px 0;")
-                    img_tag.wrap(wrapper)
+                if not image_data:
+                    continue
+
+                ext = os.path.splitext(src)[1].lower()
+                mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                            ".png": "image/png", ".gif": "image/gif",
+                            ".svg": "image/svg+xml", ".webp": "image/webp"}
+                mime = mime_map.get(ext, "image/jpeg")
+                b64 = base64.b64encode(image_data).decode("ascii")
+                img_tag["src"] = f"data:{mime};base64,{b64}"
+
+                # Remove any existing width/height/style that might conflict
+                for attr in ["style", "width", "height"]:
+                    if attr in img_tag.attrs:
+                        del img_tag.attrs[attr]
+
+                # Extract the image from whatever parent it's in and place
+                # it in a standalone <p> so QTextBrowser treats it as its
+                # own block — no text can overlap.
+                parent = img_tag.parent
+                # Build a standalone image block using <table> which QTextBrowser
+                # reliably renders as a block element with proper sizing.
+                img_block = soup.new_tag("table", width="100%", cellpadding="0", cellspacing="0")
+                img_block["style"] = "margin-top:8px; margin-bottom:8px;"
+                tr = soup.new_tag("tr")
+                td = soup.new_tag("td", align="center")
+                new_img = soup.new_tag("img", src=img_tag["src"], width="100%")
+                td.append(new_img)
+                tr.append(td)
+                img_block.append(tr)
+
+                if parent and parent.name in ("p", "span", "a", "div", "em", "strong"):
+                    # Insert the image block AFTER the parent element
+                    parent.insert_after(img_block)
+                    # Remove the original inline img from the parent
+                    img_tag.decompose()
+                else:
+                    # Replace the img in-place
+                    img_tag.replace_with(img_block)
 
             return str(soup)
         except Exception:
@@ -1665,9 +1722,9 @@ class EpubReaderDialog(QDialog):
             f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
             f"padding: 10px 20px; max-width: 800px; margin: auto; }}"
             f"h1, h2, h3 {{ color: {t['heading']}; }}"
-            f"img {{ display: block; max-width: 100%; height: auto; border-radius: 4px; margin: 12px auto; }}"
             f"p {{ margin: 0.6em 0; }}"
             f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
+            f"table {{ border: none; }}"
             f"</style></head><body>{body_html}</body></html>"
         )
 
