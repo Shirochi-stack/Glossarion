@@ -16,6 +16,7 @@
 ![Python application](https://github.com/Shirochi-stack/Glossarion/workflows/Python%20application/badge.svg)
 [![GitHub release](https://img.shields.io/github/release/Shirochi-stack/Glossarion.svg)](https://GitHub.com/Shirochi-stack/Glossarion/releases/)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-7289da?style=flat&logo=discord&logoColor=white)](https://discord.gg/n7WXRXn533)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-ff5f5f?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/glossarion/)
 
 ---
 
