@@ -722,11 +722,19 @@ class GrpcGeminiClient:
                 elif "PROHIBITED" in fr_str:
                     finish_reason = "prohibited_content"
             
-            # Extract text from content parts
+            # Extract text from content parts (filter out thought parts)
             if candidate.content:
                 raw_content_obj = candidate.content
                 text_parts = []
                 for part in candidate.content.parts:
+                    # Skip thought/reasoning parts — they must NOT leak into output
+                    is_thought = getattr(part, 'thought', False)
+                    if is_thought:
+                        # Count thinking tokens from thought text if usage_metadata
+                        # doesn't provide them
+                        if part.text:
+                            thinking_tokens = max(thinking_tokens, len(part.text) // 4)
+                        continue
                     if part.text:
                         text_parts.append(part.text)
                 text_content = "".join(text_parts)

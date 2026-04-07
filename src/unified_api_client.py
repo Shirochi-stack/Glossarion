@@ -15350,6 +15350,15 @@ class UnifiedClient:
                                     text_parts = []
                                     for part in msg_content:
                                         if isinstance(part, dict):
+                                            # Gemini OAI: skip thought-flagged parts in non-streaming multipart responses
+                                            if is_gemini_endpoint:
+                                                try:
+                                                    _ec = part.get('extra_content', {})
+                                                    _g = _ec.get('google', {}) if isinstance(_ec, dict) else {}
+                                                    if isinstance(_g, dict) and _g.get('thought') is True:
+                                                        continue
+                                                except Exception:
+                                                    pass
                                             if part.get('type') == 'text':
                                                 text_parts.append(part.get('text', ''))
                                             elif part.get('type') == 'image_url':
@@ -15371,6 +15380,16 @@ class UnifiedClient:
                                                     except Exception as e:
                                                         print(f"   ⚠️ Failed to decode image data: {e}")
                                         elif hasattr(part, 'type'):
+                                            # Gemini OAI: skip thought-flagged parts (object access via model_extra)
+                                            if is_gemini_endpoint:
+                                                try:
+                                                    _me = getattr(part, 'model_extra', None) or {}
+                                                    _ec = _me.get('extra_content', {}) if isinstance(_me, dict) else {}
+                                                    _g = _ec.get('google', {}) if isinstance(_ec, dict) else {}
+                                                    if isinstance(_g, dict) and _g.get('thought') is True:
+                                                        continue
+                                                except Exception:
+                                                    pass
                                             if part.type == 'text':
                                                 text_parts.append(getattr(part, 'text', ''))
                                             elif part.type == 'image_url':
