@@ -174,6 +174,29 @@ def _extract_cover(epub_path: str) -> str | None:
                     cover_data = item.get_content()
                     break
 
+        # Try the first image referenced in the first HTML chapter
+        if not cover_data:
+            try:
+                from bs4 import BeautifulSoup
+                for doc_item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                    html = doc_item.get_content().decode("utf-8", errors="replace")
+                    soup = BeautifulSoup(html, "html.parser")
+                    img_tag = soup.find("img")
+                    if img_tag and img_tag.get("src"):
+                        src = img_tag["src"]
+                        candidates_src = [src, os.path.basename(src), src.lstrip("../"), src.lstrip("./")]
+                        for img_item in book.get_items():
+                            if img_item.get_type() == ebooklib.ITEM_IMAGE:
+                                name = img_item.get_name()
+                                if name in candidates_src or os.path.basename(name) in candidates_src:
+                                    cover_data = img_item.get_content()
+                                    break
+                    if cover_data:
+                        break
+            except Exception:
+                pass
+
+        # Last resort: just grab the first image in the manifest
         if not cover_data:
             for item in book.get_items():
                 if item.get_type() == ebooklib.ITEM_IMAGE:

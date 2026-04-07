@@ -102,6 +102,7 @@ def get_model_options() -> List[str]:
         "groq/qwen/qwen3-32b",
         "groq/playai-tts", "groq/playai-tts-arabic",
         "groq/whisper-large-v3", "groq/whisper-large-v3-turbo",
+        "groq/groq/compound", "groq/groq/compound-mini",
         
         # Chinese Models
         "glm-4", "glm-3-turbo", "chatglm-6b", "chatglm2-6b", "chatglm3-6b",

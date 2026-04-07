@@ -1669,7 +1669,6 @@ class UnifiedClient:
         'mixtral-groq': 'groq',
         'groq': 'groq',
         'groq/': 'groq',  # Prefix for explicit Groq routing
-        'gro/': 'groq',
         'llama': 'together',  # Then check generic llama models
         'together': 'together',
         'perplexity': 'perplexity',
@@ -14031,10 +14030,6 @@ class UnifiedClient:
             # Strip the 'groq/' prefix from the model name if present
             if effective_model.startswith('groq/'):
                 effective_model = effective_model[5:]  # Remove 'groq/' prefix
-        elif provider == 'gro':
-            # Strip the 'gro/' prefix from the model name if present
-            if effective_model.startswith('gro/'): 
-               effective_model = effective_model[5:]  # Remove 'groq/' prefix
         elif provider == 'chutes':
             # Strip the 'chutes/' prefix from the model name if present
             if effective_model.startswith('chutes/'):
