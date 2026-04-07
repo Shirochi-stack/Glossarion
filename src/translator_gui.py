@@ -3637,7 +3637,7 @@ Recent translations to summarize:
         self._reposition_authgem_project_combo()
 
     def _has_authgpt_in_key_pools(self):
-        """Check if any enabled key pool contains an authgpt model."""
+        """Check if any enabled key pool contains an enabled authgpt model."""
         try:
             pool_map = {
                 'multi_api_keys': 'use_multi_api_keys',
@@ -3647,7 +3647,12 @@ Recent translations to summarize:
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
                     for key_data in self.config.get(pool_key, []):
-                        m = key_data.get('model', '') if isinstance(key_data, dict) else getattr(key_data, 'model', '')
+                        if isinstance(key_data, dict):
+                            if not key_data.get('enabled', True):
+                                continue
+                            m = key_data.get('model', '')
+                        else:
+                            m = getattr(key_data, 'model', '')
                         if m.startswith('authgpt/'):
                             return True
         except Exception:
@@ -3655,7 +3660,7 @@ Recent translations to summarize:
         return False
 
     def _has_authgem_in_key_pools(self):
-        """Check if any enabled key pool contains an authgem model."""
+        """Check if any enabled key pool contains an enabled authgem model."""
         try:
             pool_map = {
                 'multi_api_keys': 'use_multi_api_keys',
@@ -3665,7 +3670,12 @@ Recent translations to summarize:
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
                     for key_data in self.config.get(pool_key, []):
-                        m = key_data.get('model', '') if isinstance(key_data, dict) else getattr(key_data, 'model', '')
+                        if isinstance(key_data, dict):
+                            if not key_data.get('enabled', True):
+                                continue
+                            m = key_data.get('model', '')
+                        else:
+                            m = getattr(key_data, 'model', '')
                         if m.startswith('authgem/'):
                             return True
         except Exception:
