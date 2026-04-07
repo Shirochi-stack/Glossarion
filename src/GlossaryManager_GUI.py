@@ -5455,6 +5455,9 @@ CRITICAL EXTRACTION RULES:
            # Pause auto-reload during internal save to prevent flash
            if hasattr(self, '_editor_auto_reload_timer'):
                self._editor_auto_reload_timer.stop()
+           # Create backup before saving
+           if not self.create_glossary_backup("before_save"):
+               return
            if save_current_glossary():
                files_updated = 0
                if self.update_html_on_save_checkbox.isChecked() and changes:
