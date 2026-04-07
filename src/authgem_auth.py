@@ -687,6 +687,10 @@ def send_chat_completion(
 ) -> Dict:
     """Send a chat completion request to the Gemini API using OAuth token.
 
+    Streams the response via Vertex AI's ``streamGenerateContent`` endpoint
+    so that cancel flags are checked on every chunk and partial progress is
+    logged in real-time (matching the authgpt streaming behaviour).
+
     Parameters
     ----------
     access_token : str
@@ -729,62 +733,171 @@ def send_chat_completion(
             "You can find your project ID at https://console.cloud.google.com"
         )
 
-    url = (
-        f"https://{location}-aiplatform.googleapis.com/v1beta1/"
-        f"projects/{project}/locations/{location}/"
-        f"publishers/google/models/{model}:generateContent"
-    )
+    # Preview models often require 'global' location instead of a regional one
+    effective_location = location
+    if "preview" in model.lower():
+        effective_location = "global"
+
+    # Use streamGenerateContent with SSE for real-time streaming
+    # Global location uses a different URL format (no region prefix on hostname)
+    if effective_location == "global":
+        url = (
+            f"https://aiplatform.googleapis.com/v1beta1/"
+            f"projects/{project}/locations/global/"
+            f"publishers/google/models/{model}:streamGenerateContent?alt=sse"
+        )
+    else:
+        url = (
+            f"https://{effective_location}-aiplatform.googleapis.com/v1beta1/"
+            f"projects/{project}/locations/{effective_location}/"
+            f"publishers/google/models/{model}:streamGenerateContent?alt=sse"
+        )
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",  # Disable gzip so SSE streams in real-time
     }
 
-    # Build timeout tuple
-    if connect_timeout is not None:
-        req_timeout = (connect_timeout, timeout)
-    else:
-        req_timeout = timeout
+    logger.info("AuthGem: POST %s  model=%s", url.split("?")[0], model)
+
+    # Streaming log control — mirrors authgpt's LOG_STREAM_CHUNKS behaviour
+    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+        log_stream = os.getenv("ALLOW_AUTHGEM_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+
+    t_start = time.time()
+
+    # Prefer httpx for true real-time SSE (same stack as openai SDK)
+    try:
+        import httpx as _httpx
+        return _stream_with_httpx_gemini(
+            _httpx, url, body, headers, timeout, t_start,
+            _log, log_stream, connect_timeout=connect_timeout,
+        )
+    except ImportError:
+        _log("⚠️ AuthGem: httpx not installed, falling back to requests (streaming may be buffered)")
+        return _stream_with_requests_gemini(
+            url, body, headers, timeout, t_start,
+            _log, log_stream,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gemini SSE stream processing helpers
+# ---------------------------------------------------------------------------
+
+def _new_gemini_stream_state() -> Dict:
+    """Create fresh state dict for a Gemini streaming session."""
+    return {
+        "text_parts": [],        # Non-thought text chunks
+        "thought_parts": [],     # Thought/reasoning chunks (filtered from output)
+        "got_first_data": False,
+        "streamed_chars": 0,
+        "log_buf": [],
+        "finish_reason": "STOP",
+        "usage_metadata": {},
+    }
+
+
+def _process_gemini_sse_line(
+    line: str,
+    state: Dict,
+    _log,
+    log_stream: bool,
+    t_start: float,
+) -> bool:
+    """Process a single SSE line from Vertex AI streamGenerateContent.
+
+    Updates *state* in-place.  Returns True when the stream should stop.
+    """
+    line = line.strip()
+    if not line:
+        return False
+
+    # SSE data lines start with "data: "
+    if not line.startswith("data: "):
+        return False
+
+    payload = line[6:]
+    if payload == "[DONE]":
+        return True
 
     try:
-        resp = requests.post(url, json=body, headers=headers, timeout=req_timeout)
-    except requests.exceptions.Timeout:
-        raise RuntimeError(f"AuthGem: Request timed out after {timeout}s")
-    except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError(f"AuthGem: Connection error: {exc}")
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
 
-    if is_cancelled():
-        raise RuntimeError("AuthGem: stream cancelled by user")
+    if not state["got_first_data"]:
+        state["got_first_data"] = True
+        ttft = time.time() - t_start
+        _log(f"📡 AuthGem: First token in {ttft:.1f}s, streaming…")
 
-    if not resp.ok:
-        error_text = resp.text[:500] if resp.text else "No response body"
-        raise RuntimeError(f"AuthGem: {resp.status_code} - {error_text}")
-
-    data = resp.json()
-
-    # Parse the Gemini response
+    # Extract candidates
     candidates = data.get("candidates", [])
-    if not candidates:
-        # Check for promptFeedback (blocked)
-        feedback = data.get("promptFeedback", {})
-        block_reason = feedback.get("blockReason", "")
-        if block_reason:
-            raise RuntimeError(f"AuthGem: Prompt blocked - {block_reason}")
-        raise RuntimeError("AuthGem: No candidates in response")
+    for candidate in candidates:
+        # Update finish reason from the last candidate
+        fr = candidate.get("finishReason", "")
+        if fr:
+            state["finish_reason"] = fr
 
-    candidate = candidates[0]
-    content_parts = candidate.get("content", {}).get("parts", [])
+        content_parts = candidate.get("content", {}).get("parts", [])
+        for part in content_parts:
+            text = part.get("text", "")
+            if not text:
+                continue
 
-    # Extract text, filtering out thought parts
-    text_parts = []
-    for part in content_parts:
-        # Skip thought parts (Gemini's internal reasoning)
-        if part.get("thought", False):
-            continue
-        if "text" in part:
-            text_parts.append(part["text"])
+            # Separate thinking/thought parts from actual output
+            if part.get("thought", False):
+                state["thought_parts"].append(text)
+                continue
 
-    content = "".join(text_parts)
-    finish_reason = candidate.get("finishReason", "STOP")
+            state["text_parts"].append(text)
+            state["streamed_chars"] += len(text)
+
+            # Real-time log output (mirrors authgpt's delta logging)
+            if log_stream and text:
+                log_buf = state["log_buf"]
+                combined = "".join(log_buf) + text
+                # Insert newlines after HTML closing tags for readability
+                for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
+                    combined = combined.replace(tag, tag + '\n')
+                if "\n" in combined:
+                    parts = combined.split("\n")
+                    for p in parts[:-1]:
+                        _log(p)
+                    state["log_buf"] = [parts[-1]]
+                else:
+                    log_buf.append(text)
+                    if len("".join(log_buf)) > 150:
+                        _log("".join(log_buf))
+                        state["log_buf"] = []
+
+    # Update usage metadata if present
+    usage = data.get("usageMetadata", {})
+    if usage:
+        state["usage_metadata"] = usage
+
+    return False
+
+
+def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dict:
+    """Flush log buffer, build result dict from accumulated state."""
+    # Flush remaining log buffer
+    if log_stream and state["log_buf"]:
+        remainder = "".join(state["log_buf"]).strip()
+        if remainder:
+            _log(remainder)
+
+    t_total = time.time() - t_start
+    _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
+
+    content = "".join(state["text_parts"])
+
+    if not content and state["thought_parts"]:
+        _log("⚠️ AuthGem: Response contained only thinking/reasoning — no output text.")
+
+    if not content and not state["thought_parts"]:
+        _log("⚠️ AuthGem: Empty response — no text received.")
 
     # Map Gemini finish reasons to OpenAI-style
     finish_reason_map = {
@@ -792,17 +905,19 @@ def send_chat_completion(
         "MAX_TOKENS": "length",
         "SAFETY": "content_filter",
         "RECITATION": "content_filter",
+        "FINISH_REASON_UNSPECIFIED": "stop",
     }
-    mapped_reason = finish_reason_map.get(finish_reason, finish_reason.lower())
+    raw_fr = state["finish_reason"]
+    mapped_reason = finish_reason_map.get(raw_fr, raw_fr.lower() if raw_fr else "stop")
 
-    # Extract usage metadata
-    usage_metadata = data.get("usageMetadata", {})
+    # Extract usage
     usage = None
-    if usage_metadata:
+    um = state["usage_metadata"]
+    if um:
         usage = {
-            "prompt_tokens": usage_metadata.get("promptTokenCount", 0),
-            "completion_tokens": usage_metadata.get("candidatesTokenCount", 0),
-            "total_tokens": usage_metadata.get("totalTokenCount", 0),
+            "prompt_tokens": um.get("promptTokenCount", 0),
+            "completion_tokens": um.get("candidatesTokenCount", 0),
+            "total_tokens": um.get("totalTokenCount", 0),
         }
 
     return {
@@ -810,3 +925,107 @@ def send_chat_completion(
         "finish_reason": mapped_reason,
         "usage": usage,
     }
+
+
+# ---------------------------------------------------------------------------
+# httpx-based SSE reader (preferred — real-time, no buffering)
+# ---------------------------------------------------------------------------
+
+def _stream_with_httpx_gemini(
+    _httpx,
+    url: str,
+    body: Dict,
+    headers: Dict,
+    timeout: int,
+    t_start: float,
+    _log,
+    log_stream: bool,
+    connect_timeout: Optional[float] = None,
+) -> Dict:
+    """Stream SSE from Vertex AI using httpx (same stack as the openai SDK)."""
+    state = _new_gemini_stream_state()
+    _timeout = _httpx.Timeout(timeout, connect=connect_timeout)
+
+    with _httpx.stream(
+        "POST", url,
+        json=body,
+        headers=headers,
+        timeout=_timeout,
+    ) as resp:
+        if resp.status_code >= 400:
+            error_body = resp.read().decode("utf-8", errors="replace")
+            reason = getattr(resp, "reason_phrase", "") or ""
+            detail = error_body
+            try:
+                detail = json.loads(error_body).get("error", {}).get("message", error_body)
+            except Exception:
+                pass
+            if not detail:
+                detail = "empty-body"
+            summary = detail or reason or "Bad Request"
+            _log(f"❌ AuthGem HTTP {resp.status_code}. {summary}")
+            raise RuntimeError(
+                f"AuthGem: {resp.status_code} – {summary}"
+            )
+
+        for line in resp.iter_lines():
+            if _cancel_event.is_set():
+                resp.close()
+                raise RuntimeError("AuthGem: stream cancelled by user")
+            if _process_gemini_sse_line(line, state, _log, log_stream, t_start):
+                break
+
+    return _finalize_gemini_stream(state, _log, log_stream, t_start)
+
+
+# ---------------------------------------------------------------------------
+# requests-based SSE reader (fallback — may buffer due to urllib3/http.client)
+# ---------------------------------------------------------------------------
+
+def _stream_with_requests_gemini(
+    url: str,
+    body: Dict,
+    headers: Dict,
+    timeout: int,
+    t_start: float,
+    _log,
+    log_stream: bool,
+) -> Dict:
+    """Stream SSE from Vertex AI using requests (fallback when httpx unavailable)."""
+    state = _new_gemini_stream_state()
+    resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
+
+    if resp.status_code >= 400:
+        try:
+            error_body = resp.text
+        except Exception:
+            error_body = ""
+        try:
+            reason = resp.reason or ""
+        except Exception:
+            reason = ""
+        detail = error_body
+        try:
+            detail = resp.json().get("error", {}).get("message", error_body)
+        except Exception:
+            pass
+        if not detail:
+            detail = "empty-body"
+        summary = detail or reason or "Bad Request"
+        _log(f"❌ AuthGem HTTP {resp.status_code}. {summary}")
+        raise RuntimeError(
+            f"AuthGem: {resp.status_code} – {summary}"
+        )
+
+    for raw_line in resp.iter_lines(chunk_size=1):
+        if _cancel_event.is_set():
+            resp.close()
+            raise RuntimeError("AuthGem: stream cancelled by user")
+        if raw_line is None:
+            continue
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+        if _process_gemini_sse_line(line, state, _log, log_stream, t_start):
+            break
+
+    return _finalize_gemini_stream(state, _log, log_stream, t_start)
+

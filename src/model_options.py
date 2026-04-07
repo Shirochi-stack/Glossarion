@@ -176,7 +176,7 @@ def get_model_options() -> List[str]:
         "authgem/gemini-2.5-flash", "authgem/gemini-2.5-flash-lite",
         "authgem/gemini-2.5-pro",
         "authgem/gemini-2.0-flash", "authgem/gemini-2.0-flash-lite",
-        "authgem/gemini-3.1-pro", "authgem/gemini-3.1-flash-lite", "authgem/gemini-3-flash",
+        "authgem/gemini-3.1-pro-preview", "authgem/gemini-3.1-flash-lite-preview", "authgem/gemini-3-flash-preview",
 
         # Antigravity Cloud Code proxy (localhost:8080, no API key needed)
         # Claude models via Cloud Code (must match Cloud Code's available model IDs exactly)
