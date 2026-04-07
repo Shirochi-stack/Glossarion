@@ -3649,16 +3649,6 @@ Recent translations to summarize:
                         m = key_data.get('model', '') if isinstance(key_data, dict) else getattr(key_data, 'model', '')
                         if m.startswith('authgpt/'):
                             return True
-            # Also check the live in-memory pool (may not be synced to config yet)
-            try:
-                from unified_api_client import UnifiedClient
-                pool = getattr(UnifiedClient, '_api_key_pool', None)
-                if pool and hasattr(pool, 'keys'):
-                    for key in pool.keys:
-                        if getattr(key, 'model', '').startswith('authgpt/'):
-                            return True
-            except Exception:
-                pass
         except Exception:
             pass
         return False
@@ -3677,16 +3667,6 @@ Recent translations to summarize:
                         m = key_data.get('model', '') if isinstance(key_data, dict) else getattr(key_data, 'model', '')
                         if m.startswith('authgem/'):
                             return True
-            # Also check the live in-memory pool (may not be synced to config yet)
-            try:
-                from unified_api_client import UnifiedClient
-                pool = getattr(UnifiedClient, '_api_key_pool', None)
-                if pool and hasattr(pool, 'keys'):
-                    for key in pool.keys:
-                        if getattr(key, 'model', '').startswith('authgem/'):
-                            return True
-            except Exception:
-                pass
         except Exception:
             pass
         return False
@@ -3829,7 +3809,7 @@ Recent translations to summarize:
                 if hasattr(self, 'authgem_project_combo'):
                     if self.authgem_project_combo.count() == 0:
                         self._fetch_authgem_projects()
-                    if self.authgem_project_combo.count() > 0:
+                    if self.authgem_project_combo.count() > 0 and self.authgem_login_btn.isVisible():
                         self.authgem_project_combo.show()
                         self._reposition_authgem_project_combo()
                     else:
@@ -3995,8 +3975,8 @@ Recent translations to summarize:
             parent_layout = combo.parentWidget().layout() if combo.parentWidget() else None
             if parent_layout:
                 parent_layout.removeWidget(combo)
-            # Add to the grid layout on a new row (row 2, col 4, span 2 cols — under the buttons)
-            self.frame.addWidget(combo, 2, 4, 1, 2, Qt.AlignLeft)
+            # Add to the grid layout on a new row (row 2, col 3 — below the Gemini login button)
+            self.frame.addWidget(combo, 2, 3, 1, 1, Qt.AlignLeft)
             self._authgem_combo_in_own_row = True
         elif not both_visible and already_own_row:
             # Move back into the HBox button row

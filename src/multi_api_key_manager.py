@@ -5615,6 +5615,12 @@ class MultiAPIKeyDialog(QDialog):
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""
         try:
+            # Sync the in-memory key pool to config BEFORE notifying,
+            # so the GUI reads the current state when checking for auth prefixes.
+            self._save_keys_to_config()
+        except Exception:
+            pass
+        try:
             if hasattr(self.translator_gui, 'on_model_change'):
                 self.translator_gui.on_model_change()
         except Exception:
