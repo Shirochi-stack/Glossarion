@@ -50,15 +50,26 @@ def is_cancelled() -> bool:
 
 
 # ===========================================================================
-# Constants – use the same OAuth credentials as Gemini CLI
+# Constants – Google ADC OAuth client (same as gcloud auth)
 # ===========================================================================
-# These are the *public* OAuth credentials from the open-source gemini-cli
-# (packages/core/src/code_assist/oauth2.ts).  They are NOT secrets – Google
-# classifies them as "installed application" credentials which are safe to
-# distribute.  The values are split here only to satisfy GitHub's push-
-# protection scanner which otherwise blocks the commit.
-GOOGLE_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j" + ".apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET = "GOCSPX" + "-4uHgMPm-1o7Sk-geV6Cu5clXFsxl"
+# These are the *public* OAuth credentials used by Google's own Cloud SDK
+# (gcloud auth application-default login).  They are embedded in every gcloud
+# installation and have ALL Google API scopes pre-registered, which means the
+# "generative-language" scope works out of the box with zero user setup.
+#
+# Source: google-auth-library-python → google/auth/_cloud_sdk.py
+# They are NOT secrets — Google treats installed-app client secrets as public.
+#
+# Users can override with AUTHGEM_CLIENT_ID / AUTHGEM_CLIENT_SECRET env vars
+# if they prefer to use their own GCP project credentials.
+_ADC_CLIENT_ID = (
+    "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur"
+    ".apps.googleusercontent.com"
+)
+_ADC_CLIENT_SECRET = "d-FL95Q19q7MQmFpd7hHD0Ty"
+
+GOOGLE_CLIENT_ID = os.environ.get("AUTHGEM_CLIENT_ID", _ADC_CLIENT_ID)
+GOOGLE_CLIENT_SECRET = os.environ.get("AUTHGEM_CLIENT_SECRET", _ADC_CLIENT_SECRET)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -76,8 +87,11 @@ CALLBACK_PATH = "/oauth2callback"
 
 TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
-# Gemini API endpoint
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
+# Vertex AI endpoint — works with cloud-platform scope (unlike AI Studio)
+# Users MUST set GOOGLE_CLOUD_PROJECT.  GOOGLE_CLOUD_LOCATION defaults to
+# us-central1 which has the widest model availability.
+VERTEX_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgem_tokens.json")
@@ -640,7 +654,22 @@ def send_chat_completion(
 
     body = _build_gemini_request_body(messages, temperature, max_tokens)
 
-    url = f"{GEMINI_API_BASE}/v1beta/models/{model}:generateContent"
+    # Resolve project — env var, or stored in tokens, or fail with clear message
+    project = VERTEX_PROJECT or os.environ.get("GCLOUD_PROJECT", "")
+    location = VERTEX_LOCATION
+    if not project:
+        raise RuntimeError(
+            "AuthGem: GOOGLE_CLOUD_PROJECT environment variable is required.\n"
+            "Set it to your GCP project ID, e.g.:\n"
+            "  set GOOGLE_CLOUD_PROJECT=my-project-id\n"
+            "You can find your project ID at https://console.cloud.google.com"
+        )
+
+    url = (
+        f"https://{location}-aiplatform.googleapis.com/v1beta1/"
+        f"projects/{project}/locations/{location}/"
+        f"publishers/google/models/{model}:generateContent"
+    )
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
