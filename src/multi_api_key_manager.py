@@ -110,7 +110,8 @@ class APIKeyEntry:
     """Enhanced API key entry with thread-safe operations"""
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True, 
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
-                 azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None):
+                 azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
+                 individual_key_temperature: Optional[float] = None):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
@@ -128,6 +129,18 @@ class APIKeyEntry:
                 self.individual_output_token_limit = None
         except (ValueError, TypeError):
             self.individual_output_token_limit = None
+        # Individual key temperature for this key (overrides global temperature when set)
+        try:
+            if individual_key_temperature is not None and individual_key_temperature != "":
+                val = float(individual_key_temperature)
+                if val >= 0:
+                    self.individual_key_temperature = val
+                else:
+                    self.individual_key_temperature = None
+            else:
+                self.individual_key_temperature = None
+        except (ValueError, TypeError):
+            self.individual_key_temperature = None
         self.last_error_time = None
         self.error_count = 0
         self.success_count = 0
@@ -190,6 +203,7 @@ class APIKeyEntry:
             'azure_api_version': self.azure_api_version,
             'use_individual_endpoint': self.use_individual_endpoint,
             'individual_output_token_limit': self.individual_output_token_limit,
+            'individual_key_temperature': self.individual_key_temperature,
             # Persist times used and test results
             'times_used': getattr(self, 'times_used', 0),
             'last_test_result': getattr(self, 'last_test_result', None),
@@ -266,7 +280,8 @@ class APIKeyPool:
                     google_region=key_data.get('google_region'),
                     azure_api_version=key_data.get('azure_api_version'),
                     use_individual_endpoint=key_data.get('use_individual_endpoint', False),
-                    individual_output_token_limit=key_data.get('individual_output_token_limit')
+                    individual_output_token_limit=key_data.get('individual_output_token_limit'),
+                    individual_key_temperature=key_data.get('individual_key_temperature')
                 )
                 # Load saved test results and usage counter
                 entry.times_used = key_data.get('times_used', 0)
@@ -2068,6 +2083,20 @@ class MultiAPIKeyDialog(QDialog):
         fallback_output_hint.setStyleSheet("color: gray; font-size: 8pt;")
         add_fallback_grid.addWidget(fallback_output_hint, 4, 2, 1, 2, Qt.AlignLeft)
         
+        # Row 5: Individual Key Temperature (fallback)
+        fallback_temp_label = QLabel("Key Temperature:")
+        fallback_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_fallback_grid.addWidget(fallback_temp_label, 5, 0, Qt.AlignLeft)
+        self.fallback_key_temperature_spinbox = QSpinBox()
+        self.fallback_key_temperature_spinbox.setRange(-1, 200)
+        self.fallback_key_temperature_spinbox.setValue(-1)
+        self.fallback_key_temperature_spinbox.setMaximumWidth(120)
+        self._disable_spinbox_mousewheel(self.fallback_key_temperature_spinbox)
+        add_fallback_grid.addWidget(self.fallback_key_temperature_spinbox, 5, 1, Qt.AlignLeft)
+        fallback_temp_hint = QLabel("-1 = use global temp (value / 100)")
+        fallback_temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        add_fallback_grid.addWidget(fallback_temp_hint, 5, 2, 1, 2, Qt.AlignLeft)
+        
         # Initially hide the endpoint fields when toggle is off
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -2138,14 +2167,15 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
         self.fallback_tree.setColumnWidth(0, 125)  # API Key
-        self.fallback_tree.setColumnWidth(1, 230)  # Model
-        self.fallback_tree.setColumnWidth(2, 100)  # Output Limit
-        self.fallback_tree.setColumnWidth(3, 100)  # Status
-        self.fallback_tree.setColumnWidth(4, 65)   # Success
-        self.fallback_tree.setColumnWidth(5, 60)   # Errors
-        self.fallback_tree.setColumnWidth(6, 90)   # Times Used
+        self.fallback_tree.setColumnWidth(1, 220)  # Model
+        self.fallback_tree.setColumnWidth(2, 90)   # Output Limit
+        self.fallback_tree.setColumnWidth(3, 55)   # Temp
+        self.fallback_tree.setColumnWidth(4, 100)  # Status
+        self.fallback_tree.setColumnWidth(5, 60)   # Success
+        self.fallback_tree.setColumnWidth(6, 55)   # Errors
+        self.fallback_tree.setColumnWidth(7, 80)   # Times Used
         
         # Set header font to match multi-key tree
         fb_header = self.fallback_tree.header()
@@ -2305,6 +2335,15 @@ class MultiAPIKeyDialog(QDialog):
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_fallback_output_token_limit_for_selected)
         
+        # Per-key temperature options for fallback keys
+        if selected_count > 1:
+            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
+        else:
+            set_temp_action = menu.addAction("Set Key Temperature")
+        set_temp_action.triggered.connect(self._set_fallback_key_temperature_for_selected)
+        clear_temp_action = menu.addAction("Clear Key Temperature")
+        clear_temp_action.triggered.connect(self._clear_fallback_key_temperature_for_selected)
+        
         menu.addSeparator()
         
         # Test, Enable/Disable, and Remove options
@@ -2446,6 +2485,17 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 output_limit_str = "global"
             
+            # Determine per-key temperature display value
+            try:
+                raw_temp = key_data.get('individual_key_temperature')
+                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
+            except Exception:
+                per_key_temp = None
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+            
             # Determine status and coloring (match multi-key tree style)
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
@@ -2471,16 +2521,22 @@ class MultiAPIKeyDialog(QDialog):
             # Insert into tree (with Success and Errors columns matching multi-key tree)
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, status, str(success_count), str(error_count), str(times_used)])
             # Apply status-based coloring (consistent with multi-key tree)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             
-            # Tooltip for per-key output token limit
+            # Tooltip for per-key settings
+            tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
-                tooltip = f"Individual Output Token Limit: {per_key_limit}"
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
             else:
-                tooltip = "Using global output token limit"
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
             
@@ -2531,6 +2587,16 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 individual_output_token_limit = None
         
+        # Determine per-key temperature (-1 = use global temperature)
+        individual_key_temperature = None
+        if hasattr(self, 'fallback_key_temperature_spinbox'):
+            try:
+                val = int(self.fallback_key_temperature_spinbox.value())
+                if val >= 0:
+                    individual_key_temperature = val / 100.0
+            except Exception:
+                individual_key_temperature = None
+        
         # Add new key with additional fields
         fallback_keys.append({
             'api_key': api_key,
@@ -2541,6 +2607,7 @@ class MultiAPIKeyDialog(QDialog):
             'azure_api_version': azure_api_version,
             'use_individual_endpoint': use_individual_endpoint,
             'individual_output_token_limit': individual_output_token_limit,
+            'individual_key_temperature': individual_key_temperature,
             'times_used': 0
         })
         
@@ -2558,6 +2625,8 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_individual_endpoint_toggle.setChecked(False)
         if hasattr(self, 'fallback_output_token_spinbox'):
             self.fallback_output_token_spinbox.setValue(0)
+        if hasattr(self, 'fallback_key_temperature_spinbox'):
+            self.fallback_key_temperature_spinbox.setValue(-1)
         # Update the UI to disable endpoint fields
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -3151,6 +3220,66 @@ class MultiAPIKeyDialog(QDialog):
         self._load_fallback_keys()
         self._show_status(f"Cleared fallback output token limit for {len(selected_indices)} key(s)")
     
+    def _set_fallback_key_temperature_for_selected(self):
+        """Set per-key temperature for selected fallback keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+        
+        default_val = 70  # 0.7 * 100
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(fallback_keys):
+            try:
+                raw = fallback_keys[first_idx].get('individual_key_temperature')
+                if raw not in (None, ""):
+                    default_val = int(float(raw) * 100)
+            except Exception:
+                pass
+        
+        value, ok = QInputDialog.getInt(
+            self,
+            "Set Fallback Key Temperature",
+            "Temperature for selected fallback key(s) (0-200, divided by 100):\ne.g. 70 = 0.7, 100 = 1.0, 150 = 1.5",
+            default_val,
+            0,
+            200,
+            5,
+        )
+        if not ok:
+            return
+        
+        temp_float = value / 100.0
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['individual_key_temperature'] = temp_float
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_status(f"Set fallback key temperature to {temp_float} for {len(selected_indices)} key(s)")
+    
+    def _clear_fallback_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                if 'individual_key_temperature' in fallback_keys[idx]:
+                    del fallback_keys[idx]['individual_key_temperature']
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_status(f"Cleared fallback key temperature for {len(selected_indices)} key(s)")
+    
     def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
         """Quick toggle individual endpoint on/off for fallback key"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
@@ -3370,16 +3499,17 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
         # Adjusted column widths: balanced distribution
         self.tree.setColumnWidth(0, 125)  # API Key (decreased from 140)
-        self.tree.setColumnWidth(1, 230)  # Model (decreased from 320)
-        self.tree.setColumnWidth(2, 80)   # Cooldown
-        self.tree.setColumnWidth(3, 100)  # Output Limit
-        self.tree.setColumnWidth(4, 100)  # Status
-        self.tree.setColumnWidth(5, 65)   # Success (increased from 40)
-        self.tree.setColumnWidth(6, 60)   # Errors (increased from 40)
-        self.tree.setColumnWidth(7, 90)   # Times Used
+        self.tree.setColumnWidth(1, 220)  # Model
+        self.tree.setColumnWidth(2, 70)   # Cooldown
+        self.tree.setColumnWidth(3, 90)   # Output Limit
+        self.tree.setColumnWidth(4, 55)   # Temp
+        self.tree.setColumnWidth(5, 100)  # Status
+        self.tree.setColumnWidth(6, 60)   # Success
+        self.tree.setColumnWidth(7, 55)   # Errors
+        self.tree.setColumnWidth(8, 80)   # Times Used
         
         # Set header font
         header = self.tree.header()
@@ -3590,6 +3720,22 @@ class MultiAPIKeyDialog(QDialog):
         output_hint.setStyleSheet("color: gray; font-size: 8pt;")
         add_grid.addWidget(output_hint, 5, 2, 1, 2, Qt.AlignLeft)
         
+        # Row 6: Individual Key Temperature
+        temp_label = QLabel("Key Temperature:")
+        temp_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_grid.addWidget(temp_label, 6, 0, Qt.AlignLeft)
+        self.key_temperature_spinbox = QSpinBox()
+        self.key_temperature_spinbox.setRange(-1, 200)
+        self.key_temperature_spinbox.setValue(-1)
+        self.key_temperature_spinbox.setMaximumWidth(120)
+        self.key_temperature_spinbox.setPrefix("")
+        self.key_temperature_spinbox.setSuffix("")
+        self._disable_spinbox_mousewheel(self.key_temperature_spinbox)
+        add_grid.addWidget(self.key_temperature_spinbox, 6, 1, Qt.AlignLeft)
+        temp_hint = QLabel("-1 = use global temp (value / 100)")
+        temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        add_grid.addWidget(temp_hint, 6, 2, 1, 2, Qt.AlignLeft)
+        
         # Set column stretch
         add_grid.setColumnStretch(1, 1)
         add_grid.setColumnStretch(4, 1)
@@ -3788,6 +3934,13 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 output_limit_str = "global"
             
+            # Determine per-key temperature display value
+            per_key_temp = getattr(key, 'individual_key_temperature', None)
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+            
             # Position indicator (not currently shown in a column, but kept for potential future use)
             position = f"#{i+1}"
             if i == 0:
@@ -3833,23 +3986,30 @@ class MultiAPIKeyDialog(QDialog):
             # Times used (counter)
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             
-            # Insert into tree (now includes explicit Output Limit column)
+            # Insert into tree (now includes explicit Output Limit and Temp columns)
             item = QTreeWidgetItem([
                 masked_key,
                 key.model,
                 f"{key.cooldown}s",
                 output_limit_str,
+                temp_str,
                 status,
                 str(key.success_count),
                 str(key.error_count),
                 str(times_used),
             ])
             
-            # Tooltip for per-key output token limit
+            # Tooltip for per-key settings
+            tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
-                tooltip = f"Individual Output Token Limit: {per_key_limit}"
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
             else:
-                tooltip = "Using global output token limit"
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
             
@@ -4026,6 +4186,15 @@ class MultiAPIKeyDialog(QDialog):
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_output_token_limit_for_selected)
         
+        # Per-key temperature options
+        if selected_count > 1:
+            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
+        else:
+            set_temp_action = menu.addAction("Set Key Temperature")
+        set_temp_action.triggered.connect(self._set_key_temperature_for_selected)
+        clear_temp_action = menu.addAction("Clear Key Temperature")
+        clear_temp_action.triggered.connect(self._clear_key_temperature_for_selected)
+        
         menu.addSeparator()
         
         # Individual Endpoint options
@@ -4110,6 +4279,54 @@ class MultiAPIKeyDialog(QDialog):
                 self.key_pool.keys[idx].individual_output_token_limit = None
         self._refresh_key_list()
         self._show_status(f"Cleared output token limit for {len(selected_indices)} key(s)")
+    
+    def _set_key_temperature_for_selected(self):
+        """Set per-key temperature for selected multi-key entries"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = 70  # 0.7 * 100
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                key = self.key_pool.keys[idx]
+                per_key = getattr(key, 'individual_key_temperature', None)
+                if per_key is not None:
+                    default_val = int(per_key * 100)
+                    break
+        
+        value, ok = QInputDialog.getInt(
+            self,
+            "Set Key Temperature",
+            "Temperature for selected key(s) (0-200, divided by 100):\ne.g. 70 = 0.7, 100 = 1.0, 150 = 1.5",
+            default_val,
+            0,
+            200,
+            5,
+        )
+        if not ok:
+            return
+        
+        temp_float = value / 100.0
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_key_temperature = temp_float
+        self._refresh_key_list()
+        self._show_status(f"Set key temperature to {temp_float} for {len(selected_indices)} key(s)")
+    
+    def _clear_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_key_temperature = None
+        self._refresh_key_list()
+        self._show_status(f"Cleared key temperature for {len(selected_indices)} key(s)")
     
     def _change_model_for_selected(self):
         """Change model for all selected entries"""
@@ -4497,6 +4714,20 @@ class MultiAPIKeyDialog(QDialog):
         glossary_output_hint.setStyleSheet("color: gray; font-size: 8pt;")
         add_glossary_grid.addWidget(glossary_output_hint, 4, 2, 1, 2, Qt.AlignLeft)
         
+        # Row 5: Individual Key Temperature (glossary)
+        glossary_temp_label = QLabel("Key Temperature:")
+        glossary_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_glossary_grid.addWidget(glossary_temp_label, 5, 0, Qt.AlignLeft)
+        self.glossary_key_temperature_spinbox = QSpinBox()
+        self.glossary_key_temperature_spinbox.setRange(-1, 200)
+        self.glossary_key_temperature_spinbox.setValue(-1)
+        self.glossary_key_temperature_spinbox.setMaximumWidth(120)
+        self._disable_spinbox_mousewheel(self.glossary_key_temperature_spinbox)
+        add_glossary_grid.addWidget(self.glossary_key_temperature_spinbox, 5, 1, Qt.AlignLeft)
+        glossary_temp_hint = QLabel("-1 = use global temp (value / 100)")
+        glossary_temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        add_glossary_grid.addWidget(glossary_temp_hint, 5, 2, 1, 2, Qt.AlignLeft)
+        
         # Initially hide endpoint fields
         self._toggle_glossary_individual_endpoint_fields()
         
@@ -4563,14 +4794,15 @@ class MultiAPIKeyDialog(QDialog):
         
         # Right side: TreeWidget with drag and drop
         self.glossary_tree = QTreeWidget()
-        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
         self.glossary_tree.setColumnWidth(0, 125)
-        self.glossary_tree.setColumnWidth(1, 230)
-        self.glossary_tree.setColumnWidth(2, 100)
-        self.glossary_tree.setColumnWidth(3, 100)
-        self.glossary_tree.setColumnWidth(4, 65)
+        self.glossary_tree.setColumnWidth(1, 220)
+        self.glossary_tree.setColumnWidth(2, 90)
+        self.glossary_tree.setColumnWidth(3, 55)
+        self.glossary_tree.setColumnWidth(4, 100)
         self.glossary_tree.setColumnWidth(5, 60)
-        self.glossary_tree.setColumnWidth(6, 90)
+        self.glossary_tree.setColumnWidth(6, 55)
+        self.glossary_tree.setColumnWidth(7, 80)
         
         gl_header = self.glossary_tree.header()
         gl_header_font = QFont()
@@ -4659,6 +4891,17 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 output_limit_str = "global"
             
+            # Determine per-key temperature display value
+            try:
+                raw_temp = key_data.get('individual_key_temperature')
+                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
+            except Exception:
+                per_key_temp = None
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+            
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
             if not enabled:
@@ -4682,14 +4925,21 @@ class MultiAPIKeyDialog(QDialog):
             
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, status, str(success_count), str(error_count), str(times_used)])
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             
+            # Tooltip for per-key settings
+            tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
-                tooltip = f"Individual Output Token Limit: {per_key_limit}"
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
             else:
-                tooltip = "Using global output token limit"
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
             
@@ -4738,6 +4988,16 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 individual_output_token_limit = None
         
+        # Determine per-key temperature (-1 = use global temperature)
+        individual_key_temperature = None
+        if hasattr(self, 'glossary_key_temperature_spinbox'):
+            try:
+                val = int(self.glossary_key_temperature_spinbox.value())
+                if val >= 0:
+                    individual_key_temperature = val / 100.0
+            except Exception:
+                individual_key_temperature = None
+        
         glossary_keys.append({
             'api_key': api_key,
             'model': model,
@@ -4747,6 +5007,7 @@ class MultiAPIKeyDialog(QDialog):
             'azure_api_version': azure_api_version,
             'use_individual_endpoint': use_individual_endpoint,
             'individual_output_token_limit': individual_output_token_limit,
+            'individual_key_temperature': individual_key_temperature,
             'times_used': 0
         })
         
@@ -4763,6 +5024,8 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_individual_endpoint_toggle.setChecked(False)
         if hasattr(self, 'glossary_output_token_spinbox'):
             self.glossary_output_token_spinbox.setValue(0)
+        if hasattr(self, 'glossary_key_temperature_spinbox'):
+            self.glossary_key_temperature_spinbox.setValue(-1)
         self._toggle_glossary_individual_endpoint_fields()
         
         self._load_glossary_keys()
@@ -5271,6 +5534,15 @@ class MultiAPIKeyDialog(QDialog):
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_glossary_output_token_limit_for_selected)
         
+        # Per-key temperature options for glossary keys
+        if selected_count > 1:
+            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
+        else:
+            set_temp_action = menu.addAction("Set Key Temperature")
+        set_temp_action.triggered.connect(self._set_glossary_key_temperature_for_selected)
+        clear_temp_action = menu.addAction("Clear Key Temperature")
+        clear_temp_action.triggered.connect(self._clear_glossary_key_temperature_for_selected)
+        
         menu.addSeparator()
         
         test_action = menu.addAction("Test")
@@ -5494,6 +5766,66 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Cleared glossary output token limit for {len(selected_indices)} key(s)")
+    
+    def _set_glossary_key_temperature_for_selected(self):
+        """Set per-key temperature for selected glossary keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+        
+        default_val = 70  # 0.7 * 100
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(glossary_keys):
+            try:
+                raw = glossary_keys[first_idx].get('individual_key_temperature')
+                if raw not in (None, ""):
+                    default_val = int(float(raw) * 100)
+            except Exception:
+                pass
+        
+        value, ok = QInputDialog.getInt(
+            self,
+            "Set Glossary Key Temperature",
+            "Temperature for selected glossary key(s) (0-200, divided by 100):\ne.g. 70 = 0.7, 100 = 1.0, 150 = 1.5",
+            default_val,
+            0,
+            200,
+            5,
+        )
+        if not ok:
+            return
+        
+        temp_float = value / 100.0
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['individual_key_temperature'] = temp_float
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Set glossary key temperature to {temp_float} for {len(selected_indices)} key(s)")
+    
+    def _clear_glossary_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                if 'individual_key_temperature' in glossary_keys[idx]:
+                    del glossary_keys[idx]['individual_key_temperature']
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Cleared glossary key temperature for {len(selected_indices)} key(s)")
     
     def _toggle_glossary_individual_endpoint(self, glossary_index, enabled):
         """Quick toggle individual endpoint on/off for glossary key"""
@@ -5827,6 +6159,16 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             individual_output_token_limit = None
         
+        # Determine per-key temperature (-1 = use global temperature)
+        individual_key_temperature = None
+        try:
+            if hasattr(self, 'key_temperature_spinbox'):
+                val = int(self.key_temperature_spinbox.value())
+                if val >= 0:
+                    individual_key_temperature = val / 100.0
+        except Exception:
+            individual_key_temperature = None
+        
         # Add to pool with new fields
         key_entry = APIKeyEntry(
             api_key,
@@ -5839,6 +6181,7 @@ class MultiAPIKeyDialog(QDialog):
             azure_api_version=azure_api_version,
             use_individual_endpoint=use_individual_endpoint,
             individual_output_token_limit=individual_output_token_limit,
+            individual_key_temperature=individual_key_temperature,
         )
         self.key_pool.add_key(key_entry)
         
@@ -5853,6 +6196,8 @@ class MultiAPIKeyDialog(QDialog):
         self.individual_endpoint_toggle.setChecked(False)
         if hasattr(self, 'output_token_spinbox'):
             self.output_token_spinbox.setValue(0)
+        if hasattr(self, 'key_temperature_spinbox'):
+            self.key_temperature_spinbox.setValue(-1)
         # Update the UI to hide endpoint fields
         self._toggle_individual_endpoint_fields()
         

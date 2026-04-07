@@ -2583,6 +2583,7 @@ class UnifiedClient:
                     tls.google_region = getattr(key, 'google_region', None)
                     tls.use_individual_endpoint = getattr(key, 'use_individual_endpoint', False)
                     tls.output_token_limit = getattr(key, 'individual_output_token_limit', None)
+                    tls.individual_key_temperature = getattr(key, 'individual_key_temperature', None)
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -4421,6 +4422,14 @@ class UnifiedClient:
                                             try:
                                                 tls = self._get_thread_local_client()
                                                 tls.per_key_max_output_tokens = int(gk_output_limit)
+                                            except Exception:
+                                                pass
+                                        # Apply per-key temperature from glossary pool key
+                                        gk_temp = gk_data.get('individual_key_temperature')
+                                        if gk_temp not in (None, ""):
+                                            try:
+                                                tls = self._get_thread_local_client()
+                                                tls.individual_key_temperature = float(gk_temp)
                                             except Exception:
                                                 pass
                                     # Re-initialize client for new model/key
@@ -6619,6 +6628,15 @@ class UnifiedClient:
                     except Exception:
                         pass
                     
+                    # Apply per-key temperature for this fallback key, if configured
+                    try:
+                        raw_temp = fb.get('individual_key_temperature')
+                        if raw_temp not in (None, ""):
+                            temp_tls = temp_client._get_thread_local_client()
+                            temp_tls.individual_key_temperature = float(raw_temp)
+                    except Exception:
+                        pass
+                    
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
                     temp_client._is_retry_client = True
@@ -6880,6 +6898,15 @@ class UnifiedClient:
                         if gk_output_limit and int(gk_output_limit) > 0:
                             temp_tls = temp_client._get_thread_local_client()
                             temp_tls.per_key_max_output_tokens = int(gk_output_limit)
+                    except Exception:
+                        pass
+                    
+                    # Apply per-key temperature for this glossary key, if configured
+                    try:
+                        gk_temp = gk.get('individual_key_temperature')
+                        if gk_temp not in (None, ""):
+                            temp_tls = temp_client._get_thread_local_client()
+                            temp_tls.individual_key_temperature = float(gk_temp)
                     except Exception:
                         pass
                     
@@ -10834,6 +10861,16 @@ class UnifiedClient:
             max_completion_tokens = norm_max_completion_tokens
         except Exception:
             # On any failure, fall back to original values to avoid breaking calls
+            pass
+
+        # Apply per-key temperature override if configured.
+        # This allows individual API keys to use a different temperature than the global setting.
+        try:
+            tls = self._get_thread_local_client()
+            per_key_temp = getattr(tls, 'individual_key_temperature', None)
+            if per_key_temp is not None:
+                temperature = per_key_temp
+        except Exception:
             pass
 
         # Determine actual provider (e.g., Gemini using OpenAI endpoint still reports 'gemini')
