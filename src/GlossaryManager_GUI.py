@@ -4188,11 +4188,7 @@ CRITICAL EXTRACTION RULES:
 
                        gender = ''
                        if bracket:
-                           if bracket.lower() in gender_keywords:
-                               gender = bracket
-                           else:
-                               # treat bracket content as description fragment
-                               desc = f"{bracket}: {desc}".strip(': ').strip() if desc else bracket
+                           gender = bracket
 
                        entry = {
                            'type': type_map.get((current_section or 'terms').lower(), 'terms'),
