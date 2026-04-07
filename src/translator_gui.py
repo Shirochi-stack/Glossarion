@@ -4219,6 +4219,14 @@ Recent translations to summarize:
         models = self.config.get('custom_model_list', None)
         if models is None:
             models = get_model_options()
+        else:
+            # Merge in any NEW models from the default catalog that the user
+            # doesn't have yet (e.g. authgem/ models added after their list was saved)
+            default_catalog = get_model_options()
+            existing_set = set(models)
+            new_models = [m for m in default_catalog if m not in existing_set]
+            if new_models:
+                models = list(models) + new_models
         self._model_all_values = list(models)
         
         # Create editable combobox
