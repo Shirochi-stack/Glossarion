@@ -3330,6 +3330,7 @@ Recent translations to summarize:
         creds_buttons_layout = QHBoxLayout(creds_buttons_container)
         creds_buttons_layout.setContentsMargins(0, 0, 0, 0)
         creds_buttons_layout.setSpacing(5)
+        self._creds_buttons_layout = creds_buttons_layout  # saved for project combo reposition
         
         # Assistant Prompt button (optional prefill for translation)
         self.assistant_prompt_button = QPushButton("Asst. Prompt")
@@ -3975,12 +3976,18 @@ Recent translations to summarize:
             parent_layout = combo.parentWidget().layout() if combo.parentWidget() else None
             if parent_layout:
                 parent_layout.removeWidget(combo)
-            # Add to the grid layout on a new row (row 2, col 3 — below the Gemini login button)
-            self.frame.addWidget(combo, 2, 3, 1, 1, Qt.AlignLeft)
+            # Insert into the profile-buttons row (right of Delete Profile, before stretch)
+            if hasattr(self, '_profile_buttons_layout'):
+                # Insert before the stretch (last item)
+                idx = self._profile_buttons_layout.count() - 1  # before addStretch
+                if idx < 0:
+                    idx = 0
+                self._profile_buttons_layout.insertWidget(idx, combo)
             self._authgem_combo_in_own_row = True
         elif not both_visible and already_own_row:
             # Move back into the HBox button row
-            self.frame.removeWidget(combo)
+            if hasattr(self, '_profile_buttons_layout'):
+                self._profile_buttons_layout.removeWidget(combo)
             # Find the button container layout
             if hasattr(self, 'authgem_login_btn'):
                 parent_layout = self.authgem_login_btn.parentWidget().layout()
@@ -4610,6 +4617,7 @@ Recent translations to summarize:
         profile_buttons_layout.addWidget(delete_profile_btn)
         
         profile_buttons_layout.addStretch()
+        self._profile_buttons_layout = profile_buttons_layout  # saved for project combo reposition
         
         # Add the buttons widget spanning columns 2-3
         self.frame.addWidget(profile_buttons_widget, 2, 2, 1, 2)
