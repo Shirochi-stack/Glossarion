@@ -208,7 +208,42 @@ def _extract_cover(epub_path: str) -> str | None:
                 f.write(cover_data)
             return cached
     except Exception as exc:
-        logger.debug("Cover extraction failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
+        logger.debug("Cover extraction (ebooklib) failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
+
+    # Fallback: read EPUB as zip directly (handles EPUBs where ebooklib misses images)
+    try:
+        import zipfile
+        from bs4 import BeautifulSoup
+        import posixpath
+
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            names = zf.namelist()
+            # Find first HTML file and extract its first <img> src
+            html_exts = (".xhtml", ".html", ".htm")
+            for zname in sorted(names):
+                if any(zname.lower().endswith(ext) for ext in html_exts):
+                    html = zf.read(zname).decode("utf-8", errors="replace")
+                    soup = BeautifulSoup(html, "html.parser")
+                    img_tag = soup.find("img")
+                    if img_tag and img_tag.get("src"):
+                        # Resolve relative path against the HTML file's directory
+                        html_dir = posixpath.dirname(zname)
+                        img_path = posixpath.normpath(posixpath.join(html_dir, img_tag["src"]))
+                        if img_path in names:
+                            cover_data = zf.read(img_path)
+                            with open(cached, "wb") as f:
+                                f.write(cover_data)
+                            return cached
+            # Last last resort: first image file in the zip
+            img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+            for zname in names:
+                if any(zname.lower().endswith(ext) for ext in img_exts):
+                    cover_data = zf.read(zname)
+                    with open(cached, "wb") as f:
+                        f.write(cover_data)
+                    return cached
+    except Exception as exc:
+        logger.debug("Cover extraction (zipfile) failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
     return None
 
 
