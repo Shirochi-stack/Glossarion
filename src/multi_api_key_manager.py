@@ -51,7 +51,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 # Models/prefixes that don't require an API key
-_NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'vertex/', 'antigravity/', 'antigravity')
+_NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem/', 'authgem', 'vertex/', 'antigravity/', 'antigravity')
 _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
 def _model_needs_api_key(model: str) -> bool:
@@ -2515,7 +2515,7 @@ class MultiAPIKeyDialog(QDialog):
             return
         
         if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, vertex/, google-translate, deepl)")
             return
         
         # Get current fallback keys
@@ -5613,7 +5613,7 @@ class MultiAPIKeyDialog(QDialog):
             line_edit._prev_text = ""
 
     def _notify_authgpt_visibility(self):
-        """Notify the translator GUI to re-evaluate AuthGPT login button visibility."""
+        """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""
         try:
             if hasattr(self.translator_gui, 'on_model_change'):
                 self.translator_gui.on_model_change()

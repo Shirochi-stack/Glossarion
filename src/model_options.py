@@ -172,6 +172,12 @@ def get_model_options() -> List[str]:
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
         "authgpt/gpt-5",
 
+        # AuthGem – Gemini via Google OAuth (no API key needed, uses gemini-cli auth)
+        "authgem/gemini-2.5-flash", "authgem/gemini-2.5-flash-lite",
+        "authgem/gemini-2.5-pro",
+        "authgem/gemini-2.0-flash", "authgem/gemini-2.0-flash-lite",
+        "authgem/gemini-3.1-pro-preview", "authgem/gemini-3-flash-preview",
+
         # Antigravity Cloud Code proxy (localhost:8080, no API key needed)
         # Claude models via Cloud Code (must match Cloud Code's available model IDs exactly)
         "antigravity/claude-opus-4-6-thinking", "antigravity/claude-sonnet-4-6",

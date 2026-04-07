@@ -3606,6 +3606,20 @@ Recent translations to summarize:
             else:
                 self.authgpt_login_btn.hide()
 
+        # Show/hide AuthGem login button
+        if hasattr(self, 'authgem_login_btn'):
+            needs_authgem = model.startswith('authgem/') or model.startswith('authgem')
+            
+            # Also check multi-key and fallback pools for authgem models
+            if not needs_authgem:
+                needs_authgem = self._has_authgem_in_key_pools()
+            
+            if needs_authgem:
+                self.authgem_login_btn.show()
+                self._update_authgem_login_status()
+            else:
+                self.authgem_login_btn.hide()
+
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled multi-key or fallback key pool contains an authgpt model."""
         try:
@@ -3623,6 +3637,28 @@ Recent translations to summarize:
                 for key_data in self.config.get('glossary_keys', []):
                     m = key_data.get('model', '')
                     if m.startswith('authgpt/') or m.startswith('authgpt'):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _has_authgem_in_key_pools(self):
+        """Check if any enabled multi-key or fallback key pool contains an authgem model."""
+        try:
+            if self.config.get('use_multi_api_keys', False):
+                for key_data in self.config.get('multi_api_keys', []):
+                    m = key_data.get('model', '')
+                    if m.startswith('authgem/') or m.startswith('authgem'):
+                        return True
+            if self.config.get('use_fallback_keys', False):
+                for key_data in self.config.get('fallback_keys', []):
+                    m = key_data.get('model', '')
+                    if m.startswith('authgem/') or m.startswith('authgem'):
+                        return True
+            if self.config.get('use_glossary_keys', False):
+                for key_data in self.config.get('glossary_keys', []):
+                    m = key_data.get('model', '')
+                    if m.startswith('authgem/') or m.startswith('authgem'):
                         return True
         except Exception:
             pass
@@ -3738,6 +3774,119 @@ Recent translations to summarize:
         self.append_log(f"❌ ChatGPT login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"ChatGPT login failed:\n{err}")
 
+    # ==================================================================
+    # AuthGem (Gemini Login) – mirrors the AuthGPT pattern
+    # ==================================================================
+
+    def _update_authgem_login_status(self):
+        """Update the AuthGem login button text based on current token state."""
+        try:
+            from authgem_auth import get_default_store
+            store = get_default_store()
+            if store.has_tokens:
+                info = store.account_info
+                email = info.get('email', '')
+                name = info.get('name', '')
+                label = "✅ Gemini"
+                if email:
+                    label += f" ({email})"
+                elif name:
+                    label += f" ({name})"
+                self.authgem_login_btn.setText(label)
+                self.authgem_login_btn.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+            else:
+                self.authgem_login_btn.setText("🔐 Gemini Login")
+                self.authgem_login_btn.setStyleSheet(
+                    "background-color: #4285f4; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+        except ImportError:
+            self.authgem_login_btn.setText("🔐 Gemini Login (unavailable)")
+            self.authgem_login_btn.setEnabled(False)
+
+    def _authgem_login_clicked(self):
+        """Handle Gemini Login button click – run OAuth flow in background thread."""
+        try:
+            from authgem_auth import get_default_store
+            store = get_default_store()
+        except ImportError:
+            QMessageBox.critical(
+                self, "AuthGem Unavailable",
+                "The authgem module is not installed. Please check your installation."
+            )
+            return
+
+        # If already logged in, offer to log out
+        if store.has_tokens:
+            info = store.account_info
+            email = info.get('email', 'unknown')
+            reply = QMessageBox.question(
+                self, "Gemini Account",
+                f"Currently logged in as: {email}\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                store.clear_tokens()
+                self._update_authgem_login_status()
+                self.append_log("🔓 Gemini: Logged out")
+            return
+
+        # Start login in background thread
+        self.authgem_login_btn.setText("⏳ Logging in…")
+        self.authgem_login_btn.setEnabled(False)
+        self.append_log("🔐 Gemini: Opening browser for login…")
+
+        def _do_login():
+            try:
+                from authgem_auth import run_oauth_flow
+                tokens = run_oauth_flow()
+                store.save_tokens(tokens)
+                QMetaObject.invokeMethod(
+                    self, "_authgem_login_finished",
+                    Qt.QueuedConnection
+                )
+            except Exception as exc:
+                self._authgem_login_error = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authgem_login_failed",
+                    Qt.QueuedConnection
+                )
+
+        t = threading.Thread(target=_do_login, daemon=True)
+        t.start()
+
+    @Slot()
+    def _authgem_login_status_changed(self):
+        """Called (thread-safe) whenever AuthGem tokens are saved or cleared."""
+        self._update_authgem_login_status()
+
+    @Slot()
+    def _authgem_login_finished(self):
+        """Called on GUI thread after successful AuthGem login."""
+        self.authgem_login_btn.setEnabled(True)
+        self._update_authgem_login_status()
+        try:
+            from authgem_auth import get_default_store
+            info = get_default_store().account_info
+            email = info.get('email', '')
+            name = info.get('name', '')
+            detail = email or name or 'success'
+            self.append_log(f"✅ Gemini: Logged in ({detail})")
+        except Exception:
+            self.append_log("✅ Gemini: Logged in")
+
+    @Slot()
+    def _authgem_login_failed(self):
+        """Called on GUI thread after AuthGem login failure."""
+        self.authgem_login_btn.setEnabled(True)
+        self._update_authgem_login_status()
+        err = getattr(self, '_authgem_login_error', 'Unknown error')
+        self.append_log(f"❌ Gemini login failed: {err}")
+        QMessageBox.warning(self, "Login Failed", f"Gemini login failed:\n{err}")
+
     def _show_model_info_dialog(self):
         """Show information dialog about API provider shortcuts"""
         info_text = """<h3>API Provider Shortcuts</h3>
@@ -3791,6 +3940,18 @@ Recent translations to summarize:
         </ul>
         <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
             <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
+        </p>
+
+        <h4>Gemini Subscription (authgem/)</h4>
+        <p>Use Gemini API with your Google account — no API key needed</p>
+        <ul>
+            <li><b>authgem/gemini-2.5-flash</b> - Gemini 2.5 Flash (fast)</li>
+            <li><b>authgem/gemini-2.5-pro</b> - Gemini 2.5 Pro</li>
+            <li><b>authgem/gemini-2.0-flash</b> - Gemini 2.0 Flash</li>
+        </ul>
+        <p style="color: #4285f4; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click the <b>🔐 Gemini Login</b> button next to the model dropdown to authenticate.
+            Uses the same OAuth as Gemini CLI — free tier included.
         </p>
 
         <h4>Antigravity Proxy (antigravity/)</h4>
@@ -4039,12 +4200,39 @@ Recent translations to summarize:
         self.authgpt_login_btn.hide()
         model_btn_layout.addWidget(self.authgpt_login_btn)
         
-        # Auto-update login button when tokens change (e.g. auto-login during translation)
+        # AuthGem Login button (visible only for authgem/ models)
+        self.authgem_login_btn = QPushButton("🔐 Gemini Login")
+        self.authgem_login_btn.setStyleSheet(
+            "background-color: #4285f4; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+        self.authgem_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Log in with your Google account via browser. "
+            "No API key needed – uses the same auth as Gemini CLI.</p></qt>"
+        )
+        self.authgem_login_btn.clicked.connect(self._authgem_login_clicked)
+        self.authgem_login_btn.hide()
+        model_btn_layout.addWidget(self.authgem_login_btn)
+        
+        # Auto-update AuthGPT login button when tokens change (e.g. auto-login during translation)
         try:
             from authgpt_auth import get_default_store
             get_default_store().on_token_change(
                 lambda: QMetaObject.invokeMethod(
                     self, "_authgpt_login_status_changed",
+                    Qt.QueuedConnection,
+                )
+            )
+        except ImportError:
+            pass
+        
+        # Auto-update AuthGem login button when tokens change
+        try:
+            from authgem_auth import get_default_store as _authgem_get_store
+            _authgem_get_store().on_token_change(
+                lambda: QMetaObject.invokeMethod(
+                    self, "_authgem_login_status_changed",
                     Qt.QueuedConnection,
                 )
             )
@@ -16550,7 +16738,7 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
-                ("💬", "poe/", "Poe", "Quora Poe chatbots (Broken - No longer works)", "#181e28", "#70b8d8"),
+                ("🔐", "authgem/", "AuthGem", "Gemini via Google OAuth", "#142840", "#4285f4"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
             ]
