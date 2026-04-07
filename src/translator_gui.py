@@ -3606,7 +3606,7 @@ Recent translations to summarize:
             else:
                 self.authgpt_login_btn.hide()
 
-        # Show/hide AuthGem login button
+        # Show/hide AuthGem login button + project dropdown
         if hasattr(self, 'authgem_login_btn'):
             needs_authgem = model.startswith('authgem/') or model.startswith('authgem')
             
@@ -3617,8 +3617,20 @@ Recent translations to summarize:
             if needs_authgem:
                 self.authgem_login_btn.show()
                 self._update_authgem_login_status()
+                # Show project dropdown if logged in
+                if hasattr(self, 'authgem_project_combo'):
+                    try:
+                        from authgem_auth import get_default_store
+                        if get_default_store().has_tokens:
+                            self.authgem_project_combo.show()
+                        else:
+                            self.authgem_project_combo.hide()
+                    except Exception:
+                        self.authgem_project_combo.hide()
             else:
                 self.authgem_login_btn.hide()
+                if hasattr(self, 'authgem_project_combo'):
+                    self.authgem_project_combo.hide()
 
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled multi-key or fallback key pool contains an authgpt model."""
@@ -3797,15 +3809,141 @@ Recent translations to summarize:
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
+                # Show project dropdown and populate if needed
+                if hasattr(self, 'authgem_project_combo'):
+                    self.authgem_project_combo.show()
+                    if self.authgem_project_combo.count() == 0:
+                        self._fetch_authgem_projects()
             else:
                 self.authgem_login_btn.setText("🔐 Gemini Login")
                 self.authgem_login_btn.setStyleSheet(
                     "background-color: #4285f4; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
+                if hasattr(self, 'authgem_project_combo'):
+                    self.authgem_project_combo.hide()
         except ImportError:
             self.authgem_login_btn.setText("🔐 Gemini Login (unavailable)")
             self.authgem_login_btn.setEnabled(False)
+
+    def _fetch_authgem_projects(self):
+        """Fetch GCP projects in a background thread, check billing, populate dropdown."""
+        import threading
+        def _worker():
+            try:
+                from authgem_auth import get_default_store
+                import requests as _req
+                store = get_default_store()
+                token = store.get_valid_access_token(auto_login=False)
+                headers = {"Authorization": f"Bearer {token}"}
+                
+                # 1. List active projects
+                resp = _req.get(
+                    "https://cloudresourcemanager.googleapis.com/v1/projects",
+                    headers=headers,
+                    params={"filter": "lifecycleState:ACTIVE", "pageSize": 50},
+                    timeout=15,
+                )
+                if not resp.ok:
+                    return
+                projects = resp.json().get("projects", [])
+                if not projects:
+                    return
+                
+                # 2. Check billing for each project
+                billed = []
+                unbilled = []
+                for p in projects:
+                    pid = p.get("projectId", "")
+                    if not pid:
+                        continue
+                    try:
+                        br = _req.get(
+                            f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
+                            headers=headers, timeout=10,
+                        )
+                        if br.ok and br.json().get("billingEnabled", False):
+                            billed.append(pid)
+                        else:
+                            unbilled.append(pid)
+                    except Exception:
+                        unbilled.append(pid)
+                
+                # Store results for UI thread
+                self._authgem_billed_projects = billed
+                self._authgem_unbilled_projects = unbilled
+                QMetaObject.invokeMethod(
+                    self, "_authgem_projects_loaded",
+                    Qt.QueuedConnection,
+                )
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).debug("Failed to fetch GCP projects: %s", exc)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _authgem_projects_loaded(self):
+        """Populate the project dropdown (called on GUI thread)."""
+        if not hasattr(self, 'authgem_project_combo'):
+            return
+        billed = getattr(self, '_authgem_billed_projects', [])
+        unbilled = getattr(self, '_authgem_unbilled_projects', [])
+        if not billed and not unbilled:
+            return
+        combo = self.authgem_project_combo
+        combo.blockSignals(True)
+        combo.clear()
+        # Add billed projects first (usable)
+        for pid in billed:
+            combo.addItem(f"✅ {pid}", pid)
+        # Add unbilled projects (greyed out label)
+        for pid in unbilled:
+            combo.addItem(f"⚠️ {pid} (no billing)", pid)
+        
+        # Try to restore previously selected project
+        saved = self.config.get('authgem_project', '')
+        selected_idx = -1
+        if saved:
+            selected_idx = combo.findData(saved)
+        # If no saved or saved not found, pick first billed project
+        if selected_idx < 0 and billed:
+            selected_idx = 0
+        if selected_idx >= 0:
+            combo.setCurrentIndex(selected_idx)
+        combo.blockSignals(False)
+        # Apply the selection
+        if combo.count() > 0:
+            self._authgem_project_changed(combo.currentIndex())
+        combo.show()
+        # Log what we found
+        if billed:
+            self.append_log(f"📁 Found {len(billed)} GCP project(s) with billing enabled")
+        if not billed:
+            self.append_log("⚠️ No GCP projects with billing found — Vertex AI won't work")
+
+    def _authgem_project_changed(self, index):
+        """Called when user picks a different GCP project."""
+        if not hasattr(self, 'authgem_project_combo'):
+            return
+        combo = self.authgem_project_combo
+        project_id = combo.itemData(index)
+        if not project_id:
+            return
+        # Save to config + persist
+        self.config['authgem_project'] = project_id
+        try:
+            self._save_config()
+        except Exception:
+            pass
+        # Push to authgem module so API calls use this project
+        try:
+            import authgem_auth
+            authgem_auth._cached_project_id = project_id
+            import os
+            os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
+        except Exception:
+            pass
+        self.append_log(f"📁 AuthGem project set: {project_id}")
 
     def _authgem_login_clicked(self):
         """Handle Gemini Login button click – run OAuth flow in background thread."""
@@ -4209,11 +4347,37 @@ Recent translations to summarize:
         self.authgem_login_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "Log in with your Google account via browser. "
-            "No API key needed – uses the same auth as Gemini CLI.</p></qt>"
+            "No API key needed – uses your Google Cloud project.</p></qt>"
         )
         self.authgem_login_btn.clicked.connect(self._authgem_login_clicked)
         self.authgem_login_btn.hide()
         model_btn_layout.addWidget(self.authgem_login_btn)
+        
+        # AuthGem GCP Project dropdown (visible after login)
+        self.authgem_project_combo = QComboBox()
+        self.authgem_project_combo.setStyleSheet(
+            "QComboBox { background-color: #2a3a4a; color: #e0e0e0; "
+            "font-size: 9pt; padding: 3px 6px; border: 1px solid #4285f4; "
+            "border-radius: 4px; min-width: 160px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background-color: #2a3a4a; "
+            "color: #e0e0e0; selection-background-color: #4285f4; }"
+        )
+        self.authgem_project_combo.setToolTip("Select the GCP project for Gemini API calls")
+        self.authgem_project_combo.currentIndexChanged.connect(self._authgem_project_changed)
+        self.authgem_project_combo.hide()
+        model_btn_layout.addWidget(self.authgem_project_combo)
+        
+        # Restore saved project selection on startup
+        saved_project = self.config.get('authgem_project', '')
+        if saved_project:
+            try:
+                import authgem_auth
+                authgem_auth._cached_project_id = saved_project
+                import os
+                os.environ['GOOGLE_CLOUD_PROJECT'] = saved_project
+            except Exception:
+                pass
         
         # Auto-update AuthGPT login button when tokens change (e.g. auto-login during translation)
         try:

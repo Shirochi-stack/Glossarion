@@ -170,8 +170,10 @@ _cached_project_id: Optional[str] = None
 def detect_gcp_project(access_token: str) -> Optional[str]:
     """Auto-detect the user's GCP project ID using the Resource Manager API.
 
-    Uses the OAuth token to list projects the user has access to, picks the
-    first ACTIVE one.  Result is cached for the session.
+    Uses the OAuth token to list projects the user has access to.
+    Only selects projects with billing enabled.  Result is cached for the
+    session.  The GUI dropdown can override this by setting
+    ``_cached_project_id`` directly.
     """
     global _cached_project_id
     if _cached_project_id:
@@ -184,21 +186,38 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
             _cached_project_id = val
             return val
 
+    headers = {"Authorization": f"Bearer {access_token}"}
     try:
         resp = requests.get(
             "https://cloudresourcemanager.googleapis.com/v1/projects",
-            headers={"Authorization": f"Bearer {access_token}"},
-            params={"filter": "lifecycleState:ACTIVE", "pageSize": 10},
+            headers=headers,
+            params={"filter": "lifecycleState:ACTIVE", "pageSize": 50},
             timeout=15,
         )
         if resp.ok:
-            data = resp.json()
-            projects = data.get("projects", [])
+            projects = resp.json().get("projects", [])
+            # Check billing for each project — only pick one with billing
+            for p in projects:
+                pid = p.get("projectId", "")
+                if not pid:
+                    continue
+                try:
+                    br = requests.get(
+                        f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
+                        headers=headers, timeout=10,
+                    )
+                    if br.ok and br.json().get("billingEnabled", False):
+                        _cached_project_id = pid
+                        logger.info("AuthGem: Auto-detected GCP project (billing OK): %s", pid)
+                        print(f"🔍 AuthGem: Using GCP project: {pid}")
+                        return pid
+                except Exception:
+                    continue
+            # If no billed project found, warn
             if projects:
-                _cached_project_id = projects[0].get("projectId")
-                logger.info("AuthGem: Auto-detected GCP project: %s", _cached_project_id)
-                print(f"🔍 AuthGem: Using GCP project: {_cached_project_id}")
-                return _cached_project_id
+                names = ", ".join(p.get("projectId", "?") for p in projects[:5])
+                logger.warning("AuthGem: No projects with billing enabled found. Projects: %s", names)
+                print(f"⚠️ AuthGem: No GCP projects with billing enabled (checked: {names})")
     except Exception as exc:
         logger.debug("Failed to auto-detect GCP project: %s", exc)
 
