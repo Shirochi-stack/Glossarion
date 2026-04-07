@@ -1,7 +1,16 @@
 #translator_gui.py
 if __name__ == '__main__':
     import multiprocessing
-    multiprocessing.freeze_support()
+    try:
+        multiprocessing.freeze_support()
+    except OSError:
+        # [WinError 87] "The parameter is incorrect" — happens when a
+        # multiprocessing child process tries to connect to a parent pipe
+        # that is already closed (parent exited, path has special chars,
+        # or antivirus interfered with the spawn).  The child has no parent
+        # to talk to, so exit silently instead of showing an error dialog.
+        import sys
+        sys.exit(0)
 
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
