@@ -4305,9 +4305,13 @@ class TranslationProcessor:
                 
                 else:
                     # For unexpected errors, show the error message but suppress traceback in most cases
-                    if getattr(e, "error_type", None) in ["api_error", "validation", "prohibited_content"]:
+                    if getattr(e, "error_type", None) in ["api_error", "validation"]:
                         print(f"❌ API Error: {error_msg}")
                         raise UnifiedClientError(f"API Error: {error_msg}")
+                    elif getattr(e, "error_type", None) == "prohibited_content":
+                        print(f"🚫 Prohibited content: {error_msg}")
+                        # Return as a proper finish reason so the caller marks it qa_failed
+                        return result if result else "", "prohibited_content", None
                     else:
                         raise
             

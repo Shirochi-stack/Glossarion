@@ -1335,10 +1335,19 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             if not translate_special:
                 name = item.get_name() if hasattr(item, 'get_name') else ''
                 name_noext = os.path.splitext(os.path.basename(name))[0] if name else ''
-                has_digits = bool(re.search(r'\d', name_noext))
-                if not has_digits and name_noext:
+                if name_noext:
                     name_lower = name_noext.lower()
+                    # Strip trailing digits to catch files like notice01, cover001
+                    name_stripped = re.sub(r'\d+$', '', name_lower).rstrip('_- ')
+                    has_digits = bool(re.search(r'\d', name_noext))
+                    is_special = False
+                    # Match if name (with or without trailing digits) contains a special keyword
                     if any(kw in name_lower for kw in special_keywords):
+                        # If no digits at all, it's clearly special (e.g. "cover", "notice")
+                        # If has digits, still special if the base part matches a keyword (e.g. "notice01")
+                        if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
+                            is_special = True
+                    if is_special:
                         skipped_special.append(name_noext)
                         continue
 
