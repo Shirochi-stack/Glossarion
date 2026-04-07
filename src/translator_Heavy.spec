@@ -306,6 +306,7 @@ app_files = [
 
     # AuthGPT - ChatGPT subscription OAuth
     ('authgpt_auth.py', '.'),
+    ('authgem_auth.py', '.'),
 
     # Antigravity Cloud Code proxy
     ('antigravity_proxy.py', '.'),
@@ -402,6 +403,7 @@ app_modules = [
 	'ImageRenderer',
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
+	'authgem_auth',  # Gemini subscription OAuth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
 	'epub_library',  # EPUB Library & Reader

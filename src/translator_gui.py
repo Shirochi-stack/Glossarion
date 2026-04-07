@@ -1685,8 +1685,9 @@ Text to analyze:
 
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(500, lambda: self.on_model_change() if hasattr(self, 'model_var') else None)
+        # NOTE: on_model_change() is already called at the end of
+        # _create_model_section(); no need for a delayed duplicate call here.
+
         
         
         # Async processing settings
@@ -3839,8 +3840,13 @@ Recent translations to summarize:
 
     def _fetch_authgem_projects(self):
         """Fetch GCP projects in a background thread, check billing, populate dropdown."""
+        # Guard against duplicate concurrent fetches (e.g. on_model_change called twice)
+        if getattr(self, '_authgem_fetching_projects', False):
+            return
+        self._authgem_fetching_projects = True
         import threading
         def _worker():
+
             try:
                 from authgem_auth import get_default_store
                 import requests as _req
@@ -3888,6 +3894,7 @@ Recent translations to summarize:
                     Qt.QueuedConnection,
                 )
             except Exception as exc:
+                self._authgem_fetching_projects = False  # clear guard on error
                 import logging
                 logging.getLogger(__name__).debug("Failed to fetch GCP projects: %s", exc)
         threading.Thread(target=_worker, daemon=True).start()
@@ -3895,7 +3902,9 @@ Recent translations to summarize:
     @Slot()
     def _authgem_projects_loaded(self):
         """Populate the project dropdown (called on GUI thread)."""
+        self._authgem_fetching_projects = False  # clear guard
         if not hasattr(self, 'authgem_project_combo'):
+
             return
         billed = getattr(self, '_authgem_billed_projects', [])
         unbilled = getattr(self, '_authgem_unbilled_projects', [])

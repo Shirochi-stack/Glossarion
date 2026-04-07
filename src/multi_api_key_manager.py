@@ -2895,6 +2895,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_status(f"Enabled {len(selected)} fallback key(s)")
+        self._notify_authgpt_visibility()
 
     def _disable_selected_fallback(self):
         """Disable selected fallback keys"""
@@ -2910,6 +2911,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_status(f"Disabled {len(selected)} fallback key(s)")
+        self._notify_authgpt_visibility()
 
     def _clear_all_fallbacks(self):
         """Clear all fallback keys"""
@@ -5070,6 +5072,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Enabled {len(selected)} glossary key(s)")
+        self._notify_authgpt_visibility()
 
     def _disable_selected_glossary(self):
         """Disable selected glossary keys"""
@@ -5085,6 +5088,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Disabled {len(selected)} glossary key(s)")
+        self._notify_authgpt_visibility()
 
     def _clear_all_glossary(self):
         """Clear all glossary keys"""
@@ -6614,6 +6618,7 @@ class MultiAPIKeyDialog(QDialog):
         
         self._refresh_key_list()
         self._show_status(f"Enabled {len(selected)} key(s)")
+        self._notify_authgpt_visibility()
     
     def _disable_selected(self):
         """Disable selected keys"""
@@ -6625,6 +6630,7 @@ class MultiAPIKeyDialog(QDialog):
         
         self._refresh_key_list()
         self._show_status(f"Disabled {len(selected)} key(s)")
+        self._notify_authgpt_visibility()
     
     def _remove_selected(self):
         """Remove selected keys"""
