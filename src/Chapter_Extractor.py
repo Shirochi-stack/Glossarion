@@ -555,11 +555,13 @@ def _sort_by_opf_spine(chapters, opf_path):
         # Sort chapters
         sorted_chapters = sorted(chapters, key=get_spine_position)
         
-        # Renumber chapters based on new order
+        # Store the raw OPF position so translation code can build offset maps.
+        # Also store a list-based sequential position as spine_order (used
+        # by other code paths that don't need offset mapping).
         for idx, chapter in enumerate(sorted_chapters, 1):
+            opf_pos = get_spine_position(chapter)
+            chapter['opf_spine_index'] = opf_pos if opf_pos < 1000000 else None
             chapter['spine_order'] = idx
-            # Optionally update chapter numbers to match spine order
-            # chapter['num'] = idx  # Uncomment if you want to renumber
         
         # Log reordering info
         reordered_count = 0

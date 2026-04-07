@@ -10850,25 +10850,84 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
-    # When USE_SPINE_ORDER is active, pre-compute 1-based spine
-    # positions.  When special-file translation is disabled, special
-    # files are excluded from the numbering so position 1 = first
-    # translatable file.  When it IS enabled, every file gets a
-    # sequential position.
-    _spine_offset_map = {}  # idx -> offset_pos (1-based)
-    if use_spine_order:
-        _translatable_counter = 0
-        for _ci, _ch in enumerate(chapters):
-            _name = _ch.get('original_basename') or os.path.basename(_ch.get('filename', ''))
-            _name_noext = os.path.splitext(_name)[0] if _name else ''
-            _raw = FileUtilities.extract_actual_chapter_number(_ch, patterns=None, config=config)
-            _is_special = (_raw is None or _raw == 0) and not bool(re.search(r'\d', _name_noext)) and not is_text_file
-            if translate_special or not _is_special:
-                _translatable_counter += 1
-                _spine_offset_map[_ci] = _translatable_counter
-            # special files get no entry when translate_special is off
-        if not translate_special and _translatable_counter > 0 and _translatable_counter < len(chapters):
-            print(f"📊 Spine order offset: {len(chapters) - _translatable_counter} special file(s) excluded from numbering")
+    # When USE_SPINE_ORDER is active, build a mapping from each extracted
+    # chapter's list index → its spine-offset position.  The positions
+    # are computed using the FULL OPF spine (same logic as the GUI preview
+    # dialog) so the numbers always match what the preview shows.
+    _spine_pos_by_idx = {}  # chapter list index -> 1-based spine offset
+    if use_spine_order and start is not None:
+        opf_path = os.path.join(out, 'content.opf')
+        if os.path.exists(opf_path):
+            try:
+                import xml.etree.ElementTree as _ET
+                with open(opf_path, 'r', encoding='utf-8') as _f:
+                    _opf_root = _ET.fromstring(_f.read())
+
+                _ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                if _opf_root.tag.startswith('{'):
+                    _default_ns = _opf_root.tag[1:_opf_root.tag.index('}')]
+                    _ns = {'opf': _default_ns}
+
+                _manifest = {}
+                for _item in _opf_root.findall('.//opf:manifest/opf:item', _ns):
+                    _iid = _item.get('id')
+                    _href = _item.get('href')
+                    _mtype = _item.get('media-type', '')
+                    if _iid and _href and (
+                        'html' in _mtype.lower() or
+                        _href.endswith(('.html', '.xhtml', '.htm'))
+                    ):
+                        _manifest[_iid] = os.path.basename(_href)
+
+                _spine_el = _opf_root.find('.//opf:spine', _ns)
+                _all_spine_basenames = []
+                if _spine_el is not None:
+                    for _iref in _spine_el.findall('opf:itemref', _ns):
+                        _idref = _iref.get('idref')
+                        if _idref and _idref in _manifest:
+                            _all_spine_basenames.append(_manifest[_idref])
+
+                # Build offset positions — same logic as preview's
+                # _is_special_file: skip files with 'nav.', 'toc.', 'cover.'
+                # in name, or files with no digits in their stem.
+                def _is_special_spine(fname):
+                    fl = fname.lower()
+                    fnoext = os.path.splitext(fl)[0]
+                    if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
+                        return True
+                    if not re.search(r'\d', fnoext):
+                        return True
+                    return False
+
+                _offset_by_basename = {}   # basename -> offset pos (1-based)
+                _tpos = 0
+                for _sb in _all_spine_basenames:
+                    _special = _is_special_spine(_sb)
+                    _skip = (not translate_special and _special)
+                    if not _skip:
+                        _tpos += 1
+                        _offset_by_basename[_sb] = _tpos
+                        _offset_by_basename[os.path.splitext(_sb)[0]] = _tpos
+
+                # Map each extracted chapter to its offset position
+                for _ci, _ch in enumerate(chapters):
+                    _bn = _ch.get('original_basename') or os.path.basename(_ch.get('filename', ''))
+                    _bn_noext = os.path.splitext(_bn)[0] if _bn else ''
+                    _pos = _offset_by_basename.get(_bn) or _offset_by_basename.get(_bn_noext)
+                    if _pos is not None:
+                        _spine_pos_by_idx[_ci] = _pos
+
+                if _spine_pos_by_idx:
+                    _mapped = len(_spine_pos_by_idx)
+                    _total_spine = len(_all_spine_basenames)
+                    print(f"📊 Spine order: mapped {_mapped}/{len(chapters)} chapters "
+                          f"(OPF has {_total_spine} items, {_tpos} translatable)")
+                else:
+                    print("⚠️ Spine order: could not map chapters to OPF positions")
+            except Exception as _e:
+                print(f"⚠️ Spine order: failed to read content.opf: {_e}")
+        else:
+            print("⚠️ Spine order: content.opf not found in output directory")
 
     # Helper: sequential numbering with zero-phase.
     # Start at 0; only start incrementing once a digit >0 is seen in the filename.
@@ -10950,12 +11009,12 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
         if start is not None:
-            # When spine order is active, compare against offset spine position
+            # When spine order is active, use the OPF-derived offset position
+            # (built from content.opf, matches the preview dialog exactly)
             if use_spine_order:
-                # Use pre-computed offset position (always available when use_spine_order is True)
-                spine_pos_1based = _spine_offset_map.get(idx)
+                spine_pos_1based = _spine_pos_by_idx.get(idx)
                 if spine_pos_1based is None:
-                    # This is a special file that was excluded, skip it
+                    # Chapter not found in OPF spine — exclude from range
                     range_match = False
                 else:
                     range_match = start <= spine_pos_1based <= end
@@ -11185,8 +11244,8 @@ def main(log_callback=None, stop_callback=None):
             # Skip chapters outside the range
             if start is not None:
                 if use_spine_order:
-                    # Use pre-computed offset position (always available when use_spine_order is True)
-                    _spine_1based = _spine_offset_map.get(idx)
+                    # Use the OPF-derived offset position
+                    _spine_1based = _spine_pos_by_idx.get(idx)
                     if _spine_1based is None or not (start <= _spine_1based <= end):
                         continue
                 elif not (start <= actual_num <= end):
