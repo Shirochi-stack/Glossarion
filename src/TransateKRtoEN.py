@@ -12070,8 +12070,13 @@ def main(log_callback=None, stop_callback=None):
                     if not has_digits_in_name:
                         continue
                 
-                if start is not None and not (start <= actual_num <= end):
-                    continue
+                if start is not None:
+                    if use_spine_order:
+                        _sp = _spine_pos_by_idx.get(idx)
+                        if _sp is None or not (start <= _sp <= end):
+                            continue
+                    elif not (start <= actual_num <= end):
+                        continue
                 
                 needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
                     idx, actual_num, content_hash, out, c
@@ -12198,9 +12203,14 @@ def main(log_callback=None, stop_callback=None):
                 if not has_digits_in_name:
                     continue
             
-            if start is not None and not (start <= actual_num <= end):
-                # Skip silently (already summarized in earlier pass)
-                continue
+            if start is not None:
+                if use_spine_order:
+                    _sp = _spine_pos_by_idx.get(idx)
+                    if _sp is None or not (start <= _sp <= end):
+                        continue
+                elif not (start <= actual_num <= end):
+                    # Skip silently (already summarized in earlier pass)
+                    continue
             
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
                 idx, actual_num, content_hash, out, c  # Pass the chapter object
