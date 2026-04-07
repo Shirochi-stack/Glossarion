@@ -669,6 +669,13 @@ def _build_gemini_request_body(
         gen_config["temperature"] = temperature
     if max_tokens is not None:
         gen_config["maxOutputTokens"] = max_tokens
+
+    # Enable thinking/reasoning output so we can stream it
+    # (thoughts are filtered from final output but logged in real-time)
+    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+    if stream_thinking:
+        gen_config["thinkingConfig"] = {"includeThoughts": True}
+
     if gen_config:
         body["generationConfig"] = gen_config
 
@@ -849,6 +856,24 @@ def _process_gemini_sse_line(
             # Separate thinking/thought parts from actual output
             if part.get("thought", False):
                 state["thought_parts"].append(text)
+                # Log thinking in real-time — same format as gemini-grpc
+                if log_stream and text:
+                    if not state.get("_thinking_started"):
+                        _log("🧠 [authgem] Thinking...")
+                        state["_thinking_started"] = True
+                        state["_thinking_chunks"] = 0
+                        state["_thinking_start_ts"] = time.time()
+                    state["_thinking_chunks"] = state.get("_thinking_chunks", 0) + 1
+                    thought_buf = state.get("_thought_log_buf", [])
+                    thought_buf.append(text)
+                    combined = "".join(thought_buf)
+                    if "\n" in combined:
+                        parts_t = combined.split("\n")
+                        for p in parts_t[:-1]:
+                            _log(f"    {p}")
+                        state["_thought_log_buf"] = [parts_t[-1]]
+                    else:
+                        state["_thought_log_buf"] = thought_buf
                 continue
 
             state["text_parts"].append(text)
@@ -882,7 +907,19 @@ def _process_gemini_sse_line(
 
 def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dict:
     """Flush log buffer, build result dict from accumulated state."""
-    # Flush remaining log buffer
+    # Flush remaining thinking log buffer
+    if log_stream and state.get("_thought_log_buf"):
+        remainder = "".join(state["_thought_log_buf"]).rstrip("\n")
+        if remainder:
+            for p in remainder.split("\n"):
+                _log(f"    {p}")
+    # Log thinking completion summary — same format as gemini-grpc
+    if state.get("_thinking_started") and state["thought_parts"]:
+        chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
+        dur = time.time() - state.get("_thinking_start_ts", t_start)
+        _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
+
+    # Flush remaining output log buffer
     if log_stream and state["log_buf"]:
         remainder = "".join(state["log_buf"]).strip()
         if remainder:

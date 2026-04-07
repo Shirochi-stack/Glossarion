@@ -3617,11 +3617,11 @@ Recent translations to summarize:
             if needs_authgem:
                 self.authgem_login_btn.show()
                 self._update_authgem_login_status()
-                # Show project dropdown if logged in
+                # Show project dropdown only if logged in AND has items
                 if hasattr(self, 'authgem_project_combo'):
                     try:
                         from authgem_auth import get_default_store
-                        if get_default_store().has_tokens:
+                        if get_default_store().has_tokens and self.authgem_project_combo.count() > 0:
                             self.authgem_project_combo.show()
                         else:
                             self.authgem_project_combo.hide()
@@ -3631,6 +3631,9 @@ Recent translations to summarize:
                 self.authgem_login_btn.hide()
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.hide()
+        
+        # Reposition project dropdown (may need its own row if authgpt also visible)
+        self._reposition_authgem_project_combo()
 
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled multi-key or fallback key pool contains an authgpt model."""
@@ -3809,11 +3812,15 @@ Recent translations to summarize:
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
-                # Show project dropdown and populate if needed
+                # Populate projects if needed; only show if items exist
                 if hasattr(self, 'authgem_project_combo'):
-                    self.authgem_project_combo.show()
                     if self.authgem_project_combo.count() == 0:
                         self._fetch_authgem_projects()
+                    if self.authgem_project_combo.count() > 0:
+                        self.authgem_project_combo.show()
+                        self._reposition_authgem_project_combo()
+                    else:
+                        self.authgem_project_combo.hide()
             else:
                 self.authgem_login_btn.setText("🔐 Gemini Login")
                 self.authgem_login_btn.setStyleSheet(
@@ -3914,7 +3921,10 @@ Recent translations to summarize:
         # Apply the selection
         if combo.count() > 0:
             self._authgem_project_changed(combo.currentIndex())
-        combo.show()
+            combo.show()
+            self._reposition_authgem_project_combo()
+        else:
+            combo.hide()
         # Log what we found
         if billed:
             self.append_log(f"📁 Found {len(billed)} GCP project(s) with billing enabled")
@@ -3944,6 +3954,46 @@ Recent translations to summarize:
         except Exception:
             pass
         self.append_log(f"📁 AuthGem project set: {project_id}")
+
+    def _reposition_authgem_project_combo(self):
+        """Move project dropdown to its own grid row if the button row is crowded.
+
+        When both the AuthGPT *and* AuthGem login buttons are visible the
+        horizontal space is tight, so the project combo moves to a dedicated
+        row below the model row.  Otherwise it stays inline with the buttons.
+        """
+        if not hasattr(self, 'authgem_project_combo'):
+            return
+        combo = self.authgem_project_combo
+
+        # Don't touch hidden combos
+        if combo.isHidden() or combo.count() == 0:
+            return
+
+        both_visible = (
+            hasattr(self, 'authgpt_login_btn') and self.authgpt_login_btn.isVisible()
+            and hasattr(self, 'authgem_login_btn') and self.authgem_login_btn.isVisible()
+        )
+
+        already_own_row = getattr(self, '_authgem_combo_in_own_row', False)
+
+        if both_visible and not already_own_row:
+            # Remove from the HBox button row
+            parent_layout = combo.parentWidget().layout() if combo.parentWidget() else None
+            if parent_layout:
+                parent_layout.removeWidget(combo)
+            # Add to the grid layout on a new row (row 2, col 1, span 3 cols)
+            self.frame.addWidget(combo, 2, 1, 1, 3, Qt.AlignLeft)
+            self._authgem_combo_in_own_row = True
+        elif not both_visible and already_own_row:
+            # Move back into the HBox button row
+            self.frame.removeWidget(combo)
+            # Find the button container layout
+            if hasattr(self, 'authgem_login_btn'):
+                parent_layout = self.authgem_login_btn.parentWidget().layout()
+                if parent_layout:
+                    parent_layout.addWidget(combo)
+            self._authgem_combo_in_own_row = False
 
     def _authgem_login_clicked(self):
         """Handle Gemini Login button click – run OAuth flow in background thread."""
@@ -4361,7 +4411,7 @@ Recent translations to summarize:
         self.authgem_login_btn.hide()
         model_btn_layout.addWidget(self.authgem_login_btn)
         
-        # AuthGem GCP Project dropdown (visible after login)
+        # AuthGem GCP Project dropdown (visible after login, managed separately)
         self.authgem_project_combo = QComboBox()
         self.authgem_project_combo.setStyleSheet(
             "QComboBox { background-color: #2a3a4a; color: #e0e0e0; "
@@ -4374,7 +4424,9 @@ Recent translations to summarize:
         self.authgem_project_combo.setToolTip("Select the GCP project for Gemini API calls")
         self.authgem_project_combo.currentIndexChanged.connect(self._authgem_project_changed)
         self.authgem_project_combo.hide()
+        # Start in the button row; _reposition will move it if needed
         model_btn_layout.addWidget(self.authgem_project_combo)
+        self._authgem_combo_in_own_row = False  # track current placement
         
         # Restore saved project selection on startup
         saved_project = self.config.get('authgem_project', '')
