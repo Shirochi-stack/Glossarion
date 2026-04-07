@@ -10,7 +10,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit, 
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
-        QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox,
+        QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter, QDialogButtonBox
     )
@@ -2087,13 +2087,15 @@ class MultiAPIKeyDialog(QDialog):
         fallback_temp_label = QLabel("Key Temperature:")
         fallback_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
         add_fallback_grid.addWidget(fallback_temp_label, 5, 0, Qt.AlignLeft)
-        self.fallback_key_temperature_spinbox = QSpinBox()
-        self.fallback_key_temperature_spinbox.setRange(-1, 200)
-        self.fallback_key_temperature_spinbox.setValue(-1)
+        self.fallback_key_temperature_spinbox = QDoubleSpinBox()
+        self.fallback_key_temperature_spinbox.setRange(-1.0, 2.0)
+        self.fallback_key_temperature_spinbox.setValue(-1.0)
+        self.fallback_key_temperature_spinbox.setSingleStep(0.05)
+        self.fallback_key_temperature_spinbox.setDecimals(2)
         self.fallback_key_temperature_spinbox.setMaximumWidth(120)
         self._disable_spinbox_mousewheel(self.fallback_key_temperature_spinbox)
         add_fallback_grid.addWidget(self.fallback_key_temperature_spinbox, 5, 1, Qt.AlignLeft)
-        fallback_temp_hint = QLabel("-1 = use global temp (value / 100)")
+        fallback_temp_hint = QLabel("-1 = use global temp")
         fallback_temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
         add_fallback_grid.addWidget(fallback_temp_hint, 5, 2, 1, 2, Qt.AlignLeft)
         
@@ -2170,8 +2172,8 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
         self.fallback_tree.setColumnWidth(0, 125)  # API Key
         self.fallback_tree.setColumnWidth(1, 220)  # Model
-        self.fallback_tree.setColumnWidth(2, 90)   # Output Limit
-        self.fallback_tree.setColumnWidth(3, 55)   # Temp
+        self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
+        self.fallback_tree.setColumnWidth(3, 60)   # Temp
         self.fallback_tree.setColumnWidth(4, 100)  # Status
         self.fallback_tree.setColumnWidth(5, 60)   # Success
         self.fallback_tree.setColumnWidth(6, 55)   # Errors
@@ -2591,9 +2593,9 @@ class MultiAPIKeyDialog(QDialog):
         individual_key_temperature = None
         if hasattr(self, 'fallback_key_temperature_spinbox'):
             try:
-                val = int(self.fallback_key_temperature_spinbox.value())
+                val = float(self.fallback_key_temperature_spinbox.value())
                 if val >= 0:
-                    individual_key_temperature = val / 100.0
+                    individual_key_temperature = val
             except Exception:
                 individual_key_temperature = None
         
@@ -2626,7 +2628,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self, 'fallback_output_token_spinbox'):
             self.fallback_output_token_spinbox.setValue(0)
         if hasattr(self, 'fallback_key_temperature_spinbox'):
-            self.fallback_key_temperature_spinbox.setValue(-1)
+            self.fallback_key_temperature_spinbox.setValue(-1.0)
         # Update the UI to disable endpoint fields
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -3232,36 +3234,35 @@ class MultiAPIKeyDialog(QDialog):
         if not selected_indices:
             return
         
-        default_val = 70  # 0.7 * 100
+        default_val = 0.7
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(fallback_keys):
             try:
                 raw = fallback_keys[first_idx].get('individual_key_temperature')
                 if raw not in (None, ""):
-                    default_val = int(float(raw) * 100)
+                    default_val = float(raw)
             except Exception:
                 pass
         
-        value, ok = QInputDialog.getInt(
+        value, ok = QInputDialog.getDouble(
             self,
             "Set Fallback Key Temperature",
-            "Temperature for selected fallback key(s) (0-200, divided by 100):\ne.g. 70 = 0.7, 100 = 1.0, 150 = 1.5",
+            "Temperature for selected fallback key(s) (0.0 - 2.0):",
             default_val,
-            0,
-            200,
-            5,
+            0.0,
+            2.0,
+            2,
         )
         if not ok:
             return
         
-        temp_float = value / 100.0
         for idx in selected_indices:
             if 0 <= idx < len(fallback_keys):
-                fallback_keys[idx]['individual_key_temperature'] = temp_float
+                fallback_keys[idx]['individual_key_temperature'] = value
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Set fallback key temperature to {temp_float} for {len(selected_indices)} key(s)")
+        self._show_status(f"Set fallback key temperature to {value} for {len(selected_indices)} key(s)")
     
     def _clear_fallback_key_temperature_for_selected(self):
         """Clear per-key temperature for selected fallback keys"""
@@ -3504,8 +3505,8 @@ class MultiAPIKeyDialog(QDialog):
         self.tree.setColumnWidth(0, 125)  # API Key (decreased from 140)
         self.tree.setColumnWidth(1, 220)  # Model
         self.tree.setColumnWidth(2, 70)   # Cooldown
-        self.tree.setColumnWidth(3, 90)   # Output Limit
-        self.tree.setColumnWidth(4, 55)   # Temp
+        self.tree.setColumnWidth(3, 105)  # Output Limit
+        self.tree.setColumnWidth(4, 60)   # Temp
         self.tree.setColumnWidth(5, 100)  # Status
         self.tree.setColumnWidth(6, 60)   # Success
         self.tree.setColumnWidth(7, 55)   # Errors
@@ -3724,15 +3725,15 @@ class MultiAPIKeyDialog(QDialog):
         temp_label = QLabel("Key Temperature:")
         temp_label.setStyleSheet("color: gray; font-size: 9pt;")
         add_grid.addWidget(temp_label, 6, 0, Qt.AlignLeft)
-        self.key_temperature_spinbox = QSpinBox()
-        self.key_temperature_spinbox.setRange(-1, 200)
-        self.key_temperature_spinbox.setValue(-1)
+        self.key_temperature_spinbox = QDoubleSpinBox()
+        self.key_temperature_spinbox.setRange(-1.0, 2.0)
+        self.key_temperature_spinbox.setValue(-1.0)
+        self.key_temperature_spinbox.setSingleStep(0.05)
+        self.key_temperature_spinbox.setDecimals(2)
         self.key_temperature_spinbox.setMaximumWidth(120)
-        self.key_temperature_spinbox.setPrefix("")
-        self.key_temperature_spinbox.setSuffix("")
         self._disable_spinbox_mousewheel(self.key_temperature_spinbox)
         add_grid.addWidget(self.key_temperature_spinbox, 6, 1, Qt.AlignLeft)
-        temp_hint = QLabel("-1 = use global temp (value / 100)")
+        temp_hint = QLabel("-1 = use global temp")
         temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
         add_grid.addWidget(temp_hint, 6, 2, 1, 2, Qt.AlignLeft)
         
@@ -3889,6 +3890,8 @@ class MultiAPIKeyDialog(QDialog):
             return
         
         # Column 1 = Model (editable)
+        # Column 2 = Output Limit (editable)
+        # Column 3 = Temp (editable)
         if column == 1:
             old_value = item.text(1)
             new_value, ok = self._show_model_edit_dialog(old_value)
@@ -3898,6 +3901,43 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated model to: {new_value}")
+        elif column == 2:  # Output Limit column
+            from PySide6.QtWidgets import QInputDialog
+            current = fallback_keys[index].get('individual_output_token_limit') or 0
+            try:
+                current = int(current)
+            except (ValueError, TypeError):
+                current = 0
+            value, ok = QInputDialog.getInt(
+                self, "Edit Output Token Limit",
+                "Output token limit (0 = use global):",
+                current, 0, 1000000, 100
+            )
+            if ok:
+                fallback_keys[index]['individual_output_token_limit'] = value if value > 0 else None
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 3:  # Temp column
+            from PySide6.QtWidgets import QInputDialog
+            current = fallback_keys[index].get('individual_key_temperature')
+            default = float(current) if current not in (None, "") else -1.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit Key Temperature",
+                "Temperature (-1 = use global, 0.0 - 2.0):",
+                default, -1.0, 2.0, 2
+            )
+            if ok:
+                if value < 0:
+                    if 'individual_key_temperature' in fallback_keys[index]:
+                        del fallback_keys[index]['individual_key_temperature']
+                else:
+                    fallback_keys[index]['individual_key_temperature'] = value
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
@@ -4075,6 +4115,8 @@ class MultiAPIKeyDialog(QDialog):
         
         # Column 1 = Model (editable)
         # Column 2 = Cooldown (editable)
+        # Column 3 = Output Limit (editable)
+        # Column 4 = Temp (editable)
         if column == 1:  # Model column
             # Create inline editor for model
             old_value = item.text(1)
@@ -4091,6 +4133,34 @@ class MultiAPIKeyDialog(QDialog):
                 key.cooldown = new_value
                 self._refresh_key_list()
                 self._show_status(f"Updated cooldown to: {new_value}s")
+        elif column == 3:  # Output Limit column
+            from PySide6.QtWidgets import QInputDialog
+            current = getattr(key, 'individual_output_token_limit', None) or 0
+            value, ok = QInputDialog.getInt(
+                self, "Edit Output Token Limit",
+                "Output token limit (0 = use global):",
+                current, 0, 1000000, 100
+            )
+            if ok:
+                key.individual_output_token_limit = value if value > 0 else None
+                self._refresh_key_list()
+                self._show_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 4:  # Temp column
+            from PySide6.QtWidgets import QInputDialog
+            current = getattr(key, 'individual_key_temperature', None)
+            default = current if current is not None else -1.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit Key Temperature",
+                "Temperature (-1 = use global, 0.0 - 2.0):",
+                default, -1.0, 2.0, 2
+            )
+            if ok:
+                if value < 0:
+                    key.individual_key_temperature = None
+                else:
+                    key.individual_key_temperature = value
+                self._refresh_key_list()
+                self._show_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
     
     def _show_model_edit_dialog(self, current_value):
         """Show dialog for editing model name"""
@@ -4288,33 +4358,32 @@ class MultiAPIKeyDialog(QDialog):
             return
         
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 70  # 0.7 * 100
+        default_val = 0.7
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
                 key = self.key_pool.keys[idx]
                 per_key = getattr(key, 'individual_key_temperature', None)
                 if per_key is not None:
-                    default_val = int(per_key * 100)
+                    default_val = per_key
                     break
         
-        value, ok = QInputDialog.getInt(
+        value, ok = QInputDialog.getDouble(
             self,
             "Set Key Temperature",
-            "Temperature for selected key(s) (0-200, divided by 100):\ne.g. 70 = 0.7, 100 = 1.0, 150 = 1.5",
+            "Temperature for selected key(s) (0.0 - 2.0):",
             default_val,
-            0,
-            200,
-            5,
+            0.0,
+            2.0,
+            2,
         )
         if not ok:
             return
         
-        temp_float = value / 100.0
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
-                self.key_pool.keys[idx].individual_key_temperature = temp_float
+                self.key_pool.keys[idx].individual_key_temperature = value
         self._refresh_key_list()
-        self._show_status(f"Set key temperature to {temp_float} for {len(selected_indices)} key(s)")
+        self._show_status(f"Set key temperature to {value} for {len(selected_indices)} key(s)")
     
     def _clear_key_temperature_for_selected(self):
         """Clear per-key temperature for selected multi-key entries"""
@@ -4718,13 +4787,15 @@ class MultiAPIKeyDialog(QDialog):
         glossary_temp_label = QLabel("Key Temperature:")
         glossary_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
         add_glossary_grid.addWidget(glossary_temp_label, 5, 0, Qt.AlignLeft)
-        self.glossary_key_temperature_spinbox = QSpinBox()
-        self.glossary_key_temperature_spinbox.setRange(-1, 200)
-        self.glossary_key_temperature_spinbox.setValue(-1)
+        self.glossary_key_temperature_spinbox = QDoubleSpinBox()
+        self.glossary_key_temperature_spinbox.setRange(-1.0, 2.0)
+        self.glossary_key_temperature_spinbox.setValue(-1.0)
+        self.glossary_key_temperature_spinbox.setSingleStep(0.05)
+        self.glossary_key_temperature_spinbox.setDecimals(2)
         self.glossary_key_temperature_spinbox.setMaximumWidth(120)
         self._disable_spinbox_mousewheel(self.glossary_key_temperature_spinbox)
         add_glossary_grid.addWidget(self.glossary_key_temperature_spinbox, 5, 1, Qt.AlignLeft)
-        glossary_temp_hint = QLabel("-1 = use global temp (value / 100)")
+        glossary_temp_hint = QLabel("-1 = use global temp")
         glossary_temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
         add_glossary_grid.addWidget(glossary_temp_hint, 5, 2, 1, 2, Qt.AlignLeft)
         
@@ -4797,8 +4868,8 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
         self.glossary_tree.setColumnWidth(0, 125)
         self.glossary_tree.setColumnWidth(1, 220)
-        self.glossary_tree.setColumnWidth(2, 90)
-        self.glossary_tree.setColumnWidth(3, 55)
+        self.glossary_tree.setColumnWidth(2, 105)
+        self.glossary_tree.setColumnWidth(3, 60)
         self.glossary_tree.setColumnWidth(4, 100)
         self.glossary_tree.setColumnWidth(5, 60)
         self.glossary_tree.setColumnWidth(6, 55)
@@ -4992,9 +5063,9 @@ class MultiAPIKeyDialog(QDialog):
         individual_key_temperature = None
         if hasattr(self, 'glossary_key_temperature_spinbox'):
             try:
-                val = int(self.glossary_key_temperature_spinbox.value())
+                val = float(self.glossary_key_temperature_spinbox.value())
                 if val >= 0:
-                    individual_key_temperature = val / 100.0
+                    individual_key_temperature = val
             except Exception:
                 individual_key_temperature = None
         
@@ -5025,7 +5096,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self, 'glossary_output_token_spinbox'):
             self.glossary_output_token_spinbox.setValue(0)
         if hasattr(self, 'glossary_key_temperature_spinbox'):
-            self.glossary_key_temperature_spinbox.setValue(-1)
+            self.glossary_key_temperature_spinbox.setValue(-1.0)
         self._toggle_glossary_individual_endpoint_fields()
         
         self._load_glossary_keys()
@@ -5654,6 +5725,9 @@ class MultiAPIKeyDialog(QDialog):
         if index >= len(glossary_keys):
             return
         
+        # Column 1 = Model (editable)
+        # Column 2 = Output Limit (editable)
+        # Column 3 = Temp (editable)
         if column == 1:
             old_value = item.text(1)
             new_value, ok = self._show_model_edit_dialog(old_value)
@@ -5663,6 +5737,43 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated model to: {new_value}")
+        elif column == 2:  # Output Limit column
+            from PySide6.QtWidgets import QInputDialog
+            current = glossary_keys[index].get('individual_output_token_limit') or 0
+            try:
+                current = int(current)
+            except (ValueError, TypeError):
+                current = 0
+            value, ok = QInputDialog.getInt(
+                self, "Edit Output Token Limit",
+                "Output token limit (0 = use global):",
+                current, 0, 1000000, 100
+            )
+            if ok:
+                glossary_keys[index]['individual_output_token_limit'] = value if value > 0 else None
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 3:  # Temp column
+            from PySide6.QtWidgets import QInputDialog
+            current = glossary_keys[index].get('individual_key_temperature')
+            default = float(current) if current not in (None, "") else -1.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit Key Temperature",
+                "Temperature (-1 = use global, 0.0 - 2.0):",
+                default, -1.0, 2.0, 2
+            )
+            if ok:
+                if value < 0:
+                    if 'individual_key_temperature' in glossary_keys[index]:
+                        del glossary_keys[index]['individual_key_temperature']
+                else:
+                    glossary_keys[index]['individual_key_temperature'] = value
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
 
     def _show_glossary_status(self, message: str):
         """Show status message in the glossary section."""
@@ -5779,36 +5890,35 @@ class MultiAPIKeyDialog(QDialog):
         if not selected_indices:
             return
         
-        default_val = 70  # 0.7 * 100
+        default_val = 0.7
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(glossary_keys):
             try:
                 raw = glossary_keys[first_idx].get('individual_key_temperature')
                 if raw not in (None, ""):
-                    default_val = int(float(raw) * 100)
+                    default_val = float(raw)
             except Exception:
                 pass
         
-        value, ok = QInputDialog.getInt(
+        value, ok = QInputDialog.getDouble(
             self,
             "Set Glossary Key Temperature",
-            "Temperature for selected glossary key(s) (0-200, divided by 100):\ne.g. 70 = 0.7, 100 = 1.0, 150 = 1.5",
+            "Temperature for selected glossary key(s) (0.0 - 2.0):",
             default_val,
-            0,
-            200,
-            5,
+            0.0,
+            2.0,
+            2,
         )
         if not ok:
             return
         
-        temp_float = value / 100.0
         for idx in selected_indices:
             if 0 <= idx < len(glossary_keys):
-                glossary_keys[idx]['individual_key_temperature'] = temp_float
+                glossary_keys[idx]['individual_key_temperature'] = value
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
-        self._show_glossary_status(f"Set glossary key temperature to {temp_float} for {len(selected_indices)} key(s)")
+        self._show_glossary_status(f"Set glossary key temperature to {value} for {len(selected_indices)} key(s)")
     
     def _clear_glossary_key_temperature_for_selected(self):
         """Clear per-key temperature for selected glossary keys"""
@@ -6163,9 +6273,9 @@ class MultiAPIKeyDialog(QDialog):
         individual_key_temperature = None
         try:
             if hasattr(self, 'key_temperature_spinbox'):
-                val = int(self.key_temperature_spinbox.value())
+                val = float(self.key_temperature_spinbox.value())
                 if val >= 0:
-                    individual_key_temperature = val / 100.0
+                    individual_key_temperature = val
         except Exception:
             individual_key_temperature = None
         
@@ -6197,7 +6307,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self, 'output_token_spinbox'):
             self.output_token_spinbox.setValue(0)
         if hasattr(self, 'key_temperature_spinbox'):
-            self.key_temperature_spinbox.setValue(-1)
+            self.key_temperature_spinbox.setValue(-1.0)
         # Update the UI to hide endpoint fields
         self._toggle_individual_endpoint_fields()
         

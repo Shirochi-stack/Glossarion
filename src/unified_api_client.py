@@ -10869,6 +10869,7 @@ class UnifiedClient:
             tls = self._get_thread_local_client()
             per_key_temp = getattr(tls, 'individual_key_temperature', None)
             if per_key_temp is not None:
+                print(f"🌡️ Per-key temperature override: {temperature} → {per_key_temp}")
                 temperature = per_key_temp
         except Exception:
             pass
