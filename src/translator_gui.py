@@ -3646,8 +3646,19 @@ Recent translations to summarize:
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
                     for key_data in self.config.get(pool_key, []):
-                        if key_data.get('model', '').startswith('authgpt/'):
+                        m = key_data.get('model', '') if isinstance(key_data, dict) else getattr(key_data, 'model', '')
+                        if m.startswith('authgpt/'):
                             return True
+            # Also check the live in-memory pool (may not be synced to config yet)
+            try:
+                from unified_api_client import UnifiedClient
+                pool = getattr(UnifiedClient, '_api_key_pool', None)
+                if pool and hasattr(pool, 'keys'):
+                    for key in pool.keys:
+                        if getattr(key, 'model', '').startswith('authgpt/'):
+                            return True
+            except Exception:
+                pass
         except Exception:
             pass
         return False
@@ -3663,8 +3674,19 @@ Recent translations to summarize:
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
                     for key_data in self.config.get(pool_key, []):
-                        if key_data.get('model', '').startswith('authgem/'):
+                        m = key_data.get('model', '') if isinstance(key_data, dict) else getattr(key_data, 'model', '')
+                        if m.startswith('authgem/'):
                             return True
+            # Also check the live in-memory pool (may not be synced to config yet)
+            try:
+                from unified_api_client import UnifiedClient
+                pool = getattr(UnifiedClient, '_api_key_pool', None)
+                if pool and hasattr(pool, 'keys'):
+                    for key in pool.keys:
+                        if getattr(key, 'model', '').startswith('authgem/'):
+                            return True
+            except Exception:
+                pass
         except Exception:
             pass
         return False
