@@ -3594,9 +3594,9 @@ Recent translations to summarize:
         
         # Show/hide AuthGPT login button
         if hasattr(self, 'authgpt_login_btn'):
-            needs_authgpt = model.startswith('authgpt/') or model.startswith('authgpt')
+            needs_authgpt = model.startswith('authgpt/')
             
-            # Also check multi-key and fallback pools for authgpt models
+            # Also check enabled key pools for authgpt models
             if not needs_authgpt:
                 needs_authgpt = self._has_authgpt_in_key_pools()
             
@@ -3608,9 +3608,9 @@ Recent translations to summarize:
 
         # Show/hide AuthGem login button + project dropdown
         if hasattr(self, 'authgem_login_btn'):
-            needs_authgem = model.startswith('authgem/') or model.startswith('authgem')
+            needs_authgem = model.startswith('authgem/')
             
-            # Also check multi-key and fallback pools for authgem models
+            # Also check enabled key pools for authgem models
             if not needs_authgem:
                 needs_authgem = self._has_authgem_in_key_pools()
             
@@ -3636,48 +3636,39 @@ Recent translations to summarize:
         self._reposition_authgem_project_combo()
 
     def _has_authgpt_in_key_pools(self):
-        """Check if any enabled multi-key or fallback key pool contains an authgpt model."""
+        """Check if any enabled key pool contains an authgpt model."""
         try:
-            if self.config.get('use_multi_api_keys', False):
-                for key_data in self.config.get('multi_api_keys', []):
-                    m = key_data.get('model', '')
-                    if m.startswith('authgpt/') or m.startswith('authgpt'):
-                        return True
-            if self.config.get('use_fallback_keys', False):
-                for key_data in self.config.get('fallback_keys', []):
-                    m = key_data.get('model', '')
-                    if m.startswith('authgpt/') or m.startswith('authgpt'):
-                        return True
-            if self.config.get('use_glossary_keys', False):
-                for key_data in self.config.get('glossary_keys', []):
-                    m = key_data.get('model', '')
-                    if m.startswith('authgpt/') or m.startswith('authgpt'):
-                        return True
+            pool_map = {
+                'multi_api_keys': 'use_multi_api_keys',
+                'fallback_keys': 'use_fallback_keys',
+                'glossary_keys': 'use_glossary_keys',
+            }
+            for pool_key, toggle_key in pool_map.items():
+                if self.config.get(toggle_key, False):
+                    for key_data in self.config.get(pool_key, []):
+                        if key_data.get('model', '').startswith('authgpt/'):
+                            return True
         except Exception:
             pass
         return False
 
     def _has_authgem_in_key_pools(self):
-        """Check if any enabled multi-key or fallback key pool contains an authgem model."""
+        """Check if any enabled key pool contains an authgem model."""
         try:
-            if self.config.get('use_multi_api_keys', False):
-                for key_data in self.config.get('multi_api_keys', []):
-                    m = key_data.get('model', '')
-                    if m.startswith('authgem/') or m.startswith('authgem'):
-                        return True
-            if self.config.get('use_fallback_keys', False):
-                for key_data in self.config.get('fallback_keys', []):
-                    m = key_data.get('model', '')
-                    if m.startswith('authgem/') or m.startswith('authgem'):
-                        return True
-            if self.config.get('use_glossary_keys', False):
-                for key_data in self.config.get('glossary_keys', []):
-                    m = key_data.get('model', '')
-                    if m.startswith('authgem/') or m.startswith('authgem'):
-                        return True
+            pool_map = {
+                'multi_api_keys': 'use_multi_api_keys',
+                'fallback_keys': 'use_fallback_keys',
+                'glossary_keys': 'use_glossary_keys',
+            }
+            for pool_key, toggle_key in pool_map.items():
+                if self.config.get(toggle_key, False):
+                    for key_data in self.config.get(pool_key, []):
+                        if key_data.get('model', '').startswith('authgem/'):
+                            return True
         except Exception:
             pass
         return False
+
 
     def _update_authgpt_login_status(self):
         """Update the AuthGPT login button text based on current token state."""
@@ -3982,8 +3973,8 @@ Recent translations to summarize:
             parent_layout = combo.parentWidget().layout() if combo.parentWidget() else None
             if parent_layout:
                 parent_layout.removeWidget(combo)
-            # Add to the grid layout on a new row (row 2, col 1, span 3 cols)
-            self.frame.addWidget(combo, 2, 1, 1, 3, Qt.AlignLeft)
+            # Add to the grid layout on a new row (row 2, col 3, span 2 cols — under the buttons)
+            self.frame.addWidget(combo, 2, 3, 1, 2, Qt.AlignLeft)
             self._authgem_combo_in_own_row = True
         elif not both_visible and already_own_row:
             # Move back into the HBox button row
