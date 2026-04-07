@@ -5863,6 +5863,8 @@ CRITICAL EXTRACTION RULES:
                                 entry['_section'] = after
                             elif after:
                                 entry[col_key] = after
+                            elif col_key in {'type', 'raw_name', 'translated_name', 'gender', 'description'}:
+                                entry[col_key] = ''
                             else:
                                 entry.pop(col_key, None)
 
@@ -6221,8 +6223,13 @@ CRITICAL EXTRACTION RULES:
            if self.current_glossary_format in ['list', 'token_csv']:
                if 0 <= row_idx < len(self.current_glossary_data):
                    data_entry = self.current_glossary_data[row_idx]
+                   # Standard fields must be kept as empty strings, not removed,
+                   # to avoid losing columns (e.g. gender) when saved.
+                   _standard_fields = {'type', 'raw_name', 'translated_name', 'gender', 'description'}
                    if new_value:
                        data_entry[col_key] = new_value
+                   elif col_key in _standard_fields:
+                       data_entry[col_key] = ''
                    else:
                        data_entry.pop(col_key, None)
            
