@@ -161,6 +161,51 @@ def refresh_access_token(refresh_token: str) -> Dict:
 
 
 # ===========================================================================
+# GCP project auto-detection
+# ===========================================================================
+
+_cached_project_id: Optional[str] = None
+
+
+def detect_gcp_project(access_token: str) -> Optional[str]:
+    """Auto-detect the user's GCP project ID using the Resource Manager API.
+
+    Uses the OAuth token to list projects the user has access to, picks the
+    first ACTIVE one.  Result is cached for the session.
+    """
+    global _cached_project_id
+    if _cached_project_id:
+        return _cached_project_id
+
+    # Check env vars first
+    for env_key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GCP_PROJECT"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            _cached_project_id = val
+            return val
+
+    try:
+        resp = requests.get(
+            "https://cloudresourcemanager.googleapis.com/v1/projects",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"filter": "lifecycleState:ACTIVE", "pageSize": 10},
+            timeout=15,
+        )
+        if resp.ok:
+            data = resp.json()
+            projects = data.get("projects", [])
+            if projects:
+                _cached_project_id = projects[0].get("projectId")
+                logger.info("AuthGem: Auto-detected GCP project: %s", _cached_project_id)
+                print(f"🔍 AuthGem: Using GCP project: {_cached_project_id}")
+                return _cached_project_id
+    except Exception as exc:
+        logger.debug("Failed to auto-detect GCP project: %s", exc)
+
+    return None
+
+
+# ===========================================================================
 # User info helpers
 # ===========================================================================
 
@@ -654,13 +699,13 @@ def send_chat_completion(
 
     body = _build_gemini_request_body(messages, temperature, max_tokens)
 
-    # Resolve project — env var, or stored in tokens, or fail with clear message
-    project = VERTEX_PROJECT or os.environ.get("GCLOUD_PROJECT", "")
+    # Resolve project — auto-detect from the OAuth token
+    project = detect_gcp_project(access_token)
     location = VERTEX_LOCATION
     if not project:
         raise RuntimeError(
-            "AuthGem: GOOGLE_CLOUD_PROJECT environment variable is required.\n"
-            "Set it to your GCP project ID, e.g.:\n"
+            "AuthGem: Could not detect your GCP project ID.\n"
+            "Set the GOOGLE_CLOUD_PROJECT environment variable, e.g.:\n"
             "  set GOOGLE_CLOUD_PROJECT=my-project-id\n"
             "You can find your project ID at https://console.cloud.google.com"
         )
