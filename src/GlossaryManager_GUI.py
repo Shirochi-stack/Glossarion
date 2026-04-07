@@ -4065,6 +4065,11 @@ CRITICAL EXTRACTION RULES:
         self.glossary_column_fields = []
         self._original_translated_map = {}
 
+        # Undo / redo history stacks (each entry is a deep copy of current_glossary_data)
+        self._undo_stack = []
+        self._redo_stack = []
+        self._undo_max = 50  # Keep at most 50 snapshots
+
         # Row highlight helpers
         orange_brush = QBrush(QColor("#f97316"))
         default_brush = QBrush()
@@ -4097,13 +4102,19 @@ CRITICAL EXTRACTION RULES:
             mark_row_updated(item, new_val != baseline)
 
         # Editor functions
-        def load_glossary_for_editing():
+        def load_glossary_for_editing(skip_file_read=False):
            path = self.editor_file_entry.text()
            if not path or not os.path.exists(path):
                QMessageBox.critical(parent, "Error", "Please select a valid glossary file")
                return
            
            try:
+               # When restoring from undo/redo, save in-memory data to disk first
+               # then let the normal parse path re-read it. This avoids re-indenting
+               # hundreds of lines of the file-read block.
+               if skip_file_read and self.current_glossary_data is not None:
+                   save_current_glossary()
+
                # Helpers for token-efficient format (sectioned, bullet-style CSV text)
                def parse_token_efficient_glossary(lines):
                    entries = []
@@ -4388,6 +4399,13 @@ CRITICAL EXTRACTION RULES:
                # Clear any existing highlights
                for i in range(self.glossary_tree.topLevelItemCount()):
                    mark_row_updated(self.glossary_tree.topLevelItem(i), False)
+               # Reset undo/redo stacks on fresh load (not on undo/redo restore)
+               if not skip_file_read:
+                   self._undo_stack.clear()
+                   self._redo_stack.clear()
+               if hasattr(self, '_undo_btn'):
+                   self._undo_btn.setEnabled(len(self._undo_stack) > 0)
+                   self._redo_btn.setEnabled(len(self._redo_stack) > 0)
                
            except Exception as e:
                #QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
@@ -4583,6 +4601,9 @@ CRITICAL EXTRACTION RULES:
                 # automatic backup
                 if not self.create_glossary_backup(f"before_delete_{count}"):
                     return
+                # Snapshot for undo
+                if hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
                     
                 indices_to_delete = []
                 for item in selected:
@@ -5671,6 +5692,114 @@ CRITICAL EXTRACTION RULES:
             btn.clicked.connect(handler)
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
             toolbar_layout.addWidget(btn)
+
+        # ── Undo / Redo / Open Backups ──
+        import copy as _copy
+
+        def _push_undo_snapshot():
+            """Snapshot current data onto the undo stack (call BEFORE mutation)."""
+            if self.current_glossary_data is None:
+                return
+            snap = _copy.deepcopy(self.current_glossary_data)
+            self._undo_stack.append(snap)
+            if len(self._undo_stack) > self._undo_max:
+                self._undo_stack.pop(0)
+            self._redo_stack.clear()
+            _update_undo_redo_state()
+
+        def _undo_action():
+            if not self._undo_stack or self.current_glossary_data is None:
+                return
+            # Push current state to redo
+            self._redo_stack.append(_copy.deepcopy(self.current_glossary_data))
+            # Pop last undo snapshot
+            restored = self._undo_stack.pop()
+            self.current_glossary_data = restored
+            load_glossary_for_editing(skip_file_read=True)
+            _update_undo_redo_state()
+
+        def _redo_action():
+            if not self._redo_stack or self.current_glossary_data is None:
+                return
+            # Push current state to undo
+            self._undo_stack.append(_copy.deepcopy(self.current_glossary_data))
+            # Pop from redo
+            restored = self._redo_stack.pop()
+            self.current_glossary_data = restored
+            load_glossary_for_editing(skip_file_read=True)
+            _update_undo_redo_state()
+
+        def _update_undo_redo_state():
+            undo_count = len(self._undo_stack)
+            redo_count = len(self._redo_stack)
+            self._undo_btn.setEnabled(undo_count > 0)
+            self._redo_btn.setEnabled(redo_count > 0)
+            self._undo_btn.setToolTip(f"Undo ({undo_count} steps)" if undo_count else "Nothing to undo")
+            self._redo_btn.setToolTip(f"Redo ({redo_count} steps)" if redo_count else "Nothing to redo")
+
+        def _open_backups_folder():
+            path = self.editor_file_entry.text()
+            if not path:
+                QMessageBox.warning(parent, "No File", "No glossary file is loaded.")
+                return
+            backup_dir = os.path.join(os.path.dirname(path), "Backups")
+            if not os.path.isdir(backup_dir):
+                QMessageBox.information(parent, "No Backups",
+                    f"No backups folder found yet.\n\n"
+                    f"Expected location:\n{backup_dir}\n\n"
+                    "Backups are created automatically when you perform destructive operations (delete, filter, etc).")
+                return
+            import subprocess
+            if sys.platform == 'win32':
+                os.startfile(backup_dir)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', backup_dir])
+            else:
+                subprocess.Popen(['xdg-open', backup_dir])
+
+        # Expose snapshot helper so other functions (save_edit, delete, etc.) can call it
+        self._push_undo_snapshot = _push_undo_snapshot
+
+        # Separator
+        sep = QLabel("│")
+        sep.setStyleSheet("color: #555; font-size: 14pt; padding: 0 2px;")
+        toolbar_layout.addWidget(sep)
+
+        # Undo button
+        self._undo_btn = QPushButton("↶ Undo")
+        self._undo_btn.setFixedWidth(75)
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.clicked.connect(_undo_action)
+        self._undo_btn.setStyleSheet(
+            "QPushButton { background-color: #4a5568; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #5a6a80; }"
+            "QPushButton:disabled { background-color: #2d3748; color: #666; }"
+        )
+        toolbar_layout.addWidget(self._undo_btn)
+
+        # Redo button
+        self._redo_btn = QPushButton("↷ Redo")
+        self._redo_btn.setFixedWidth(75)
+        self._redo_btn.setEnabled(False)
+        self._redo_btn.clicked.connect(_redo_action)
+        self._redo_btn.setStyleSheet(
+            "QPushButton { background-color: #4a5568; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #5a6a80; }"
+            "QPushButton:disabled { background-color: #2d3748; color: #666; }"
+        )
+        toolbar_layout.addWidget(self._redo_btn)
+
+        # Open Backups button
+        backups_btn = QPushButton("📂 Backups")
+        backups_btn.setFixedWidth(90)
+        backups_btn.clicked.connect(_open_backups_folder)
+        backups_btn.setStyleSheet(
+            "QPushButton { background-color: #6b5b3a; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #7d6b48; }"
+        )
+        backups_btn.setToolTip("Open the Backups folder in your file explorer")
+        toolbar_layout.addWidget(backups_btn)
+
         toolbar_layout.addStretch()
         content_frame_layout.insertWidget(0, toolbar_widget)
 
@@ -5885,6 +6014,9 @@ CRITICAL EXTRACTION RULES:
                 return replacements
 
             def replace_current():
+                # Snapshot for undo
+                if hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
                 count = replace_in_item(self.glossary_tree.currentItem())
                 status_label.setText(f"Replaced {count} occurrence(s) in current row" if count else "No matches in current row.")
 
@@ -5892,6 +6024,9 @@ CRITICAL EXTRACTION RULES:
                 total_items = self.glossary_tree.topLevelItemCount()
                 if total_items == 0 or not find_edit.text():
                     return
+                # Snapshot for undo
+                if hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
                 total_repl = 0
                 for idx in range(total_items):
                     item = self.glossary_tree.topLevelItem(idx)
@@ -6217,6 +6352,9 @@ CRITICAL EXTRACTION RULES:
        def save_edit():
            new_value = entry.text()
            item.setText(column_idx, new_value)
+           # Snapshot before mutation for undo
+           if hasattr(self, '_push_undo_snapshot'):
+               self._push_undo_snapshot()
            
            row_idx = int(item.text(0)) - 1
            
