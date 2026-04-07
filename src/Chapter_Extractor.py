@@ -274,9 +274,6 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     
     print(f"\n🖼️ Renaming {len(existing_images)} images to chapter-based format...")
     
-    # Pattern to detect already-renamed images (filename_img_N format + Cover format)
-    already_renamed_pattern = re.compile(r'^.+_img_\d+\..+$|^\d+_Cover\.')
-    
     # Build mapping: scan each chapter body for <img> references
     # Track which images belong to which chapter (first reference wins)
     rename_map = {}  # original_name -> new_name
@@ -322,12 +319,6 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
             if not basename or basename in claimed_images:
                 continue
             
-            # Skip if already in our renamed format
-            if already_renamed_pattern.match(basename):
-                claimed_images.add(basename)
-                img_counter += 1
-                continue
-            
             # Check if file actually exists
             if basename not in existing_images:
                 # Try case-insensitive match
@@ -356,8 +347,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     
     # Handle unclaimed images (not referenced by any chapter) — name as Cover
     unclaimed = existing_images - claimed_images
-    # Filter out already-renamed ones
-    unclaimed_to_rename = [img for img in sorted(unclaimed) if not already_renamed_pattern.match(img)]
+    unclaimed_to_rename = sorted(unclaimed)
     if unclaimed_to_rename:
         for idx, img_name in enumerate(unclaimed_to_rename):
             ext = os.path.splitext(img_name)[1]
@@ -369,18 +359,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
         print(f"   📎 {len(unclaimed_to_rename)} unclaimed images named as Cover")
     
     if not rename_map:
-        print("📸 All images already in chapter format — no renames needed")
-        # Still save the map (could be empty or identity)
-        try:
-            # Build identity map for already-renamed images
-            identity_map = {}
-            for img_name in existing_images:
-                if already_renamed_pattern.match(img_name):
-                    identity_map[img_name] = img_name
-            with open(rename_map_path, 'w', encoding='utf-8') as f:
-                json.dump(identity_map, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        print("📸 No image references found in chapters — skipping rename")
         return chapters
     
     # Phase 1: Physically rename image files (use temp names to avoid collisions)
