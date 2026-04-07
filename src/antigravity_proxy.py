@@ -139,7 +139,7 @@ def _wait_for_auth(
     proxy_url: str,
     log_fn=None,
     max_wait: int = 120,
-    poll_interval: int = 5,
+    poll_interval: int = 10,
     stream: bool = False,
 ):
     """Open browser once and poll until authentication succeeds or timeout.
@@ -148,22 +148,36 @@ def _wait_for_auth(
     """
     _open_auth_browser_once(proxy_url, log_fn)
     _log = log_fn or (lambda msg: None)
+    _log(f"")
+    _log(f"╔══════════════════════════════════════════════════════════════╗")
+    _log(f"║  🔐  Antigravity: Google Account Authentication Required    ║")
+    _log(f"╠══════════════════════════════════════════════════════════════╣")
+    _log(f"║  Please complete these steps:                               ║")
+    _log(f"║  1. Open {proxy_url:<50s}║")
+    _log(f"║  2. Click 'Add Account' and sign in with Google             ║")
+    _log(f"║  3. Come back here — translation will resume automatically  ║")
+    _log(f"╚══════════════════════════════════════════════════════════════╝")
+    _log(f"")
+    _log(f"⏳ Waiting for you to complete authentication... (timeout: {max_wait}s)")
+
     elapsed = 0
     while elapsed < max_wait:
         time.sleep(poll_interval)
         elapsed += poll_interval
         if _cancel_event.is_set():
             return None
-        _log(f"⏳ Waiting for authentication... ({elapsed}s / {max_wait}s)")
+        _log(f"⏳ Still waiting for authentication... ({elapsed}s / {max_wait}s)")
         try:
             retry_resp = requests.post(
                 url, json=payload, headers=headers, timeout=30, stream=stream
             )
             if retry_resp.status_code not in (401, 403):
+                _log(f"✅ Antigravity: Authentication successful!")
                 return retry_resp
         except Exception:
             continue
     return None
+
 
 
 def cancel_stream():
@@ -590,9 +604,9 @@ def send_message(
     if log_fn:
         log_fn(f"🌀 Antigravity: Sending to proxy at {proxy_url} (model={model})")
 
-    # Retry on transient 401/403 (OAuth token refresh race condition)
+    # Brief retry on transient 401/403 (OAuth token refresh race condition)
     resp = None
-    for _auth_attempt in range(4):  # 1 initial + 3 retries
+    for _auth_attempt in range(2):  # 1 initial + 1 quick retry
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
         except requests.ConnectionError:
@@ -608,34 +622,18 @@ def send_message(
                 "The model may need more time for long translations."
             )
 
-        if resp.status_code not in (401, 403) or _auth_attempt >= 3:
+        if resp.status_code not in (401, 403):
             break
-        # Transient auth failure — wait for token refresh and retry
-        wait = 2 * (_auth_attempt + 1)  # 2s, 4s, 6s
-        if log_fn:
-            log_fn(f"⏳ Antigravity: Auth error (HTTP {resp.status_code}), retrying in {wait}s... ({_auth_attempt + 1}/3)")
-        time.sleep(wait)
-        invalidate_api_key_cache()
-        headers = _build_headers()  # refresh key
-        # On last retry, also try without API key (localhost may accept)
-        if _auth_attempt == 2:
-            headers.pop("x-api-key", None)
-
-    # All retries failed — restart the proxy as last resort
-    if resp.status_code in (401, 403):
-        restart_result = restart_proxy(log_fn=log_fn)
-        if restart_result.get("running"):
-            # Proxy restarted — rebuild headers with fresh key and retry once
+        if _auth_attempt == 0:
+            # One quick retry with refreshed key for transient race conditions
+            if log_fn:
+                log_fn(f"⏳ Antigravity: Auth error (HTTP {resp.status_code}), retrying once...")
+            time.sleep(2)
             invalidate_api_key_cache()
             headers = _build_headers()
-            try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            except Exception:
-                pass  # fall through to existing error handling
 
-    # Handle auth failure (after all retry/restart attempts)
+    # Handle auth failure — determine if it's an API key issue or Google account issue
     if resp.status_code in (401, 403):
-        # Parse error to distinguish API key rejection from Google auth
         error_detail = ""
         try:
             err_json = resp.json()
@@ -644,7 +642,7 @@ def send_message(
             error_detail = resp.text[:200]
 
         if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
-            # API key mismatch — clear cache & retry once with a fresh key
+            # API key mismatch — try fresh key, then restart proxy as last resort
             invalidate_api_key_cache()
             fresh_key = _get_proxy_api_key()
             if fresh_key:
@@ -654,7 +652,6 @@ def send_message(
                     if retry_resp.status_code not in (401, 403):
                         resp = retry_resp
                     else:
-                        # Still failing — raise with helpful message
                         config_path = os.path.join(
                             os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
                         )
@@ -681,19 +678,19 @@ def send_message(
                     f"Fix: edit the apiKey in {config_path}\n"
                     f"or open {proxy_url} → Settings and remove/change the API Key."
                 )
-
-        # Otherwise it's likely a Google account auth issue → open browser
-        auth_resp = _wait_for_auth(
-            url, payload, headers, proxy_url, log_fn, stream=False
-        )
-        if auth_resp is not None and auth_resp.status_code == 200:
-            resp = auth_resp
         else:
-            raise RuntimeError(
-                f"Antigravity: Authentication timed out.\n"
-                f"Open {proxy_url} in your browser and link your Google account,\n"
-                f"then try again."
+            # Google account auth issue — go straight to user-facing wait
+            auth_resp = _wait_for_auth(
+                url, payload, headers, proxy_url, log_fn, stream=False
             )
+            if auth_resp is not None and auth_resp.status_code == 200:
+                resp = auth_resp
+            else:
+                raise RuntimeError(
+                    f"Antigravity: Authentication timed out.\n"
+                    f"Open {proxy_url} in your browser and link your Google account,\n"
+                    f"then try again."
+                )
 
     if resp.status_code != 200:
         error_body = resp.text
