@@ -2069,35 +2069,6 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_combobox_mousewheel(self.fallback_azure_api_version_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
         
-        # Row 4: Individual Output Token Limit (fallback)
-        fallback_output_label = QLabel("Output Token Limit:")
-        fallback_output_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_fallback_grid.addWidget(fallback_output_label, 4, 0, Qt.AlignLeft)
-        self.fallback_output_token_spinbox = QSpinBox()
-        self.fallback_output_token_spinbox.setRange(0, 2000000)
-        self.fallback_output_token_spinbox.setValue(0)
-        self.fallback_output_token_spinbox.setMaximumWidth(120)
-        self._disable_spinbox_mousewheel(self.fallback_output_token_spinbox)
-        add_fallback_grid.addWidget(self.fallback_output_token_spinbox, 4, 1, Qt.AlignLeft)
-        fallback_output_hint = QLabel("0 = use global limit")
-        fallback_output_hint.setStyleSheet("color: gray; font-size: 8pt;")
-        add_fallback_grid.addWidget(fallback_output_hint, 4, 2, 1, 2, Qt.AlignLeft)
-        
-        # Row 5: Individual Key Temperature (fallback)
-        fallback_temp_label = QLabel("Key Temperature:")
-        fallback_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_fallback_grid.addWidget(fallback_temp_label, 5, 0, Qt.AlignLeft)
-        self.fallback_key_temperature_spinbox = QDoubleSpinBox()
-        self.fallback_key_temperature_spinbox.setRange(-1.0, 1.0)
-        self.fallback_key_temperature_spinbox.setValue(-1.0)
-        self.fallback_key_temperature_spinbox.setSingleStep(0.05)
-        self.fallback_key_temperature_spinbox.setDecimals(2)
-        self.fallback_key_temperature_spinbox.setMaximumWidth(120)
-        self._disable_spinbox_mousewheel(self.fallback_key_temperature_spinbox)
-        add_fallback_grid.addWidget(self.fallback_key_temperature_spinbox, 5, 1, Qt.AlignLeft)
-        fallback_temp_hint = QLabel("-1 = use global temp")
-        fallback_temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
-        add_fallback_grid.addWidget(fallback_temp_hint, 5, 2, 1, 2, Qt.AlignLeft)
         
         # Initially hide the endpoint fields when toggle is off
         self._toggle_fallback_individual_endpoint_fields()
@@ -2579,25 +2550,10 @@ class MultiAPIKeyDialog(QDialog):
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
-        # Determine per-key output token limit (0 = use global limit)
+        # Per-key output token limit and temperature default to None (global)
+        # Users can set these later via the right-click context menu
         individual_output_token_limit = None
-        if hasattr(self, 'fallback_output_token_spinbox'):
-            try:
-                val = int(self.fallback_output_token_spinbox.value())
-                if val > 0:
-                    individual_output_token_limit = val
-            except Exception:
-                individual_output_token_limit = None
-        
-        # Determine per-key temperature (-1 = use global temperature)
         individual_key_temperature = None
-        if hasattr(self, 'fallback_key_temperature_spinbox'):
-            try:
-                val = float(self.fallback_key_temperature_spinbox.value())
-                if val >= 0:
-                    individual_key_temperature = val
-            except Exception:
-                individual_key_temperature = None
         
         # Add new key with additional fields
         fallback_keys.append({
@@ -2625,10 +2581,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_google_region_entry.setText("us-east5")
         self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.fallback_individual_endpoint_toggle.setChecked(False)
-        if hasattr(self, 'fallback_output_token_spinbox'):
-            self.fallback_output_token_spinbox.setValue(0)
-        if hasattr(self, 'fallback_key_temperature_spinbox'):
-            self.fallback_key_temperature_spinbox.setValue(-1.0)
+
         # Update the UI to disable endpoint fields
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -3707,35 +3660,6 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_combobox_mousewheel(self.azure_api_version_combo)  # Disable mousewheel
         add_grid.addWidget(self.azure_api_version_combo, 4, 4, 1, 1, Qt.AlignLeft)
         
-        # Row 5: Individual Output Token Limit
-        output_label = QLabel("Output Token Limit:")
-        output_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_grid.addWidget(output_label, 5, 0, Qt.AlignLeft)
-        self.output_token_spinbox = QSpinBox()
-        self.output_token_spinbox.setRange(0, 2000000)
-        self.output_token_spinbox.setValue(0)
-        self.output_token_spinbox.setMaximumWidth(120)
-        self._disable_spinbox_mousewheel(self.output_token_spinbox)
-        add_grid.addWidget(self.output_token_spinbox, 5, 1, Qt.AlignLeft)
-        output_hint = QLabel("0 = use global limit")
-        output_hint.setStyleSheet("color: gray; font-size: 8pt;")
-        add_grid.addWidget(output_hint, 5, 2, 1, 2, Qt.AlignLeft)
-        
-        # Row 6: Individual Key Temperature
-        temp_label = QLabel("Key Temperature:")
-        temp_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_grid.addWidget(temp_label, 6, 0, Qt.AlignLeft)
-        self.key_temperature_spinbox = QDoubleSpinBox()
-        self.key_temperature_spinbox.setRange(-1.0, 1.0)
-        self.key_temperature_spinbox.setValue(-1.0)
-        self.key_temperature_spinbox.setSingleStep(0.05)
-        self.key_temperature_spinbox.setDecimals(2)
-        self.key_temperature_spinbox.setMaximumWidth(120)
-        self._disable_spinbox_mousewheel(self.key_temperature_spinbox)
-        add_grid.addWidget(self.key_temperature_spinbox, 6, 1, Qt.AlignLeft)
-        temp_hint = QLabel("-1 = use global temp")
-        temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
-        add_grid.addWidget(temp_hint, 6, 2, 1, 2, Qt.AlignLeft)
         
         # Set column stretch
         add_grid.setColumnStretch(1, 1)
@@ -4769,35 +4693,6 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_combobox_mousewheel(self.glossary_azure_api_version_combo)
         add_glossary_grid.addWidget(self.glossary_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
         
-        # Row 4: Output Token Limit
-        glossary_output_label = QLabel("Output Token Limit:")
-        glossary_output_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_glossary_grid.addWidget(glossary_output_label, 4, 0, Qt.AlignLeft)
-        self.glossary_output_token_spinbox = QSpinBox()
-        self.glossary_output_token_spinbox.setRange(0, 2000000)
-        self.glossary_output_token_spinbox.setValue(0)
-        self.glossary_output_token_spinbox.setMaximumWidth(120)
-        self._disable_spinbox_mousewheel(self.glossary_output_token_spinbox)
-        add_glossary_grid.addWidget(self.glossary_output_token_spinbox, 4, 1, Qt.AlignLeft)
-        glossary_output_hint = QLabel("0 = use global limit")
-        glossary_output_hint.setStyleSheet("color: gray; font-size: 8pt;")
-        add_glossary_grid.addWidget(glossary_output_hint, 4, 2, 1, 2, Qt.AlignLeft)
-        
-        # Row 5: Individual Key Temperature (glossary)
-        glossary_temp_label = QLabel("Key Temperature:")
-        glossary_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_glossary_grid.addWidget(glossary_temp_label, 5, 0, Qt.AlignLeft)
-        self.glossary_key_temperature_spinbox = QDoubleSpinBox()
-        self.glossary_key_temperature_spinbox.setRange(-1.0, 1.0)
-        self.glossary_key_temperature_spinbox.setValue(-1.0)
-        self.glossary_key_temperature_spinbox.setSingleStep(0.05)
-        self.glossary_key_temperature_spinbox.setDecimals(2)
-        self.glossary_key_temperature_spinbox.setMaximumWidth(120)
-        self._disable_spinbox_mousewheel(self.glossary_key_temperature_spinbox)
-        add_glossary_grid.addWidget(self.glossary_key_temperature_spinbox, 5, 1, Qt.AlignLeft)
-        glossary_temp_hint = QLabel("-1 = use global temp")
-        glossary_temp_hint.setStyleSheet("color: gray; font-size: 8pt;")
-        add_glossary_grid.addWidget(glossary_temp_hint, 5, 2, 1, 2, Qt.AlignLeft)
         
         # Initially hide endpoint fields
         self._toggle_glossary_individual_endpoint_fields()
@@ -5050,24 +4945,10 @@ class MultiAPIKeyDialog(QDialog):
         
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         
+        # Per-key output token limit and temperature default to None (global)
+        # Users can set these later via the right-click context menu
         individual_output_token_limit = None
-        if hasattr(self, 'glossary_output_token_spinbox'):
-            try:
-                val = int(self.glossary_output_token_spinbox.value())
-                if val > 0:
-                    individual_output_token_limit = val
-            except Exception:
-                individual_output_token_limit = None
-        
-        # Determine per-key temperature (-1 = use global temperature)
         individual_key_temperature = None
-        if hasattr(self, 'glossary_key_temperature_spinbox'):
-            try:
-                val = float(self.glossary_key_temperature_spinbox.value())
-                if val >= 0:
-                    individual_key_temperature = val
-            except Exception:
-                individual_key_temperature = None
         
         glossary_keys.append({
             'api_key': api_key,
@@ -5093,10 +4974,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_google_region_entry.setText("us-east5")
         self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.glossary_individual_endpoint_toggle.setChecked(False)
-        if hasattr(self, 'glossary_output_token_spinbox'):
-            self.glossary_output_token_spinbox.setValue(0)
-        if hasattr(self, 'glossary_key_temperature_spinbox'):
-            self.glossary_key_temperature_spinbox.setValue(-1.0)
+
         self._toggle_glossary_individual_endpoint_fields()
         
         self._load_glossary_keys()
@@ -6259,25 +6137,10 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
             return
         
-        # Determine per-key output token limit (0 = use global limit)
+        # Per-key output token limit and temperature default to None (global)
+        # Users can set these later via the right-click context menu
         individual_output_token_limit = None
-        try:
-            if hasattr(self, 'output_token_spinbox'):
-                val = int(self.output_token_spinbox.value())
-                if val > 0:
-                    individual_output_token_limit = val
-        except Exception:
-            individual_output_token_limit = None
-        
-        # Determine per-key temperature (-1 = use global temperature)
         individual_key_temperature = None
-        try:
-            if hasattr(self, 'key_temperature_spinbox'):
-                val = float(self.key_temperature_spinbox.value())
-                if val >= 0:
-                    individual_key_temperature = val
-        except Exception:
-            individual_key_temperature = None
         
         # Add to pool with new fields
         key_entry = APIKeyEntry(
@@ -6304,10 +6167,7 @@ class MultiAPIKeyDialog(QDialog):
         self.google_region_entry.setText("us-east5")
         self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.individual_endpoint_toggle.setChecked(False)
-        if hasattr(self, 'output_token_spinbox'):
-            self.output_token_spinbox.setValue(0)
-        if hasattr(self, 'key_temperature_spinbox'):
-            self.key_temperature_spinbox.setValue(-1.0)
+
         # Update the UI to hide endpoint fields
         self._toggle_individual_endpoint_fields()
         
