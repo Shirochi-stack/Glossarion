@@ -1315,12 +1315,33 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             print(f"[Fatal] Cannot open EPUB as zip: {ze}")
             return chapters
             
+    # Check if special files should be skipped (same logic as TransateKRtoEN)
+    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+    special_keywords = [
+        'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
+        'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+        'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
+        'bibliography'
+    ]
+    skipped_special = []
+
     for item in items:
         # Add stop check before processing each chapter
         if is_stop_requested():
             return chapters
             
         try:
+            # Skip special files when TRANSLATE_SPECIAL_FILES is disabled
+            if not translate_special:
+                name = item.get_name() if hasattr(item, 'get_name') else ''
+                name_noext = os.path.splitext(os.path.basename(name))[0] if name else ''
+                has_digits = bool(re.search(r'\d', name_noext))
+                if not has_digits and name_noext:
+                    name_lower = name_noext.lower()
+                    if any(kw in name_lower for kw in special_keywords):
+                        skipped_special.append(name_noext)
+                        continue
+
             raw = item.get_content()
             soup = BeautifulSoup(raw, 'html.parser')
             text = soup.get_text("\n", strip=True)
@@ -1329,6 +1350,9 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
         except Exception as e:
             name = item.get_name() if hasattr(item, 'get_name') else repr(item)
             print(f"[Warning] Skipped corrupted chapter {name}: {e}")
+
+    if skipped_special:
+        print(f"⏭️ Skipped {len(skipped_special)} special file(s) for glossary extraction: {', '.join(skipped_special)}")
             
     return chapters
 

@@ -1043,7 +1043,7 @@ class GlossaryManagerMixin:
         self.entry_type_filter_combo = QComboBox()
         self.entry_type_filter_combo.addItems(["Strict", "Loose", "No Filtering"])
         self.entry_type_filter_combo.wheelEvent = lambda event: event.ignore()
-        saved_mode = self.config.get('glossary_entry_type_filter_mode', 'none')
+        saved_mode = self.config.get('glossary_entry_type_filter_mode', 'loose')
         mode_to_index = {'strict': 0, 'loose': 1, 'none': 2}
         self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 2))
         filter_combo_layout.addWidget(self.entry_type_filter_combo)
