@@ -151,6 +151,126 @@ def _extract_cover(epub_path: str) -> str | None:
     if os.path.isfile(cached):
         return cached
 
+    # Fast path: read EPUB as a zip and extract cover via OPF metadata
+    # This avoids the heavy ebooklib.read_epub() which fully parses the DOM
+    try:
+        import zipfile
+        import posixpath
+        from xml.etree import ElementTree as ET
+
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            names = zf.namelist()
+            names_set = set(names)
+            cover_data = None
+
+            # --- Step 1: Find and parse the OPF file ---
+            opf_path = None
+            # Check container.xml for the OPF path
+            if "META-INF/container.xml" in names_set:
+                try:
+                    container_xml = zf.read("META-INF/container.xml").decode("utf-8", errors="replace")
+                    container_tree = ET.fromstring(container_xml)
+                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+                    rootfile = container_tree.find(".//c:rootfile", ns)
+                    if rootfile is not None:
+                        opf_path = rootfile.get("full-path")
+                except Exception:
+                    pass
+
+            # Fallback: find any .opf file
+            if not opf_path:
+                for zname in names:
+                    if zname.lower().endswith(".opf"):
+                        opf_path = zname
+                        break
+
+            opf_dir = ""
+            manifest_items = {}  # id -> (href, media_type)
+            cover_meta_id = None
+
+            if opf_path and opf_path in names_set:
+                try:
+                    opf_xml = zf.read(opf_path).decode("utf-8", errors="replace")
+                    opf_tree = ET.fromstring(opf_xml)
+                    opf_dir = posixpath.dirname(opf_path)
+
+                    # Strip namespace for easier matching
+                    opf_ns = {"opf": "http://www.idpf.org/2007/opf", "dc": "http://purl.org/dc/elements/1.1/"}
+
+                    # Find cover image ID from <meta name="cover" content="..."/>
+                    for meta_el in opf_tree.findall(".//{http://www.idpf.org/2007/opf}meta"):
+                        if meta_el.get("name") == "cover":
+                            cover_meta_id = meta_el.get("content")
+                            break
+
+                    # Build manifest lookup
+                    for item_el in opf_tree.findall(".//{http://www.idpf.org/2007/opf}item"):
+                        item_id = item_el.get("id", "")
+                        item_href = item_el.get("href", "")
+                        item_media = item_el.get("media-type", "")
+                        item_props = item_el.get("properties", "")
+                        full_href = posixpath.normpath(posixpath.join(opf_dir, item_href)) if item_href else ""
+                        manifest_items[item_id] = (full_href, item_media, item_props)
+                except Exception:
+                    pass
+
+            # --- Step 2: Try cover by OPF metadata ID ---
+            if cover_meta_id and cover_meta_id in manifest_items:
+                href, media_type, _ = manifest_items[cover_meta_id]
+                if href in names_set and media_type.startswith("image/"):
+                    cover_data = zf.read(href)
+
+            # --- Step 3: Try cover by properties="cover-image" (EPUB3) ---
+            if not cover_data:
+                for item_id, (href, media_type, props) in manifest_items.items():
+                    if "cover-image" in props and href in names_set:
+                        cover_data = zf.read(href)
+                        break
+
+            # --- Step 4: Try images with "cover" in filename ---
+            if not cover_data:
+                img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+                for zname in names:
+                    lower = zname.lower()
+                    if any(lower.endswith(ext) for ext in img_exts) and "cover" in os.path.basename(lower):
+                        cover_data = zf.read(zname)
+                        break
+
+            # --- Step 5: First <img> in first HTML chapter ---
+            if not cover_data:
+                try:
+                    from bs4 import BeautifulSoup
+                    html_exts = (".xhtml", ".html", ".htm")
+                    for zname in sorted(names):
+                        if any(zname.lower().endswith(ext) for ext in html_exts):
+                            html = zf.read(zname).decode("utf-8", errors="replace")
+                            soup = BeautifulSoup(html, "html.parser")
+                            img_tag = soup.find("img")
+                            if img_tag and img_tag.get("src"):
+                                html_dir = posixpath.dirname(zname)
+                                img_path = posixpath.normpath(posixpath.join(html_dir, img_tag["src"]))
+                                if img_path in names_set:
+                                    cover_data = zf.read(img_path)
+                                    break
+                except Exception:
+                    pass
+
+            # --- Step 6: First image file in the zip ---
+            if not cover_data:
+                img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+                for zname in names:
+                    if any(zname.lower().endswith(ext) for ext in img_exts):
+                        cover_data = zf.read(zname)
+                        break
+
+            if cover_data:
+                with open(cached, "wb") as f:
+                    f.write(cover_data)
+                return cached
+    except Exception as exc:
+        logger.debug("Cover extraction (zipfile) failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
+
+    # Last resort fallback: ebooklib (heavy, but handles edge cases)
     try:
         import ebooklib
         from ebooklib import epub as epub_mod
@@ -174,29 +294,6 @@ def _extract_cover(epub_path: str) -> str | None:
                     cover_data = item.get_content()
                     break
 
-        # Try the first image referenced in the first HTML chapter
-        if not cover_data:
-            try:
-                from bs4 import BeautifulSoup
-                for doc_item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-                    html = doc_item.get_content().decode("utf-8", errors="replace")
-                    soup = BeautifulSoup(html, "html.parser")
-                    img_tag = soup.find("img")
-                    if img_tag and img_tag.get("src"):
-                        src = img_tag["src"]
-                        candidates_src = [src, os.path.basename(src), src.lstrip("../"), src.lstrip("./")]
-                        for img_item in book.get_items():
-                            if img_item.get_type() == ebooklib.ITEM_IMAGE:
-                                name = img_item.get_name()
-                                if name in candidates_src or os.path.basename(name) in candidates_src:
-                                    cover_data = img_item.get_content()
-                                    break
-                    if cover_data:
-                        break
-            except Exception:
-                pass
-
-        # Last resort: just grab the first image in the manifest
         if not cover_data:
             for item in book.get_items():
                 if item.get_type() == ebooklib.ITEM_IMAGE:
@@ -210,40 +307,6 @@ def _extract_cover(epub_path: str) -> str | None:
     except Exception as exc:
         logger.debug("Cover extraction (ebooklib) failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
 
-    # Fallback: read EPUB as zip directly (handles EPUBs where ebooklib misses images)
-    try:
-        import zipfile
-        from bs4 import BeautifulSoup
-        import posixpath
-
-        with zipfile.ZipFile(epub_path, "r") as zf:
-            names = zf.namelist()
-            # Find first HTML file and extract its first <img> src
-            html_exts = (".xhtml", ".html", ".htm")
-            for zname in sorted(names):
-                if any(zname.lower().endswith(ext) for ext in html_exts):
-                    html = zf.read(zname).decode("utf-8", errors="replace")
-                    soup = BeautifulSoup(html, "html.parser")
-                    img_tag = soup.find("img")
-                    if img_tag and img_tag.get("src"):
-                        # Resolve relative path against the HTML file's directory
-                        html_dir = posixpath.dirname(zname)
-                        img_path = posixpath.normpath(posixpath.join(html_dir, img_tag["src"]))
-                        if img_path in names:
-                            cover_data = zf.read(img_path)
-                            with open(cached, "wb") as f:
-                                f.write(cover_data)
-                            return cached
-            # Last last resort: first image file in the zip
-            img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp")
-            for zname in names:
-                if any(zname.lower().endswith(ext) for ext in img_exts):
-                    cover_data = zf.read(zname)
-                    with open(cached, "wb") as f:
-                        f.write(cover_data)
-                    return cached
-    except Exception as exc:
-        logger.debug("Cover extraction (zipfile) failed for %s: %s\n%s", epub_path, exc, traceback.format_exc())
     return None
 
 
@@ -1721,8 +1784,8 @@ class EpubReaderDialog(QDialog):
             QTimer.singleShot(0, lambda: self._on_epub_loaded_from_cache(cached[0], cached[1]))
             return
         self._loader_thread = _EpubLoaderThread(self._epub_path, self)
-        self._loader_thread.done.connect(self._on_loader_done)
-        self._loader_thread.error.connect(self._on_epub_error)
+        self._loader_thread.done.connect(lambda: self._on_loader_done())
+        self._loader_thread.error.connect(lambda msg: self._on_epub_error(msg))
         self._loader_thread.start()
 
     @Slot()
