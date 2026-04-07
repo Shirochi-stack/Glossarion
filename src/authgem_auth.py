@@ -429,24 +429,58 @@ class AuthGemTokenStore:
             os.makedirs(d, exist_ok=True)
 
     def _load_from_disk(self):
-        """Load tokens from the JSON file into memory."""
+        """Load tokens from the encrypted file into memory.
+
+        If decryption fails (corrupt file, wrong user, etc.), the file is
+        removed so the next login produces a fresh, correctly-encrypted file.
+        """
         try:
             if os.path.isfile(self._token_file):
-                with open(self._token_file, "r", encoding="utf-8") as f:
-                    self._tokens = json.load(f)
+                try:
+                    from token_encryption import load_encrypted_tokens
+                    self._tokens = load_encrypted_tokens(self._token_file)
+                except ImportError:
+                    # token_encryption module not available — read plain JSON
+                    with open(self._token_file, "r", encoding="utf-8") as f:
+                        self._tokens = json.load(f)
+                except Exception as dec_exc:
+                    # Decryption failed — file is corrupt or from a different
+                    # user/machine.  Delete it so re-login creates a fresh one.
+                    logger.warning("AuthGem token decryption failed (%s) — removing corrupt file", dec_exc)
+                    try:
+                        os.remove(self._token_file)
+                    except OSError:
+                        pass
+                    self._tokens = None
+                    return
                 logger.debug("AuthGem tokens loaded from %s", self._token_file)
         except Exception as exc:
             logger.warning("Failed to load authgem tokens: %s", exc)
             self._tokens = None
 
     def save_tokens(self, tokens: Dict):
-        """Save tokens to disk and cache in memory."""
+        """Encrypt and save tokens to disk, and cache in memory.
+
+        If encryption fails for any reason, falls back to plain JSON so
+        the tokens are not lost and the app continues working.
+        """
         with self._lock:
             self._tokens = tokens
             try:
                 self._ensure_dir()
-                with open(self._token_file, "w", encoding="utf-8") as f:
-                    json.dump(tokens, f, indent=2)
+                saved = False
+                try:
+                    from token_encryption import save_encrypted_tokens
+                    save_encrypted_tokens(tokens, self._token_file)
+                    saved = True
+                except ImportError:
+                    pass
+                except Exception as enc_exc:
+                    logger.warning("AuthGem token encryption failed (%s) — saving as plain JSON", enc_exc)
+                if not saved:
+                    # Fallback: plain JSON (still better than losing tokens)
+                    with open(self._token_file, "w", encoding="utf-8") as f:
+                        json.dump(tokens, f, indent=2)
                 logger.debug("AuthGem tokens saved to %s", self._token_file)
             except Exception as exc:
                 logger.warning("Failed to save authgem tokens: %s", exc)
@@ -618,6 +652,76 @@ def get_default_store() -> AuthGemTokenStore:
 # Gemini API adapter
 # ===========================================================================
 
+def _convert_content_to_gemini_parts(content) -> List[Dict]:
+    """Convert OpenAI-style content (string or multimodal list) to Gemini parts.
+
+    Handles:
+      - Plain string → [{"text": "..."}]
+      - List of parts (OpenAI multimodal format):
+          {"type": "text", "text": "..."} → {"text": "..."}
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAA"}}
+              → {"inlineData": {"mimeType": "image/jpeg", "data": "AAA"}}
+    """
+    if isinstance(content, str):
+        return [{"text": content}]
+
+    if not isinstance(content, list):
+        return [{"text": str(content)}]
+
+    parts = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append({"text": item})
+            continue
+        if not isinstance(item, dict):
+            parts.append({"text": str(item)})
+            continue
+
+        item_type = item.get("type", "")
+
+        if item_type == "text":
+            text_val = item.get("text", "")
+            if text_val:
+                parts.append({"text": text_val})
+
+        elif item_type in ("image_url", "image"):
+            # OpenAI format: {"type": "image_url", "image_url": {"url": "data:mime;base64,..."}}
+            image_url_obj = item.get("image_url", {})
+            url = image_url_obj.get("url", "") if isinstance(image_url_obj, dict) else str(image_url_obj)
+
+            if url.startswith("data:") and "base64," in url:
+                # Parse data URI → inlineData
+                # Format: data:image/jpeg;base64,/9j/4AAQ...
+                header, b64_data = url.split("base64,", 1)
+                # Extract MIME type from "data:image/jpeg;..."
+                mime_type = header.replace("data:", "").rstrip(";").strip()
+                if not mime_type:
+                    mime_type = "image/jpeg"
+                parts.append({
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": b64_data,
+                    }
+                })
+            elif url.startswith(("http://", "https://")):
+                # URL-referenced image — use fileData for Vertex AI
+                parts.append({
+                    "fileData": {
+                        "mimeType": "image/jpeg",
+                        "fileUri": url,
+                    }
+                })
+            else:
+                logger.warning("AuthGem: Unsupported image URL format (not data: or http): %.80s…", url)
+        else:
+            # Unknown part type — try to extract text
+            text_val = item.get("text", "") or item.get("content", "")
+            if text_val:
+                parts.append({"text": str(text_val)})
+
+    return parts if parts else [{"text": ""}]
+
+
 def _build_gemini_request_body(
     messages: List[Dict],
     temperature: Optional[float] = None,
@@ -627,7 +731,7 @@ def _build_gemini_request_body(
 
     Maps:
       - system → systemInstruction
-      - user → user parts
+      - user → user parts (text and/or images)
       - assistant → model parts
     """
     system_parts = []
@@ -635,27 +739,31 @@ def _build_gemini_request_body(
 
     for msg in messages:
         role = msg.get("role", "user")
-        text = msg.get("content", "")
-        if not text:
+        content = msg.get("content", "")
+        if not content:
             continue
 
+        gemini_parts = _convert_content_to_gemini_parts(content)
+
         if role == "system":
-            system_parts.append({"text": text})
+            # System instruction only supports text parts
+            for p in gemini_parts:
+                if "text" in p:
+                    system_parts.append(p)
         elif role == "user":
             contents.append({
                 "role": "user",
-                "parts": [{"text": text}],
+                "parts": gemini_parts,
             })
         elif role == "assistant":
             contents.append({
                 "role": "model",
-                "parts": [{"text": text}],
+                "parts": gemini_parts,
             })
         else:
-            # Default to user
             contents.append({
                 "role": "user",
-                "parts": [{"text": text}],
+                "parts": gemini_parts,
             })
 
     body = {"contents": contents}

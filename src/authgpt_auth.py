@@ -353,24 +353,58 @@ class AuthGPTTokenStore:
             os.makedirs(d, exist_ok=True)
 
     def _load_from_disk(self):
-        """Load tokens from the JSON file into memory."""
+        """Load tokens from the encrypted file into memory.
+
+        If decryption fails (corrupt file, wrong user, etc.), the file is
+        removed so the next login produces a fresh, correctly-encrypted file.
+        """
         try:
             if os.path.isfile(self._token_file):
-                with open(self._token_file, "r", encoding="utf-8") as f:
-                    self._tokens = json.load(f)
+                try:
+                    from token_encryption import load_encrypted_tokens
+                    self._tokens = load_encrypted_tokens(self._token_file)
+                except ImportError:
+                    # token_encryption module not available — read plain JSON
+                    with open(self._token_file, "r", encoding="utf-8") as f:
+                        self._tokens = json.load(f)
+                except Exception as dec_exc:
+                    # Decryption failed — file is corrupt or from a different
+                    # user/machine.  Delete it so re-login creates a fresh one.
+                    logger.warning("AuthGPT token decryption failed (%s) — removing corrupt file", dec_exc)
+                    try:
+                        os.remove(self._token_file)
+                    except OSError:
+                        pass
+                    self._tokens = None
+                    return
                 logger.debug("AuthGPT tokens loaded from %s", self._token_file)
         except Exception as exc:
             logger.warning("Failed to load authgpt tokens: %s", exc)
             self._tokens = None
 
     def save_tokens(self, tokens: Dict):
-        """Save tokens to disk and cache in memory."""
+        """Encrypt and save tokens to disk, and cache in memory.
+
+        If encryption fails for any reason, falls back to plain JSON so
+        the tokens are not lost and the app continues working.
+        """
         with self._lock:
             self._tokens = tokens
             try:
                 self._ensure_dir()
-                with open(self._token_file, "w", encoding="utf-8") as f:
-                    json.dump(tokens, f, indent=2)
+                saved = False
+                try:
+                    from token_encryption import save_encrypted_tokens
+                    save_encrypted_tokens(tokens, self._token_file)
+                    saved = True
+                except ImportError:
+                    pass
+                except Exception as enc_exc:
+                    logger.warning("AuthGPT token encryption failed (%s) — saving as plain JSON", enc_exc)
+                if not saved:
+                    # Fallback: plain JSON (still better than losing tokens)
+                    with open(self._token_file, "w", encoding="utf-8") as f:
+                        json.dump(tokens, f, indent=2)
                 logger.debug("AuthGPT tokens saved to %s", self._token_file)
             except Exception as exc:
                 logger.warning("Failed to save authgpt tokens: %s", exc)
