@@ -10380,7 +10380,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Check if model needs API key
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('antigravity/'))
             
             if model_needs_api_key and not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
@@ -11087,7 +11087,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Check if model needs API key
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('antigravity/'))
             
             # Validate API key and model (same as original)
             if '@' in model or model.startswith('vertex/'):
@@ -12096,7 +12096,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Check if model needs API key
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('antigravity/'))
             
             if (model_needs_api_key and not api_key) or not model:
                 self.append_log("❌ Error: API key and model required")
@@ -12815,7 +12815,7 @@ Important rules:
             
             # Check if model needs API key
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('antigravity/'))
             
             # Validate Vertex AI credentials if needed
             if '@' in model or model.startswith('vertex/'):

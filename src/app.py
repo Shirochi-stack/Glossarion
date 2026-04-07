@@ -84,7 +84,7 @@ except ImportError as e:
 
 
 # Models that do not require an API key
-_NO_API_KEY_PREFIXES = ('vertex/', 'authgpt/', 'antigravity/', 'google-translate', 'deepl')
+_NO_API_KEY_PREFIXES = ('vertex/', 'authgpt/', 'authgem/', 'antigravity/', 'google-translate', 'deepl')
 
 def _model_needs_no_api_key(model: str) -> bool:
     """Return True if the given model name does not require a user-supplied API key."""

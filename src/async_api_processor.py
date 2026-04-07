@@ -225,7 +225,7 @@ class AsyncAPIProcessor:
             return 'bedrock'
             
         # Check for aggregator prefixes that might support async
-        if model_lower.startswith(('eh/', 'electronhub/', 'electron/', 'authgpt/')):
+        if model_lower.startswith(('eh/', 'electronhub/', 'electron/', 'authgpt/', 'authgem/')):
             # Extract actual model after prefix
             actual_model = model.split('/', 1)[1] if '/' in model else model
             return self.get_provider_from_model(actual_model)
@@ -3011,7 +3011,7 @@ class AsyncProcessingDialog:
             # AuthGPT OAuth tokens are NOT accepted by OpenAI's Batch API
             # (requires sk-* secret keys). If user wants async with an authgpt/ model,
             # they need a real OpenAI API key entered in the API key field.
-            is_authgpt = model.lower().startswith('authgpt/')
+            is_authgpt = model.lower().startswith(('authgpt/', 'authgem/'))
             if is_authgpt:
                 if not api_key or not api_key.startswith('sk-'):
                     self._show_error(

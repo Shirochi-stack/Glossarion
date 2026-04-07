@@ -4940,7 +4940,7 @@ class MultiAPIKeyDialog(QDialog):
             return
         
         if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, vertex/, google-translate, deepl)")
             return
         
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
@@ -6134,7 +6134,7 @@ class MultiAPIKeyDialog(QDialog):
             return
         
         if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, vertex/, google-translate, deepl)")
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, vertex/, google-translate, deepl)")
             return
         
         # Per-key output token limit and temperature default to None (global)

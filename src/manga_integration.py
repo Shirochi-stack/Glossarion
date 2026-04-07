@@ -1230,7 +1230,7 @@ class MangaTranslationTab(QObject):
             if not has_api_key:
                 _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
                 _ml = (_model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
+                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
                     has_api_key = True
             
             if not has_api_key:
@@ -2525,7 +2525,7 @@ class MangaTranslationTab(QObject):
             else:
                 # Check if model uses own auth (no API key needed)
                 _model = (self.main_gui.config.get('model', '') or '').lower()
-                if _model.startswith('authgpt/') or _model.startswith('vertex/') or _model.startswith('antigravity/'):
+                if _model.startswith('authgpt/') or _model.startswith('authgem/') or _model.startswith('vertex/') or _model.startswith('antigravity/'):
                     if bubble_detection_enabled:
                         self.provider_status_label.setText("✅ Ready (own-auth model)")
                         self.provider_status_label.setStyleSheet("color: green;")
@@ -3150,7 +3150,7 @@ class MangaTranslationTab(QObject):
         if not has_api_key:
             _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
             _ml = (_model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
                 has_api_key = True
         
         # Get current provider
@@ -3285,7 +3285,7 @@ class MangaTranslationTab(QObject):
         if not has_api_key:
             _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
             _ml = (_model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
                 has_api_key = True
         
         # Get the saved OCR provider to check appropriate credentials
@@ -5345,7 +5345,7 @@ class MangaTranslationTab(QObject):
         if not has_api_key:
             _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
             _ml = (_model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
                 has_api_key = True
             
         provider = self.ocr_provider_value
@@ -10770,7 +10770,7 @@ class MangaTranslationTab(QObject):
                 if not api_key:
                     _model = self.main_gui.config.get('model', '') if hasattr(self.main_gui, 'config') else ''
                     _ml = (_model or '').lower()
-                    if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                    if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
                         api_key = 'own-auth'  # placeholder — actual auth handled by provider
                 
                 if not api_key:
@@ -11232,7 +11232,7 @@ class MangaTranslationTab(QObject):
             # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
             if not api_key:
                 _ml = (model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('vertex/'):
+                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
                     api_key = 'own-auth'  # placeholder — actual auth handled by provider
             
             if not api_key:
