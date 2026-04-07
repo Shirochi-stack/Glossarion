@@ -3973,8 +3973,8 @@ Recent translations to summarize:
             parent_layout = combo.parentWidget().layout() if combo.parentWidget() else None
             if parent_layout:
                 parent_layout.removeWidget(combo)
-            # Add to the grid layout on a new row (row 2, col 3, span 2 cols — under the buttons)
-            self.frame.addWidget(combo, 2, 3, 1, 2, Qt.AlignLeft)
+            # Add to the grid layout on a new row (row 2, col 4, span 2 cols — under the buttons)
+            self.frame.addWidget(combo, 2, 4, 1, 2, Qt.AlignLeft)
             self._authgem_combo_in_own_row = True
         elif not both_visible and already_own_row:
             # Move back into the HBox button row
