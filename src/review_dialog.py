@@ -861,6 +861,16 @@ class ReviewDialog(QDialog):
         prompt_edit = QPlainTextEdit()
         prompt_edit.setPlainText(getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT))
         prompt_edit.setPlaceholderText("Enter the final review synthesis prompt...")
+        prompt_edit.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #383838;
+                color: #e2e8f0;
+                border: 1px solid #505050;
+                border-radius: 4px;
+                padding: 6px;
+                font-size: 10pt;
+            }
+        """)
         layout.addWidget(prompt_edit, stretch=1)
 
         btn_row = QHBoxLayout()
