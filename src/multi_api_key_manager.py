@@ -2088,7 +2088,7 @@ class MultiAPIKeyDialog(QDialog):
         fallback_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
         add_fallback_grid.addWidget(fallback_temp_label, 5, 0, Qt.AlignLeft)
         self.fallback_key_temperature_spinbox = QDoubleSpinBox()
-        self.fallback_key_temperature_spinbox.setRange(-1.0, 2.0)
+        self.fallback_key_temperature_spinbox.setRange(-1.0, 1.0)
         self.fallback_key_temperature_spinbox.setValue(-1.0)
         self.fallback_key_temperature_spinbox.setSingleStep(0.05)
         self.fallback_key_temperature_spinbox.setDecimals(2)
@@ -2169,13 +2169,13 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
         self.fallback_tree.setColumnWidth(0, 125)  # API Key
         self.fallback_tree.setColumnWidth(1, 220)  # Model
         self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
-        self.fallback_tree.setColumnWidth(3, 60)   # Temp
+        self.fallback_tree.setColumnWidth(3, 100)  # Temperature
         self.fallback_tree.setColumnWidth(4, 100)  # Status
-        self.fallback_tree.setColumnWidth(5, 60)   # Success
+        self.fallback_tree.setColumnWidth(5, 75)   # Success
         self.fallback_tree.setColumnWidth(6, 55)   # Errors
         self.fallback_tree.setColumnWidth(7, 80)   # Times Used
         
@@ -2517,7 +2517,7 @@ class MultiAPIKeyDialog(QDialog):
                 status = "❌ Error"
                 color = Qt.darkRed
             else:
-                status = "Not tested"
+                status = "Enabled"
                 color = Qt.gray
             
             # Insert into tree (with Success and Errors columns matching multi-key tree)
@@ -3247,10 +3247,10 @@ class MultiAPIKeyDialog(QDialog):
         value, ok = QInputDialog.getDouble(
             self,
             "Set Fallback Key Temperature",
-            "Temperature for selected fallback key(s) (0.0 - 2.0):",
+            "Temperature for selected fallback key(s) (0.0 - 1.0):",
             default_val,
             0.0,
-            2.0,
+            1.0,
             2,
         )
         if not ok:
@@ -3500,15 +3500,15 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
         # Adjusted column widths: balanced distribution
         self.tree.setColumnWidth(0, 125)  # API Key (decreased from 140)
         self.tree.setColumnWidth(1, 220)  # Model
         self.tree.setColumnWidth(2, 70)   # Cooldown
         self.tree.setColumnWidth(3, 105)  # Output Limit
-        self.tree.setColumnWidth(4, 60)   # Temp
+        self.tree.setColumnWidth(4, 100)   # Temperature
         self.tree.setColumnWidth(5, 100)  # Status
-        self.tree.setColumnWidth(6, 60)   # Success
+        self.tree.setColumnWidth(6, 75)   # Success
         self.tree.setColumnWidth(7, 55)   # Errors
         self.tree.setColumnWidth(8, 80)   # Times Used
         
@@ -3726,7 +3726,7 @@ class MultiAPIKeyDialog(QDialog):
         temp_label.setStyleSheet("color: gray; font-size: 9pt;")
         add_grid.addWidget(temp_label, 6, 0, Qt.AlignLeft)
         self.key_temperature_spinbox = QDoubleSpinBox()
-        self.key_temperature_spinbox.setRange(-1.0, 2.0)
+        self.key_temperature_spinbox.setRange(-1.0, 1.0)
         self.key_temperature_spinbox.setValue(-1.0)
         self.key_temperature_spinbox.setSingleStep(0.05)
         self.key_temperature_spinbox.setDecimals(2)
@@ -3925,8 +3925,8 @@ class MultiAPIKeyDialog(QDialog):
             default = float(current) if current not in (None, "") else -1.0
             value, ok = QInputDialog.getDouble(
                 self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 2.0):",
-                default, -1.0, 2.0, 2
+                "Temperature (-1 = use global, 0.0 - 1.0):",
+                default, -1.0, 1.0, 2
             )
             if ok:
                 if value < 0:
@@ -4151,8 +4151,8 @@ class MultiAPIKeyDialog(QDialog):
             default = current if current is not None else -1.0
             value, ok = QInputDialog.getDouble(
                 self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 2.0):",
-                default, -1.0, 2.0, 2
+                "Temperature (-1 = use global, 0.0 - 1.0):",
+                default, -1.0, 1.0, 2
             )
             if ok:
                 if value < 0:
@@ -4370,10 +4370,10 @@ class MultiAPIKeyDialog(QDialog):
         value, ok = QInputDialog.getDouble(
             self,
             "Set Key Temperature",
-            "Temperature for selected key(s) (0.0 - 2.0):",
+            "Temperature for selected key(s) (0.0 - 1.0):",
             default_val,
             0.0,
-            2.0,
+            1.0,
             2,
         )
         if not ok:
@@ -4788,7 +4788,7 @@ class MultiAPIKeyDialog(QDialog):
         glossary_temp_label.setStyleSheet("color: gray; font-size: 9pt;")
         add_glossary_grid.addWidget(glossary_temp_label, 5, 0, Qt.AlignLeft)
         self.glossary_key_temperature_spinbox = QDoubleSpinBox()
-        self.glossary_key_temperature_spinbox.setRange(-1.0, 2.0)
+        self.glossary_key_temperature_spinbox.setRange(-1.0, 1.0)
         self.glossary_key_temperature_spinbox.setValue(-1.0)
         self.glossary_key_temperature_spinbox.setSingleStep(0.05)
         self.glossary_key_temperature_spinbox.setDecimals(2)
@@ -4865,13 +4865,13 @@ class MultiAPIKeyDialog(QDialog):
         
         # Right side: TreeWidget with drag and drop
         self.glossary_tree = QTreeWidget()
-        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temp', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
         self.glossary_tree.setColumnWidth(0, 125)
         self.glossary_tree.setColumnWidth(1, 220)
         self.glossary_tree.setColumnWidth(2, 105)
-        self.glossary_tree.setColumnWidth(3, 60)
+        self.glossary_tree.setColumnWidth(3, 100)
         self.glossary_tree.setColumnWidth(4, 100)
-        self.glossary_tree.setColumnWidth(5, 60)
+        self.glossary_tree.setColumnWidth(5, 75)
         self.glossary_tree.setColumnWidth(6, 55)
         self.glossary_tree.setColumnWidth(7, 80)
         
@@ -4991,7 +4991,7 @@ class MultiAPIKeyDialog(QDialog):
                 status = "❌ Error"
                 color = Qt.darkRed
             else:
-                status = "Not tested"
+                status = "Enabled"
                 color = Qt.gray
             
             success_count = int(key_data.get('success_count', 0))
@@ -5761,8 +5761,8 @@ class MultiAPIKeyDialog(QDialog):
             default = float(current) if current not in (None, "") else -1.0
             value, ok = QInputDialog.getDouble(
                 self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 2.0):",
-                default, -1.0, 2.0, 2
+                "Temperature (-1 = use global, 0.0 - 1.0):",
+                default, -1.0, 1.0, 2
             )
             if ok:
                 if value < 0:
@@ -5903,10 +5903,10 @@ class MultiAPIKeyDialog(QDialog):
         value, ok = QInputDialog.getDouble(
             self,
             "Set Glossary Key Temperature",
-            "Temperature for selected glossary key(s) (0.0 - 2.0):",
+            "Temperature for selected glossary key(s) (0.0 - 1.0):",
             default_val,
             0.0,
-            2.0,
+            1.0,
             2,
         )
         if not ok:
