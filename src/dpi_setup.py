@@ -49,11 +49,134 @@ def _ensure_dpi_aware():
         pass
 
 
+def _mac_get_backing_scale_factor():
+    """Return the macOS backing scale factor using CoreGraphics (ctypes).
+
+    Uses CGMainDisplayID + backingScaleFactor via Cocoa/ObjC runtime.
+    Falls back to pixel-density heuristic, then system_profiler as last resort.
+    This avoids shelling out to system_profiler which can hang or crash on
+    Hackintosh / non-Apple hardware (AMD CPUs, non-standard GPU kexts).
+
+    Returns 2.0 for Retina, 1.0 for standard displays.
+    """
+    # ── Method 1: Cocoa NSScreen.mainScreen.backingScaleFactor via ObjC runtime ──
+    try:
+        import ctypes
+        import ctypes.util
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+
+        # objc_getClass / sel_registerName / objc_msgSend
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+        NSScreen = objc.objc_getClass(b'NSScreen')
+        if NSScreen:
+            sel_main = objc.sel_registerName(b'mainScreen')
+            main_screen = objc.objc_msgSend(NSScreen, sel_main)
+            if main_screen:
+                sel_scale = objc.sel_registerName(b'backingScaleFactor')
+                # backingScaleFactor returns CGFloat (double on 64-bit)
+                objc.objc_msgSend.restype = ctypes.c_double
+                scale = objc.objc_msgSend(main_screen, sel_scale)
+                # Reset restype for safety
+                objc.objc_msgSend.restype = ctypes.c_void_p
+                if scale >= 1.0:
+                    return float(scale)
+    except Exception:
+        pass
+
+    # ── Method 2: CoreGraphics pixel density heuristic ──────────────────────
+    try:
+        import ctypes
+        import ctypes.util
+        cg_path = ctypes.util.find_library('CoreGraphics')
+        if cg_path:
+            cg = ctypes.cdll.LoadLibrary(cg_path)
+            cg.CGMainDisplayID.restype = ctypes.c_uint32
+            display_id = cg.CGMainDisplayID()
+            cg.CGDisplayPixelsWide.restype = ctypes.c_size_t
+            cg.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+            pixel_w = cg.CGDisplayPixelsWide(display_id)
+            # CGDisplayScreenSize returns CGSize (two doubles: width, height in mm)
+            class CGSize(ctypes.Structure):
+                _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
+            cg.CGDisplayScreenSize.restype = CGSize
+            cg.CGDisplayScreenSize.argtypes = [ctypes.c_uint32]
+            phys = cg.CGDisplayScreenSize(display_id)
+            if phys.width > 0:
+                dpi = (pixel_w / phys.width) * 25.4  # mm → inches
+                if dpi > 170:  # Retina threshold (~220 DPI typical)
+                    return 2.0
+    except Exception:
+        pass
+
+    # ── Method 3: system_profiler as last resort (shorter timeout) ──────────
+    try:
+        import subprocess, re as _re
+        out = subprocess.check_output(
+            ["system_profiler", "SPDisplaysDataType"],
+            timeout=3, stderr=subprocess.DEVNULL,
+        ).decode("utf-8", errors="replace")
+        if _re.search(r"Resolution:.*Retina", out, _re.IGNORECASE):
+            return 2.0
+    except Exception:
+        pass
+
+    return 1.0
+
+
+def _mac_get_screen_resolution():
+    """Return (width, height) of the main macOS display using CoreGraphics.
+
+    Uses CGMainDisplayID + CGDisplayPixelsWide/High which are reliable on all
+    macOS-compatible hardware including Hackintosh / AMD CPU systems.
+    Falls back to system_profiler as last resort.
+    """
+    # ── Method 1: CoreGraphics (fast, no subprocess, Hackintosh-safe) ──────
+    try:
+        import ctypes
+        import ctypes.util
+        cg_path = ctypes.util.find_library('CoreGraphics')
+        if cg_path:
+            cg = ctypes.cdll.LoadLibrary(cg_path)
+            cg.CGMainDisplayID.restype = ctypes.c_uint32
+            display_id = cg.CGMainDisplayID()
+            cg.CGDisplayPixelsWide.restype = ctypes.c_size_t
+            cg.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+            cg.CGDisplayPixelsHigh.restype = ctypes.c_size_t
+            cg.CGDisplayPixelsHigh.argtypes = [ctypes.c_uint32]
+            width = cg.CGDisplayPixelsWide(display_id)
+            height = cg.CGDisplayPixelsHigh(display_id)
+            if width > 0 and height > 0:
+                return (int(width), int(height))
+    except Exception:
+        pass
+
+    # ── Method 2: system_profiler as last resort (shorter timeout) ──────────
+    try:
+        import subprocess, re as _re
+        out = subprocess.check_output(
+            ["system_profiler", "SPDisplaysDataType"],
+            timeout=3, stderr=subprocess.DEVNULL,
+        ).decode("utf-8", errors="replace")
+        m = _re.search(r"Resolution:\s+(\d+)\s*x\s*(\d+)", out)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+    except Exception:
+        pass
+
+    return (0, 0)
+
+
 def _get_system_dpi_scale():
     """Return the OS-level DPI scale factor (e.g. 1.0, 1.25, 1.5, 2.0).
 
     Windows  → GetDpiForSystem / GetDeviceCaps
-    macOS    → Retina backing-scale from system_profiler (2.0 for Retina, 1.0 otherwise)
+    macOS    → CoreGraphics backing scale (Hackintosh-safe, no system_profiler)
     Linux    → Xrdb / GDK_SCALE / xrandr DPI
     Fallback → 1.0
     """
@@ -81,19 +204,7 @@ def _get_system_dpi_scale():
 
     # ── macOS ──────────────────────────────────────────────────────────────
     elif sys.platform == "darwin":
-        # Retina displays have a backing scale factor of 2.0.
-        # system_profiler reports "Retina" in the resolution line.
-        try:
-            import subprocess, re as _re
-            out = subprocess.check_output(
-                ["system_profiler", "SPDisplaysDataType"],
-                timeout=5, stderr=subprocess.DEVNULL,
-            ).decode("utf-8", errors="replace")
-            # "Resolution: 2560 x 1600 Retina" → scale 2.0
-            if _re.search(r"Resolution:.*Retina", out, _re.IGNORECASE):
-                return 2.0
-        except Exception:
-            pass
+        return _mac_get_backing_scale_factor()
 
     # ── Linux / X11 / Wayland ──────────────────────────────────────────────
     else:
@@ -129,7 +240,7 @@ def _get_screen_resolution():
     """Return (width, height) of the primary monitor using stdlib only.
 
     Windows  → ctypes + GetSystemMetrics
-    macOS    → subprocess + system_profiler (JSON)
+    macOS    → CoreGraphics (Hackintosh-safe, no system_profiler)
     Linux    → subprocess + xrandr
     Returns (0, 0) on failure.
     """
@@ -148,18 +259,7 @@ def _get_screen_resolution():
 
     # ── macOS ──────────────────────────────────────────────────────────────
     elif sys.platform == "darwin":
-        try:
-            import subprocess, re as _re
-            out = subprocess.check_output(
-                ["system_profiler", "SPDisplaysDataType"],
-                timeout=5, stderr=subprocess.DEVNULL,
-            ).decode("utf-8", errors="replace")
-            # Look for "Resolution: 2560 x 1440" (or Retina variant)
-            m = _re.search(r"Resolution:\s+(\d+)\s*x\s*(\d+)", out)
-            if m:
-                width, height = int(m.group(1)), int(m.group(2))
-        except Exception:
-            pass
+        width, height = _mac_get_screen_resolution()
 
     # ── Linux / X11 ────────────────────────────────────────────────────────
     else:

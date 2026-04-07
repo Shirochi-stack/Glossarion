@@ -91,6 +91,22 @@ import atexit
 import faulthandler
 import platform
 
+# macOS GPU rendering safety — must be set BEFORE any Qt/PySide6 import.
+# On Hackintosh (AMD CPU) systems, Qt6's default Metal backend can segfault
+# due to non-standard GPU kexts.  Force OpenGL as a safer default on macOS.
+# Users can also set GLOSSARION_SW_RENDER=1 to force full software rendering.
+# This block is a no-op on Windows and Linux.
+if sys.platform == 'darwin':
+    if os.environ.get('GLOSSARION_SW_RENDER', ''):
+        # Full software rendering — last resort for broken GPU drivers
+        os.environ.setdefault('QT_QUICK_BACKEND', 'software')
+        os.environ.setdefault('QSG_RHI_BACKEND', 'opengl')
+        os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE', '1')
+        print("⚠️ macOS: Forced software rendering (GLOSSARION_SW_RENDER=1)")
+    else:
+        # Prefer OpenGL over Metal — more compatible with Hackintosh hardware
+        os.environ.setdefault('QSG_RHI_BACKEND', 'opengl')
+
 # PySide6 imports (replacing Tkinter)
 # DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
 try:
