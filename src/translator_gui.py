@@ -1150,7 +1150,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.2.3"
+        __version__ = "8.2.4"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1225,7 +1225,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.2.3')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.2.4')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -3182,7 +3182,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.2.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.2.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -3641,18 +3641,25 @@ Recent translations to summarize:
             if not needs_authgem:
                 needs_authgem = self._has_authgem_in_key_pools()
             
+            # GCP project dropdown is ONLY needed for authgem-vertex/ (Vertex AI)
+            # authgem/ uses AI Studio which doesn't require a GCP project
+            needs_vertex = model.startswith('authgem-vertex/') or self._has_authgem_vertex_in_key_pools()
+            
             if needs_authgem:
                 self.authgem_login_btn.show()
-                self._update_authgem_login_status()
-                # Show project dropdown only if logged in AND has items
+                self._update_authgem_login_status(needs_vertex=needs_vertex)
+                # Show project dropdown ONLY for authgem-vertex/ (Vertex AI needs GCP project)
                 if hasattr(self, 'authgem_project_combo'):
-                    try:
-                        from authgem_auth import get_default_store
-                        if get_default_store().has_tokens and self.authgem_project_combo.count() > 0:
-                            self.authgem_project_combo.show()
-                        else:
+                    if needs_vertex:
+                        try:
+                            from authgem_auth import get_default_store
+                            if get_default_store().has_tokens and self.authgem_project_combo.count() > 0:
+                                self.authgem_project_combo.show()
+                            else:
+                                self.authgem_project_combo.hide()
+                        except Exception:
                             self.authgem_project_combo.hide()
-                    except Exception:
+                    else:
                         self.authgem_project_combo.hide()
             else:
                 self.authgem_login_btn.hide()
@@ -3703,6 +3710,29 @@ Recent translations to summarize:
                         else:
                             m = getattr(key_data, 'model', '')
                         if m.startswith('authgem/') or m.startswith('authgem-vertex/'):
+                            return True
+        except Exception:
+            pass
+        return False
+
+    def _has_authgem_vertex_in_key_pools(self):
+        """Check if any enabled key pool contains an enabled authgem-vertex model."""
+        try:
+            pool_map = {
+                'multi_api_keys': 'use_multi_api_keys',
+                'fallback_keys': 'use_fallback_keys',
+                'glossary_keys': 'use_glossary_keys',
+            }
+            for pool_key, toggle_key in pool_map.items():
+                if self.config.get(toggle_key, False):
+                    for key_data in self.config.get(pool_key, []):
+                        if isinstance(key_data, dict):
+                            if not key_data.get('enabled', True):
+                                continue
+                            m = key_data.get('model', '')
+                        else:
+                            m = getattr(key_data, 'model', '')
+                        if m.startswith('authgem-vertex/'):
                             return True
         except Exception:
             pass
@@ -3823,8 +3853,17 @@ Recent translations to summarize:
     # AuthGem (Gemini Login) – mirrors the AuthGPT pattern
     # ==================================================================
 
-    def _update_authgem_login_status(self):
-        """Update the AuthGem login button text based on current token state."""
+    def _update_authgem_login_status(self, needs_vertex=None):
+        """Update the AuthGem login button text based on current token state.
+        
+        Args:
+            needs_vertex: If True, show GCP project dropdown (only for authgem-vertex/).
+                          If None, auto-detect from current model.
+        """
+        # Auto-detect if not explicitly provided
+        if needs_vertex is None:
+            needs_vertex = self.model_var.startswith('authgem-vertex/') or self._has_authgem_vertex_in_key_pools()
+        
         try:
             from authgem_auth import get_default_store
             store = get_default_store()
@@ -3842,13 +3881,17 @@ Recent translations to summarize:
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
-                # Populate projects if needed; only show if items exist
+                # Populate projects ONLY for authgem-vertex/ (Vertex AI needs GCP project)
+                # authgem/ uses AI Studio which doesn't require a GCP project
                 if hasattr(self, 'authgem_project_combo'):
-                    if self.authgem_project_combo.count() == 0:
-                        self._fetch_authgem_projects()
-                    if self.authgem_project_combo.count() > 0 and self.authgem_login_btn.isVisible():
-                        self.authgem_project_combo.show()
-                        self._reposition_authgem_project_combo()
+                    if needs_vertex:
+                        if self.authgem_project_combo.count() == 0:
+                            self._fetch_authgem_projects()
+                        if self.authgem_project_combo.count() > 0 and self.authgem_login_btn.isVisible():
+                            self.authgem_project_combo.show()
+                            self._reposition_authgem_project_combo()
+                        else:
+                            self.authgem_project_combo.hide()
                     else:
                         self.authgem_project_combo.hide()
             else:
@@ -19964,7 +20007,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.2.3...")
+    print("🚀 Starting Glossarion v8.2.4...")
     
     # Initialize splash screen
     splash_manager = None
