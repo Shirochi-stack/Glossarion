@@ -213,6 +213,7 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
         )
         if resp.ok:
             projects = resp.json().get("projects", [])
+            billing_check_failed = False  # Track if billing API is inaccessible
             # Check billing for each project — only pick one with billing
             for p in projects:
                 pid = p.get("projectId", "")
@@ -228,8 +229,25 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
                         logger.info("AuthGem: Auto-detected GCP project (billing OK): %s", pid)
                         print(f"🔍 AuthGem: Using GCP project: {pid}")
                         return pid
+                    elif not br.ok:
+                        # Billing API returned error (likely 403 permission denied)
+                        logger.debug("AuthGem: Billing API returned %s for %s", br.status_code, pid)
+                        billing_check_failed = True
                 except Exception:
+                    billing_check_failed = True
                     continue
+
+            # Fallback: if billing API was inaccessible for ALL projects,
+            # use the first active project rather than rejecting everything.
+            # The Gemini CLI OAuth client may not have cloudbilling permissions.
+            if billing_check_failed and projects:
+                first_pid = projects[0].get("projectId", "")
+                if first_pid:
+                    _cached_project_id = first_pid
+                    logger.info("AuthGem: Billing API inaccessible; using first project: %s", first_pid)
+                    print(f"🔍 AuthGem: Using GCP project: {first_pid} (billing check skipped — no permission)")
+                    return first_pid
+
             # If no billed project found, warn
             if projects:
                 names = ", ".join(p.get("projectId", "?") for p in projects[:5])

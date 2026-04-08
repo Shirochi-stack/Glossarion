@@ -3938,6 +3938,7 @@ Recent translations to summarize:
                 # 2. Check billing for each project
                 billed = []
                 unbilled = []
+                billing_api_failed = False  # Track if billing API is inaccessible
                 for p in projects:
                     pid = p.get("projectId", "")
                     if not pid:
@@ -3949,11 +3950,23 @@ Recent translations to summarize:
                         )
                         if br.ok and br.json().get("billingEnabled", False):
                             billed.append(pid)
+                        elif not br.ok:
+                            # Billing API returned error (likely 403 permission denied)
+                            billing_api_failed = True
+                            unbilled.append(pid)
                         else:
                             unbilled.append(pid)
                     except Exception:
+                        billing_api_failed = True
                         unbilled.append(pid)
                 
+                # Fallback: if billing API was inaccessible for ALL projects,
+                # treat them all as billed (billing status unknown).
+                # The Gemini CLI OAuth client may not have cloudbilling permissions.
+                if billing_api_failed and not billed:
+                    billed = unbilled
+                    unbilled = []
+
                 # Store results for UI thread
                 self._authgem_billed_projects = billed
                 self._authgem_unbilled_projects = unbilled
