@@ -10,7 +10,7 @@ OAuth 2.0 flow for Gemini API authentication via Google Account, persistent
 token storage with automatic refresh, and Gemini API adapters.
 
 Three endpoint modes:
-  - AI Studio + OAuth: generativelanguage.googleapis.com with Bearer token
+  - OAuth (authgem/): cloudcode-pa.googleapis.com Code Assist proxy (same as Gemini CLI)
   - AI Studio + API key: generativelanguage.googleapis.com with ?key= param
   - Vertex AI + OAuth: {region}-aiplatform.googleapis.com with Bearer token
 
@@ -58,32 +58,41 @@ def is_cancelled() -> bool:
 
 
 # ===========================================================================
-# Constants – Google ADC OAuth client (same as gcloud auth)
+# Constants – Gemini CLI OAuth client (same as google-gemini/gemini-cli)
 # ===========================================================================
-# These are the *public* OAuth credentials used by Google's own Cloud SDK
-# (gcloud auth application-default login).  They are embedded in every gcloud
-# installation and have ALL Google API scopes pre-registered, which means the
-# "generative-language" scope works out of the box with zero user setup.
+# These are the *public* OAuth credentials used by Google's own Gemini CLI.
+# Source: google-gemini/gemini-cli → packages/core/src/code_assist/oauth2.ts
 #
-# Source: google-auth-library-python → google/auth/_cloud_sdk.py
-# They are NOT secrets — Google treats installed-app client secrets as public.
+# They are NOT secrets — Google treats installed-app client secrets as public:
+# https://developers.google.com/identity/protocols/oauth2#installed
+# "The process results in a client ID and, in some cases, a client secret,
+# which you embed in the source code of your application. (In this context,
+# the client secret is obviously not treated as a secret.)"
+#
+# This client is registered with Google's Generative Language API, so it works
+# for both AI Studio (generativelanguage.googleapis.com) AND Vertex AI.
+# The gcloud ADC client (764086051850-...) does NOT work for AI Studio.
 #
 # Users can override with AUTHGEM_CLIENT_ID / AUTHGEM_CLIENT_SECRET env vars
 # if they prefer to use their own GCP project credentials.
-_ADC_CLIENT_ID = (
-    "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur"
+_GEMINI_CLI_CLIENT_ID = (
+    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j"
     ".apps.googleusercontent.com"
 )
-_ADC_CLIENT_SECRET = "d-FL95Q19q7MQmFpd7hHD0Ty"
+_GEMINI_CLI_CLIENT_SECRET = "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"
 
-GOOGLE_CLIENT_ID = os.environ.get("AUTHGEM_CLIENT_ID", _ADC_CLIENT_ID)
-GOOGLE_CLIENT_SECRET = os.environ.get("AUTHGEM_CLIENT_SECRET", _ADC_CLIENT_SECRET)
+GOOGLE_CLIENT_ID = os.environ.get("AUTHGEM_CLIENT_ID", _GEMINI_CLI_CLIENT_ID)
+GOOGLE_CLIENT_SECRET = os.environ.get("AUTHGEM_CLIENT_SECRET", _GEMINI_CLI_CLIENT_SECRET)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
-# Scopes needed for Gemini API access + user info
+# Scopes — cloud-platform covers Code Assist proxy (cloudcode-pa.googleapis.com)
+# which is what the Gemini CLI uses for "Sign in with Google".
+# Direct OAuth to generativelanguage.googleapis.com is NOT possible with
+# public OAuth clients (the generative-language.retriever scope is unregistered).
+# For direct AI Studio access, use authgem-key/ (API key) instead.
 OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -799,9 +808,14 @@ def _build_gemini_request_body(
 
 
 # ===========================================================================
-# AI Studio endpoint (generativelanguage.googleapis.com) — OAuth Bearer token
+# Code Assist proxy (cloudcode-pa.googleapis.com) — OAuth Bearer token
 # No GCP project required.  Used by the  authgem/  prefix.
+# This is the same endpoint the Gemini CLI uses with "Sign in with Google".
+# Accepts the cloud-platform scope; no generative-language.retriever needed.
 # ===========================================================================
+
+_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
+_CODE_ASSIST_API_VERSION = "v1internal"
 
 def send_chat_completion_aistudio(
     access_token: str,
@@ -813,28 +827,31 @@ def send_chat_completion_aistudio(
     log_fn=None,
     connect_timeout: Optional[float] = None,
 ) -> Dict:
-    """Send a chat completion via Google AI Studio using an OAuth Bearer token.
+    """Send a chat completion via Google Code Assist proxy using OAuth.
 
-    Uses ``generativelanguage.googleapis.com`` — no GCP project needed.
-    Best for individual Google account users (1 000 req/day with subscription).
+    Routes through ``cloudcode-pa.googleapis.com`` (same as Gemini CLI).
+    No GCP project required — works with any Google account.
     """
     if is_cancelled():
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
-    body = _build_gemini_request_body(messages, temperature, max_tokens)
+    inner_body = _build_gemini_request_body(messages, temperature, max_tokens)
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{model}:streamGenerateContent?alt=sse"
-    )
+    # Wrap in Code Assist envelope: {model, request: {contents, ...}}
+    body = {
+        "model": model,
+        "request": inner_body,
+    }
+
+    url = f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}:streamGenerateContent?alt=sse"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Accept-Encoding": "identity",
     }
 
-    logger.info("AuthGem-AIStudio: POST %s  model=%s", url.split("?")[0], model)
+    logger.info("AuthGem-CodeAssist: POST %s  model=%s", url.split("?")[0], model)
 
     return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
 
@@ -1032,6 +1049,12 @@ def _process_gemini_sse_line(
         state["got_first_data"] = True
         ttft = time.time() - t_start
         _log(f"📡 AuthGem: First token in {ttft:.1f}s, streaming…")
+
+    # Unwrap Code Assist response envelope if present
+    # Code Assist wraps: {"response": {"candidates": [...]}} 
+    # Direct AI Studio / Vertex use flat {"candidates": [...]}
+    if "response" in data and isinstance(data["response"], dict):
+        data = data["response"]
 
     # Extract candidates
     candidates = data.get("candidates", [])
