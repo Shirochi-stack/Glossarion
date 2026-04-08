@@ -1,18 +1,26 @@
 # authgem_auth.py - Gemini subscription OAuth authentication
 # Uses the same OAuth2 credentials as Gemini CLI (google-gemini/gemini-cli).
-# Prefix models with 'authgem/' to route through the Gemini API using your
-# Google account instead of a GEMINI_API_KEY.
+#
+# Routing prefixes:
+#   authgem/         → Google AI Studio via OAuth (no GCP project needed)
+#   authgem-key/     → Google AI Studio via GEMINI_API_KEY (no OAuth needed)
+#   authgem-vertex/  → Vertex AI via OAuth (requires GCP project w/ billing)
 """
 OAuth 2.0 flow for Gemini API authentication via Google Account, persistent
-token storage with automatic refresh, and Gemini API adapter.
+token storage with automatic refresh, and Gemini API adapters.
 
-Flow:
+Three endpoint modes:
+  - AI Studio + OAuth: generativelanguage.googleapis.com with Bearer token
+  - AI Studio + API key: generativelanguage.googleapis.com with ?key= param
+  - Vertex AI + OAuth: {region}-aiplatform.googleapis.com with Bearer token
+
+OAuth Flow:
   1. Open browser to Google OAuth consent screen
   2. Spin up a local HTTP callback server on a random available port
   3. User logs in via browser → callback receives auth code
   4. Exchange auth code for access + refresh tokens
   5. Store tokens locally (~/.glossarion/authgem_tokens.json)
-  6. Use access token as Bearer auth for generativelanguage.googleapis.com
+  6. Use access token as Bearer auth
 """
 import os
 import json
@@ -790,7 +798,12 @@ def _build_gemini_request_body(
     return body
 
 
-def send_chat_completion(
+# ===========================================================================
+# AI Studio endpoint (generativelanguage.googleapis.com) — OAuth Bearer token
+# No GCP project required.  Used by the  authgem/  prefix.
+# ===========================================================================
+
+def send_chat_completion_aistudio(
     access_token: str,
     messages: List[Dict],
     model: str = "gemini-2.5-flash",
@@ -800,41 +813,96 @@ def send_chat_completion(
     log_fn=None,
     connect_timeout: Optional[float] = None,
 ) -> Dict:
-    """Send a chat completion request to the Gemini API using OAuth token.
+    """Send a chat completion via Google AI Studio using an OAuth Bearer token.
 
-    Streams the response via Vertex AI's ``streamGenerateContent`` endpoint
-    so that cancel flags are checked on every chunk and partial progress is
-    logged in real-time (matching the authgpt streaming behaviour).
-
-    Parameters
-    ----------
-    access_token : str
-        Valid Google OAuth access token (Bearer).
-    messages : list
-        OpenAI-style message list (role/content dicts).
-    model : str
-        Gemini model name (e.g. 'gemini-2.5-flash', 'gemini-2.5-pro').
-    temperature : float, optional
-        Sampling temperature.
-    max_tokens : int, optional
-        Maximum output tokens.
-    timeout : int
-        Request timeout in seconds.
-    log_fn : callable, optional
-        Logging function (e.g. print).
-    connect_timeout : float, optional
-        Separate connect timeout.
-
-    Returns
-    -------
-    dict
-        {'content': str, 'finish_reason': str, 'usage': dict or None}
+    Uses ``generativelanguage.googleapis.com`` — no GCP project needed.
+    Best for individual Google account users (1 000 req/day with subscription).
     """
     if is_cancelled():
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
+    body = _build_gemini_request_body(messages, temperature, max_tokens)
 
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/"
+        f"models/{model}:streamGenerateContent?alt=sse"
+    )
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+    }
+
+    logger.info("AuthGem-AIStudio: POST %s  model=%s", url.split("?")[0], model)
+
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
+
+
+# ===========================================================================
+# AI Studio endpoint — API key (no OAuth).  Used by the  authgem-key/  prefix.
+# ===========================================================================
+
+def send_chat_completion_aistudio_key(
+    api_key: str,
+    messages: List[Dict],
+    model: str = "gemini-2.5-flash",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    timeout: int = 300,
+    log_fn=None,
+    connect_timeout: Optional[float] = None,
+) -> Dict:
+    """Send a chat completion via Google AI Studio using an API key.
+
+    Uses ``generativelanguage.googleapis.com`` with ``?key=`` query parameter.
+    No OAuth login needed — the user supplies a GEMINI_API_KEY.
+    Free tier: 250 req/day, Flash model only.
+    """
+    if is_cancelled():
+        raise RuntimeError("AuthGem: stream cancelled by user")
+
+    _log = log_fn or (lambda *a, **kw: None)
+    body = _build_gemini_request_body(messages, temperature, max_tokens)
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/"
+        f"models/{model}:streamGenerateContent?key={api_key}&alt=sse"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+    }
+
+    logger.info("AuthGem-Key: POST %s  model=%s", url.split("?")[0], model)
+
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
+
+
+# ===========================================================================
+# Vertex AI endpoint — OAuth Bearer token + GCP project.
+# Used by the  authgem-vertex/  prefix (and legacy  send_chat_completion ).
+# ===========================================================================
+
+def send_chat_completion_vertex(
+    access_token: str,
+    messages: List[Dict],
+    model: str = "gemini-2.5-flash",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    timeout: int = 300,
+    log_fn=None,
+    connect_timeout: Optional[float] = None,
+) -> Dict:
+    """Send a chat completion via Vertex AI using an OAuth Bearer token.
+
+    Uses ``{region}-aiplatform.googleapis.com`` — requires a GCP project
+    with billing enabled and the Vertex AI API turned on.
+    """
+    if is_cancelled():
+        raise RuntimeError("AuthGem: stream cancelled by user")
+
+    _log = log_fn or (lambda *a, **kw: None)
     body = _build_gemini_request_body(messages, temperature, max_tokens)
 
     # Resolve project — auto-detect from the OAuth token
@@ -842,7 +910,7 @@ def send_chat_completion(
     location = VERTEX_LOCATION
     if not project:
         raise RuntimeError(
-            "AuthGem: Could not detect your GCP project ID.\n"
+            "AuthGem-Vertex: Could not detect your GCP project ID.\n"
             "Set the GOOGLE_CLOUD_PROJECT environment variable, e.g.:\n"
             "  set GOOGLE_CLOUD_PROJECT=my-project-id\n"
             "You can find your project ID at https://console.cloud.google.com"
@@ -853,7 +921,6 @@ def send_chat_completion(
     if "preview" in model.lower():
         effective_location = "global"
 
-    # Use streamGenerateContent with SSE for real-time streaming
     # Global location uses a different URL format (no region prefix on hostname)
     if effective_location == "global":
         url = (
@@ -870,12 +937,31 @@ def send_chat_completion(
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
-        "Accept-Encoding": "identity",  # Disable gzip so SSE streams in real-time
+        "Accept-Encoding": "identity",
     }
 
-    logger.info("AuthGem: POST %s  model=%s", url.split("?")[0], model)
+    logger.info("AuthGem-Vertex: POST %s  model=%s", url.split("?")[0], model)
 
-    # Streaming log control — mirrors authgpt's LOG_STREAM_CHUNKS behaviour
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
+
+
+# Backward-compatible alias — old code imports send_chat_completion
+send_chat_completion = send_chat_completion_vertex
+
+
+# ===========================================================================
+# Shared streaming dispatcher used by all three endpoint functions
+# ===========================================================================
+
+def _stream_gemini_common(
+    url: str,
+    body: Dict,
+    headers: Dict,
+    timeout: int,
+    _log,
+    connect_timeout: Optional[float] = None,
+) -> Dict:
+    """Shared streaming logic for all Gemini endpoints (AI Studio & Vertex)."""
     log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
     if os.getenv("BATCH_TRANSLATION", "0") == "1":
         log_stream = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")

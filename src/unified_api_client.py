@@ -47,7 +47,9 @@ Supported models and their prefixes (Updated July 2025):
 - Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
 - Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
 - AuthGPT: authgpt/* (e.g., authgpt/gpt-4o, authgpt/o3) – ChatGPT subscription via OAuth
-- AuthGem: authgem/* (e.g., authgem/gemini-2.5-flash) – Gemini via Google OAuth (no API key)
+- AuthGem: authgem/* (e.g., authgem/gemini-2.5-flash) – Gemini via Google OAuth + AI Studio (no API key)
+- AuthGem-Key: authgem-key/* (e.g., authgem-key/gemini-2.5-flash) – Gemini via AI Studio API key
+- AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
@@ -970,15 +972,21 @@ except ImportError:
     _authgpt_reset_cancel = None
     AUTHGPT_AVAILABLE = False
 
-# AuthGem - Gemini via Google OAuth (optional)
+# AuthGem - Gemini via Google OAuth / API key (optional)
 try:
     from authgem_auth import get_default_store as _authgem_get_store
-    from authgem_auth import send_chat_completion as _authgem_send
+    from authgem_auth import send_chat_completion_aistudio as _authgem_send_aistudio
+    from authgem_auth import send_chat_completion_aistudio_key as _authgem_send_aistudio_key
+    from authgem_auth import send_chat_completion_vertex as _authgem_send_vertex
+    from authgem_auth import send_chat_completion as _authgem_send  # backward-compat alias
     from authgem_auth import cancel_stream as _authgem_cancel_stream
     from authgem_auth import reset_cancel as _authgem_reset_cancel
     AUTHGEM_AVAILABLE = True
 except ImportError:
     _authgem_get_store = None
+    _authgem_send_aistudio = None
+    _authgem_send_aistudio_key = None
+    _authgem_send_vertex = None
     _authgem_send = None
     _authgem_cancel_stream = None
     _authgem_reset_cancel = None
@@ -1745,6 +1753,10 @@ class UnifiedClient:
         'google-translate': 'google_translate',
         'authgpt/': 'authgpt',
         'authgpt': 'authgpt',
+        'authgem-key/': 'authgem_key',
+        'authgem-key': 'authgem_key',
+        'authgem-vertex/': 'authgem_vertex',
+        'authgem-vertex': 'authgem_vertex',
         'authgem/': 'authgem',
         'authgem': 'authgem',
         'antigravity/': 'antigravity',
@@ -1773,7 +1785,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem/', 'authgem', 'vertex/', 'antigravity/', 'antigravity')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem/', 'authgem', 'authgem-vertex/', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity')
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
     @classmethod
@@ -5006,14 +5018,14 @@ class UnifiedClient:
                 )
             # logger.info("AuthGPT will use ChatGPT backend API with OAuth tokens")
 
-        elif self.client_type == 'authgem':
-            # AuthGem uses Gemini API via Google OAuth – no persistent SDK client
+        elif self.client_type in ('authgem', 'authgem_key', 'authgem_vertex'):
+            # AuthGem uses Gemini API via Google OAuth or API key – no persistent SDK client
             if not AUTHGEM_AVAILABLE:
                 raise ImportError(
                     "AuthGem package not found. Make sure 'authgem_auth.py' "
                     "exists under src/."
                 )
-            # logger.info("AuthGem will use Gemini API with Google OAuth tokens")
+            # logger.info("AuthGem will use Gemini API (%s mode)", self.client_type)
 
         elif self.client_type == 'antigravity':
             # Antigravity uses local proxy (antigravity-claude-proxy) – no SDK client needed
@@ -10943,7 +10955,9 @@ class UnifiedClient:
             'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
             'authgpt': self._send_authgpt,  # ChatGPT subscription via OAuth
-            'authgem': self._send_authgem,  # Gemini via Google OAuth
+            'authgem': self._send_authgem,  # Gemini via Google OAuth + AI Studio
+            'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
+            'authgem_vertex': self._send_authgem_vertex,  # Gemini via Google OAuth + Vertex AI
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
         }
         
@@ -16440,29 +16454,136 @@ class UnifiedClient:
             error_type="api_error"
         )
 
-    def _send_authgem(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request via Gemini API using Google OAuth tokens.
+    # ------------------------------------------------------------------
+    # AuthGem helpers (shared across authgem, authgem-key, authgem-vertex)
+    # ------------------------------------------------------------------
 
-        Uses the authgem_auth package to obtain/refresh Google OAuth tokens and send
-        messages to the Gemini API (generativelanguage.googleapis.com).
-        Model names should be prefixed with 'authgem/' (e.g. authgem/gemini-2.5-flash).
+    _AUTHGEM_PREFIXES = (
+        'authgem-key/', 'authgem-key',
+        'authgem-vertex/', 'authgem-vertex',
+        'authgem/', 'authgem',
+    )
+
+    def _strip_authgem_prefix(self, model: str) -> str:
+        """Strip any authgem* prefix and return the bare model name."""
+        for prefix in self._AUTHGEM_PREFIXES:
+            if model.startswith(prefix):
+                return model[len(prefix):].lstrip('/') or 'gemini-2.5-flash'
+        return model or 'gemini-2.5-flash'
+
+    def _authgem_retry_loop(self, send_fn, label: str, actual_model: str,
+                            messages, temperature, max_tokens,
+                            store=None) -> UnifiedResponse:
+        """Common retry / error-handling loop for all AuthGem variants.
+
+        Parameters
+        ----------
+        send_fn : callable
+            The actual send function to call on each attempt.
+            Signature: send_fn(attempt) -> Dict with content/finish_reason/usage.
+        label : str
+            Human-readable label for log messages (e.g. "AuthGem", "AuthGem-Key").
+        actual_model : str
+            Bare model name (after prefix stripping).
+        store : AuthGemTokenStore or None
+            If provided, 401 errors will trigger a token refresh from this store.
         """
-        if not AUTHGEM_AVAILABLE or _authgem_get_store is None or _authgem_send is None:
+        max_retries = self._get_max_retries()
+        last_error = None
+        access_token_holder = [None]  # mutable so send_fn can update
+
+        for attempt in range(max_retries):
+            if self._is_stop_requested():
+                raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+
+            try:
+                if _authgem_reset_cancel is not None:
+                    _authgem_reset_cancel()
+
+                result = send_fn(attempt)
+
+                return UnifiedResponse(
+                    content=result.get("content", ""),
+                    finish_reason=result.get("finish_reason", "stop"),
+                    usage=result.get("usage"),
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+
+                # Stream cancelled
+                if "stream cancelled" in error_str.lower() or "cancelled" in error_str.lower():
+                    self._log_once(f"⏹️ {label}: Stream cancelled by user")
+                    raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+
+                # 400 Bad Request
+                if "400" in error_str or "bad request" in error_str.lower():
+                    if attempt < max_retries - 1:
+                        interval = self._get_send_interval()
+                        delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
+                        print(f"🔄 {label} 400 Bad Request – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
+                        if not self._sleep_with_cancel(delay, 0.5):
+                            raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+                        continue
+                    raise UnifiedClientError(f"{label}: {error_str}", error_type="validation")
+
+                if self._should_abort_retry():
+                    raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+
+                # 401 — refresh OAuth token once (only when we have a store)
+                if "401" in error_str and attempt == 0 and store is not None:
+                    print(f"🔄 {label}: 401 received, attempting token refresh…")
+                    try:
+                        access_token_holder[0] = store.get_valid_access_token(auto_login=True)
+                        continue
+                    except Exception:
+                        pass
+
+                # 429 rate limit
+                if "429" in error_str:
+                    print(f"⚠️ {label} rate limit (attempt {attempt+1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        delay = self._get_send_interval() * (attempt + 1)
+                        if not self._sleep_with_cancel(delay, 0.5):
+                            raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+                        continue
+                    raise UnifiedClientError(f"{label}: Rate limit exceeded after {max_retries} attempts", error_type="rate_limit")
+
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+            except Exception as exc:
+                error_str = str(exc)
+                print(f"⚠️ {label} error (attempt {attempt+1}/{max_retries}): {error_str}")
+                if self._should_abort_retry():
+                    raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+        raise UnifiedClientError(f"{label} request failed after {max_retries} attempts: {last_error}", error_type="api_error")
+
+    # ------------------------------------------------------------------
+    # authgem/  →  Google AI Studio  +  OAuth Bearer token
+    # ------------------------------------------------------------------
+
+    def _send_authgem(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via Google AI Studio using OAuth (no GCP project needed).
+
+        Model names prefixed with 'authgem/' (e.g. authgem/gemini-2.5-flash).
+        """
+        if not AUTHGEM_AVAILABLE or _authgem_get_store is None or _authgem_send_aistudio is None:
             raise UnifiedClientError(
                 "AuthGem is not available. Ensure 'authgem_auth.py' exists under src/.",
                 error_type="config_error"
             )
 
-        # Strip the authgem/ prefix to get the actual model name
-        actual_model = self.model
-        for prefix in ('authgem/', 'authgem'):
-            if actual_model.startswith(prefix):
-                actual_model = actual_model[len(prefix):].lstrip('/')
-                break
-        if not actual_model:
-            actual_model = 'gemini-2.5-flash'  # sensible default
+        actual_model = self._strip_authgem_prefix(self.model)
 
-        # Obtain a valid OAuth access token (auto-refreshes or triggers browser login)
         try:
             store = _authgem_get_store()
             access_token = store.get_valid_access_token(auto_login=True)
@@ -16473,126 +16594,121 @@ class UnifiedClient:
                 error_type="auth_error"
             )
 
-        # Send the request through the Gemini API adapter
-        max_retries = self._get_max_retries()
-        last_error = None
-        print(f"🔐 AuthGem: Sending request to Gemini API (model={actual_model})")
-        for attempt in range(max_retries):
-            # Check stop flag before each attempt
-            if self._is_stop_requested():
-                raise UnifiedClientError(
-                    "AuthGem: Translation stopped by user",
-                    error_type="cancelled"
-                )
+        _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+        _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
 
-            try:
-                # Reset AuthGem cancel flag before each attempt
-                if _authgem_reset_cancel is not None:
-                    _authgem_reset_cancel()
+        print(f"🔐 AuthGem: Sending request to AI Studio (model={actual_model})")
 
-                _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
-                _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+        # Mutable token holder so retry loop can refresh it
+        token = [access_token]
 
-                result = _authgem_send(
-                    access_token=access_token,
-                    messages=messages,
-                    model=actual_model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=self.request_timeout,
-                    log_fn=print,
-                    connect_timeout=_connect_timeout,
-                )
+        def _do_send(attempt):
+            return _authgem_send_aistudio(
+                access_token=token[0],
+                messages=messages,
+                model=actual_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=self.request_timeout,
+                log_fn=print,
+                connect_timeout=_connect_timeout,
+            )
 
-                content = result.get("content", "")
-                finish_reason = result.get("finish_reason", "stop")
-                usage = result.get("usage")
+        return self._authgem_retry_loop(_do_send, "AuthGem", actual_model, messages, temperature, max_tokens, store=store)
 
-                return UnifiedResponse(
-                    content=content,
-                    finish_reason=finish_reason,
-                    usage=usage,
-                    raw_response=result,
-                )
+    # ------------------------------------------------------------------
+    # authgem-key/  →  Google AI Studio  +  API key (no OAuth)
+    # ------------------------------------------------------------------
 
-            except RuntimeError as exc:
-                error_str = str(exc)
+    def _send_authgem_key(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via Google AI Studio using an API key (GEMINI_API_KEY).
 
-                # Stream cancelled by force-stop
-                if "stream cancelled" in error_str.lower() or "cancelled" in error_str.lower():
-                    self._log_once("⏹️ AuthGem: Stream cancelled by user")
-                    raise UnifiedClientError(
-                        "AuthGem: Translation stopped by user",
-                        error_type="cancelled"
-                    )
+        Model names prefixed with 'authgem-key/' (e.g. authgem-key/gemini-2.5-flash).
+        """
+        if not AUTHGEM_AVAILABLE or _authgem_send_aistudio_key is None:
+            raise UnifiedClientError(
+                "AuthGem is not available. Ensure 'authgem_auth.py' exists under src/.",
+                error_type="config_error"
+            )
 
-                # 400 Bad Request: retry with delay
-                if "400" in error_str or "bad request" in error_str.lower():
-                    if attempt < max_retries - 1:
-                        interval = self._get_send_interval()
-                        delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
-                        print(f"🔄 AuthGem 400 Bad Request – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
-                        if not self._sleep_with_cancel(delay, 0.5):
-                            raise UnifiedClientError("AuthGem: Translation stopped by user", error_type="cancelled")
-                        continue
-                    raise UnifiedClientError(
-                        f"AuthGem: {error_str}",
-                        error_type="validation"
-                    )
+        actual_model = self._strip_authgem_prefix(self.model)
 
-                # Bail out immediately on stop request
-                if self._should_abort_retry():
-                    raise UnifiedClientError(
-                        "AuthGem: Translation stopped by user",
-                        error_type="cancelled"
-                    )
+        # Use the API key supplied by the user (GUI api_key field)
+        api_key = self.api_key
+        if not api_key:
+            raise UnifiedClientError(
+                "AuthGem-Key: No API key provided.\n"
+                "Enter your Gemini API key (from https://aistudio.google.com/app/apikey) "
+                "in the API key field.",
+                error_type="config_error"
+            )
 
-                # On 401, try refreshing the token once
-                if "401" in error_str and attempt == 0:
-                    print("🔄 AuthGem: 401 received, attempting token refresh…")
-                    try:
-                        access_token = store.get_valid_access_token(auto_login=True)
-                        continue
-                    except Exception:
-                        pass
+        _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+        _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
 
-                # On 429 rate limit
-                if "429" in error_str:
-                    print(f"⚠️ Gemini rate limit (attempt {attempt+1}/{max_retries})")
-                    if attempt < max_retries - 1:
-                        delay = self._get_send_interval() * (attempt + 1)
-                        if not self._sleep_with_cancel(delay, 0.5):
-                            raise UnifiedClientError("AuthGem: Translation stopped by user", error_type="cancelled")
-                        continue
-                    raise UnifiedClientError(
-                        f"AuthGem: Rate limit exceeded after {max_retries} attempts",
-                        error_type="rate_limit"
-                    )
+        print(f"🔑 AuthGem-Key: Sending request to AI Studio (model={actual_model})")
 
-                last_error = exc
-                if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
-                    continue
+        def _do_send(attempt):
+            return _authgem_send_aistudio_key(
+                api_key=api_key,
+                messages=messages,
+                model=actual_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=self.request_timeout,
+                log_fn=print,
+                connect_timeout=_connect_timeout,
+            )
 
-            except Exception as exc:
-                error_str = str(exc)
-                print(f"⚠️ AuthGem error (attempt {attempt+1}/{max_retries}): {error_str}")
+        return self._authgem_retry_loop(_do_send, "AuthGem-Key", actual_model, messages, temperature, max_tokens)
 
-                if self._should_abort_retry():
-                    raise UnifiedClientError(
-                        "AuthGem: Translation stopped by user",
-                        error_type="cancelled"
-                    )
+    # ------------------------------------------------------------------
+    # authgem-vertex/  →  Vertex AI  +  OAuth Bearer token (GCP project required)
+    # ------------------------------------------------------------------
 
-                last_error = exc
-                if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
-                    continue
+    def _send_authgem_vertex(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via Vertex AI using OAuth (requires GCP project w/ billing).
 
-        raise UnifiedClientError(
-            f"AuthGem request failed after {max_retries} attempts: {last_error}",
-            error_type="api_error"
-        )
+        Model names prefixed with 'authgem-vertex/' (e.g. authgem-vertex/gemini-2.5-flash).
+        """
+        if not AUTHGEM_AVAILABLE or _authgem_get_store is None or _authgem_send_vertex is None:
+            raise UnifiedClientError(
+                "AuthGem is not available. Ensure 'authgem_auth.py' exists under src/.",
+                error_type="config_error"
+            )
+
+        actual_model = self._strip_authgem_prefix(self.model)
+
+        try:
+            store = _authgem_get_store()
+            access_token = store.get_valid_access_token(auto_login=True)
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"AuthGem-Vertex authentication failed: {exc}\n"
+                "Make sure you have a Google account and try again.",
+                error_type="auth_error"
+            )
+
+        _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+        _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+
+        print(f"🔐 AuthGem-Vertex: Sending request to Vertex AI (model={actual_model})")
+
+        token = [access_token]
+
+        def _do_send(attempt):
+            return _authgem_send_vertex(
+                access_token=token[0],
+                messages=messages,
+                model=actual_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=self.request_timeout,
+                log_fn=print,
+                connect_timeout=_connect_timeout,
+            )
+
+        return self._authgem_retry_loop(_do_send, "AuthGem-Vertex", actual_model, messages, temperature, max_tokens, store=store)
 
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.
