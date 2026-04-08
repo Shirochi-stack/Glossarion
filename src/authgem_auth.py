@@ -834,7 +834,6 @@ def _build_gemini_request_body(
 
         if is_gemini_3:
             # Gemini 3: level-based thinking
-            # Budget=0 → map to lowest supported level per model
             if thinking_budget == 0:
                 if "flash" in model_lower:
                     thinking_level = "minimal"
@@ -1015,22 +1014,11 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Code Assist uses SDK field name "generateContentConfig" (not REST "generationConfig").
-    # Also, it only supports thinkingBudget + includeThoughts (not thinkingLevel).
-    if "generationConfig" in inner_body:
-        gc = inner_body.pop("generationConfig")
-        # Strip unsupported thinkingConfig fields for Code Assist
-        tc = gc.get("thinkingConfig")
-        if tc:
-            gc["thinkingConfig"] = {
-                k: v for k, v in tc.items()
-                if k in ("thinkingBudget", "includeThoughts")
-            }
-            # Ensure includeThoughts is set when streaming is on
-            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
-            if stream_thinking:
-                gc["thinkingConfig"]["includeThoughts"] = True
-        inner_body["generateContentConfig"] = gc
+    # Code Assist suppresses thought parts from SSE when thinkingLevel is present.
+    # Strip it — keep only thinkingBudget + includeThoughts for thought streaming.
+    tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
+    if tc and "thinkingLevel" in tc:
+        tc.pop("thinkingLevel")
 
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
