@@ -1014,12 +1014,6 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Code Assist suppresses thought parts from SSE when thinkingLevel is present.
-    # Strip it — keep only thinkingBudget + includeThoughts for thought streaming.
-    tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
-    if tc and "thinkingLevel" in tc:
-        tc.pop("thinkingLevel")
-
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
         "model": model,
