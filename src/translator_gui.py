@@ -3653,8 +3653,11 @@ Recent translations to summarize:
                     if needs_vertex:
                         try:
                             from authgem_auth import get_default_store
-                            if get_default_store().has_tokens and self.authgem_project_combo.count() > 0:
-                                self.authgem_project_combo.show()
+                            if get_default_store().has_tokens:
+                                if self.authgem_project_combo.count() == 0:
+                                    self._fetch_authgem_projects()
+                                else:
+                                    self.authgem_project_combo.show()
                             else:
                                 self.authgem_project_combo.hide()
                         except Exception:
@@ -3887,11 +3890,10 @@ Recent translations to summarize:
                     if needs_vertex:
                         if self.authgem_project_combo.count() == 0:
                             self._fetch_authgem_projects()
-                        if self.authgem_project_combo.count() > 0 and self.authgem_login_btn.isVisible():
+                            # Don't hide — _authgem_projects_loaded will show it
+                        elif self.authgem_login_btn.isVisible():
                             self.authgem_project_combo.show()
                             self._reposition_authgem_project_combo()
-                        else:
-                            self.authgem_project_combo.hide()
                     else:
                         self.authgem_project_combo.hide()
             else:
@@ -3914,7 +3916,6 @@ Recent translations to summarize:
         self._authgem_fetching_projects = True
         import threading
         def _worker():
-
             try:
                 from authgem_auth import get_default_store
                 import requests as _req
@@ -3922,7 +3923,7 @@ Recent translations to summarize:
                 token = store.get_valid_access_token(auto_login=False)
                 headers = {"Authorization": f"Bearer {token}"}
                 
-                # 1. List active projects
+                # 1. List active projects (fast)
                 resp = _req.get(
                     "https://cloudresourcemanager.googleapis.com/v1/projects",
                     headers=headers,
@@ -3935,45 +3936,59 @@ Recent translations to summarize:
                 if not projects:
                     return
                 
-                # 2. Check billing for each project
-                billed = []
-                unbilled = []
-                unknown = []  # Both APIs inaccessible
-                for p in projects:
-                    pid = p.get("projectId", "")
-                    if not pid:
-                        continue
+                all_pids = [p.get("projectId", "") for p in projects if p.get("projectId")]
+                
+                # Phase 1: Show all projects immediately as unknown (❔)
+                # This ensures the dropdown appears fast
+                self._authgem_billed_projects = []
+                self._authgem_unbilled_projects = []
+                self._authgem_unknown_projects = list(all_pids)
+                QMetaObject.invokeMethod(
+                    self, "_authgem_projects_loaded",
+                    Qt.QueuedConnection,
+                )
+                
+                # Phase 2: Check billing in parallel, then update
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                def _check_billing(pid):
+                    """Return (pid, 'billed'|'unbilled'|'unknown')."""
                     try:
-                        # Try Cloud Billing API first (works with ADC client)
+                        # Try Cloud Billing API first (fast, works with ADC client)
                         br = _req.get(
                             f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
-                            headers=headers, timeout=10,
+                            headers=headers, timeout=8,
                         )
                         if br.ok:
                             if br.json().get("billingEnabled", False):
-                                billed.append(pid)
-                            else:
-                                unbilled.append(pid)
-                            continue
-                        # Billing API returned 403 — try Service Usage API as fallback.
-                        # If aiplatform.googleapis.com is ENABLED, billing must be active
-                        # (Google requires billing to enable paid APIs).
-                        sr = _req.get(
-                            f"https://serviceusage.googleapis.com/v1/projects/{pid}/services/aiplatform.googleapis.com",
-                            headers=headers, timeout=10,
+                                return (pid, "billed")
+                            return (pid, "unbilled")
+                        # Billing API returned 403 — probe Vertex AI directly
+                        vr = _req.get(
+                            f"https://us-central1-aiplatform.googleapis.com/v1/projects/{pid}/locations/us-central1",
+                            headers=headers, timeout=8,
                         )
-                        if sr.ok:
-                            state = sr.json().get("state", "")
-                            if state == "ENABLED":
-                                billed.append(pid)
-                            else:
-                                unbilled.append(pid)
+                        if vr.ok:
+                            return (pid, "billed")
+                        return (pid, "unbilled")
+                    except Exception:
+                        return (pid, "unknown")
+                
+                billed = []
+                unbilled = []
+                unknown = []
+                with ThreadPoolExecutor(max_workers=min(6, len(all_pids))) as pool:
+                    futures = {pool.submit(_check_billing, pid): pid for pid in all_pids}
+                    for future in as_completed(futures):
+                        pid, status = future.result()
+                        if status == "billed":
+                            billed.append(pid)
+                        elif status == "unbilled":
+                            unbilled.append(pid)
                         else:
                             unknown.append(pid)
-                    except Exception:
-                        unknown.append(pid)
-
-                # Store results for UI thread
+                
+                # Phase 2 complete: Update dropdown with billing info
                 self._authgem_billed_projects = billed
                 self._authgem_unbilled_projects = unbilled
                 self._authgem_unknown_projects = unknown
@@ -3982,17 +3997,16 @@ Recent translations to summarize:
                     Qt.QueuedConnection,
                 )
             except Exception as exc:
-                self._authgem_fetching_projects = False  # clear guard on error
                 import logging
                 logging.getLogger(__name__).debug("Failed to fetch GCP projects: %s", exc)
+            finally:
+                self._authgem_fetching_projects = False  # always clear guard
         threading.Thread(target=_worker, daemon=True).start()
 
     @Slot()
     def _authgem_projects_loaded(self):
         """Populate the project dropdown (called on GUI thread)."""
-        self._authgem_fetching_projects = False  # clear guard
         if not hasattr(self, 'authgem_project_combo'):
-
             return
         billed = getattr(self, '_authgem_billed_projects', [])
         unbilled = getattr(self, '_authgem_unbilled_projects', [])
@@ -4032,13 +4046,14 @@ Recent translations to summarize:
             self._reposition_authgem_project_combo()
         else:
             combo.hide()
-        # Log what we found
-        if billed:
-            self.append_log(f"📁 Found {len(billed)} GCP project(s) with billing enabled")
-        if unknown:
-            self.append_log(f"❔ {len(unknown)} project(s) — billing status unknown (no permission to check)")
-        if not billed and not unknown:
-            self.append_log("⚠️ No GCP projects with billing found — Vertex AI won't work")
+        # Log billing results only when billing detection is complete
+        # (skip phase 1 where everything is unknown — that's just the fast preview)
+        has_billing_results = bool(billed or unbilled)
+        if has_billing_results:
+            if billed:
+                self.append_log(f"📁 Found {len(billed)} GCP project(s) with billing enabled")
+            if not billed:
+                self.append_log("⚠️ No GCP projects with billing found — Vertex AI won't work")
 
     def _authgem_project_changed(self, index):
         """Called when user picks a different GCP project."""

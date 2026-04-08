@@ -232,16 +232,16 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
                     elif br.ok:
                         # Billing API says explicitly not billed
                         continue
-                    # Billing API returned 403 — try Service Usage API as fallback
-                    # If aiplatform.googleapis.com is ENABLED, billing must be active
-                    sr = requests.get(
-                        f"https://serviceusage.googleapis.com/v1/projects/{pid}/services/aiplatform.googleapis.com",
-                        headers=headers, timeout=10,
+                    # Billing API returned 403 — probe Vertex AI directly
+                    # If getting location info succeeds, billing is active
+                    vr = requests.get(
+                        f"https://us-central1-aiplatform.googleapis.com/v1/projects/{pid}/locations/us-central1",
+                        headers=headers, timeout=8,
                     )
-                    if sr.ok and sr.json().get("state", "") == "ENABLED":
+                    if vr.ok:
                         _cached_project_id = pid
-                        logger.info("AuthGem: Auto-detected GCP project (Vertex AI enabled): %s", pid)
-                        print(f"🔍 AuthGem: Using GCP project: {pid} (Vertex AI API enabled)")
+                        logger.info("AuthGem: Auto-detected GCP project (Vertex AI probe OK): %s", pid)
+                        print(f"🔍 AuthGem: Using GCP project: {pid}")
                         return pid
                 except Exception:
                     continue
