@@ -817,6 +817,112 @@ def _build_gemini_request_body(
 _CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 _CODE_ASSIST_API_VERSION = "v1internal"
 
+# Cached Code Assist project ID (set once per session by _code_assist_setup)
+_code_assist_project_id: Optional[str] = None
+_code_assist_setup_done = False
+
+def _code_assist_base_url() -> str:
+    return f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}"
+
+def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
+    """Onboard user with Code Assist (mirrors Gemini CLI's setupUser).
+
+    Calls ``loadCodeAssist`` to register the user and obtain a managed
+    GCP project ID.  For free-tier users the server creates a project
+    automatically — no user configuration needed.
+
+    Returns the project ID (may be None for some tiers).
+    """
+    global _code_assist_project_id, _code_assist_setup_done
+    if _code_assist_setup_done:
+        return _code_assist_project_id
+
+    _log = _log or (lambda *a, **kw: None)
+    url = f"{_code_assist_base_url()}:loadCodeAssist"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "metadata": {
+            "ideType": "IDE_UNSPECIFIED",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        },
+        "mode": "HEALTH_CHECK",
+    }
+
+    try:
+        import httpx as _httpx
+        resp = _httpx.post(url, json=payload, headers=headers, timeout=30)
+        resp_data = resp.json()
+    except ImportError:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp_data = resp.json()
+    except Exception as exc:
+        logger.warning("Code Assist setup failed: %s", exc)
+        _code_assist_setup_done = True
+        return None
+
+    project = resp_data.get("cloudaicompanionProject")
+    tier = resp_data.get("currentTier", {})
+    tier_name = tier.get("name", "unknown")
+    logger.info("Code Assist setup: tier=%s  project=%s", tier_name, project)
+    _log(f"🔧 Code Assist: tier={tier_name}")
+
+    # If user needs onboarding (no currentTier), trigger it
+    if not tier and resp_data.get("allowedTiers"):
+        allowed = resp_data["allowedTiers"]
+        default_tier = next((t for t in allowed if t.get("isDefault")), allowed[0] if allowed else {})
+        tier_id = default_tier.get("id", "STANDARD")
+        onboard_url = f"{_code_assist_base_url()}:onboardUser"
+        onboard_payload = {
+            "tierId": tier_id,
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            },
+        }
+        try:
+            import httpx as _httpx
+            ob_resp = _httpx.post(onboard_url, json=onboard_payload, headers=headers, timeout=60)
+            ob_data = ob_resp.json()
+        except ImportError:
+            ob_resp = requests.post(onboard_url, json=onboard_payload, headers=headers, timeout=60)
+            ob_data = ob_resp.json()
+
+        # Poll LRO if needed
+        if not ob_data.get("done") and ob_data.get("name"):
+            op_name = ob_data["name"]
+            for _ in range(12):  # up to 60s
+                time.sleep(5)
+                try:
+                    import httpx as _httpx
+                    poll = _httpx.get(
+                        f"{_code_assist_base_url()}/{op_name}",
+                        headers=headers, timeout=30,
+                    )
+                    ob_data = poll.json()
+                except ImportError:
+                    poll = requests.get(
+                        f"{_code_assist_base_url()}/{op_name}",
+                        headers=headers, timeout=30,
+                    )
+                    ob_data = poll.json()
+                if ob_data.get("done"):
+                    break
+
+        project = (ob_data.get("response", {})
+                   .get("cloudaicompanionProject", {})
+                   .get("id", project))
+        _log(f"🔧 Code Assist: onboarded (project={project})")
+
+    _code_assist_project_id = project
+    _code_assist_setup_done = True
+    return project
+
+
 def send_chat_completion_aistudio(
     access_token: str,
     messages: List[Dict],
@@ -836,15 +942,21 @@ def send_chat_completion_aistudio(
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
+
+    # Ensure user is set up with Code Assist (runs once per session)
+    project_id = _code_assist_setup(access_token, _log)
+
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens)
 
-    # Wrap in Code Assist envelope: {model, request: {contents, ...}}
-    body = {
+    # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
+    body: Dict = {
         "model": model,
         "request": inner_body,
     }
+    if project_id:
+        body["project"] = project_id
 
-    url = f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}:streamGenerateContent?alt=sse"
+    url = f"{_code_assist_base_url()}:streamGenerateContent?alt=sse"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
