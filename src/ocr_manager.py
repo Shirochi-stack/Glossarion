@@ -274,7 +274,7 @@ class CustomAPIProvider(OCRProvider):
             
             # Check if model uses own auth (no API key needed)
             _ml = (model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
                 api_key = 'own-auth'  # placeholder — actual auth handled by provider
             elif not api_key:
                 self._log("❌ No API key configured", "error")

@@ -4436,7 +4436,7 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
             # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
             if not api_key:
                 _ml = (model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
+                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
                     api_key = 'own-auth'
             
             if not api_key:
@@ -4627,7 +4627,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
         if not api_key:
             _ml = (model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
                 api_key = 'own-auth'
         
         if not api_key:
@@ -7663,7 +7663,7 @@ def _translate_this_text_background(self, message: str, region_index: int):
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
         if not api_key:
             _ml = (model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('vertex/'):
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
                 api_key = 'own-auth'
         
         if not api_key:
@@ -9391,7 +9391,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
                 model = self.main_gui.config.get('model', 'gpt-4o-mini') if hasattr(self, 'main_gui') else 'gpt-4o-mini'
                 # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
                 _model_lower = model.lower() if model else ''
-                _uses_own_auth = _model_lower.startswith('authgpt/') or _model_lower.startswith('authgem/') or _model_lower.startswith('vertex/')
+                _uses_own_auth = _model_lower.startswith('authgpt/') or _model_lower.startswith('authgem/') or _model_lower.startswith('authgem-vertex/') or _model_lower.startswith('vertex/')
                 if not api_key and not _uses_own_auth:
                     print(f"[RENDER] ERROR: No API key found!")
                     raise ValueError("No API key found")
@@ -10941,7 +10941,7 @@ def _get_ocr_config(self) -> dict:
         _model = ''
         if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
             _model = (self.main_gui.config.get('model', '') or '').lower()
-        _uses_own_auth = _model.startswith('authgpt/') or _model.startswith('authgem/') or _model.startswith('vertex/') or _model.startswith('antigravity/')
+        _uses_own_auth = _model.startswith('authgpt/') or _model.startswith('authgem/') or _model.startswith('authgem-vertex/') or _model.startswith('vertex/') or _model.startswith('antigravity/')
         if api_key:
             print(f"[DEBUG] Using custom-api provider (API key available)")
             print(f"[DEBUG] API key available for custom-api OCR")

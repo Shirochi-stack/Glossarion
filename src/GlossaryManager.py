@@ -430,7 +430,7 @@ def _model_uses_own_auth(model: str) -> bool:
     if not model:
         return False
     m = model.lower()
-    return m.startswith('authgpt/') or m.startswith('authgem/') or m.startswith('vertex/')
+    return m.startswith('authgpt/') or m.startswith('authgem/') or m.startswith('authgem-vertex/') or m.startswith('vertex/')
 
 def _ensure_multi_key_config_loaded():
     """Best-effort load of multi-key config when running in subprocesses.
