@@ -213,13 +213,13 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
         )
         if resp.ok:
             projects = resp.json().get("projects", [])
-            billing_check_failed = False  # Track if billing API is inaccessible
             # Check billing for each project — only pick one with billing
             for p in projects:
                 pid = p.get("projectId", "")
                 if not pid:
                     continue
                 try:
+                    # Try Cloud Billing API first
                     br = requests.get(
                         f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
                         headers=headers, timeout=10,
@@ -229,24 +229,22 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
                         logger.info("AuthGem: Auto-detected GCP project (billing OK): %s", pid)
                         print(f"🔍 AuthGem: Using GCP project: {pid}")
                         return pid
-                    elif not br.ok:
-                        # Billing API returned error (likely 403 permission denied)
-                        logger.debug("AuthGem: Billing API returned %s for %s", br.status_code, pid)
-                        billing_check_failed = True
+                    elif br.ok:
+                        # Billing API says explicitly not billed
+                        continue
+                    # Billing API returned 403 — try Service Usage API as fallback
+                    # If aiplatform.googleapis.com is ENABLED, billing must be active
+                    sr = requests.get(
+                        f"https://serviceusage.googleapis.com/v1/projects/{pid}/services/aiplatform.googleapis.com",
+                        headers=headers, timeout=10,
+                    )
+                    if sr.ok and sr.json().get("state", "") == "ENABLED":
+                        _cached_project_id = pid
+                        logger.info("AuthGem: Auto-detected GCP project (Vertex AI enabled): %s", pid)
+                        print(f"🔍 AuthGem: Using GCP project: {pid} (Vertex AI API enabled)")
+                        return pid
                 except Exception:
-                    billing_check_failed = True
                     continue
-
-            # Fallback: if billing API was inaccessible for ALL projects,
-            # use the first active project rather than rejecting everything.
-            # The Gemini CLI OAuth client may not have cloudbilling permissions.
-            if billing_check_failed and projects:
-                first_pid = projects[0].get("projectId", "")
-                if first_pid:
-                    _cached_project_id = first_pid
-                    logger.info("AuthGem: Billing API inaccessible; using first project: %s", first_pid)
-                    print(f"🔍 AuthGem: Using GCP project: {first_pid} (billing check skipped — no permission)")
-                    return first_pid
 
             # If no billed project found, warn
             if projects:
@@ -1164,6 +1162,9 @@ def _stream_gemini_common(
     if os.getenv("BATCH_TRANSLATION", "0") == "1":
         log_stream = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
 
+    # Thinking stream uses its own env var (matches other providers)
+    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+
     t_start = time.time()
 
     # Prefer httpx for true real-time SSE (same stack as openai SDK)
@@ -1172,12 +1173,13 @@ def _stream_gemini_common(
         return _stream_with_httpx_gemini(
             _httpx, url, body, headers, timeout, t_start,
             _log, log_stream, connect_timeout=connect_timeout,
+            stream_thinking=stream_thinking,
         )
     except ImportError:
         _log("⚠️ AuthGem: httpx not installed, falling back to requests (streaming may be buffered)")
         return _stream_with_requests_gemini(
             url, body, headers, timeout, t_start,
-            _log, log_stream,
+            _log, log_stream, stream_thinking=stream_thinking,
         )
 
 
@@ -1204,6 +1206,7 @@ def _process_gemini_sse_line(
     _log,
     log_stream: bool,
     t_start: float,
+    stream_thinking: bool = True,
 ) -> bool:
     """Process a single SSE line from Vertex AI streamGenerateContent.
 
@@ -1255,7 +1258,7 @@ def _process_gemini_sse_line(
             if part.get("thought", False):
                 state["thought_parts"].append(text)
                 # Log thinking in real-time — same format as gemini-grpc
-                if log_stream and text:
+                if stream_thinking and text:
                     if not state.get("_thinking_started"):
                         _log("🧠 [authgem] Thinking...")
                         state["_thinking_started"] = True
@@ -1276,6 +1279,22 @@ def _process_gemini_sse_line(
 
             state["text_parts"].append(text)
             state["streamed_chars"] += len(text)
+
+            # Emit separator when transitioning from thinking to text output
+            if state.get("_thinking_started") and not state.get("_thinking_ended"):
+                state["_thinking_ended"] = True
+                # Flush remaining thinking buffer first
+                thought_rem = state.get("_thought_log_buf", [])
+                if thought_rem:
+                    remainder = "".join(thought_rem).rstrip("\n")
+                    if remainder:
+                        for p in remainder.split("\n"):
+                            _log(f"    {p}")
+                    state["_thought_log_buf"] = []
+                chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
+                dur = time.time() - state.get("_thinking_start_ts", t_start)
+                _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
+                _log("─" * 50)
 
             # Real-time log output (mirrors authgpt's delta logging)
             if log_stream and text:
@@ -1305,14 +1324,14 @@ def _process_gemini_sse_line(
 
 def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dict:
     """Flush log buffer, build result dict from accumulated state."""
-    # Flush remaining thinking log buffer
-    if log_stream and state.get("_thought_log_buf"):
+    # Flush remaining thinking log buffer (only if not already flushed during transition)
+    if not state.get("_thinking_ended") and state.get("_thought_log_buf"):
         remainder = "".join(state["_thought_log_buf"]).rstrip("\n")
         if remainder:
             for p in remainder.split("\n"):
                 _log(f"    {p}")
-    # Log thinking completion summary — same format as gemini-grpc
-    if state.get("_thinking_started") and state["thought_parts"]:
+    # Log thinking completion summary (only if not already logged during transition)
+    if state.get("_thinking_started") and state["thought_parts"] and not state.get("_thinking_ended"):
         chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
         dur = time.time() - state.get("_thinking_start_ts", t_start)
         _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
@@ -1354,6 +1373,9 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float)
             "completion_tokens": um.get("candidatesTokenCount", 0),
             "total_tokens": um.get("totalTokenCount", 0),
         }
+        thinking_tokens = um.get("thoughtsTokenCount", 0)
+        if thinking_tokens:
+            usage["thinking_tokens"] = thinking_tokens
 
     return {
         "content": content,
@@ -1376,6 +1398,7 @@ def _stream_with_httpx_gemini(
     _log,
     log_stream: bool,
     connect_timeout: Optional[float] = None,
+    stream_thinking: bool = True,
 ) -> Dict:
     """Stream SSE from Vertex AI using httpx (same stack as the openai SDK)."""
     state = _new_gemini_stream_state()
@@ -1407,7 +1430,7 @@ def _stream_with_httpx_gemini(
             if _cancel_event.is_set():
                 resp.close()
                 raise RuntimeError("AuthGem: stream cancelled by user")
-            if _process_gemini_sse_line(line, state, _log, log_stream, t_start):
+            if _process_gemini_sse_line(line, state, _log, log_stream, t_start, stream_thinking=stream_thinking):
                 break
 
     return _finalize_gemini_stream(state, _log, log_stream, t_start)
@@ -1425,6 +1448,7 @@ def _stream_with_requests_gemini(
     t_start: float,
     _log,
     log_stream: bool,
+    stream_thinking: bool = True,
 ) -> Dict:
     """Stream SSE from Vertex AI using requests (fallback when httpx unavailable)."""
     state = _new_gemini_stream_state()
@@ -1459,7 +1483,7 @@ def _stream_with_requests_gemini(
         if raw_line is None:
             continue
         line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
-        if _process_gemini_sse_line(line, state, _log, log_stream, t_start):
+        if _process_gemini_sse_line(line, state, _log, log_stream, t_start, stream_thinking=stream_thinking):
             break
 
     return _finalize_gemini_stream(state, _log, log_stream, t_start)

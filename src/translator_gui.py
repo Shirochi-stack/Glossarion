@@ -3938,38 +3938,45 @@ Recent translations to summarize:
                 # 2. Check billing for each project
                 billed = []
                 unbilled = []
-                billing_api_failed = False  # Track if billing API is inaccessible
+                unknown = []  # Both APIs inaccessible
                 for p in projects:
                     pid = p.get("projectId", "")
                     if not pid:
                         continue
                     try:
+                        # Try Cloud Billing API first (works with ADC client)
                         br = _req.get(
                             f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
                             headers=headers, timeout=10,
                         )
-                        if br.ok and br.json().get("billingEnabled", False):
-                            billed.append(pid)
-                        elif not br.ok:
-                            # Billing API returned error (likely 403 permission denied)
-                            billing_api_failed = True
-                            unbilled.append(pid)
+                        if br.ok:
+                            if br.json().get("billingEnabled", False):
+                                billed.append(pid)
+                            else:
+                                unbilled.append(pid)
+                            continue
+                        # Billing API returned 403 — try Service Usage API as fallback.
+                        # If aiplatform.googleapis.com is ENABLED, billing must be active
+                        # (Google requires billing to enable paid APIs).
+                        sr = _req.get(
+                            f"https://serviceusage.googleapis.com/v1/projects/{pid}/services/aiplatform.googleapis.com",
+                            headers=headers, timeout=10,
+                        )
+                        if sr.ok:
+                            state = sr.json().get("state", "")
+                            if state == "ENABLED":
+                                billed.append(pid)
+                            else:
+                                unbilled.append(pid)
                         else:
-                            unbilled.append(pid)
+                            unknown.append(pid)
                     except Exception:
-                        billing_api_failed = True
-                        unbilled.append(pid)
-                
-                # Fallback: if billing API was inaccessible for ALL projects,
-                # treat them all as billed (billing status unknown).
-                # The Gemini CLI OAuth client may not have cloudbilling permissions.
-                if billing_api_failed and not billed:
-                    billed = unbilled
-                    unbilled = []
+                        unknown.append(pid)
 
                 # Store results for UI thread
                 self._authgem_billed_projects = billed
                 self._authgem_unbilled_projects = unbilled
+                self._authgem_unknown_projects = unknown
                 QMetaObject.invokeMethod(
                     self, "_authgem_projects_loaded",
                     Qt.QueuedConnection,
@@ -3989,15 +3996,19 @@ Recent translations to summarize:
             return
         billed = getattr(self, '_authgem_billed_projects', [])
         unbilled = getattr(self, '_authgem_unbilled_projects', [])
-        if not billed and not unbilled:
+        unknown = getattr(self, '_authgem_unknown_projects', [])
+        if not billed and not unbilled and not unknown:
             return
         combo = self.authgem_project_combo
         combo.blockSignals(True)
         combo.clear()
-        # Add billed projects first (usable)
+        # Add billed projects first (confirmed usable)
         for pid in billed:
             combo.addItem(f"✅ {pid}", pid)
-        # Add unbilled projects (greyed out label)
+        # Add unknown projects (billing API inaccessible — still selectable)
+        for pid in unknown:
+            combo.addItem(f"❔ {pid}", pid)
+        # Add unbilled projects last (confirmed no billing)
         for pid in unbilled:
             combo.addItem(f"⚠️ {pid} (no billing)", pid)
         
@@ -4006,9 +4017,11 @@ Recent translations to summarize:
         selected_idx = -1
         if saved:
             selected_idx = combo.findData(saved)
-        # If no saved or saved not found, pick first billed project
+        # If no saved or saved not found, pick first billed; if none, first unknown
         if selected_idx < 0 and billed:
             selected_idx = 0
+        elif selected_idx < 0 and unknown:
+            selected_idx = len(billed)  # first unknown item
         if selected_idx >= 0:
             combo.setCurrentIndex(selected_idx)
         combo.blockSignals(False)
@@ -4022,7 +4035,9 @@ Recent translations to summarize:
         # Log what we found
         if billed:
             self.append_log(f"📁 Found {len(billed)} GCP project(s) with billing enabled")
-        if not billed:
+        if unknown:
+            self.append_log(f"❔ {len(unknown)} project(s) — billing status unknown (no permission to check)")
+        if not billed and not unknown:
             self.append_log("⚠️ No GCP projects with billing found — Vertex AI won't work")
 
     def _authgem_project_changed(self, index):
