@@ -743,6 +743,7 @@ def _build_gemini_request_body(
     messages: List[Dict],
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    model: str = "",
 ) -> Dict:
     """Convert OpenAI-style messages to Gemini API generateContent format.
 
@@ -750,6 +751,11 @@ def _build_gemini_request_body(
       - system → systemInstruction
       - user → user parts (text and/or images)
       - assistant → model parts
+
+    Reads thinking settings from environment variables:
+      - ENABLE_GEMINI_THINKING: "1" (default) or "0"
+      - THINKING_BUDGET: 0=disabled, 512-24576=limited, -1=dynamic (default)
+      - GEMINI_THINKING_LEVEL: minimal/low/medium/high (Gemini 3)
     """
     system_parts = []
     contents = []
@@ -789,17 +795,62 @@ def _build_gemini_request_body(
         body["systemInstruction"] = {"parts": system_parts}
 
     # Generation config
-    gen_config = {}
+    gen_config: Dict = {}
     if temperature is not None:
         gen_config["temperature"] = temperature
     if max_tokens is not None:
         gen_config["maxOutputTokens"] = max_tokens
 
-    # Enable thinking/reasoning output so we can stream it
-    # (thoughts are filtered from final output but logged in real-time)
+    # ── Thinking / reasoning configuration ──
+    enable_thinking = os.getenv("ENABLE_GEMINI_THINKING", "1") == "1"
+    thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
+    thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
-    if stream_thinking:
-        gen_config["thinkingConfig"] = {"includeThoughts": True}
+
+    model_lower = model.lower() if model else ""
+    is_gemini_3 = "gemini-3" in model_lower
+
+    if thinking_level not in ("minimal", "low", "medium", "high"):
+        thinking_level = "high"
+
+    if enable_thinking:
+        thinking_config: Dict = {}
+
+        if is_gemini_3:
+            # Gemini 3: level-based thinking
+            # Budget=0 → map to lowest supported level per model
+            if thinking_budget == 0:
+                if "flash" in model_lower:
+                    thinking_level = "minimal"
+                else:
+                    thinking_level = "low"
+            thinking_config["thinkingLevel"] = thinking_level.upper()
+            # Gemini 3 Pro doesn't support minimal
+            if "pro" in model_lower and "flash" not in model_lower:
+                if thinking_level == "minimal":
+                    thinking_config["thinkingLevel"] = "LOW"
+        else:
+            # Gemini 2.5 and earlier: budget-based thinking
+            if thinking_budget == 0:
+                thinking_config["thinkingBudget"] = 0
+            elif thinking_budget > 0:
+                thinking_config["thinkingBudget"] = thinking_budget
+            # -1 = dynamic (don't set budget, let model decide)
+
+        # Include thoughts in stream so we can log them in real-time
+        if stream_thinking:
+            thinking_config["includeThoughts"] = True
+
+        if thinking_config:
+            gen_config["thinkingConfig"] = thinking_config
+    else:
+        # Thinking explicitly disabled
+        if is_gemini_3:
+            # Gemini 3 can't fully disable thinking; use lowest level
+            lowest = "MINIMAL" if "flash" in model_lower else "LOW"
+            gen_config["thinkingConfig"] = {"thinkingLevel": lowest}
+        else:
+            gen_config["thinkingConfig"] = {"thinkingBudget": 0}
 
     if gen_config:
         body["generationConfig"] = gen_config
@@ -946,7 +997,7 @@ def send_chat_completion_aistudio(
     # Ensure user is set up with Code Assist (runs once per session)
     project_id = _code_assist_setup(access_token, _log)
 
-    inner_body = _build_gemini_request_body(messages, temperature, max_tokens)
+    inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
@@ -992,7 +1043,7 @@ def send_chat_completion_aistudio_key(
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
-    body = _build_gemini_request_body(messages, temperature, max_tokens)
+    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
@@ -1032,7 +1083,7 @@ def send_chat_completion_vertex(
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
-    body = _build_gemini_request_body(messages, temperature, max_tokens)
+    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
     # Resolve project — auto-detect from the OAuth token
     project = detect_gcp_project(access_token)
