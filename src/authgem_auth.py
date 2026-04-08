@@ -1015,6 +1015,23 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
+    # Code Assist uses SDK field name "generateContentConfig" (not REST "generationConfig").
+    # Also, it only supports thinkingBudget + includeThoughts (not thinkingLevel).
+    if "generationConfig" in inner_body:
+        gc = inner_body.pop("generationConfig")
+        # Strip unsupported thinkingConfig fields for Code Assist
+        tc = gc.get("thinkingConfig")
+        if tc:
+            gc["thinkingConfig"] = {
+                k: v for k, v in tc.items()
+                if k in ("thinkingBudget", "includeThoughts")
+            }
+            # Ensure includeThoughts is set when streaming is on
+            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+            if stream_thinking:
+                gc["thinkingConfig"]["includeThoughts"] = True
+        inner_body["generateContentConfig"] = gc
+
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
         "model": model,
@@ -1165,6 +1182,23 @@ def _stream_gemini_common(
     # Thinking stream uses its own env var (matches other providers)
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
 
+    # Log generation config summary
+    _inner = body.get("request", body)  # Code Assist wraps in {"request": ...}
+    _gc = _inner.get("generateContentConfig") or _inner.get("generationConfig") or {}
+    _tc = _gc.get("thinkingConfig", {})
+    _temp = _gc.get("temperature", "default")
+    _think_desc = ""
+    if "thinkingLevel" in _tc:
+        _think_desc = f"level={_tc['thinkingLevel']}"
+    elif "thinkingBudget" in _tc:
+        b = _tc["thinkingBudget"]
+        _think_desc = f"budget={'dynamic' if b < 0 else b}"
+    else:
+        _think_desc = "dynamic"
+    if _tc.get("includeThoughts"):
+        _think_desc += "+stream"
+    _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}")
+
     t_start = time.time()
 
     # Prefer httpx for true real-time SSE (same stack as openai SDK)
@@ -1232,6 +1266,7 @@ def _process_gemini_sse_line(
     if not state["got_first_data"]:
         state["got_first_data"] = True
         ttft = time.time() - t_start
+        state["_ttft"] = ttft
         _log(f"📡 AuthGem: First token in {ttft:.1f}s, streaming…")
 
     # Unwrap Code Assist response envelope if present
@@ -1343,6 +1378,18 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float)
             _log(remainder)
 
     t_total = time.time() - t_start
+
+    # Infer thinking when the endpoint doesn't stream thought parts
+    # (Code Assist strips thought content from the SSE stream)
+    if not state.get("_thinking_started") and not state["thought_parts"]:
+        ttft = state.get("_ttft", 0)
+        um = state["usage_metadata"]
+        thinking_tokens = um.get("thoughtsTokenCount", 0) if um else 0
+        if thinking_tokens > 0:
+            _log(f"🧠 [authgem] Model used {thinking_tokens} thinking tokens (TTFT {ttft:.1f}s)")
+        elif ttft > 5.0:
+            _log(f"🧠 [authgem] Model thinking inferred from TTFT ({ttft:.1f}s) — endpoint doesn't stream thoughts")
+
     _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
 
     content = "".join(state["text_parts"])
