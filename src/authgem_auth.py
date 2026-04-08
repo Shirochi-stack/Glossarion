@@ -89,8 +89,9 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
 # Scopes — cloud-platform covers Code Assist proxy (cloudcode-pa.googleapis.com)
-# and Vertex AI (aiplatform.googleapis.com).
-# generative-language.retriever is NOT usable with public OAuth clients.
+# which is what the Gemini CLI uses for "Sign in with Google".
+# Direct OAuth to generativelanguage.googleapis.com is NOT possible with
+# public OAuth clients (the generative-language.retriever scope is unregistered).
 # For direct AI Studio access, use authgem-key/ (API key) instead.
 OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
@@ -1011,17 +1012,21 @@ def send_chat_completion_aistudio(
     # Ensure user is set up with Code Assist (runs once per session)
     project_id = _code_assist_setup(access_token, _log)
 
-    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
+    inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
+
+    # Code Assist suppresses thought parts from SSE when thinkingLevel is present.
+    # Strip it — keep only thinkingBudget + includeThoughts for thought streaming.
+    tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
+    if tc and "thinkingLevel" in tc:
+        tc.pop("thinkingLevel")
 
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
-    # NOTE: Code Assist proxy does not stream thought parts (includeThoughts).
-    # For real-time thinking logs, use authgem-key/ or authgem-vertex/ instead.
-    wrapped: Dict = {
+    body: Dict = {
         "model": model,
-        "request": body,
+        "request": inner_body,
     }
     if project_id:
-        wrapped["project"] = project_id
+        body["project"] = project_id
 
     url = f"{_code_assist_base_url()}:streamGenerateContent?alt=sse"
     headers = {
@@ -1032,7 +1037,7 @@ def send_chat_completion_aistudio(
 
     logger.info("AuthGem-CodeAssist: POST %s  model=%s", url.split("?")[0], model)
 
-    return _stream_gemini_common(url, wrapped, headers, timeout, _log, connect_timeout)
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
 
 
 # ===========================================================================
@@ -1406,10 +1411,6 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float)
         thinking_tokens = um.get("thoughtsTokenCount", 0)
         if thinking_tokens:
             usage["thinking_tokens"] = thinking_tokens
-            # Log thinking summary when thought parts weren't streamed
-            if not state["thought_parts"]:
-                ttft = state.get("_ttft", 0)
-                _log(f"🧠 [authgem] Model used {thinking_tokens} thinking tokens (TTFT {ttft:.1f}s)")
 
     return {
         "content": content,
