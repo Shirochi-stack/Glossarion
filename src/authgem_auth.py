@@ -1281,7 +1281,8 @@ def _process_gemini_sse_line(
         state["got_first_data"] = True
         ttft = time.time() - t_start
         state["_ttft"] = ttft
-        _log(f"📡 AuthGem: First token in {ttft:.1f}s, streaming…")
+        if log_stream:
+            _log(f"📡 AuthGem: First token in {ttft:.1f}s, streaming…")
 
     # Unwrap Code Assist response envelope if present
     # Code Assist wraps: {"response": {"candidates": [...]}} 
@@ -1299,13 +1300,6 @@ def _process_gemini_sse_line(
 
         content_parts = candidate.get("content", {}).get("parts", [])
         for part in content_parts:
-            # DEBUG: log keys of first 5 parts to diagnose thought streaming
-            _dbg = state.get("_dbg_n", 0)
-            if _dbg < 5:
-                _preview = (part.get('text', '') or '')[:60].replace('\n', ' ')
-                _has_sig = 'thoughtSignature' in part
-                _log(f"[DEBUG] Part#{_dbg} keys={sorted(part.keys())} thought={part.get('thought')} sig={_has_sig} text='{_preview}'")
-                state["_dbg_n"] = _dbg + 1
             text = part.get("text", "")
             if not text:
                 continue
@@ -1345,19 +1339,20 @@ def _process_gemini_sse_line(
             # Emit separator when transitioning from thinking to text output
             if state.get("_thinking_started") and not state.get("_thinking_ended"):
                 state["_thinking_ended"] = True
-                # Flush remaining thinking buffer first
-                thought_rem = state.get("_thought_log_buf", [])
-                if thought_rem:
-                    remainder = "".join(thought_rem).rstrip("\n")
-                    if remainder:
-                        for p in remainder.split("\n"):
-                            _log(f"    {p}")
-                    state["_thought_log_buf"] = []
-                chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
-                dur = time.time() - state.get("_thinking_start_ts", t_start)
-                _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
-                _log("─" * 50)
-                _log("📡 Text streaming...")
+                if stream_thinking:
+                    # Flush remaining thinking buffer first
+                    thought_rem = state.get("_thought_log_buf", [])
+                    if thought_rem:
+                        remainder = "".join(thought_rem).rstrip("\n")
+                        if remainder:
+                            for p in remainder.split("\n"):
+                                _log(f"    {p}")
+                        state["_thought_log_buf"] = []
+                    chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
+                    dur = time.time() - state.get("_thinking_start_ts", t_start)
+                    _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
+                    _log("─" * 50)
+                    _log("📡 Text streaming...")
 
             # Real-time log output (mirrors authgpt's delta logging)
             if log_stream and text:
@@ -1385,19 +1380,20 @@ def _process_gemini_sse_line(
     return False
 
 
-def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dict:
+def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float, stream_thinking: bool = True) -> Dict:
     """Flush log buffer, build result dict from accumulated state."""
     # Flush remaining thinking log buffer (only if not already flushed during transition)
     if not state.get("_thinking_ended") and state.get("_thought_log_buf"):
         remainder = "".join(state["_thought_log_buf"]).rstrip("\n")
-        if remainder:
+        if remainder and stream_thinking:
             for p in remainder.split("\n"):
                 _log(f"    {p}")
     # Log thinking completion summary (only if not already logged during transition)
     if state.get("_thinking_started") and state["thought_parts"] and not state.get("_thinking_ended"):
         chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
         dur = time.time() - state.get("_thinking_start_ts", t_start)
-        _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
+        if stream_thinking:
+            _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
 
     # Flush remaining output log buffer
     if log_stream and state["log_buf"]:
@@ -1508,7 +1504,7 @@ def _stream_with_httpx_gemini(
             if _process_gemini_sse_line(line, state, _log, log_stream, t_start, stream_thinking=stream_thinking):
                 break
 
-    return _finalize_gemini_stream(state, _log, log_stream, t_start)
+    return _finalize_gemini_stream(state, _log, log_stream, t_start, stream_thinking=stream_thinking)
 
 
 # ---------------------------------------------------------------------------
@@ -1561,5 +1557,5 @@ def _stream_with_requests_gemini(
         if _process_gemini_sse_line(line, state, _log, log_stream, t_start, stream_thinking=stream_thinking):
             break
 
-    return _finalize_gemini_stream(state, _log, log_stream, t_start)
+    return _finalize_gemini_stream(state, _log, log_stream, t_start, stream_thinking=stream_thinking)
 
