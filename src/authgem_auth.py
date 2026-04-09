@@ -1175,6 +1175,12 @@ def send_chat_completion_aistudio(
     # Ensure user is set up with Code Assist (runs once per session)
     project_id = _code_assist_setup(access_token, _log)
 
+    if not project_id:
+        raise RuntimeError(
+            "AuthGem: No project assigned — account verification may be incomplete. "
+            "Complete the verification in your browser, then retry."
+        )
+
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
     # Wrap in Code Assist envelope matching Gemini CLI's converter.ts format:
