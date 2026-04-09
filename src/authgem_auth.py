@@ -1093,8 +1093,6 @@ def send_chat_completion_aistudio(
         "Content-Type": "application/json",
         "Accept-Encoding": "identity",
     }
-    if project_id:
-        headers["x-goog-user-project"] = project_id
 
     logger.info("AuthGem-CodeAssist: POST %s  model=%s  credits=GOOGLE_ONE_AI", url.split("?")[0], model)
 
