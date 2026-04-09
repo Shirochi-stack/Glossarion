@@ -963,6 +963,33 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
     project = resp_data.get("cloudaicompanionProject")
 
+    # Log raw response for debugging verification issues
+    logger.info("Code Assist loadCodeAssist raw keys: %s", list(resp_data.keys()))
+    if resp_data.get("ineligibleTiers"):
+        logger.info("Code Assist ineligibleTiers raw: %s", json.dumps(resp_data["ineligibleTiers"])[:2000])
+
+    # Handle account verification — matching Gemini CLI's validateLoadCodeAssistResponse()
+    # The CLI checks ineligibleTiers for entries with:
+    #   reasonCode === "VALIDATION_REQUIRED" AND validationUrl present
+    _verification_opened = False
+    for inelig in resp_data.get("ineligibleTiers", []):
+        v_url = inelig.get("validationUrl", "")
+        v_msg = inelig.get("reasonMessage", "Account verification required")
+        reason_code = inelig.get("reasonCode", "")
+
+        if v_url and reason_code == "VALIDATION_REQUIRED":
+            _log(f"⚠️ {v_msg}")
+            _log(f"🔗 Opening verification in browser…")
+            logger.warning("Code Assist VALIDATION_REQUIRED: %s", v_url)
+            try:
+                import webbrowser
+                webbrowser.open(v_url)
+                _verification_opened = True
+            except Exception:
+                _log(f"🔗 Could not open browser. Visit: {v_url}")
+        elif v_msg:
+            _log(f"⚠️ {v_msg}")
+
     # Gemini CLI prioritizes paidTier over currentTier (setup.ts)
     paid_tier = resp_data.get("paidTier") or {}
     current_tier = resp_data.get("currentTier") or {}
