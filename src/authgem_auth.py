@@ -1225,7 +1225,10 @@ def _stream_gemini_common(
         _think_desc = "dynamic"
     if _tc.get("includeThoughts"):
         _think_desc += "+stream"
-    _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}")
+    # Check if safety settings are in the body
+    _safety = _inner.get("safetySettings")
+    _safety_desc = "OFF" if _safety else "default"
+    _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}, safety={_safety_desc}")
 
     # Emit "in progress" here (after config summary) so it appears last
     import threading as _threading
