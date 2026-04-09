@@ -1275,8 +1275,11 @@ def _stream_gemini_common(
 
         # Fallback: if text content is empty but thoughts contain text,
         # the API returned everything as thought-annotated parts.
-        # Use the thought content as the main content.
-        if not final_content and thought_text:
+        # Use the thought content as the main content — but ONLY when
+        # finish_reason is STOP (normal completion).  If the model was
+        # blocked (SAFETY, PROHIBITED_CONTENT, etc.) we must NOT leak
+        # thinking output into the content field.
+        if not final_content and thought_text and finish_reason == "STOP":
             final_content = thought_text
             thought_text = None
 
