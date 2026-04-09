@@ -9781,7 +9781,10 @@ class UnifiedClient:
                 elapsed += dt
         
         # Log stagger status — shows queued+delay or immediate in-progress
-        if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+        # (Skip for authgem providers — they emit this after their own config summary)
+        _model_lower = getattr(self, 'model', '').lower()
+        _is_authgem = _model_lower.startswith('authgem')
+        if not _is_authgem and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'

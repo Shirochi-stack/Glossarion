@@ -1215,6 +1215,10 @@ def _stream_gemini_common(
         _think_desc += "+stream"
     _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}")
 
+    # Emit "in progress" here (after config summary) so it appears last
+    import threading as _threading
+    _log(f"📤 [{_threading.current_thread().name}] API call in progress")
+
     t_start = time.time()
 
     # ── Non-streaming path: use generateContent instead of streamGenerateContent ──
