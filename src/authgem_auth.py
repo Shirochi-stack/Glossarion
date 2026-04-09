@@ -1150,16 +1150,6 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Warn user if Gemini 3 thought streaming is requested — Code Assist proxy
-    # doesn't return thought=true annotations for Gemini 3 models.
-    model_lower = model.lower() if model else ""
-    tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
-    if "gemini-3" in model_lower:
-        stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
-        if stream_thinking and tc and tc.get("includeThoughts"):
-            _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem/ — use authgem-key/ instead")
-            _log("🧠 Model is thinking internally (thoughts will not be streamed)")
-
     # Wrap in Code Assist envelope matching Gemini CLI's converter.ts format:
     # {model, project, user_prompt_id, enabled_credit_types?, request: {contents, ..., session_id}}
     inner_body["session_id"] = _code_assist_session_id
