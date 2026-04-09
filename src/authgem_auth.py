@@ -1065,6 +1065,40 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
     _code_assist_project_id = project
     _code_assist_setup_done = True
+
+    # Query server-side quota (Gemini CLI: retrieveUserQuota)
+    try:
+        quota_url = f"{_code_assist_base_url()}:retrieveUserQuota"
+        quota_payload = {"project": project} if project else {}
+        try:
+            import httpx as _httpx
+            q_resp = _httpx.post(quota_url, json=quota_payload, headers=headers, timeout=15)
+            q_data = q_resp.json()
+        except ImportError:
+            q_resp = requests.post(quota_url, json=quota_payload, headers=headers, timeout=15)
+            q_data = q_resp.json()
+
+        buckets = q_data.get("buckets", [])
+        if buckets:
+            # Aggregate: find the "pooled" or most relevant bucket
+            for b in buckets:
+                remaining = int(b.get("remainingAmount", 0))
+                fraction = b.get("remainingFraction", 0)
+                reset_time = b.get("resetTime", "")
+                model_id = b.get("modelId", "all")
+                # Derive total limit from remaining/fraction
+                if fraction and fraction > 0:
+                    total = round(remaining / fraction)
+                    used = total - remaining
+                    _log(f"📊 Quota ({model_id}): {remaining}/{total} remaining ({used} used) — resets {reset_time[:16] if reset_time else 'midnight PT'}")
+                else:
+                    _log(f"📊 Quota ({model_id}): {remaining} remaining — resets {reset_time[:16] if reset_time else 'midnight PT'}")
+            logger.info("Code Assist quota buckets: %s", json.dumps(buckets)[:1000])
+        else:
+            logger.info("Code Assist retrieveUserQuota: no buckets returned. Raw: %s", json.dumps(q_data)[:500])
+    except Exception as exc:
+        logger.debug("retrieveUserQuota failed (non-fatal): %s", exc)
+
     return project
 
 
