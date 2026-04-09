@@ -1518,14 +1518,14 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
     # Flush remaining thinking log buffer (only if not already flushed during transition)
     if not state.get("_thinking_ended") and state.get("_thought_log_buf"):
         remainder = "".join(state["_thought_log_buf"]).rstrip("\n")
-        if remainder and stream_thinking:
+        if remainder and stream_thinking and log_stream:
             for p in remainder.split("\n"):
                 _log(f"    {p}")
     # Log thinking completion summary (only if not already logged during transition)
     if state.get("_thinking_started") and state["thought_parts"] and not state.get("_thinking_ended"):
         chunks = state.get("_thinking_chunks", len(state["thought_parts"]))
         dur = time.time() - state.get("_thinking_start_ts", t_start)
-        if stream_thinking:
+        if stream_thinking and log_stream:
             _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
 
     # Flush remaining output log buffer
@@ -1542,12 +1542,14 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
         ttft = state.get("_ttft", 0)
         um = state["usage_metadata"]
         thinking_tokens = um.get("thoughtsTokenCount", 0) if um else 0
-        if thinking_tokens > 0:
-            _log(f"🧠 [authgem] Model used {thinking_tokens} thinking tokens (TTFT {ttft:.1f}s)")
-        elif ttft > 5.0:
-            _log(f"🧠 [authgem] Model thinking inferred from TTFT ({ttft:.1f}s) — endpoint doesn't stream thoughts")
+        if log_stream:
+            if thinking_tokens > 0:
+                _log(f"🧠 [authgem] Model used {thinking_tokens} thinking tokens (TTFT {ttft:.1f}s)")
+            elif ttft > 5.0:
+                _log(f"🧠 [authgem] Model thinking inferred from TTFT ({ttft:.1f}s) — endpoint doesn't stream thoughts")
 
-    _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
+    if log_stream:
+        _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
 
     content = "".join(state["text_parts"])
     thought_content = "".join(state["thought_parts"]) if state["thought_parts"] else None
