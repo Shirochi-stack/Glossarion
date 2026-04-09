@@ -1080,19 +1080,33 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
         buckets = q_data.get("buckets", [])
         if buckets:
-            # Aggregate: find the "pooled" or most relevant bucket
+            quota_lines = []
+            any_remaining = False
             for b in buckets:
                 remaining = int(b.get("remainingAmount", 0))
                 fraction = b.get("remainingFraction", 0)
                 reset_time = b.get("resetTime", "")
                 model_id = b.get("modelId", "all")
+                reset_str = reset_time[:16] if reset_time else "midnight PT"
                 # Derive total limit from remaining/fraction
                 if fraction and fraction > 0:
                     total = round(remaining / fraction)
                     used = total - remaining
-                    _log(f"📊 Quota ({model_id}): {remaining}/{total} remaining ({used} used) — resets {reset_time[:16] if reset_time else 'midnight PT'}")
+                    quota_lines.append(f"  {model_id}: {remaining}/{total} left ({used} used) resets {reset_str}")
+                    if remaining > 0:
+                        any_remaining = True
+                elif remaining > 0:
+                    quota_lines.append(f"  {model_id}: {remaining} left, resets {reset_str}")
+                    any_remaining = True
                 else:
-                    _log(f"📊 Quota ({model_id}): {remaining} remaining — resets {reset_time[:16] if reset_time else 'midnight PT'}")
+                    quota_lines.append(f"  {model_id}: exhausted, resets {reset_str}")
+            # Show summary line + details
+            if any_remaining:
+                _log("📊 Daily Quota:")
+            else:
+                _log("⚠️ Daily Quota: EXHAUSTED (paid credits will be used if available)")
+            for ql in quota_lines:
+                _log(ql)
             logger.info("Code Assist quota buckets: %s", json.dumps(buckets)[:1000])
         else:
             logger.info("Code Assist retrieveUserQuota: no buckets returned. Raw: %s", json.dumps(q_data)[:500])
