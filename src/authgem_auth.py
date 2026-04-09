@@ -976,7 +976,9 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     available_credits = tier.get("availableCredits", [])
     g1_credits = [c for c in available_credits if c.get("creditType") == "GOOGLE_ONE_AI"]
     g1_balance = sum(int(c.get("creditAmount", 0)) for c in g1_credits) if g1_credits else 0
-    has_g1_credits = g1_balance >= 50  # MIN_CREDIT_BALANCE from Gemini CLI
+    # Enable credits if: paid tier detected OR explicit credit balance found
+    has_paid_tier = bool(paid_tier)
+    has_g1_credits = has_paid_tier or g1_balance >= 50
 
     # Determine subscription level for user-friendly display
     tier_lower = tier_name.lower() if tier_name else ""
@@ -994,15 +996,16 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
         sub_label = "Free tier"
 
     # Credit status
-    if has_g1_credits:
+    if g1_balance > 0:
         credit_label = f"GOOGLE_ONE_AI ({g1_balance} credits)"
-    elif g1_credits:
-        credit_label = f"GOOGLE_ONE_AI (low balance: {g1_balance})"
+    elif has_paid_tier:
+        credit_label = "enabled (paid tier)"
     else:
-        credit_label = "none detected"
+        credit_label = "free tier (no credits)"
 
-    logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  paid_tier=%s  g1_credits=%s  allowed=%s",
-                tier_name, tier_id, project, paid_tier.get("name"), g1_balance, allowed_names)
+    # Log raw paidTier for debugging
+    logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  paid_tier_raw=%s  g1_balance=%s  allowed=%s",
+                tier_name, tier_id, project, json.dumps(paid_tier)[:500], g1_balance, allowed_names)
     _log(f"🔧 Code Assist: tier={tier_name}")
     _log(f"🔑 Subscription: {sub_label} | Credits: {credit_label}")
     if allowed_names:
