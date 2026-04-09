@@ -913,6 +913,7 @@ _CODE_ASSIST_API_VERSION = "v1internal"
 # Cached Code Assist project ID (set once per session by _code_assist_setup)
 _code_assist_project_id: Optional[str] = None
 _code_assist_setup_done = False
+_code_assist_has_credits = False  # Whether user has GOOGLE_ONE_AI credits
 # Session ID for Code Assist — generated once per process, like Gemini CLI
 _code_assist_session_id: str = str(uuid.uuid4())
 
@@ -928,7 +929,7 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
     Returns the project ID (may be None for some tiers).
     """
-    global _code_assist_project_id, _code_assist_setup_done
+    global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits
     if _code_assist_setup_done:
         return _code_assist_project_id
 
@@ -960,11 +961,22 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
         return None
 
     project = resp_data.get("cloudaicompanionProject")
-    tier = resp_data.get("currentTier", {})
-    tier_name = tier.get("name", "unknown")
-    tier_id = tier.get("id", "unknown")
+
+    # Gemini CLI prioritizes paidTier over currentTier (setup.ts)
+    paid_tier = resp_data.get("paidTier") or {}
+    current_tier = resp_data.get("currentTier") or {}
+    # Use paidTier if available, fall back to currentTier
+    tier = paid_tier if paid_tier else current_tier
+    tier_name = paid_tier.get("name") or current_tier.get("name", "unknown")
+    tier_id = paid_tier.get("id") or current_tier.get("id", "unknown")
     allowed_tiers = resp_data.get("allowedTiers", [])
     allowed_names = [t.get("name", t.get("id", "?")) for t in allowed_tiers] if allowed_tiers else []
+
+    # Check for GOOGLE_ONE_AI credits (billing.ts: getG1CreditBalance)
+    available_credits = tier.get("availableCredits", [])
+    g1_credits = [c for c in available_credits if c.get("creditType") == "GOOGLE_ONE_AI"]
+    g1_balance = sum(int(c.get("creditAmount", 0)) for c in g1_credits) if g1_credits else 0
+    has_g1_credits = g1_balance >= 50  # MIN_CREDIT_BALANCE from Gemini CLI
 
     # Determine subscription level for user-friendly display
     tier_lower = tier_name.lower() if tier_name else ""
@@ -981,12 +993,24 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     else:
         sub_label = "Free tier"
 
-    logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  allowed=%s",
-                tier_name, tier_id, project, allowed_names)
+    # Credit status
+    if has_g1_credits:
+        credit_label = f"GOOGLE_ONE_AI ({g1_balance} credits)"
+    elif g1_credits:
+        credit_label = f"GOOGLE_ONE_AI (low balance: {g1_balance})"
+    else:
+        credit_label = "none detected"
+
+    logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  paid_tier=%s  g1_credits=%s  allowed=%s",
+                tier_name, tier_id, project, paid_tier.get("name"), g1_balance, allowed_names)
     _log(f"🔧 Code Assist: tier={tier_name}")
-    _log(f"🔑 Subscription: {sub_label} | Credits: GOOGLE_ONE_AI enabled")
+    _log(f"🔑 Subscription: {sub_label} | Credits: {credit_label}")
     if allowed_names:
         logger.info("Code Assist allowed tiers: %s", allowed_names)
+
+    # Cache credit eligibility for request building
+    global _code_assist_has_credits
+    _code_assist_has_credits = has_g1_credits
 
     # If user needs onboarding (no currentTier), trigger it
     if not tier and resp_data.get("allowedTiers"):
@@ -1077,15 +1101,17 @@ def send_chat_completion_aistudio(
             _log("🧠 Model is thinking internally (thoughts will not be streamed)")
 
     # Wrap in Code Assist envelope matching Gemini CLI's converter.ts format:
-    # {model, project, user_prompt_id, enabled_credit_types, request: {contents, ..., session_id}}
+    # {model, project, user_prompt_id, enabled_credit_types?, request: {contents, ..., session_id}}
     inner_body["session_id"] = _code_assist_session_id
     body: Dict = {
         "model": model,
         "project": project_id or "",
         "user_prompt_id": str(uuid.uuid4()),
-        "enabled_credit_types": ["GOOGLE_ONE_AI"],
         "request": inner_body,
     }
+    # Only enable credits when user has GOOGLE_ONE_AI balance (Gemini CLI: shouldEnableCredits)
+    if _code_assist_has_credits:
+        body["enabled_credit_types"] = ["GOOGLE_ONE_AI"]
 
     url = f"{_code_assist_base_url()}:streamGenerateContent?alt=sse"
     headers = {
