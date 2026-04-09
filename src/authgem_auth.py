@@ -1087,7 +1087,7 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
                 fraction = b.get("remainingFraction", 0) or 0
                 reset_time = b.get("resetTime", "")
                 model_id = b.get("modelId", "all")
-                pct = fraction * 100
+                pct_used = (1.0 - fraction) * 100
 
                 # Format reset time like CLI: "6:06 PM (20h 18m)"
                 reset_str = ""
@@ -1105,9 +1105,9 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
                 else:
                     reset_str = "midnight PT"
 
-                if pct > 0:
+                if fraction > 0.01:
                     any_remaining = True
-                quota_lines.append(f"  {model_id}: {pct:.1f}%  resets {reset_str}")
+                quota_lines.append(f"  {model_id}: {pct_used:.1f}% used  resets {reset_str}")
 
             # Show summary line + details
             if any_remaining:
