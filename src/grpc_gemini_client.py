@@ -666,7 +666,7 @@ class GrpcGeminiClient:
         if not disabled:
             return None
         
-        # Block none for all categories
+        # OFF = completely disable safety filter evaluation
         categories = [
             HarmCategory.HARM_CATEGORY_HATE_SPEECH,
             HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
@@ -685,7 +685,7 @@ class GrpcGeminiClient:
             settings.append(
                 SafetySetting(
                     category=cat,
-                    threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE
+                    threshold=SafetySetting.HarmBlockThreshold.OFF
                 )
             )
         

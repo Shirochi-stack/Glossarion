@@ -103,7 +103,7 @@ The client respects the GUI's "Disable Gemini API Safety Filters" toggle via the
 DISABLE_GEMINI_SAFETY environment variable. When enabled, it applies API-level safety 
 settings where available:
 
-- Gemini: Sets all harm categories to BLOCK_NONE (most permissive)
+- Gemini: Sets all harm categories to OFF (filters completely disabled)
 - OpenRouter: Disables safe mode via X-Safe-Mode header
 - Poe: Disables safe mode via safe_mode parameter
 - Other OpenAI-compatible providers: Sets moderation=false where supported
@@ -9286,23 +9286,23 @@ class UnifiedClient:
                     safety_settings = [
                         types.SafetySetting(
                             category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                            threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=types.HarmBlockThreshold.OFF
                         ),
                         types.SafetySetting(
                             category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                            threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=types.HarmBlockThreshold.OFF
                         ),
                         types.SafetySetting(
                             category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                            threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=types.HarmBlockThreshold.OFF
                         ),
                         types.SafetySetting(
                             category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                            threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=types.HarmBlockThreshold.OFF
                         ),
                         types.SafetySetting(
                             category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-                            threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=types.HarmBlockThreshold.OFF
                         ),
                     ]
                     generation_config.safety_settings = safety_settings
@@ -9314,13 +9314,13 @@ class UnifiedClient:
                     
                 # SAVE SAFETY CONFIGURATION FOR VERIFICATION
                 if safety_settings:
-                    safety_status = "DISABLED - All categories set to BLOCK_NONE"
+                    safety_status = "DISABLED - All categories set to OFF"
                     readable_safety = {
-                        "HATE_SPEECH": "BLOCK_NONE",
-                        "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                        "HARASSMENT": "BLOCK_NONE",
-                        "DANGEROUS_CONTENT": "BLOCK_NONE",
-                        "CIVIC_INTEGRITY": "BLOCK_NONE"
+                        "HATE_SPEECH": "OFF",
+                        "SEXUALLY_EXPLICIT": "OFF",
+                        "HARASSMENT": "OFF",
+                        "DANGEROUS_CONTENT": "OFF",
+                        "CIVIC_INTEGRITY": "OFF"
                     }
                 else:
                     safety_status = "ENABLED - Using default Gemini safety settings"
@@ -12212,31 +12212,31 @@ class UnifiedClient:
         # Configure safety settings
         safety_settings = None
         if disable_safety:
-            # Set all safety categories to BLOCK_NONE (most permissive)
+            # Set all safety categories to OFF (completely disabled)
             safety_settings = [
                 types.SafetySetting(
                     category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    threshold=types.HarmBlockThreshold.OFF
                 ),
                 types.SafetySetting(
                     category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    threshold=types.HarmBlockThreshold.OFF
                 ),
                 types.SafetySetting(
                     category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    threshold=types.HarmBlockThreshold.OFF
                 ),
                 types.SafetySetting(
                     category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    threshold=types.HarmBlockThreshold.OFF
                 ),
                 types.SafetySetting(
                     category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    threshold=types.HarmBlockThreshold.OFF
                 ),
             ]
             if not self._is_stop_requested():
-                #logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
+                #logger.info("Gemini safety settings disabled - using OFF for all categories")
                 pass
         else:
             if not self._is_stop_requested():
@@ -12249,13 +12249,13 @@ class UnifiedClient:
         
         # Prepare configuration data
         if disable_safety:
-            safety_status = "DISABLED - All categories set to BLOCK_NONE"
+            safety_status = "DISABLED - All categories set to OFF"
             readable_safety = {
-                "HATE_SPEECH": "BLOCK_NONE",
-                "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                "HARASSMENT": "BLOCK_NONE",
-                "DANGEROUS_CONTENT": "BLOCK_NONE",
-                "CIVIC_INTEGRITY": "BLOCK_NONE"
+                "HATE_SPEECH": "OFF",
+                "SEXUALLY_EXPLICIT": "OFF",
+                "HARASSMENT": "OFF",
+                "DANGEROUS_CONTENT": "OFF",
+                "CIVIC_INTEGRITY": "OFF"
             }
         else:
             safety_status = "ENABLED - Using default Gemini safety settings"

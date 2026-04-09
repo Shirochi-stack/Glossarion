@@ -882,6 +882,18 @@ def _build_gemini_request_body(
     if gen_config:
         body["generationConfig"] = gen_config
 
+    # ── Safety settings ──
+    # AuthGem endpoints always disable safety filters.
+    # OFF = filter is completely disabled (no evaluation at all).
+    # BLOCK_NONE still evaluates and can trigger PROHIBITED_CONTENT.
+    body["safetySettings"] = [
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "OFF"},
+    ]
+
     return body
 
 
