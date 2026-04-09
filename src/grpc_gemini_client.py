@@ -672,7 +672,17 @@ class GrpcGeminiClient:
         if not disabled:
             return None
         
-        # OFF = completely disable safety filter evaluation
+        # Map threshold name from env var to protobuf enum
+        _threshold_name = os.getenv("GEMINI_SAFETY_THRESHOLD", "OFF").strip().upper()
+        _threshold_map = {
+            "OFF": SafetySetting.HarmBlockThreshold.OFF,
+            "BLOCK_NONE": SafetySetting.HarmBlockThreshold.BLOCK_NONE,
+            "BLOCK_ONLY_HIGH": SafetySetting.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            "BLOCK_MEDIUM_AND_ABOVE": SafetySetting.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            "BLOCK_LOW_AND_ABOVE": SafetySetting.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
+        }
+        _threshold = _threshold_map.get(_threshold_name, SafetySetting.HarmBlockThreshold.OFF)
+        
         categories = [
             HarmCategory.HARM_CATEGORY_HATE_SPEECH,
             HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
@@ -691,7 +701,7 @@ class GrpcGeminiClient:
             settings.append(
                 SafetySetting(
                     category=cat,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
+                    threshold=_threshold
                 )
             )
         

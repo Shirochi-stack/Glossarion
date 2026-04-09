@@ -8257,6 +8257,14 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'disable_gemini_safety_var'):
         self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', True)
     
+    if not hasattr(self, 'gemini_safety_threshold_var'):
+        self.gemini_safety_threshold_var = self.config.get('gemini_safety_threshold', 'OFF')
+    
+    # Row with checkbox + dropdown
+    safety_row = QWidget()
+    safety_row_h = QHBoxLayout(safety_row)
+    safety_row_h.setContentsMargins(0, 5, 0, 0)
+    
     safety_cb = self._create_styled_checkbox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
     try:
         safety_cb.setChecked(bool(self.disable_gemini_safety_var))
@@ -8268,10 +8276,41 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     safety_cb.toggled.connect(_on_safety_toggle)
-    safety_cb.setContentsMargins(0, 5, 0, 0)
-    section_v.addWidget(safety_cb)
+    safety_row_h.addWidget(safety_cb)
     
-    safety_warning = QLabel("⚠️ Disables content safety filters for supported providers.\nGemini: Sets all harm categories to BLOCK_NONE.\nGroq/Fireworks: Disables moderation parameter.")
+    safety_row_h.addSpacing(10)
+    safety_row_h.addWidget(QLabel("Threshold:"))
+    
+    safety_threshold_combo = QComboBox()
+    safety_threshold_combo.addItems(["OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"])
+    safety_threshold_combo.setFixedWidth(190)
+    safety_threshold_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(safety_threshold_combo)
+    self._disable_combobox_mousewheel(safety_threshold_combo)
+    try:
+        idx = safety_threshold_combo.findText(self.gemini_safety_threshold_var)
+        if idx >= 0:
+            safety_threshold_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_safety_threshold_changed(text):
+        try:
+            self.gemini_safety_threshold_var = text
+        except Exception:
+            pass
+    safety_threshold_combo.currentTextChanged.connect(_on_safety_threshold_changed)
+    safety_row_h.addWidget(safety_threshold_combo)
+    safety_row_h.addStretch()
+    section_v.addWidget(safety_row)
+    
+    safety_warning = QLabel("⚠️ Disables content safety filters for supported providers.\nGemini: Sets all harm categories to selected threshold.\nGroq/Fireworks: Disables moderation parameter.")
     safety_warning.setStyleSheet("color: #ff6b6b; font-size: 9pt;")
     safety_warning.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(safety_warning)

@@ -2983,6 +2983,7 @@ Recent translations to summarize:
             ('break_split_count_var', 'break_split_count', ''),
             ('auto_glossary_mode_var', 'auto_glossary_mode', 'balanced'),
             ('emergency_glossary_compliance_mode_var', 'emergency_glossary_compliance_mode', 'characters'),
+            ('gemini_safety_threshold_var', 'gemini_safety_threshold', 'OFF'),
         ]
         
         for var_name, key, default in str_vars:
@@ -11686,6 +11687,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES': json.dumps(getattr(self, 'emergency_glossary_compliance_custom_types_var', [])),
             'COMPRESSION_FACTOR': str(self.compression_factor_var),
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+            'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'OFF')),
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
             'MANUAL_GLOSSARY': self._resolve_glossary_for_env(epub_path),
@@ -12972,6 +12974,7 @@ Important rules:
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
                     'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var else "0",
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+                    'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'OFF')),
                     'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
@@ -18900,6 +18903,7 @@ Important rules:
                 ('qa_auto_search_output', ['qa_auto_search_output_checkbox', 'qa_auto_search_output_var'], True, bool),
                 ('disable_zero_detection', ['disable_zero_detection_var'], False, bool),
                 ('disable_gemini_safety', ['disable_gemini_safety_var'], False, bool),
+                ('gemini_safety_threshold', ['gemini_safety_threshold_var'], 'OFF', str),
                 
                 # Anti-duplicate parameters - all vars updated by other_settings.py callbacks
                 ('enable_anti_duplicate', ['enable_anti_duplicate_var'], False, bool),
@@ -19770,6 +19774,7 @@ Important rules:
 
                 # Safety flags
                 ('DISABLE_GEMINI_SAFETY', str(self.config.get('disable_gemini_safety', False)).lower()),
+                ('GEMINI_SAFETY_THRESHOLD', str(self.config.get('gemini_safety_threshold', 'OFF'))),
 
                 # OpenRouter (duplicates are okay; ensures presence)
                 ('OPENROUTER_USE_HTTP_ONLY', '1' if getattr(self, 'openrouter_http_only_var', False) else '0'),

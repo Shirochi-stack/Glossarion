@@ -883,15 +883,17 @@ def _build_gemini_request_body(
         body["generationConfig"] = gen_config
 
     # ── Safety settings ──
-    # AuthGem endpoints always disable safety filters.
-    # OFF = filter is completely disabled (no evaluation at all).
-    # BLOCK_NONE still evaluates and can trigger PROHIBITED_CONTENT.
+    # AuthGem endpoints always disable safety filters (ignores DISABLE_GEMINI_SAFETY toggle).
+    # Threshold is configurable via dropdown: OFF, BLOCK_NONE, BLOCK_ONLY_HIGH, etc.
+    _threshold = os.getenv("GEMINI_SAFETY_THRESHOLD", "OFF").strip().upper()
+    if _threshold not in ("OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"):
+        _threshold = "OFF"
     body["safetySettings"] = [
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
-        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": _threshold},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": _threshold},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": _threshold},
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": _threshold},
+        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": _threshold},
     ]
 
     return body
@@ -1227,7 +1229,10 @@ def _stream_gemini_common(
         _think_desc += "+stream"
     # Check if safety settings are in the body
     _safety = _inner.get("safetySettings")
-    _safety_desc = "OFF" if _safety else "default"
+    if _safety and isinstance(_safety, list) and len(_safety) > 0:
+        _safety_desc = _safety[0].get("threshold", "OFF")
+    else:
+        _safety_desc = "default"
     _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}, safety={_safety_desc}")
 
     # Emit "in progress" here (after config summary) so it appears last
