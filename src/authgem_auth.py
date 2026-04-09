@@ -1264,11 +1264,13 @@ def _stream_gemini_common(
         _safety_desc = _safety[0].get("threshold", "OFF")
     else:
         _safety_desc = "default"
-    _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}, safety={_safety_desc}")
+    if log_stream:
+        _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}, safety={_safety_desc}")
 
     # Emit "in progress" here (after config summary) so it appears last
     import threading as _threading
-    _log(f"📤 [{_threading.current_thread().name}] API call in progress")
+    if log_stream:
+        _log(f"📤 [{_threading.current_thread().name}] API call in progress")
 
     t_start = time.time()
 
@@ -1294,7 +1296,8 @@ def _stream_gemini_common(
             raise RuntimeError(f"AuthGem HTTP {status}. {err_text}")
 
         data = resp.json()
-        _log(f"📡 AuthGem: Response received in {elapsed:.1f}s (non-streaming)")
+        if log_stream:
+            _log(f"📡 AuthGem: Response received in {elapsed:.1f}s (non-streaming)")
 
         # Unwrap Code Assist envelope
         if "response" in data and isinstance(data["response"], dict):
@@ -1410,6 +1413,7 @@ def _process_gemini_sse_line(
         state["_ttft"] = ttft
         if log_stream:
             _log(f"📡 AuthGem: First token in {ttft:.1f}s, streaming…")
+            state["_log_stream"] = True
 
     # Unwrap Code Assist response envelope if present
     # Code Assist wraps: {"response": {"candidates": [...]}} 
@@ -1443,21 +1447,23 @@ def _process_gemini_sse_line(
                 # Log thinking in real-time — same format as gemini-grpc
                 if stream_thinking and text:
                     if not state.get("_thinking_started"):
-                        _log("🧠 [authgem] Thinking...")
+                        if log_stream:
+                            _log("🧠 [authgem] Thinking...")
                         state["_thinking_started"] = True
                         state["_thinking_chunks"] = 0
                         state["_thinking_start_ts"] = time.time()
                     state["_thinking_chunks"] = state.get("_thinking_chunks", 0) + 1
-                    thought_buf = state.get("_thought_log_buf", [])
-                    thought_buf.append(text)
-                    combined = "".join(thought_buf)
-                    if "\n" in combined:
-                        parts_t = combined.split("\n")
-                        for p in parts_t[:-1]:
-                            _log(f"    {p}")
-                        state["_thought_log_buf"] = [parts_t[-1]]
-                    else:
-                        state["_thought_log_buf"] = thought_buf
+                    if log_stream:
+                        thought_buf = state.get("_thought_log_buf", [])
+                        thought_buf.append(text)
+                        combined = "".join(thought_buf)
+                        if "\n" in combined:
+                            parts_t = combined.split("\n")
+                            for p in parts_t[:-1]:
+                                _log(f"    {p}")
+                            state["_thought_log_buf"] = [parts_t[-1]]
+                        else:
+                            state["_thought_log_buf"] = thought_buf
                 continue
 
             state["text_parts"].append(text)
@@ -1466,7 +1472,7 @@ def _process_gemini_sse_line(
             # Emit separator when transitioning from thinking to text output
             if state.get("_thinking_started") and not state.get("_thinking_ended"):
                 state["_thinking_ended"] = True
-                if stream_thinking:
+                if stream_thinking and log_stream:
                     # Flush remaining thinking buffer first
                     thought_rem = state.get("_thought_log_buf", [])
                     if thought_rem:
