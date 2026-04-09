@@ -1355,6 +1355,10 @@ def _stream_gemini_common(
     import threading as _threading
     if log_stream:
         _log(f"📤 [{_threading.current_thread().name}] API call in progress")
+    else:
+        # Minimal indicator when batch stream logs are suppressed
+        _model = body.get("model") or body.get("request", {}).get("model") or "?"
+        _log(f"📤 AuthGem: {_model} — streaming internally…")
 
     t_start = time.time()
 
@@ -1379,7 +1383,7 @@ def _stream_gemini_common(
             err_text = resp.text[:500] if hasattr(resp, 'text') else str(resp.content[:500])
             # Clarify misleading "No capacity" 429 — it's temporary server overload, not quota exhaustion
             if status == 429 and "No capacity" in err_text:
-                raise RuntimeError(f"AuthGem HTTP 429. Server overloaded for this model (retrying…). Raw: {err_text}")
+                raise RuntimeError(f"AuthGem HTTP 429. Server busy — no capacity for this model right now, retrying")
             raise RuntimeError(f"AuthGem HTTP {status}. {err_text}")
 
         data = resp.json()
@@ -1724,7 +1728,7 @@ def _stream_with_httpx_gemini(
             summary = detail or reason or "Bad Request"
             # Clarify misleading "No capacity" 429
             if resp.status_code == 429 and "No capacity" in str(summary):
-                summary = f"Server overloaded for this model (retrying…). Raw: {summary}"
+                summary = f"Server busy — no capacity for this model right now, retrying"
             _log(f"❌ AuthGem HTTP {resp.status_code}. {summary}")
             raise RuntimeError(
                 f"AuthGem: {resp.status_code} – {summary}"
@@ -1777,7 +1781,7 @@ def _stream_with_requests_gemini(
         summary = detail or reason or "Bad Request"
         # Clarify misleading "No capacity" 429
         if resp.status_code == 429 and "No capacity" in str(summary):
-            summary = f"Server overloaded for this model (retrying…). Raw: {summary}"
+            summary = f"Server busy — no capacity for this model right now, retrying"
         _log(f"❌ AuthGem HTTP {resp.status_code}. {summary}")
         raise RuntimeError(
             f"AuthGem: {resp.status_code} – {summary}"
