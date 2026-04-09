@@ -1026,19 +1026,15 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Code Assist proxy suppresses thought annotations when thinkingLevel is present.
-    # Strip it — keep only includeThoughts so the proxy doesn't interfere.
-    tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
-    if tc and "thinkingLevel" in tc:
-        tc.pop("thinkingLevel")
-
     # Warn user if Gemini 3 thought streaming is requested — Code Assist proxy
     # doesn't return thought=true annotations for Gemini 3 models.
     model_lower = model.lower() if model else ""
+    tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
     if "gemini-3" in model_lower:
         stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
         if stream_thinking and tc and tc.get("includeThoughts"):
             _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem/ — use authgem-key/ instead")
+            _log("🧠 Model is thinking internally (thoughts will not be streamed)")
 
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
@@ -1134,6 +1130,7 @@ def send_chat_completion_vertex(
         tc = body.get("generationConfig", {}).get("thinkingConfig", {})
         if stream_thinking and tc.get("includeThoughts"):
             _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem-vertex/ — use authgem-key/ instead")
+            _log("🧠 Model is thinking internally (thoughts will not be streamed)")
 
     # Resolve project — auto-detect from the OAuth token
     project = detect_gcp_project(access_token)
