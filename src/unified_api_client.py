@@ -15128,6 +15128,9 @@ class UnifiedClient:
                                                     reasoning_frag = delta.get("content")
                                                 else:
                                                     reasoning_frag = getattr(delta, "content", None)
+                                                # Strip <thought> XML wrapper tags that some endpoints include
+                                                if reasoning_frag and isinstance(reasoning_frag, str):
+                                                    reasoning_frag = reasoning_frag.replace("<thought>", "").replace("</thought>", "")
                                         
                                         if reasoning_frag and isinstance(reasoning_frag, str):
                                             oai_thinking_chunks += 1
@@ -15160,6 +15163,12 @@ class UnifiedClient:
                                                 delta_content = delta.get("content")
                                             else:
                                                 delta_content = getattr(delta, "content", None)
+                                            # Strip residual </thought> tag that can leak into the
+                                            # first non-thought delta from the Gemini OpenAI endpoint
+                                            if delta_content and isinstance(delta_content, str):
+                                                delta_content = delta_content.replace("</thought>", "").replace("<thought>", "")
+                                                if not delta_content.strip():
+                                                    delta_content = None  # was ONLY the tag, skip
 
                                         # Detect <think>...</think> inline reasoning tags
                                         # Models like Liquid LFM, QwQ, etc. embed thinking in content
@@ -15253,6 +15262,7 @@ class UnifiedClient:
                                             oai_thinking_log_buf = []
                                             thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
                                             print(f"🧠 [{provider}] Thinking complete ({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                            print("─" * 50, flush=True)
                                             oai_thinking_started = False
 
                                         if isinstance(delta_content, list):
