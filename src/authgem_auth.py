@@ -1026,14 +1026,19 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Code Assist suppresses thought annotations (thought: true on SSE parts) when
-    # thinkingLevel is present.  Convert level → budget so thoughts stream correctly.
+    # Code Assist proxy suppresses thought annotations when thinkingLevel is present.
+    # Strip it — keep only includeThoughts so the proxy doesn't interfere.
     tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
     if tc and "thinkingLevel" in tc:
-        level = tc.pop("thinkingLevel")
-        budget = _THINKING_LEVEL_TO_BUDGET_MAP.get(level.upper() if isinstance(level, str) else level)
-        if budget is not None and "thinkingBudget" not in tc:
-            tc["thinkingBudget"] = budget
+        tc.pop("thinkingLevel")
+
+    # Warn user if Gemini 3 thought streaming is requested — Code Assist proxy
+    # doesn't return thought=true annotations for Gemini 3 models.
+    model_lower = model.lower() if model else ""
+    if "gemini-3" in model_lower:
+        stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+        if stream_thinking and tc and tc.get("includeThoughts"):
+            _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem/ — use authgem-key/ instead")
 
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
@@ -1121,15 +1126,14 @@ def send_chat_completion_vertex(
     _log = log_fn or (lambda *a, **kw: None)
     body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Vertex AI REST API suppresses thought annotations (thought: true on SSE parts)
-    # when thinkingLevel is present.  Convert level → budget (same as gRPC client)
-    # so that thought streaming works correctly for Gemini 3 models.
-    tc = body.get("generationConfig", {}).get("thinkingConfig")
-    if tc and "thinkingLevel" in tc:
-        level = tc.pop("thinkingLevel")
-        budget = _THINKING_LEVEL_TO_BUDGET_MAP.get(level.upper() if isinstance(level, str) else level)
-        if budget is not None and "thinkingBudget" not in tc:
-            tc["thinkingBudget"] = budget
+    # Warn user if Gemini 3 thought streaming is requested — Vertex AI v1beta1
+    # doesn't return thought=true annotations for Gemini 3 models.
+    model_lower = model.lower() if model else ""
+    if "gemini-3" in model_lower:
+        stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+        tc = body.get("generationConfig", {}).get("thinkingConfig", {})
+        if stream_thinking and tc.get("includeThoughts"):
+            _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem-vertex/ — use authgem-key/ instead")
 
     # Resolve project — auto-detect from the OAuth token
     project = detect_gcp_project(access_token)
@@ -1298,17 +1302,25 @@ def _process_gemini_sse_line(
 
         content_parts = candidate.get("content", {}).get("parts", [])
         for part in content_parts:
-            # DEBUG: log keys of first 3 parts to diagnose thought streaming
+            # DEBUG: log keys of first 5 parts to diagnose thought streaming
             _dbg = state.get("_dbg_n", 0)
-            if _dbg < 3:
-                _log(f"[DEBUG] Part#{_dbg} keys={list(part.keys())} thought={part.get('thought')}")
+            if _dbg < 5:
+                _preview = (part.get('text', '') or '')[:60].replace('\n', ' ')
+                _has_sig = 'thoughtSignature' in part
+                _log(f"[DEBUG] Part#{_dbg} keys={sorted(part.keys())} thought={part.get('thought')} sig={_has_sig} text='{_preview}'")
                 state["_dbg_n"] = _dbg + 1
             text = part.get("text", "")
             if not text:
                 continue
 
             # Separate thinking/thought parts from actual output
-            if part.get("thought", False):
+            # Primary: check explicit thought boolean
+            # Fallback: if part has thoughtSignature but no thought key,
+            # treat it as a thought part (Vertex AI Gemini 3 omits thought=true).
+            is_thought = part.get("thought", False)
+            if not is_thought and "thoughtSignature" in part and "thought" not in part:
+                is_thought = True
+            if is_thought:
                 state["thought_parts"].append(text)
                 # Log thinking in real-time — same format as gemini-grpc
                 if stream_thinking and text:
@@ -1348,6 +1360,7 @@ def _process_gemini_sse_line(
                 dur = time.time() - state.get("_thinking_start_ts", t_start)
                 _log(f"🧠 [authgem] Thinking complete ({chunks} chunks, {dur:.1f}s)")
                 _log("─" * 50)
+                _log("📡 Text streaming...")
 
             # Real-time log output (mirrors authgpt's delta logging)
             if log_stream and text:

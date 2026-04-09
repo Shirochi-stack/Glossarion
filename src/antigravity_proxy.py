@@ -1031,6 +1031,8 @@ def send_message_stream(
                         ag_thinking_buf = []
                     thinking_dur = time.time() - ag_thinking_start_ts if ag_thinking_start_ts else 0
                     _log(f"🧠 [antigravity] Thinking complete ({ag_thinking_chunks} chunks, {thinking_dur:.1f}s)")
+                    _log("─" * 50)
+                    _log("📡 Text streaming...")
                 # else: thinking was < 0.5s, discard silently
                 ag_thinking_started = False
                 ag_thinking_deferred_lines = []

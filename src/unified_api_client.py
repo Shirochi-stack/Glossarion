@@ -12835,6 +12835,8 @@ class UnifiedClient:
                                                 if gemini_thinking_started and stream_thinking and not self._is_stop_requested():
                                                     thinking_dur = _t.time() - gemini_thinking_start_ts if gemini_thinking_start_ts else 0
                                                     print(f"🧠 [gemini-native] Thinking complete ({gemini_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                                    print("─" * 50, flush=True)
+                                                    print("📡 Text streaming...", flush=True)
                                                     gemini_thinking_started = False
                                                 text_parts.append(part.text)
                                                 if log_stream and not self._is_stop_requested():
@@ -13642,6 +13644,8 @@ class UnifiedClient:
                                                 thinking_log_buf = []
                                                 thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
                                                 print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
+                                                print("─" * 50, flush=True)
+                                                print("📡 Text streaming...", flush=True)
                                         else:
                                             # Haven't found </think> yet — buffer is all thinking
                                             # Start thinking display if not already started
@@ -13742,6 +13746,8 @@ class UnifiedClient:
                                 thinking_log_buf = []
                                 thinking_dur = _t.time() - first_thinking_ts if first_thinking_ts else 0
                                 print(f"🧠 [anthropic] Thinking complete ({thinking_tokens_seen} chunks, {thinking_dur:.1f}s)", flush=True)
+                                print("─" * 50, flush=True)
+                                print("📡 Text streaming...", flush=True)
                         current_block_type = None
 
                     # message_delta → stop reason + usage
@@ -15263,6 +15269,7 @@ class UnifiedClient:
                                             thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
                                             print(f"🧠 [{provider}] Thinking complete ({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
                                             print("─" * 50, flush=True)
+                                            print(f"📡 [{provider}] Text streaming...", flush=True)
                                             oai_thinking_started = False
 
                                         if isinstance(delta_content, list):

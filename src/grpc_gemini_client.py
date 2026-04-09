@@ -457,6 +457,8 @@ class GrpcGeminiClient:
                                     grpc_thinking_log_buf = []
                                     thinking_dur = time.time() - grpc_thinking_start_ts if grpc_thinking_start_ts else 0
                                     print(f"🧠 [gemini-grpc] Thinking complete ({grpc_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                    print("─" * 50, flush=True)
+                                    print("📡 Text streaming...", flush=True)
                                     grpc_thinking_started = False
                                 text_parts.append(part.text)
                                 if should_log and not (stop_check_fn and stop_check_fn()):
