@@ -117,6 +117,18 @@ _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgem_tokens.json")
 SIGN_IN_SUCCESS_URL = "https://developers.google.com/gemini-code-assist/auth_success_gemini"
 SIGN_IN_FAILURE_URL = "https://developers.google.com/gemini-code-assist/auth_failure_gemini"
 
+# Thinking level → budget mapping (same as grpc_gemini_client.py line 650)
+# Used by authgem-vertex/ and authgem/ to convert thinkingLevel to thinkingBudget,
+# since the Vertex AI REST API and Code Assist proxy suppress thought annotations
+# (thought: true on response parts) when thinkingLevel is present.
+# AI Studio (authgem-key/) handles thinkingLevel correctly, so no conversion needed there.
+_THINKING_LEVEL_TO_BUDGET_MAP = {
+    'MINIMAL': 0,
+    'LOW': 4096,
+    'MEDIUM': 12288,
+    'HIGH': 32768,
+}
+
 
 # ===========================================================================
 # Port helpers
@@ -1014,11 +1026,14 @@ def send_chat_completion_aistudio(
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Code Assist suppresses thought parts from SSE when thinkingLevel is present.
-    # Strip it — keep only thinkingBudget + includeThoughts for thought streaming.
+    # Code Assist suppresses thought annotations (thought: true on SSE parts) when
+    # thinkingLevel is present.  Convert level → budget so thoughts stream correctly.
     tc = inner_body.get("generationConfig", {}).get("thinkingConfig")
     if tc and "thinkingLevel" in tc:
-        tc.pop("thinkingLevel")
+        level = tc.pop("thinkingLevel")
+        budget = _THINKING_LEVEL_TO_BUDGET_MAP.get(level.upper() if isinstance(level, str) else level)
+        if budget is not None and "thinkingBudget" not in tc:
+            tc["thinkingBudget"] = budget
 
     # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
     body: Dict = {
@@ -1105,6 +1120,16 @@ def send_chat_completion_vertex(
 
     _log = log_fn or (lambda *a, **kw: None)
     body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
+
+    # Vertex AI REST API suppresses thought annotations (thought: true on SSE parts)
+    # when thinkingLevel is present.  Convert level → budget (same as gRPC client)
+    # so that thought streaming works correctly for Gemini 3 models.
+    tc = body.get("generationConfig", {}).get("thinkingConfig")
+    if tc and "thinkingLevel" in tc:
+        level = tc.pop("thinkingLevel")
+        budget = _THINKING_LEVEL_TO_BUDGET_MAP.get(level.upper() if isinstance(level, str) else level)
+        if budget is not None and "thinkingBudget" not in tc:
+            tc["thinkingBudget"] = budget
 
     # Resolve project — auto-detect from the OAuth token
     project = detect_gcp_project(access_token)
@@ -1273,6 +1298,11 @@ def _process_gemini_sse_line(
 
         content_parts = candidate.get("content", {}).get("parts", [])
         for part in content_parts:
+            # DEBUG: log keys of first 3 parts to diagnose thought streaming
+            _dbg = state.get("_dbg_n", 0)
+            if _dbg < 3:
+                _log(f"[DEBUG] Part#{_dbg} keys={list(part.keys())} thought={part.get('thought')}")
+                state["_dbg_n"] = _dbg + 1
             text = part.get("text", "")
             if not text:
                 continue
