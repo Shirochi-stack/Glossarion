@@ -984,7 +984,7 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  allowed=%s",
                 tier_name, tier_id, project, allowed_names)
     _log(f"🔧 Code Assist: tier={tier_name}")
-    _log(f"🔑 Subscription: {sub_label} | Credits: G1_CREDIT_TYPE enabled")
+    _log(f"🔑 Subscription: {sub_label} | Credits: GOOGLE_ONE_AI enabled")
     if allowed_names:
         logger.info("Code Assist allowed tiers: %s", allowed_names)
 
@@ -1083,7 +1083,7 @@ def send_chat_completion_aistudio(
         "model": model,
         "project": project_id or "",
         "user_prompt_id": str(uuid.uuid4()),
-        "enabled_credit_types": ["G1_CREDIT_TYPE"],
+        "enabled_credit_types": ["GOOGLE_ONE_AI"],
         "request": inner_body,
     }
 
@@ -1096,7 +1096,7 @@ def send_chat_completion_aistudio(
     if project_id:
         headers["x-goog-user-project"] = project_id
 
-    logger.info("AuthGem-CodeAssist: POST %s  model=%s  credits=G1", url.split("?")[0], model)
+    logger.info("AuthGem-CodeAssist: POST %s  model=%s  credits=GOOGLE_ONE_AI", url.split("?")[0], model)
 
     return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
 
