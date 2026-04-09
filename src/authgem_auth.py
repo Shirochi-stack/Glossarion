@@ -1241,15 +1241,6 @@ def send_chat_completion_vertex(
     _log = log_fn or (lambda *a, **kw: None)
     body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
-    # Warn user if Gemini 3 thought streaming is requested — Vertex AI v1beta1
-    # doesn't return thought=true annotations for Gemini 3 models.
-    model_lower = model.lower() if model else ""
-    if "gemini-3" in model_lower:
-        stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
-        tc = body.get("generationConfig", {}).get("thinkingConfig", {})
-        if stream_thinking and tc.get("includeThoughts"):
-            _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem-vertex/ — use authgem-key/ instead")
-            _log("🧠 Model is thinking internally (thoughts will not be streamed)")
 
     # Resolve project — auto-detect from the OAuth token
     project = detect_gcp_project(access_token)
