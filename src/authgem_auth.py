@@ -1270,10 +1270,20 @@ def _stream_gemini_common(
                     text_parts.append(text)
 
         usage = data.get("usageMetadata", {})
+        final_content = "".join(text_parts)
+        thought_text = "".join(thought_parts) if thought_parts else None
+
+        # Fallback: if text content is empty but thoughts contain text,
+        # the API returned everything as thought-annotated parts.
+        # Use the thought content as the main content.
+        if not final_content and thought_text:
+            final_content = thought_text
+            thought_text = None
+
         return {
-            "content": "".join(text_parts),
+            "content": final_content,
             "finish_reason": finish_reason,
-            "thought_content": "".join(thought_parts) if thought_parts else None,
+            "thought_content": thought_text,
             "usage_metadata": usage,
         }
 
