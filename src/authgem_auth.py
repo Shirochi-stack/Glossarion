@@ -28,6 +28,7 @@ import time
 import hashlib
 import base64
 import secrets
+import uuid
 import logging
 import threading
 import webbrowser
@@ -912,6 +913,8 @@ _CODE_ASSIST_API_VERSION = "v1internal"
 # Cached Code Assist project ID (set once per session by _code_assist_setup)
 _code_assist_project_id: Optional[str] = None
 _code_assist_setup_done = False
+# Session ID for Code Assist — generated once per process, like Gemini CLI
+_code_assist_session_id: str = str(uuid.uuid4())
 
 def _code_assist_base_url() -> str:
     return f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}"
@@ -1050,13 +1053,16 @@ def send_chat_completion_aistudio(
             _log("⚠️ AuthGem: Gemini 3 thought streaming is not supported on authgem/ — use authgem-key/ instead")
             _log("🧠 Model is thinking internally (thoughts will not be streamed)")
 
-    # Wrap in Code Assist envelope: {model, project, request: {contents, ...}}
+    # Wrap in Code Assist envelope matching Gemini CLI's converter.ts format:
+    # {model, project, user_prompt_id, enabled_credit_types, request: {contents, ..., session_id}}
+    inner_body["session_id"] = _code_assist_session_id
     body: Dict = {
         "model": model,
+        "project": project_id or "",
+        "user_prompt_id": str(uuid.uuid4()),
+        "enabled_credit_types": ["G1_CREDIT_TYPE"],
         "request": inner_body,
     }
-    if project_id:
-        body["project"] = project_id
 
     url = f"{_code_assist_base_url()}:streamGenerateContent?alt=sse"
     headers = {
@@ -1064,8 +1070,10 @@ def send_chat_completion_aistudio(
         "Content-Type": "application/json",
         "Accept-Encoding": "identity",
     }
+    if project_id:
+        headers["x-goog-user-project"] = project_id
 
-    logger.info("AuthGem-CodeAssist: POST %s  model=%s", url.split("?")[0], model)
+    logger.info("AuthGem-CodeAssist: POST %s  model=%s  credits=G1", url.split("?")[0], model)
 
     return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
 
