@@ -4262,15 +4262,37 @@ Recent translations to summarize:
         </p>
 
         <h4>Gemini Subscription (authgem/)</h4>
-        <p>Use Gemini API with your Google account — no API key needed</p>
+        <p>Use Gemini via Code Assist proxy — free daily quota with Google account</p>
         <ul>
-            <li><b>authgem/gemini-2.5-flash</b> - Gemini 2.5 Flash (fast)</li>
-            <li><b>authgem/gemini-2.5-pro</b> - Gemini 2.5 Pro</li>
-            <li><b>authgem/gemini-2.0-flash</b> - Gemini 2.0 Flash</li>
+            <li><b>authgem/gemini-2.5-flash</b> - Gemini 2.5 Flash (free quota)</li>
+            <li><b>authgem/gemini-2.5-pro</b> - Gemini 2.5 Pro (free quota)</li>
+            <li><b>authgem/gemini-3-flash-preview</b> - Gemini 3 Flash Preview</li>
         </ul>
-        <p style="color: #4285f4; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Click the <b>🔐 Gemini Login</b> button next to the model dropdown to authenticate.
-            Uses the same OAuth as Gemini CLI — free tier included.
+        <p style="color: #4285f4; padding: 2px; font-size: 11px;">
+            <b>ℹ️</b> Uses Code Assist proxy (same as Gemini CLI). Free daily requests included.
+            Preview models may require retries due to server capacity.
+        </p>
+
+        <h4>Gemini Direct API (authgem-key/)</h4>
+        <p>Use Gemini via AI Studio direct API — stable, uses API key rate limits</p>
+        <ul>
+            <li><b>authgem-key/gemini-2.5-flash</b> - Direct AI Studio (stable)</li>
+            <li><b>authgem-key/gemini-3-flash-preview</b> - Preview models with thought streaming</li>
+        </ul>
+        <p style="color: #f59e0b; padding: 2px; font-size: 11px;">
+            <b>ℹ️</b> Bypasses Code Assist proxy. More stable for preview models.
+            Supports Gemini 3 thought streaming. Subject to API key rate limits.
+        </p>
+
+        <h4>Gemini Vertex AI (authgem-vertex/)</h4>
+        <p>Use Gemini via Vertex AI — requires GCP project with billing</p>
+        <ul>
+            <li><b>authgem-vertex/gemini-2.5-flash</b> - Vertex AI endpoint</li>
+            <li><b>authgem-vertex/gemini-2.5-pro</b> - Vertex AI endpoint</li>
+        </ul>
+        <p style="color: #4285f4; padding: 2px; font-size: 11px;">
+            <b>ℹ️</b> Click the <b>🔐 Gemini Login</b> button to authenticate.
+            Select a GCP project with billing enabled from the dropdown.
         </p>
 
         <h4>Antigravity Proxy (antigravity/)</h4>
@@ -17096,7 +17118,9 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
-                ("🔐", "authgem/", "AuthGem", "Gemini via Google OAuth", "#142840", "#4285f4"),
+                ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#142840", "#4285f4"),
+                ("🔑", "authgem-key/", "AuthGem Key", "Direct AI Studio API", "#1e2838", "#f59e0b"),
+                ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#142840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
             ]
