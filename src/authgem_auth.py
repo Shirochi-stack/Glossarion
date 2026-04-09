@@ -1189,7 +1189,9 @@ def _stream_gemini_common(
     connect_timeout: Optional[float] = None,
 ) -> Dict:
     """Shared streaming logic for all Gemini endpoints (AI Studio & Vertex)."""
-    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+    # Respect the "Enable streaming responses" toggle from other_settings.py
+    _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
+    log_stream = _enable_streaming and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
     if os.getenv("BATCH_TRANSLATION", "0") == "1":
         log_stream = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
 
@@ -1215,6 +1217,63 @@ def _stream_gemini_common(
 
     t_start = time.time()
 
+    # ── Non-streaming path: use generateContent instead of streamGenerateContent ──
+    if not _enable_streaming:
+        # Rewrite URL: streamGenerateContent?alt=sse → generateContent
+        non_stream_url = url.replace(":streamGenerateContent?alt=sse", ":generateContent")
+        non_stream_url = non_stream_url.replace(":streamGenerateContent", ":generateContent")
+        # Remove alt=sse from query string if still present
+        non_stream_url = non_stream_url.replace("&alt=sse", "").replace("?alt=sse", "")
+        try:
+            import httpx as _httpx
+            _ct = connect_timeout or 30.0
+            _client_timeout = _httpx.Timeout(timeout, connect=_ct)
+            resp = _httpx.post(non_stream_url, json=body, headers=headers, timeout=_client_timeout)
+        except ImportError:
+            resp = requests.post(non_stream_url, json=body, headers=headers, timeout=timeout)
+
+        elapsed = time.time() - t_start
+        status = resp.status_code
+        if status != 200:
+            err_text = resp.text[:500] if hasattr(resp, 'text') else str(resp.content[:500])
+            raise RuntimeError(f"AuthGem HTTP {status}. {err_text}")
+
+        data = resp.json()
+        _log(f"📡 AuthGem: Response received in {elapsed:.1f}s (non-streaming)")
+
+        # Unwrap Code Assist envelope
+        if "response" in data and isinstance(data["response"], dict):
+            data = data["response"]
+
+        # Extract text from candidates
+        text_parts = []
+        thought_parts = []
+        finish_reason = "STOP"
+        for candidate in data.get("candidates", []):
+            fr = candidate.get("finishReason", "")
+            if fr:
+                finish_reason = fr
+            for part in candidate.get("content", {}).get("parts", []):
+                text = part.get("text", "")
+                if not text:
+                    continue
+                is_thought = part.get("thought", False)
+                if not is_thought and "thoughtSignature" in part and "thought" not in part:
+                    is_thought = True
+                if is_thought:
+                    thought_parts.append(text)
+                else:
+                    text_parts.append(text)
+
+        usage = data.get("usageMetadata", {})
+        return {
+            "content": "".join(text_parts),
+            "finish_reason": finish_reason,
+            "thought_content": "".join(thought_parts) if thought_parts else None,
+            "usage_metadata": usage,
+        }
+
+    # ── Streaming path: use streamGenerateContent (SSE) ──
     # Prefer httpx for true real-time SSE (same stack as openai SDK)
     try:
         import httpx as _httpx
