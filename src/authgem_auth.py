@@ -1508,11 +1508,19 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
     _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
 
     content = "".join(state["text_parts"])
+    thought_content = "".join(state["thought_parts"]) if state["thought_parts"] else None
 
-    if not content and state["thought_parts"]:
+    # Fallback: if text is empty but thoughts exist and finish_reason is STOP,
+    # the API returned everything as thought-annotated parts.
+    # Use thought content as main content (safe — blocked responses have non-STOP finish).
+    raw_fr = state["finish_reason"]
+    if not content and thought_content and raw_fr == "STOP":
+        _log("⚠️ AuthGem: Text empty but thoughts present — using thought content as output")
+        content = thought_content
+        thought_content = None
+    elif not content and thought_content:
         _log("⚠️ AuthGem: Response contained only thinking/reasoning — no output text.")
-
-    if not content and not state["thought_parts"]:
+    elif not content and not thought_content:
         _log("⚠️ AuthGem: Empty response — no text received.")
 
     # Map Gemini finish reasons to OpenAI-style

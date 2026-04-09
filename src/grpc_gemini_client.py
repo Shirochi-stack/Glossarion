@@ -500,6 +500,12 @@ class GrpcGeminiClient:
             elapsed = time.time() - t0
             text_content = "".join(text_parts)
             self._request_count += 1
+
+            # Fallback: if text is empty but thoughts exist and finish_reason
+            # is stop, the API returned everything as thought-annotated parts.
+            if not text_content and grpc_thinking_text_parts and finish_reason == "stop":
+                logger.debug("gRPC stream: text empty but thoughts present — using thought content")
+                text_content = "".join(grpc_thinking_text_parts)
             
             if not (stop_check_fn and stop_check_fn()):
                 print(f"🛰️ [gemini-grpc] Stream finished in {elapsed:.2f}s, tokens≈{len(text_content)//4}")
@@ -728,6 +734,7 @@ class GrpcGeminiClient:
             if candidate.content:
                 raw_content_obj = candidate.content
                 text_parts = []
+                thought_text_parts = []
                 for part in candidate.content.parts:
                     # Skip thought/reasoning parts — they must NOT leak into output
                     is_thought = getattr(part, 'thought', False)
@@ -736,10 +743,17 @@ class GrpcGeminiClient:
                         # doesn't provide them
                         if part.text:
                             thinking_tokens = max(thinking_tokens, len(part.text) // 4)
+                            thought_text_parts.append(part.text)
                         continue
                     if part.text:
                         text_parts.append(part.text)
                 text_content = "".join(text_parts)
+
+                # Fallback: if text is empty but thoughts exist and finish_reason
+                # is stop, the API returned everything as thought-annotated parts.
+                if not text_content and thought_text_parts and finish_reason == "stop":
+                    logger.debug("gRPC: text empty but thoughts present — using thought content as output")
+                    text_content = "".join(thought_text_parts)
         
         # Try simple .text accessor
         if not text_content:
