@@ -939,13 +939,14 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    # Match Gemini CLI's setup.ts loadCodeAssist payload exactly
+    # NOTE: CLI does NOT use mode:"HEALTH_CHECK" — that returns reduced data
     payload = {
         "metadata": {
             "ideType": "IDE_UNSPECIFIED",
             "platform": "PLATFORM_UNSPECIFIED",
             "pluginType": "GEMINI",
         },
-        "mode": "HEALTH_CHECK",
     }
 
     try:
@@ -1083,28 +1084,36 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
             quota_lines = []
             any_remaining = False
             for b in buckets:
-                remaining = int(b.get("remainingAmount", 0))
-                fraction = b.get("remainingFraction", 0)
+                fraction = b.get("remainingFraction", 0) or 0
                 reset_time = b.get("resetTime", "")
                 model_id = b.get("modelId", "all")
-                reset_str = reset_time[:16] if reset_time else "midnight PT"
-                # Derive total limit from remaining/fraction
-                if fraction and fraction > 0:
-                    total = round(remaining / fraction)
-                    used = total - remaining
-                    quota_lines.append(f"  {model_id}: {remaining}/{total} left ({used} used) resets {reset_str}")
-                    if remaining > 0:
-                        any_remaining = True
-                elif remaining > 0:
-                    quota_lines.append(f"  {model_id}: {remaining} left, resets {reset_str}")
-                    any_remaining = True
+                pct = fraction * 100
+
+                # Format reset time like CLI: "6:06 PM (20h 18m)"
+                reset_str = ""
+                if reset_time:
+                    try:
+                        from datetime import datetime, timezone
+                        rt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
+                        local_rt = rt.astimezone()
+                        delta = rt - datetime.now(timezone.utc)
+                        hrs, rem = divmod(max(int(delta.total_seconds()), 0), 3600)
+                        mins = rem // 60
+                        reset_str = f"{local_rt.strftime('%I:%M %p').lstrip('0')} ({hrs}h {mins}m)"
+                    except Exception:
+                        reset_str = reset_time[:16]
                 else:
-                    quota_lines.append(f"  {model_id}: exhausted, resets {reset_str}")
+                    reset_str = "midnight PT"
+
+                if pct > 0:
+                    any_remaining = True
+                quota_lines.append(f"  {model_id}: {pct:.1f}%  resets {reset_str}")
+
             # Show summary line + details
             if any_remaining:
                 _log("📊 Daily Quota:")
             else:
-                _log("⚠️ Daily Quota: EXHAUSTED (paid credits will be used if available)")
+                _log("⚠️ Daily Quota: LOW/EXHAUSTED (paid credits used if available)")
             for ql in quota_lines:
                 _log(ql)
             logger.info("Code Assist quota buckets: %s", json.dumps(buckets)[:1000])
