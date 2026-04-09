@@ -962,8 +962,31 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     project = resp_data.get("cloudaicompanionProject")
     tier = resp_data.get("currentTier", {})
     tier_name = tier.get("name", "unknown")
-    logger.info("Code Assist setup: tier=%s  project=%s", tier_name, project)
+    tier_id = tier.get("id", "unknown")
+    allowed_tiers = resp_data.get("allowedTiers", [])
+    allowed_names = [t.get("name", t.get("id", "?")) for t in allowed_tiers] if allowed_tiers else []
+
+    # Determine subscription level for user-friendly display
+    tier_lower = tier_name.lower() if tier_name else ""
+    if "ultra" in tier_lower:
+        sub_label = "Google AI Ultra ✨"
+    elif "pro" in tier_lower:
+        sub_label = "Google AI Pro ⭐"
+    elif "enterprise" in tier_lower:
+        sub_label = "Enterprise 🏢"
+    elif "standard" in tier_lower:
+        sub_label = "Standard"
+    elif tier_name and tier_name != "unknown":
+        sub_label = tier_name
+    else:
+        sub_label = "Free tier"
+
+    logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  allowed=%s",
+                tier_name, tier_id, project, allowed_names)
     _log(f"🔧 Code Assist: tier={tier_name}")
+    _log(f"🔑 Subscription: {sub_label} | Credits: G1_CREDIT_TYPE enabled")
+    if allowed_names:
+        logger.info("Code Assist allowed tiers: %s", allowed_names)
 
     # If user needs onboarding (no currentTier), trigger it
     if not tier and resp_data.get("allowedTiers"):
