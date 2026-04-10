@@ -51,8 +51,16 @@ def cancel_stream():
 
 def reset_cancel():
     """Clear the cancellation flag (call before starting a new request)."""
-    global _verification_pending
     _cancel_event.clear()
+
+
+def reset_verification():
+    """Clear the verification-pending flag.
+
+    Call this when the user starts a NEW translation session (not per-request).
+    This allows the browser to re-open for verification on the next 403.
+    """
+    global _verification_pending
     _verification_pending = False
 
 

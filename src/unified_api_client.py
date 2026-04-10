@@ -982,6 +982,7 @@ try:
     from authgem_auth import cancel_stream as _authgem_cancel_stream
     from authgem_auth import reset_cancel as _authgem_reset_cancel
     from authgem_auth import _reset_code_assist_setup
+    from authgem_auth import reset_verification as _authgem_reset_verification
     AUTHGEM_AVAILABLE = True
 except ImportError:
     _authgem_get_store = None
@@ -992,6 +993,7 @@ except ImportError:
     _authgem_cancel_stream = None
     _authgem_reset_cancel = None
     _reset_code_assist_setup = None
+    _authgem_reset_verification = None
     AUTHGEM_AVAILABLE = False
 
 # Antigravity Cloud Code proxy (optional)
@@ -16511,6 +16513,10 @@ class UnifiedClient:
         max_retries = self._get_max_retries()
         last_error = None
         access_token_holder = [None]  # mutable so send_fn can update
+
+        # Reset verification flag once per call (not per retry)
+        if _authgem_reset_verification is not None:
+            _authgem_reset_verification()
 
         for attempt in range(max_retries):
             if self._is_stop_requested():
