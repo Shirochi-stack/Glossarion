@@ -993,6 +993,11 @@ excludes = [
     'scikit-image', 'skimage', 'skimage.*',
     'sklearn', 'sklearn.*',
     
+    # Silent truncation detection deps (optional, too heavy for lite build ~100MB)
+    'sentence_transformers', 'sentence_transformers.*',
+    'deep_translator', 'deep_translator.*',
+    'scikit-learn',
+    
 	# Remove AVIF support if not needed (7MB)
     'PIL._avif',
     'pillow.libs',
