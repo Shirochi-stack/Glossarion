@@ -178,12 +178,6 @@ def get_model_options() -> List[str]:
         "authgem/gemini-2.0-flash", "authgem/gemini-2.0-flash-lite",
         "authgem/gemini-3.1-pro-preview", "authgem/gemini-3.1-flash-lite-preview", "authgem/gemini-3-flash-preview",
 
-        # AuthGem-key – Gemini-cli via API key
-        "authgem-key/gemini-2.5-flash", "authgem-key/gemini-2.5-flash-lite",
-        "authgem-key/gemini-2.5-pro",
-        "authgem-key/gemini-2.0-flash", "authgem-key/gemini-2.0-flash-lite",
-        "authgem-key/gemini-3.1-pro-preview", "authgem-key/gemini-3.1-flash-lite-preview", "authgem-key/gemini-3-flash-preview",
-
         # AuthGem – Gemini-cli via Google OAuth (Uses Vertex AI)
         "authgem-vertex/gemini-2.5-flash", "authgem-vertex/gemini-2.5-flash-lite",
         "authgem-vertex/gemini-2.5-pro",

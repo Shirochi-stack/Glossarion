@@ -4273,16 +4273,6 @@ Recent translations to summarize:
             Preview models may require retries due to server capacity.
         </p>
 
-        <h4>Gemini Direct API (authgem-key/)</h4>
-        <p>Use Gemini via AI Studio direct API — stable, uses API key rate limits</p>
-        <ul>
-            <li><b>authgem-key/gemini-2.5-flash</b> - Direct AI Studio (stable)</li>
-            <li><b>authgem-key/gemini-3-flash-preview</b> - Preview models with thought streaming</li>
-        </ul>
-        <p style="color: #f59e0b; padding: 2px; font-size: 11px;">
-            <b>ℹ️</b> Bypasses Code Assist proxy. More stable for preview models.
-            Supports Gemini 3 thought streaming. Subject to API key rate limits.
-        </p>
 
         <h4>Gemini Vertex AI (authgem-vertex/)</h4>
         <p>Use Gemini via Vertex AI — requires GCP project with billing</p>
@@ -17119,7 +17109,6 @@ Important rules:
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
                 ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#142840", "#4285f4"),
-                ("🔑", "authgem-key/", "AuthGem Key", "Direct AI Studio API", "#1e2838", "#f59e0b"),
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#142840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
