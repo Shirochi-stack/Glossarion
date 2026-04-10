@@ -55,9 +55,19 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v4-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
           restore-keys: |
-            buildozer-v3-${{ runner.os }}-
+            buildozer-v4-${{ runner.os }}-
+      
+      - name: Fix stale pyjnius cache
+        run: |
+          # If cached pyjnius exists but jnius.c is missing, delete it to force Cython rebuild
+          for d in $(find "$HOME/.buildozer" src/android/.buildozer -path '*/pyjnius/jnius' -type d 2>/dev/null); do
+            if [ ! -f "$d/jnius.c" ]; then
+              echo "Removing stale pyjnius build: $(dirname $d)"
+              rm -rf "$(dirname $d)"
+            fi
+          done
       
       - name: Copy shared backend files
         run: |
@@ -307,5 +317,5 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v4-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
 
