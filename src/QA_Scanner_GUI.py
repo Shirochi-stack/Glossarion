@@ -334,7 +334,7 @@ class QAScannerMixin:
             'truncation_cheap_threshold': 12,
             'truncation_borderline_score': 40,
             'truncation_length_threshold': 30,
-            'truncation_embed_threshold': 45,
+            'truncation_embed_threshold': 30,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
@@ -3826,7 +3826,7 @@ class QAScannerMixin:
                 truncation_cheap_slider.setValue(12)
                 truncation_borderline_slider.setValue(40)
                 truncation_length_slider.setValue(30)
-                truncation_embed_slider.setValue(45)
+                truncation_embed_slider.setValue(30)
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
 
                 # Reset cache settings

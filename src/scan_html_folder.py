@@ -4842,7 +4842,7 @@ def _extract_paragraphs(html):
 def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', target_lang='en', log=print,
                                  tail_paragraphs=3, sleep_time=2,
                                  cheap_threshold=0.12, borderline_score=0.40,
-                                 length_threshold=0.30, embed_threshold=0.45):
+                                 length_threshold=0.30, embed_threshold=0.30):
     """Check if translated content silently truncated the ending of the source.
 
     Compares the last ~500 chars of the raw (source) HTML with the last
@@ -7544,19 +7544,39 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             issues.append(f"{artifact['type']}_{artifact['count']}_found")
                 
         
-        # Silent truncation detection (runs in main thread due to network + ML deps)
-        if check_truncation and original_html_content and not should_stop():
+        result['issues'] = issues
+        result['score'] = len(issues)
+        
+        if issues:
+            log(f"   {result['filename']}: {', '.join(issues[:2])}" + (" ..." if len(issues) > 2 else ""))
+    
+    # ---- Silent truncation detection (threadpooled) ----
+    if check_truncation and original_html_content and not should_stop():
+        import threading as _threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        src_lang = str(qa_settings.get('source_language', 'auto')).strip()
+        tgt_lang = str(qa_settings.get('target_language', 'english')).strip()
+        _cheap_t = int(qa_settings.get('truncation_cheap_threshold', 12)) / 100
+        _border_t = int(qa_settings.get('truncation_borderline_score', 40)) / 100
+        _len_t = int(qa_settings.get('truncation_length_threshold', 30)) / 100
+        _embed_t = int(qa_settings.get('truncation_embed_threshold', 30)) / 100
+
+        # Use a lock for thread-safe translator / cache access
+        _trunc_lock = _threading.Lock()
+
+        def _check_one(result_obj):
+            """Run truncation check for a single file. Returns (result_obj, trunc_result) or None."""
+            if should_stop():
+                return None
             try:
-                filename = result['filename']
+                filename = result_obj['filename']
                 matched_source_html = None
-                
-                # Match by filename (same logic as word count / image matching)
                 search_basename = os.path.splitext(filename.lower())[0]
                 if search_basename.startswith('response_'):
                     search_basename = search_basename[9:]
-                
+
                 if not text_file_mode:
-                    # EPUB mode: match via original_word_counts spine index -> filename
                     for spine_idx, info in original_html_content.items():
                         if isinstance(info, dict):
                             orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
@@ -7564,51 +7584,54 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                 matched_source_html = info['html']
                                 break
                 else:
-                    # Text mode: match by filename in original_html_content dict
                     for key, info in original_html_content.items():
                         if isinstance(info, dict):
                             orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
                             if orig_basename == search_basename:
                                 matched_source_html = info['html']
                                 break
-                
-                if matched_source_html and not should_stop():
-                    # Read translated HTML from disk
-                    trans_file_path = os.path.join(folder_path, filename)
-                    if os.path.exists(trans_file_path):
-                        try:
-                            with open(trans_file_path, 'r', encoding='utf-8') as f:
-                                trans_html = f.read()
-                        except Exception:
-                            trans_html = None
-                        
-                        if trans_html and not should_stop():
-                            # Use the scanner's resolved source/target languages
-                            src_lang = str(qa_settings.get('source_language', 'auto')).strip()
-                            tgt_lang = str(qa_settings.get('target_language', 'english')).strip()
-                            
-                            trunc_result = run_silent_truncation_check(
-                                matched_source_html, trans_html,
-                                source_lang=src_lang, target_lang=tgt_lang, log=log,
-                                cheap_threshold=int(qa_settings.get('truncation_cheap_threshold', 12)) / 100,
-                                borderline_score=int(qa_settings.get('truncation_borderline_score', 40)) / 100,
-                                length_threshold=int(qa_settings.get('truncation_length_threshold', 30)) / 100,
-                                embed_threshold=int(qa_settings.get('truncation_embed_threshold', 45)) / 100,
-                            )
-                            
-                            if trunc_result['flagged']:
-                                score = trunc_result['score']
-                                details = trunc_result['details']
-                                issues.append(f"silent_truncation_suspected (score={score:.2f}, {details})")
-                                log(f"   ⚠️ {filename}: Silent truncation suspected - {details}")
+
+                if not matched_source_html or should_stop():
+                    return None
+
+                trans_file_path = os.path.join(folder_path, filename)
+                if not os.path.exists(trans_file_path):
+                    return None
+                with open(trans_file_path, 'r', encoding='utf-8') as f:
+                    trans_html = f.read()
+                if not trans_html or should_stop():
+                    return None
+
+                trunc_result = run_silent_truncation_check(
+                    matched_source_html, trans_html,
+                    source_lang=src_lang, target_lang=tgt_lang, log=log,
+                    cheap_threshold=_cheap_t, borderline_score=_border_t,
+                    length_threshold=_len_t, embed_threshold=_embed_t,
+                )
+                return (result_obj, trunc_result)
             except Exception as e:
-                log(f"   ⚠️ Truncation check failed for {result.get('filename', '?')}: {e}")
-        
-        result['issues'] = issues
-        result['score'] = len(issues)
-        
-        if issues:
-            log(f"   {result['filename']}: {', '.join(issues[:2])}" + (" ..." if len(issues) > 2 else ""))
+                log(f"   ⚠️ Truncation check failed for {result_obj.get('filename', '?')}: {e}")
+                return None
+
+        # Thread count: use up to 4 threads (limited by Google Translate rate limits)
+        max_workers = min(4, len(results))
+        log(f"\n🔍 Running silent truncation detection ({max_workers} threads)...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as trunc_pool:
+            futures = {trunc_pool.submit(_check_one, r): r for r in results}
+            for future in as_completed(futures):
+                if should_stop():
+                    break
+                try:
+                    pair = future.result()
+                    if pair:
+                        r_obj, tr = pair
+                        if tr['flagged']:
+                            r_obj['issues'].append(f"silent_truncation_suspected (score={tr['score']:.2f}, {tr['details']})")
+                            r_obj['score'] = len(r_obj['issues'])
+                            log(f"   ⚠️ {r_obj['filename']}: Silent truncation suspected - {tr['details']}")
+                except Exception:
+                    pass
     
     # Clean up to save memory
     for result in results:
