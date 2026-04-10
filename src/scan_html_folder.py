@@ -4839,15 +4839,15 @@ def _extract_paragraphs(html):
     return paragraphs
 
 
-def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=print,
+def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', target_lang='en', log=print,
                                  tail_paragraphs=3, sleep_time=2,
                                  cheap_threshold=0.30, borderline_score=0.75,
                                  length_threshold=0.55, embed_threshold=0.65):
     """Check if translated content silently truncated the ending of the source.
 
-    Compares the last *tail_paragraphs* of the raw (source) HTML with the last
-    paragraphs of the translated HTML via:
-      1. Back-translate the raw tail to English (GoogleTranslator).
+    Compares the last ~500 chars of the raw (source) HTML with the last
+    ~500 chars of the translated HTML via:
+      1. Back-translate the raw tail to the target language (GoogleTranslator).
       2. Cheap composite score (SequenceMatcher + keyword overlap + length ratio).
       3. If borderline, use sentence-transformer embeddings for semantic similarity.
 
@@ -4890,19 +4890,20 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=p
         trans_tail = _build_tail(trans_paragraphs, min_tail_chars)
         result['trans_tail'] = trans_tail[:200]
 
-        # ---- Back-translate raw tail ----
+        # ---- Back-translate raw tail to target language ----
         cache_key = raw_tail[:500]
         if cache_key in _truncation_translation_cache:
-            raw_tail_en = _truncation_translation_cache[cache_key]
+            raw_tail_translated = _truncation_translation_cache[cache_key]
         else:
             try:
                 from deep_translator import GoogleTranslator
                 if _truncation_translator is None:
-                    # Normalise source language code for deep_translator
+                    # Normalise language codes for deep_translator
                     src = source_lang.lower().replace(' ', '-')
-                    _truncation_translator = GoogleTranslator(source=src, target="en")
-                raw_tail_en = _truncation_translator.translate(raw_tail[:4500]) or ''
-                _truncation_translation_cache[cache_key] = raw_tail_en
+                    tgt = target_lang.lower().replace(' ', '-')
+                    _truncation_translator = GoogleTranslator(source=src, target=tgt)
+                raw_tail_translated = _truncation_translator.translate(raw_tail[:4500]) or ''
+                _truncation_translation_cache[cache_key] = raw_tail_translated
                 import time as _t
                 _t.sleep(sleep_time)
             except Exception as e:
@@ -4910,14 +4911,14 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=p
                 result['details'] = f'back_translation_failed: {e}'
                 return result
 
-        result['raw_tail'] = raw_tail_en[:200]
+        result['raw_tail'] = raw_tail_translated[:200]
 
         # ---- Cheap composite score ----
         from difflib import SequenceMatcher
-        seq_ratio = SequenceMatcher(None, raw_tail_en.lower(), trans_tail.lower()).ratio()
+        seq_ratio = SequenceMatcher(None, raw_tail_translated.lower(), trans_tail.lower()).ratio()
 
         # Keyword overlap
-        raw_kw = set(re.findall(r'[a-zA-Z]{3,}', raw_tail_en.lower()))
+        raw_kw = set(re.findall(r'[a-zA-Z]{3,}', raw_tail_translated.lower()))
         trans_kw = set(re.findall(r'[a-zA-Z]{3,}', trans_tail.lower()))
         if raw_kw:
             kw_overlap = len(raw_kw & trans_kw) / len(raw_kw)
@@ -4925,7 +4926,7 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=p
             kw_overlap = 0.0
 
         # Length ratio
-        len_raw = max(len(raw_tail_en), 1)
+        len_raw = max(len(raw_tail_translated), 1)
         len_trans = max(len(trans_tail), 1)
         len_ratio = min(len_raw, len_trans) / max(len_raw, len_trans)
 
@@ -4954,7 +4955,7 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=p
                 log("   🔄 Loading embedding model for truncation detection (first use)...")
                 _truncation_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-            embeddings = _truncation_embed_model.encode([raw_tail_en, trans_tail])
+            embeddings = _truncation_embed_model.encode([raw_tail_translated, trans_tail])
             embed_sim = float(_cos_sim([embeddings[0]], [embeddings[1]])[0][0])
 
             result['score'] = embed_sim
@@ -7576,14 +7577,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             trans_html = None
                         
                         if trans_html and not should_stop():
-                            # Determine source language for back-translation
-                            src_lang = qa_settings.get('source_language', 'auto')
-                            if src_lang.lower() == 'auto':
-                                src_lang = 'zh-CN'  # Default fallback for auto
+                            # Use the scanner's resolved source/target languages
+                            src_lang = str(qa_settings.get('source_language', 'auto')).strip()
+                            tgt_lang = str(qa_settings.get('target_language', 'english')).strip()
                             
                             trunc_result = run_silent_truncation_check(
                                 matched_source_html, trans_html,
-                                source_lang=src_lang, log=log
+                                source_lang=src_lang, target_lang=tgt_lang, log=log
                             )
                             
                             if trunc_result['flagged']:
