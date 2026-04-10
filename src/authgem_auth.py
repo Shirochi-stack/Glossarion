@@ -1198,7 +1198,11 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
         _log(f"🔧 Code Assist: onboarded (project={project})")
 
     _code_assist_project_id = project
-    _code_assist_setup_done = True
+    # Only cache as "done" if we actually got a project.
+    # If verification was needed (project=None), let setup re-run next time
+    # so it picks up the project after the user completes verification.
+    if project:
+        _code_assist_setup_done = True
 
     # Query server-side quota (Gemini CLI: retrieveUserQuota)
     try:
