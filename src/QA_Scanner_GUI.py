@@ -3004,7 +3004,10 @@ class QAScannerMixin:
             for s in _truncation_all_sliders:
                 s.setEnabled(enabled)
             for lbl in _truncation_slider_labels:
-                lbl.setStyleSheet("" if enabled else "color: #606060;")
+                if enabled:
+                    lbl.setStyleSheet("color: white;")
+                else:
+                    lbl.setStyleSheet("color: #808080;")
 
         check_truncation_checkbox.toggled.connect(_toggle_truncation_sliders)
         # Set initial state
