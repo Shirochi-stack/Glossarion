@@ -4871,8 +4871,23 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=p
             result['details'] = 'insufficient_paragraphs'
             return result
 
-        raw_tail = "\n".join(raw_paragraphs[-tail_paragraphs:])
-        trans_tail = "\n".join(trans_paragraphs[-tail_paragraphs:])
+        # Build tail by expanding upward until we have at least min_tail_chars
+        min_tail_chars = 500
+
+        def _build_tail(paragraphs, min_chars):
+            """Take paragraphs from the end, expanding until min_chars reached."""
+            tail_parts = []
+            total_len = 0
+            for p in reversed(paragraphs):
+                tail_parts.append(p)
+                total_len += len(p)
+                if total_len >= min_chars:
+                    break
+            tail_parts.reverse()
+            return "\n".join(tail_parts)
+
+        raw_tail = _build_tail(raw_paragraphs, min_tail_chars)
+        trans_tail = _build_tail(trans_paragraphs, min_tail_chars)
         result['trans_tail'] = trans_tail[:200]
 
         # ---- Back-translate raw tail ----
