@@ -916,6 +916,8 @@ _code_assist_setup_done = False
 _code_assist_has_credits = False  # Whether user has GOOGLE_ONE_AI credits
 # Session ID for Code Assist — generated once per process, like Gemini CLI
 _code_assist_session_id: str = str(uuid.uuid4())
+# Tracks whether verification has been opened — prevents spam
+_verification_pending = False
 
 def _code_assist_base_url() -> str:
     return f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}"
@@ -938,10 +940,20 @@ def _handle_403_verification(error_body: str, _log) -> None:
     The Code Assist proxy may return 403 with a verification URL when the
     user's account needs additional verification (phone, ID, etc.).  This
     mirrors the Gemini CLI's ``validateLoadCodeAssistResponse()`` logic.
+
+    Only opens the browser ONCE per session — subsequent 403s log a reminder
+    without spamming new tabs.
     """
+    global _verification_pending
+
     # Reset setup so the next attempt re-runs loadCodeAssist (which also
     # checks for verification requirements).
     _reset_code_assist_setup()
+
+    # If we already opened verification, don't spam the browser
+    if _verification_pending:
+        _log(f"⚠️ AuthGem: 403 — verification still pending. Complete it in your browser, then retry.")
+        return
 
     # Try to parse a JSON error body for a verification URL
     verification_url = None
@@ -977,6 +989,7 @@ def _handle_403_verification(error_body: str, _log) -> None:
             verification_url = url_match.group(0)
 
     if verification_url:
+        _verification_pending = True
         _log(f"⚠️ AuthGem: Account verification required")
         _log(f"🔗 Opening verification in browser…")
         logger.warning("AuthGem 403 verification URL: %s", verification_url)
@@ -985,6 +998,10 @@ def _handle_403_verification(error_body: str, _log) -> None:
             webbrowser.open(verification_url)
         except Exception:
             _log(f"🔗 Could not open browser. Visit: {verification_url}")
+        # Raise immediately — don't let the retry loop keep going
+        raise RuntimeError(
+            "AuthGem: Account verification required. Complete it in your browser, then retry."
+        )
     else:
         _log(f"⚠️ AuthGem: 403 Forbidden — account may need verification or permissions are insufficient")
         logger.warning("AuthGem 403 with no verification URL detected. Body: %s", error_body[:500])

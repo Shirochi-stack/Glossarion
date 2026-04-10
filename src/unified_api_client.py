@@ -16561,9 +16561,14 @@ class UnifiedClient:
                         pass
 
                 # 403 — verification or permissions issue; reset Code Assist
-                # setup so the next attempt re-runs loadCodeAssist (which
-                # handles verification URLs and account onboarding).
+                # setup so the next attempt re-runs loadCodeAssist.
                 if "403" in error_str:
+                    # If verification is required, abort immediately — don't retry
+                    if "verification" in error_str.lower():
+                        raise UnifiedClientError(
+                            f"{label}: Account verification required. Complete it in your browser, then retry.",
+                            error_type="auth",
+                        )
                     if _reset_code_assist_setup is not None:
                         _reset_code_assist_setup()
                     if store is not None and attempt < max_retries - 1:
