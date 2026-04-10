@@ -4732,6 +4732,242 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
         log(f"❌ Error reading EPUB file: {e}")
         return {}
 
+def extract_epub_html_content(epub_path, log=print):
+    """Extract raw HTML content for each chapter from the original EPUB using spine order.
+    
+    Used by silent truncation detection to compare source paragraphs with translated output.
+    Follows the same spine-order pattern as extract_epub_word_counts / extract_epub_image_info.
+    
+    Returns:
+        Dict[int, dict]: {spine_index: {'html': raw_html_string, 'filename': basename}}
+    """
+    try:
+        html_contents = {}
+
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Read and parse content.opf to get spine order
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}
+
+            for fname in zf.namelist():
+                if 'content.opf' in fname.lower():
+                    content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
+                    content_opf_path = fname
+                    break
+
+            if not content_opf_data:
+                log("⚠️ Could not find content.opf for truncation detection")
+                return {}
+
+            soup_opf = BeautifulSoup(content_opf_data, 'xml')
+
+            manifest = soup_opf.find('manifest')
+            if manifest:
+                for item in manifest.find_all('item'):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    if item_id and href:
+                        manifest_map[item_id] = href
+
+            spine = soup_opf.find('spine')
+            if not spine:
+                log("⚠️ No spine found in content.opf for truncation detection")
+                return {}
+
+            base_dir = ''
+            if content_opf_path:
+                base_dir = os.path.dirname(content_opf_path)
+                if base_dir:
+                    base_dir = base_dir + '/'
+
+            spine_index = 1
+            for itemref in spine.find_all('itemref'):
+                idref = itemref.get('idref')
+                if idref and idref in manifest_map:
+                    href = manifest_map[idref]
+                    possible_paths = [
+                        href,
+                        base_dir + href,
+                        'OEBPS/' + href,
+                        'OPS/' + href,
+                    ]
+
+                    for try_path in possible_paths:
+                        try:
+                            content = zf.read(try_path).decode('utf-8', errors='ignore')
+                            html_contents[spine_index] = {
+                                'html': content,
+                                'filename': os.path.basename(href)
+                            }
+                            break
+                        except KeyError:
+                            continue
+
+                    spine_index += 1
+
+        if html_contents:
+            log(f"   Extracted HTML content for {len(html_contents)} spine items")
+        return html_contents
+
+    except Exception as e:
+        log(f"⚠️ Error extracting EPUB HTML content for truncation detection: {e}")
+        return {}
+
+
+# ---------- Silent Truncation Detection ----------
+
+# Module-level lazy-loaded references (set on first call)
+_truncation_embed_model = None
+_truncation_translator = None
+_truncation_translation_cache = {}
+
+def _extract_paragraphs(html):
+    """Extract paragraph texts from HTML content."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "head", "title", "meta", "link"]):
+        tag.decompose()
+    paragraphs = []
+    for p in soup.find_all("p"):
+        text = p.get_text(strip=True)
+        if text:
+            paragraphs.append(text)
+    # Fallback: if no <p> tags, split by double newlines
+    if not paragraphs:
+        raw_text = soup.get_text()
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', raw_text) if p.strip()]
+    return paragraphs
+
+
+def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', log=print,
+                                 tail_paragraphs=3, sleep_time=2,
+                                 cheap_threshold=0.30, borderline_score=0.75,
+                                 length_threshold=0.55, embed_threshold=0.65):
+    """Check if translated content silently truncated the ending of the source.
+
+    Compares the last *tail_paragraphs* of the raw (source) HTML with the last
+    paragraphs of the translated HTML via:
+      1. Back-translate the raw tail to English (GoogleTranslator).
+      2. Cheap composite score (SequenceMatcher + keyword overlap + length ratio).
+      3. If borderline, use sentence-transformer embeddings for semantic similarity.
+
+    Returns:
+        dict with keys:
+            'flagged'  (bool)  – True when truncation is suspected
+            'score'    (float) – composite similarity score (0-1, lower = more suspicious)
+            'details'  (str)   – human-readable explanation
+            'raw_tail' (str)   – the raw tail text (back-translated)
+            'trans_tail' (str) – the translated tail text
+    """
+    global _truncation_embed_model, _truncation_translator, _truncation_translation_cache
+
+    result = {'flagged': False, 'score': 1.0, 'details': '', 'raw_tail': '', 'trans_tail': ''}
+
+    try:
+        raw_paragraphs = _extract_paragraphs(raw_html)
+        trans_paragraphs = _extract_paragraphs(trans_html)
+
+        if not raw_paragraphs or not trans_paragraphs:
+            result['details'] = 'insufficient_paragraphs'
+            return result
+
+        raw_tail = "\n".join(raw_paragraphs[-tail_paragraphs:])
+        trans_tail = "\n".join(trans_paragraphs[-tail_paragraphs:])
+        result['trans_tail'] = trans_tail[:200]
+
+        # ---- Back-translate raw tail ----
+        cache_key = raw_tail[:500]
+        if cache_key in _truncation_translation_cache:
+            raw_tail_en = _truncation_translation_cache[cache_key]
+        else:
+            try:
+                from deep_translator import GoogleTranslator
+                if _truncation_translator is None:
+                    # Normalise source language code for deep_translator
+                    src = source_lang.lower().replace(' ', '-')
+                    _truncation_translator = GoogleTranslator(source=src, target="en")
+                raw_tail_en = _truncation_translator.translate(raw_tail[:4500]) or ''
+                _truncation_translation_cache[cache_key] = raw_tail_en
+                import time as _t
+                _t.sleep(sleep_time)
+            except Exception as e:
+                log(f"      ⚠️ Back-translation failed: {e}")
+                result['details'] = f'back_translation_failed: {e}'
+                return result
+
+        result['raw_tail'] = raw_tail_en[:200]
+
+        # ---- Cheap composite score ----
+        from difflib import SequenceMatcher
+        seq_ratio = SequenceMatcher(None, raw_tail_en.lower(), trans_tail.lower()).ratio()
+
+        # Keyword overlap
+        raw_kw = set(re.findall(r'[a-zA-Z]{3,}', raw_tail_en.lower()))
+        trans_kw = set(re.findall(r'[a-zA-Z]{3,}', trans_tail.lower()))
+        if raw_kw:
+            kw_overlap = len(raw_kw & trans_kw) / len(raw_kw)
+        else:
+            kw_overlap = 0.0
+
+        # Length ratio
+        len_raw = max(len(raw_tail_en), 1)
+        len_trans = max(len(trans_tail), 1)
+        len_ratio = min(len_raw, len_trans) / max(len_raw, len_trans)
+
+        cheap_score = 0.4 * seq_ratio + 0.35 * kw_overlap + 0.25 * len_ratio
+
+        # ---- Decision ----
+        if cheap_score >= borderline_score:
+            # High similarity → not truncated
+            result['score'] = cheap_score
+            result['details'] = f'cheap_pass (score={cheap_score:.2f})'
+            return result
+
+        if cheap_score < cheap_threshold and len_ratio < length_threshold:
+            # Very low → flagged immediately
+            result['flagged'] = True
+            result['score'] = cheap_score
+            result['details'] = f'cheap_fail (score={cheap_score:.2f}, len_ratio={len_ratio:.2f})'
+            return result
+
+        # ---- Borderline → use embeddings ----
+        try:
+            from sentence_transformers import SentenceTransformer
+            from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+
+            if _truncation_embed_model is None:
+                log("   🔄 Loading embedding model for truncation detection (first use)...")
+                _truncation_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+            embeddings = _truncation_embed_model.encode([raw_tail_en, trans_tail])
+            embed_sim = float(_cos_sim([embeddings[0]], [embeddings[1]])[0][0])
+
+            result['score'] = embed_sim
+            if embed_sim < embed_threshold:
+                result['flagged'] = True
+                result['details'] = f'embed_fail (embed={embed_sim:.2f}, cheap={cheap_score:.2f})'
+            else:
+                result['details'] = f'embed_pass (embed={embed_sim:.2f}, cheap={cheap_score:.2f})'
+
+        except ImportError as ie:
+            log(f"      ⚠️ Embedding libraries not available: {ie}")
+            # Fall back to cheap score only
+            if cheap_score < 0.5:
+                result['flagged'] = True
+            result['score'] = cheap_score
+            result['details'] = f'cheap_only_fallback (score={cheap_score:.2f})'
+        except Exception as e:
+            log(f"      ⚠️ Embedding comparison failed: {e}")
+            result['score'] = cheap_score
+            result['details'] = f'embed_error: {e}'
+
+    except Exception as e:
+        log(f"      ⚠️ Truncation check error: {e}")
+        result['details'] = f'error: {e}'
+
+    return result
+
+
 def detect_multiple_headers(html_content):
     """Detect if HTML content has 2 or more header tags"""
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -6357,6 +6593,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_missing_header_tags': True,
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
+            'check_silent_truncation': False,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
@@ -6370,6 +6607,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     original_word_counts = {}
     original_image_info = {}  # For missing image detection
     original_punctuation_info = {}  # For punctuation mismatch detection
+    original_html_content = {}  # For silent truncation detection
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
     
@@ -6470,6 +6708,36 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             else:
                 log(f"   No ?! punctuation found in EPUB (or unable to extract)")
     
+    # Extract HTML content from EPUB if silent truncation check is enabled
+    check_truncation = qa_settings.get('check_silent_truncation', False)
+    if check_truncation:
+        if text_file_mode:
+            # For text file mode, extract from word_count folder
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log(f"🔍 Extracting source HTML content from word_count folder for truncation detection")
+                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
+                for chunk_file in chunk_files:
+                    chunk_path = os.path.join(word_count_folder, chunk_file)
+                    try:
+                        with open(chunk_path, 'r', encoding='utf-8') as f:
+                            original_html_content[chunk_file] = {
+                                'html': f.read(),
+                                'filename': chunk_file
+                            }
+                    except Exception as e:
+                        log(f"   ⚠️ Could not read {chunk_file} for truncation detection: {e}")
+                if original_html_content:
+                    log(f"   Loaded HTML content for {len(original_html_content)} source chunks")
+            else:
+                log("   ⚠️ No word_count folder found for truncation detection in text mode")
+        elif epub_path and os.path.exists(epub_path):
+            log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(epub_path)}")
+            original_html_content = extract_epub_html_content(epub_path, log)
+        else:
+            log("⚠️ Silent truncation check enabled but no source file provided - skipping")
+            check_truncation = False
+
     if check_word_count:
         if text_file_mode:
             # For text-type sources, load word counts from individual chunks in word_count folder
@@ -6665,6 +6933,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', True) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
+    log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
     log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")
     # Log counting mode
     if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
@@ -7252,6 +7521,63 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         else:
                             issues.append(f"{artifact['type']}_{artifact['count']}_found")
                 
+        
+        # Silent truncation detection (runs in main thread due to network + ML deps)
+        if check_truncation and original_html_content:
+            try:
+                filename = result['filename']
+                matched_source_html = None
+                
+                # Match by filename (same logic as word count / image matching)
+                search_basename = os.path.splitext(filename.lower())[0]
+                if search_basename.startswith('response_'):
+                    search_basename = search_basename[9:]
+                
+                if not text_file_mode:
+                    # EPUB mode: match via original_word_counts spine index -> filename
+                    for spine_idx, info in original_html_content.items():
+                        if isinstance(info, dict):
+                            orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
+                            if orig_basename == search_basename:
+                                matched_source_html = info['html']
+                                break
+                else:
+                    # Text mode: match by filename in original_html_content dict
+                    for key, info in original_html_content.items():
+                        if isinstance(info, dict):
+                            orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
+                            if orig_basename == search_basename:
+                                matched_source_html = info['html']
+                                break
+                
+                if matched_source_html:
+                    # Read translated HTML from disk
+                    trans_file_path = os.path.join(folder_path, filename)
+                    if os.path.exists(trans_file_path):
+                        try:
+                            with open(trans_file_path, 'r', encoding='utf-8') as f:
+                                trans_html = f.read()
+                        except Exception:
+                            trans_html = None
+                        
+                        if trans_html:
+                            # Determine source language for back-translation
+                            src_lang = qa_settings.get('source_language', 'auto')
+                            if src_lang.lower() == 'auto':
+                                src_lang = 'zh-CN'  # Default fallback for auto
+                            
+                            trunc_result = run_silent_truncation_check(
+                                matched_source_html, trans_html,
+                                source_lang=src_lang, log=log
+                            )
+                            
+                            if trunc_result['flagged']:
+                                score = trunc_result['score']
+                                details = trunc_result['details']
+                                issues.append(f"silent_truncation_suspected (score={score:.2f}, {details})")
+                                log(f"   ⚠️ {filename}: Silent truncation suspected - {details}")
+            except Exception as e:
+                log(f"   ⚠️ Truncation check failed for {result.get('filename', '?')}: {e}")
         
         result['issues'] = issues
         result['score'] = len(issues)

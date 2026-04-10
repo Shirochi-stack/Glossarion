@@ -330,6 +330,7 @@ class QAScannerMixin:
             'check_missing_html_tag': True,
             'check_missing_header_tags': True,
             'check_invalid_nesting': False,
+            'check_silent_truncation': False,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
@@ -2878,6 +2879,49 @@ class QAScannerMixin:
         check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
         additional_layout.addWidget(check_invalid_nesting_checkbox)
 
+        # Silent truncation detection (optional, requires heavy deps)
+        check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")
+        additional_layout.addWidget(check_truncation_checkbox)
+
+        # Check if required dependencies are installed
+        _truncation_deps_missing = []
+        try:
+            import sentence_transformers
+        except ImportError:
+            _truncation_deps_missing.append("sentence-transformers")
+        try:
+            import deep_translator
+        except ImportError:
+            _truncation_deps_missing.append("deep-translator")
+        try:
+            import sklearn
+        except ImportError:
+            _truncation_deps_missing.append("scikit-learn")
+
+        if _truncation_deps_missing:
+            # Dependencies missing — disable and grey out
+            check_truncation_checkbox.setChecked(False)
+            check_truncation_checkbox.setEnabled(False)
+            check_truncation_checkbox.setStyleSheet("color: #606060;")
+            missing_str = ", ".join(_truncation_deps_missing)
+            truncation_desc = QLabel(f"⚠️ Missing dependencies: {missing_str}\n"
+                                     f"Install with: pip install {' '.join(_truncation_deps_missing)}")
+            truncation_desc.setFont(QFont('Arial', 9))
+            truncation_desc.setStyleSheet("color: #b06040;")
+        else:
+            # All deps available — normal behavior
+            check_truncation_checkbox.setChecked(qa_settings.get('check_silent_truncation', False))
+            truncation_desc = QLabel("Detects when translated content silently drops paragraphs from the end of chapters.\n"
+                                     "Uses embedding similarity + back-translation to compare source vs translated tails.\n"
+                                     "Requires: sentence-transformers, deep-translator, scikit-learn. Loads ~80MB model on first use.")
+            truncation_desc.setFont(QFont('Arial', 9))
+            truncation_desc.setStyleSheet("color: gray;")
+
+        truncation_desc.setWordWrap(True)
+        truncation_desc.setMaximumWidth(700)
+        truncation_desc.setContentsMargins(20, 0, 0, 0)
+        additional_layout.addWidget(truncation_desc)
+
         additional_layout.addSpacing(15)
         
         # NEW: Paragraph Structure Check
@@ -3346,6 +3390,7 @@ class QAScannerMixin:
                     'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                     'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                     'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
+                    'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
                     'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
                     'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
                 }
@@ -3682,6 +3727,7 @@ class QAScannerMixin:
                 check_missing_header_tags_checkbox.setChecked(True)
                 check_paragraph_structure_checkbox.setChecked(True)
                 check_invalid_nesting_checkbox.setChecked(False)
+                check_truncation_checkbox.setChecked(False)
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
 
                 # Reset cache settings
