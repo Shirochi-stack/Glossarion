@@ -14,7 +14,7 @@ version = 1.0.0
 # Dependencies (python-for-android recipes)
 # NOTE: lxml removed — p4a's lxml 4.8.0 recipe is incompatible with Python 3.11.
 # All BeautifulSoup usage uses html.parser instead.
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,requests,certifi,charset-normalizer,chardet,html2text,regex,tqdm,plyer,pyjnius,six,setuptools
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools
 
 # Entry point
 entrypoint = main.py
@@ -56,7 +56,6 @@ android.allow_backup = True
 
 # Exclude large unused packages from the build to reduce APK size
 # These are in the main requirements.txt but NOT compatible with Android
-android.add_compile_options = -Xlint:deprecation
 
 # Presplash color
 android.presplash_color = #121217

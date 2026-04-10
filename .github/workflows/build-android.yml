@@ -307,5 +307,5 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
 
