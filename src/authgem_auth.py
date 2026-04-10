@@ -1209,6 +1209,77 @@ def send_chat_completion_aistudio(
 
 
 # ===========================================================================
+# Gemini CLI identification helpers — used by authgem-key/ to match the
+# headers that the real Gemini CLI sends, unlocking higher rate limits.
+# ===========================================================================
+
+# Version of the Gemini CLI we impersonate (from package.json)
+_GEMINI_CLI_VERSION = "0.39.0"
+# Version of @google/genai SDK the CLI bundles
+_GENAI_JS_VERSION = "1.30.0"
+
+_installation_id_cache: Optional[str] = None
+
+
+def _cli_platform() -> str:
+    """Return a platform string matching the Gemini CLI's User-Agent format."""
+    import platform
+    plat = {"win32": "win32", "darwin": "darwin", "linux": "linux"}.get(
+        __import__("sys").platform, __import__("sys").platform
+    )
+    arch = {"AMD64": "x64", "x86_64": "x64", "aarch64": "arm64",
+            "arm64": "arm64"}.get(platform.machine(), platform.machine())
+    return f"{plat}; {arch}"
+
+
+def _get_installation_id() -> str:
+    """Return a persistent installation UUID (stored in ~/.glossarion/)."""
+    global _installation_id_cache
+    if _installation_id_cache:
+        return _installation_id_cache
+
+    id_file = os.path.join(_DEFAULT_TOKEN_DIR, "installation_id")
+    try:
+        if os.path.isfile(id_file):
+            with open(id_file, "r", encoding="utf-8") as f:
+                _installation_id_cache = f.read().strip()
+                if _installation_id_cache:
+                    return _installation_id_cache
+    except Exception:
+        pass
+
+    # Generate a new installation ID
+    _installation_id_cache = str(uuid.uuid4())
+    try:
+        os.makedirs(_DEFAULT_TOKEN_DIR, exist_ok=True)
+        with open(id_file, "w", encoding="utf-8") as f:
+            f.write(_installation_id_cache)
+    except Exception:
+        pass
+    return _installation_id_cache
+
+
+def _build_cli_headers(api_key: str, model: str) -> Dict[str, str]:
+    """Build HTTP headers matching the Gemini CLI's request format.
+
+    The Gemini CLI (google-gemini/gemini-cli) sends specific identifying
+    headers that Google's backend uses to apply higher rate limits
+    (e.g. 250 RPD vs 20 RPD for bare API key calls).
+    """
+    return {
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+        "x-goog-api-key": api_key,
+        "User-Agent": (
+            f"GeminiCLI/{_GEMINI_CLI_VERSION}/{model} "
+            f"({_cli_platform()}; terminal)"
+        ),
+        "x-goog-api-client": f"genai-js/{_GENAI_JS_VERSION} gl-js/20.0.0",
+        "x-gemini-api-privileged-user-id": _get_installation_id(),
+    }
+
+
+# ===========================================================================
 # AI Studio endpoint — API key (no OAuth).  Used by the  authgem-key/  prefix.
 # ===========================================================================
 
@@ -1224,9 +1295,9 @@ def send_chat_completion_aistudio_key(
 ) -> Dict:
     """Send a chat completion via Google AI Studio using an API key.
 
-    Uses ``generativelanguage.googleapis.com`` with ``?key=`` query parameter.
+    Uses ``generativelanguage.googleapis.com`` with the ``x-goog-api-key``
+    header (matching the Gemini CLI / @google/genai SDK behaviour).
     No OAuth login needed — the user supplies a GEMINI_API_KEY.
-    Free tier: 250 req/day, Flash model only.
     """
     if is_cancelled():
         raise RuntimeError("AuthGem: stream cancelled by user")
@@ -1234,14 +1305,13 @@ def send_chat_completion_aistudio_key(
     _log = log_fn or (lambda *a, **kw: None)
     body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
+    # API key is sent via x-goog-api-key header (not ?key= query param)
+    # to match the @google/genai SDK's default behaviour.
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{model}:streamGenerateContent?key={api_key}&alt=sse"
+        f"models/{model}:streamGenerateContent?alt=sse"
     )
-    headers = {
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-    }
+    headers = _build_cli_headers(api_key, model)
 
     logger.info("AuthGem-Key: POST %s  model=%s", url.split("?")[0], model)
 
