@@ -4915,6 +4915,10 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
 
         result['raw_tail'] = raw_tail_translated[:200]
 
+        # Strip any residual HTML tags from both tails before comparison
+        raw_tail_translated = re.sub(r'<[^>]+>', '', raw_tail_translated).strip()
+        trans_tail = re.sub(r'<[^>]+>', '', trans_tail).strip()
+
         # ---- Cheap composite score ----
         from difflib import SequenceMatcher
         seq_ratio = SequenceMatcher(None, raw_tail_translated.lower(), trans_tail.lower()).ratio()
@@ -7585,7 +7589,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             
                             trunc_result = run_silent_truncation_check(
                                 matched_source_html, trans_html,
-                                source_lang=src_lang, target_lang=tgt_lang, log=log
+                                source_lang=src_lang, target_lang=tgt_lang, log=log,
+                                cheap_threshold=int(qa_settings.get('truncation_cheap_threshold', 12)) / 100,
+                                borderline_score=int(qa_settings.get('truncation_borderline_score', 40)) / 100,
+                                length_threshold=int(qa_settings.get('truncation_length_threshold', 30)) / 100,
+                                embed_threshold=int(qa_settings.get('truncation_embed_threshold', 45)) / 100,
                             )
                             
                             if trunc_result['flagged']:

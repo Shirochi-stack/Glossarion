@@ -331,6 +331,10 @@ class QAScannerMixin:
             'check_missing_header_tags': True,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
+            'truncation_cheap_threshold': 12,
+            'truncation_borderline_score': 40,
+            'truncation_length_threshold': 30,
+            'truncation_embed_threshold': 45,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
@@ -2922,6 +2926,83 @@ class QAScannerMixin:
         truncation_desc.setContentsMargins(20, 0, 0, 0)
         additional_layout.addWidget(truncation_desc)
 
+        # ---- Truncation threshold sliders ----
+        _truncation_deps_ok = not _truncation_deps_missing
+
+        truncation_sliders_widget = QWidget()
+        truncation_sliders_layout = QVBoxLayout(truncation_sliders_widget)
+        truncation_sliders_layout.setContentsMargins(20, 5, 0, 0)
+        truncation_sliders_layout.setSpacing(4)
+
+        def _make_threshold_slider(label_text, setting_key, default_val, tooltip=""):
+            """Create a labeled slider (0-100) for a truncation threshold."""
+            row = QWidget()
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(8)
+
+            lbl = QLabel(label_text)
+            lbl.setFont(QFont('Arial', 9))
+            lbl.setFixedWidth(160)
+            hl.addWidget(lbl)
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setMinimum(0)
+            slider.setMaximum(100)
+            val = int(qa_settings.get(setting_key, default_val))
+            slider.setValue(val)
+            slider.setFixedWidth(200)
+            if tooltip:
+                slider.setToolTip(tooltip)
+            hl.addWidget(slider)
+
+            val_label = QLabel(f"{val / 100:.2f}")
+            val_label.setFont(QFont('Arial', 9))
+            val_label.setFixedWidth(40)
+            hl.addWidget(val_label)
+
+            slider.valueChanged.connect(lambda v: val_label.setText(f"{v / 100:.2f}"))
+
+            if not _truncation_deps_ok:
+                slider.setEnabled(False)
+                lbl.setStyleSheet("color: #606060;")
+                val_label.setStyleSheet("color: #606060;")
+
+            hl.addStretch()
+            return row, slider
+
+        cheap_row, truncation_cheap_slider = _make_threshold_slider(
+            "Cheap score threshold:", 'truncation_cheap_threshold', 12,
+            "Below this composite score AND below length threshold → immediately flagged (default: 0.12)")
+        truncation_sliders_layout.addWidget(cheap_row)
+
+        borderline_row, truncation_borderline_slider = _make_threshold_slider(
+            "Borderline pass score:", 'truncation_borderline_score', 40,
+            "Above this composite score → considered OK without embedding check (default: 0.40)")
+        truncation_sliders_layout.addWidget(borderline_row)
+
+        length_row, truncation_length_slider = _make_threshold_slider(
+            "Length ratio threshold:", 'truncation_length_threshold', 30,
+            "Minimum length ratio for the cheap-fail gate (default: 0.30)")
+        truncation_sliders_layout.addWidget(length_row)
+
+        embed_row, truncation_embed_slider = _make_threshold_slider(
+            "Embedding threshold:", 'truncation_embed_threshold', 45,
+            "Below this embedding similarity → flagged in borderline cases (default: 0.45)")
+        truncation_sliders_layout.addWidget(embed_row)
+
+        additional_layout.addWidget(truncation_sliders_widget)
+
+        # Wire checkbox toggle to enable/disable sliders
+        def _toggle_truncation_sliders(checked):
+            enabled = checked and _truncation_deps_ok
+            truncation_sliders_widget.setEnabled(enabled)
+            truncation_sliders_widget.setStyleSheet("" if enabled else "color: #606060;")
+
+        check_truncation_checkbox.toggled.connect(_toggle_truncation_sliders)
+        # Set initial state
+        _toggle_truncation_sliders(check_truncation_checkbox.isChecked())
+
         additional_layout.addSpacing(15)
         
         # NEW: Paragraph Structure Check
@@ -3391,6 +3472,10 @@ class QAScannerMixin:
                     'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                     'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
                     'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
+                    'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),
+                    'truncation_borderline_score': (truncation_borderline_slider, lambda x: x.value()),
+                    'truncation_length_threshold': (truncation_length_slider, lambda x: x.value()),
+                    'truncation_embed_threshold': (truncation_embed_slider, lambda x: x.value()),
                     'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
                     'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
                 }
@@ -3728,6 +3813,10 @@ class QAScannerMixin:
                 check_paragraph_structure_checkbox.setChecked(True)
                 check_invalid_nesting_checkbox.setChecked(False)
                 check_truncation_checkbox.setChecked(False)
+                truncation_cheap_slider.setValue(12)
+                truncation_borderline_slider.setValue(40)
+                truncation_length_slider.setValue(30)
+                truncation_embed_slider.setValue(45)
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
 
                 # Reset cache settings
