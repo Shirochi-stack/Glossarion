@@ -2963,36 +2963,48 @@ class QAScannerMixin:
 
             slider.valueChanged.connect(lambda v: val_label.setText(f"{v / 100:.2f}"))
 
-
             hl.addStretch()
-            return row, slider
+            return row, slider, lbl, val_label
 
-        cheap_row, truncation_cheap_slider = _make_threshold_slider(
+        # Collect all slider labels for toggle styling
+        _truncation_slider_labels = []
+
+        cheap_row, truncation_cheap_slider, _cl, _cv = _make_threshold_slider(
             "Cheap score threshold:", 'truncation_cheap_threshold', 12,
             "Below this composite score AND below length threshold → immediately flagged (default: 0.12)")
+        _truncation_slider_labels.extend([_cl, _cv])
         truncation_sliders_layout.addWidget(cheap_row)
 
-        borderline_row, truncation_borderline_slider = _make_threshold_slider(
+        borderline_row, truncation_borderline_slider, _bl, _bv = _make_threshold_slider(
             "Borderline pass score:", 'truncation_borderline_score', 40,
             "Above this composite score → considered OK without embedding check (default: 0.40)")
+        _truncation_slider_labels.extend([_bl, _bv])
         truncation_sliders_layout.addWidget(borderline_row)
 
-        length_row, truncation_length_slider = _make_threshold_slider(
+        length_row, truncation_length_slider, _ll, _lv = _make_threshold_slider(
             "Length ratio threshold:", 'truncation_length_threshold', 30,
             "Minimum length ratio for the cheap-fail gate (default: 0.30)")
+        _truncation_slider_labels.extend([_ll, _lv])
         truncation_sliders_layout.addWidget(length_row)
 
-        embed_row, truncation_embed_slider = _make_threshold_slider(
+        embed_row, truncation_embed_slider, _el, _ev = _make_threshold_slider(
             "Embedding threshold:", 'truncation_embed_threshold', 45,
             "Below this embedding similarity → flagged in borderline cases (default: 0.45)")
+        _truncation_slider_labels.extend([_el, _ev])
         truncation_sliders_layout.addWidget(embed_row)
+
+        _truncation_all_sliders = [truncation_cheap_slider, truncation_borderline_slider,
+                                    truncation_length_slider, truncation_embed_slider]
 
         additional_layout.addWidget(truncation_sliders_widget)
 
-        # Wire checkbox toggle to enable/disable sliders
+        # Wire checkbox toggle to enable/disable sliders with explicit label styling
         def _toggle_truncation_sliders(checked):
             enabled = checked and _truncation_deps_ok
-            truncation_sliders_widget.setEnabled(enabled)
+            for s in _truncation_all_sliders:
+                s.setEnabled(enabled)
+            for lbl in _truncation_slider_labels:
+                lbl.setStyleSheet("" if enabled else "color: #606060;")
 
         check_truncation_checkbox.toggled.connect(_toggle_truncation_sliders)
         # Set initial state
