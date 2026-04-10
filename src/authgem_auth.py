@@ -51,7 +51,9 @@ def cancel_stream():
 
 def reset_cancel():
     """Clear the cancellation flag (call before starting a new request)."""
+    global _verification_pending
     _cancel_event.clear()
+    _verification_pending = False
 
 
 def is_cancelled() -> bool:
@@ -953,10 +955,13 @@ def _handle_403_verification(error_body: str, _log) -> None:
     if not _verification_pending:
         _reset_code_assist_setup()
 
-    # If we already opened verification, don't spam the browser
+    # If we already opened verification, raise immediately — don't let
+    # the caller fall through to generic error handling that would retry.
     if _verification_pending:
         _log(f"⚠️ AuthGem: 403 — verification still pending. Complete it in your browser, then retry.")
-        return
+        raise RuntimeError(
+            "AuthGem: Account verification required. Complete it in your browser, then retry."
+        )
 
     # Try to parse a JSON error body for a verification URL
     verification_url = None

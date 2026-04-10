@@ -16564,7 +16564,7 @@ class UnifiedClient:
                 # setup so the next attempt re-runs loadCodeAssist.
                 if "403" in error_str:
                     # If verification is required, abort immediately — don't retry
-                    if "verification" in error_str.lower():
+                    if "verif" in error_str.lower():
                         raise UnifiedClientError(
                             f"{label}: Account verification required. Complete it in your browser, then retry.",
                             error_type="auth",
