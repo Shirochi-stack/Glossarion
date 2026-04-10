@@ -920,6 +920,75 @@ _code_assist_session_id: str = str(uuid.uuid4())
 def _code_assist_base_url() -> str:
     return f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}"
 
+
+def _reset_code_assist_setup():
+    """Reset Code Assist setup state so the next authgem/ call re-runs setup.
+
+    Call this when a 403 suggests the setup is stale or verification is needed.
+    """
+    global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits
+    _code_assist_project_id = None
+    _code_assist_setup_done = False
+    _code_assist_has_credits = False
+
+
+def _handle_403_verification(error_body: str, _log) -> None:
+    """Check a 403 error response for account verification URLs and open them.
+
+    The Code Assist proxy may return 403 with a verification URL when the
+    user's account needs additional verification (phone, ID, etc.).  This
+    mirrors the Gemini CLI's ``validateLoadCodeAssistResponse()`` logic.
+    """
+    # Reset setup so the next attempt re-runs loadCodeAssist (which also
+    # checks for verification requirements).
+    _reset_code_assist_setup()
+
+    # Try to parse a JSON error body for a verification URL
+    verification_url = None
+    try:
+        err_data = json.loads(error_body)
+        # Pattern 1: {"error": {"details": [{"validationUrl": "..."}]}}
+        for detail in err_data.get("error", {}).get("details", []):
+            v_url = detail.get("validationUrl", "")
+            if v_url:
+                verification_url = v_url
+                break
+        # Pattern 2: top-level or nested validationUrl
+        if not verification_url:
+            verification_url = err_data.get("validationUrl", "")
+        # Pattern 3: ineligibleTiers (same as loadCodeAssist response)
+        if not verification_url:
+            for inelig in err_data.get("ineligibleTiers", []):
+                v_url = inelig.get("validationUrl", "")
+                if v_url and inelig.get("reasonCode") == "VALIDATION_REQUIRED":
+                    verification_url = v_url
+                    break
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # Fallback: scan raw text for common verification URL patterns
+    if not verification_url:
+        import re
+        url_match = re.search(
+            r'https://(?:accounts\.google\.com|myaccount\.google\.com|g\.co)/[^\s"\'}\]]+',
+            error_body,
+        )
+        if url_match:
+            verification_url = url_match.group(0)
+
+    if verification_url:
+        _log(f"⚠️ AuthGem: Account verification required")
+        _log(f"🔗 Opening verification in browser…")
+        logger.warning("AuthGem 403 verification URL: %s", verification_url)
+        try:
+            import webbrowser
+            webbrowser.open(verification_url)
+        except Exception:
+            _log(f"🔗 Could not open browser. Visit: {verification_url}")
+    else:
+        _log(f"⚠️ AuthGem: 403 Forbidden — account may need verification or permissions are insufficient")
+        logger.warning("AuthGem 403 with no verification URL detected. Body: %s", error_body[:500])
+
 def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     """Onboard user with Code Assist (mirrors Gemini CLI's setupUser).
 
@@ -958,7 +1027,8 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
         resp_data = resp.json()
     except Exception as exc:
         logger.warning("Code Assist setup failed: %s", exc)
-        _code_assist_setup_done = True
+        # Do NOT set _code_assist_setup_done = True here — allow retry
+        # on the next call so transient failures don't permanently block setup.
         return None
 
     project = resp_data.get("cloudaicompanionProject")
@@ -1176,10 +1246,11 @@ def send_chat_completion_aistudio(
     project_id = _code_assist_setup(access_token, _log)
 
     if not project_id:
-        raise RuntimeError(
-            "AuthGem: No project assigned — account verification may be incomplete. "
-            "Complete the verification in your browser, then retry."
-        )
+        # Don't block — the Code Assist proxy works without a pre-existing
+        # project.  It auto-provisions one for the user's Google account.
+        # The Gemini CLI sends an empty project string in this case.
+        logger.info("AuthGem: No project from loadCodeAssist — proceeding with empty project (proxy auto-provisions)")
+        _log("⚠️ No project assigned yet — proxy will auto-provision")
 
     inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
@@ -1465,6 +1536,9 @@ def _stream_gemini_common(
         status = resp.status_code
         if status != 200:
             err_text = resp.text[:500] if hasattr(resp, 'text') else str(resp.content[:500])
+            # 403 — check for verification URL and open browser
+            if status == 403:
+                _handle_403_verification(err_text, _log)
             # Clarify misleading "No capacity" 429 — it's temporary server overload, not quota exhaustion
             if status == 429 and "No capacity" in err_text:
                 raise RuntimeError(f"AuthGem HTTP 429. Server busy — no capacity for this model right now, retrying")
@@ -1810,6 +1884,9 @@ def _stream_with_httpx_gemini(
             if not detail:
                 detail = "empty-body"
             summary = detail or reason or "Bad Request"
+            # 403 — check for verification URL and open browser
+            if resp.status_code == 403:
+                _handle_403_verification(error_body, _log)
             # Clarify misleading "No capacity" 429
             if resp.status_code == 429 and "No capacity" in str(summary):
                 summary = f"Server busy — no capacity for this model right now, retrying"
@@ -1863,6 +1940,9 @@ def _stream_with_requests_gemini(
         if not detail:
             detail = "empty-body"
         summary = detail or reason or "Bad Request"
+        # 403 — check for verification URL and open browser
+        if resp.status_code == 403:
+            _handle_403_verification(error_body, _log)
         # Clarify misleading "No capacity" 429
         if resp.status_code == 429 and "No capacity" in str(summary):
             summary = f"Server busy — no capacity for this model right now, retrying"

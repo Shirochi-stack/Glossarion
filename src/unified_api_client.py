@@ -981,6 +981,7 @@ try:
     from authgem_auth import send_chat_completion as _authgem_send  # backward-compat alias
     from authgem_auth import cancel_stream as _authgem_cancel_stream
     from authgem_auth import reset_cancel as _authgem_reset_cancel
+    from authgem_auth import _reset_code_assist_setup
     AUTHGEM_AVAILABLE = True
 except ImportError:
     _authgem_get_store = None
@@ -990,6 +991,7 @@ except ImportError:
     _authgem_send = None
     _authgem_cancel_stream = None
     _authgem_reset_cancel = None
+    _reset_code_assist_setup = None
     AUTHGEM_AVAILABLE = False
 
 # Antigravity Cloud Code proxy (optional)
@@ -16557,6 +16559,20 @@ class UnifiedClient:
                         continue
                     except Exception:
                         pass
+
+                # 403 — verification or permissions issue; reset Code Assist
+                # setup so the next attempt re-runs loadCodeAssist (which
+                # handles verification URLs and account onboarding).
+                if "403" in error_str:
+                    if _reset_code_assist_setup is not None:
+                        _reset_code_assist_setup()
+                    if store is not None and attempt < max_retries - 1:
+                        print(f"🔄 {label}: 403 received, resetting setup and refreshing token…")
+                        try:
+                            access_token_holder[0] = store.get_valid_access_token(auto_login=True)
+                            continue
+                        except Exception:
+                            pass
 
                 # 429 rate limit
                 if "429" in error_str:
