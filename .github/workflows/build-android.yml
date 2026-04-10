@@ -118,12 +118,8 @@ jobs:
           
           # Copy assets
           mkdir -p "$ANDROID_DIR/assets"
+          cp "$SRC_DIR/Halgakos.png" "$ANDROID_DIR/assets/" 2>/dev/null || true
           cp "$SRC_DIR/Halgakos.ico" "$ANDROID_DIR/assets/" 2>/dev/null || true
-          
-          # Convert .ico to .png for Android (if ImageMagick is available)
-          if command -v convert &> /dev/null; then
-            convert "$ANDROID_DIR/assets/Halgakos.ico" "$ANDROID_DIR/assets/Halgakos.png" 2>/dev/null || true
-          fi
           
           # Stubs for packages removed from buildozer requirements
           # These allow backend code to import without crashing on Android
