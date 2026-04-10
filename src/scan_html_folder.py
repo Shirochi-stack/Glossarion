@@ -7538,7 +7538,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 
         
         # Silent truncation detection (runs in main thread due to network + ML deps)
-        if check_truncation and original_html_content:
+        if check_truncation and original_html_content and not should_stop():
             try:
                 filename = result['filename']
                 matched_source_html = None
@@ -7565,7 +7565,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                 matched_source_html = info['html']
                                 break
                 
-                if matched_source_html:
+                if matched_source_html and not should_stop():
                     # Read translated HTML from disk
                     trans_file_path = os.path.join(folder_path, filename)
                     if os.path.exists(trans_file_path):
@@ -7575,7 +7575,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         except Exception:
                             trans_html = None
                         
-                        if trans_html:
+                        if trans_html and not should_stop():
                             # Determine source language for back-translation
                             src_lang = qa_settings.get('source_language', 'auto')
                             if src_lang.lower() == 'auto':
