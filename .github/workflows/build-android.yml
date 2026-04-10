@@ -47,7 +47,7 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer==1.5.0 cython virtualenv
+          pip install buildozer==1.5.0 "cython<3" virtualenv
       
       - name: Restore Buildozer cache
         uses: actions/cache/restore@v4
