@@ -2963,10 +2963,6 @@ class QAScannerMixin:
 
             slider.valueChanged.connect(lambda v: val_label.setText(f"{v / 100:.2f}"))
 
-            if not _truncation_deps_ok:
-                slider.setEnabled(False)
-                lbl.setStyleSheet("color: #606060;")
-                val_label.setStyleSheet("color: #606060;")
 
             hl.addStretch()
             return row, slider
