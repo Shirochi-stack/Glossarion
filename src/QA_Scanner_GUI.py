@@ -2993,7 +2993,6 @@ class QAScannerMixin:
         def _toggle_truncation_sliders(checked):
             enabled = checked and _truncation_deps_ok
             truncation_sliders_widget.setEnabled(enabled)
-            truncation_sliders_widget.setStyleSheet("" if enabled else "color: #606060;")
 
         check_truncation_checkbox.toggled.connect(_toggle_truncation_sliders)
         # Set initial state
