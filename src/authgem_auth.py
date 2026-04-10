@@ -948,7 +948,10 @@ def _handle_403_verification(error_body: str, _log) -> None:
 
     # Reset setup so the next attempt re-runs loadCodeAssist (which also
     # checks for verification requirements).
-    _reset_code_assist_setup()
+    # But DON'T reset if verification is already pending — that would cause
+    # setup to re-run and spam the browser again.
+    if not _verification_pending:
+        _reset_code_assist_setup()
 
     # If we already opened verification, don't spam the browser
     if _verification_pending:
@@ -1015,7 +1018,7 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
     Returns the project ID (may be None for some tiers).
     """
-    global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits
+    global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits, _verification_pending
     if _code_assist_setup_done:
         return _code_assist_project_id
 
@@ -1058,7 +1061,6 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     # Handle account verification — matching Gemini CLI's validateLoadCodeAssistResponse()
     # The CLI checks ineligibleTiers for entries with:
     #   reasonCode === "VALIDATION_REQUIRED" AND validationUrl present
-    _verification_opened = False
     for inelig in resp_data.get("ineligibleTiers", []):
         v_url = inelig.get("validationUrl", "")
         v_msg = inelig.get("reasonMessage", "Account verification required")
@@ -1066,14 +1068,18 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
         if v_url and reason_code == "VALIDATION_REQUIRED":
             _log(f"⚠️ {v_msg}")
-            _log(f"🔗 Opening verification in browser…")
-            logger.warning("Code Assist VALIDATION_REQUIRED: %s", v_url)
-            try:
-                import webbrowser
-                webbrowser.open(v_url)
-                _verification_opened = True
-            except Exception:
-                _log(f"🔗 Could not open browser. Visit: {v_url}")
+            # Only open browser ONCE — use shared _verification_pending flag
+            if not _verification_pending:
+                _verification_pending = True
+                _log(f"🔗 Opening verification in browser…")
+                logger.warning("Code Assist VALIDATION_REQUIRED: %s", v_url)
+                try:
+                    import webbrowser
+                    webbrowser.open(v_url)
+                except Exception:
+                    _log(f"🔗 Could not open browser. Visit: {v_url}")
+            else:
+                _log(f"⚠️ Verification still pending — complete it in your browser, then retry.")
         elif v_msg:
             _log(f"⚠️ {v_msg}")
 
