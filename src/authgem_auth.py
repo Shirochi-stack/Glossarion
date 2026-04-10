@@ -1610,8 +1610,6 @@ def _stream_gemini_common(
                 if not text:
                     continue
                 is_thought = part.get("thought", False)
-                if not is_thought and "thoughtSignature" in part and "thought" not in part:
-                    is_thought = True
                 if is_thought:
                     thought_parts.append(text)
                 else:
@@ -1730,12 +1728,10 @@ def _process_gemini_sse_line(
                 continue
 
             # Separate thinking/thought parts from actual output
-            # Primary: check explicit thought boolean
-            # Fallback: if part has thoughtSignature but no thought key,
-            # treat it as a thought part (Vertex AI Gemini 3 omits thought=true).
+            # Only the explicit `thought: true` boolean is authoritative.
+            # `thoughtSignature` is an opaque token that can appear on ANY
+            # part (including the final text part) — NOT a thought indicator.
             is_thought = part.get("thought", False)
-            if not is_thought and "thoughtSignature" in part and "thought" not in part:
-                is_thought = True
             if is_thought:
                 state["thought_parts"].append(text)
                 # Log thinking in real-time — same format as gemini-grpc
