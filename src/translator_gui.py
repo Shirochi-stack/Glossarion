@@ -2167,6 +2167,14 @@ Text to analyze:
             except Exception:
                 pass
 
+            # Stop QA scanner if running (including truncation detection)
+            try:
+                from scan_html_folder import stop_scan
+                stop_scan()
+                print("[CLEANUP] QA scanner stop signal sent")
+            except Exception:
+                pass
+
             # Helper: force-close dialogs that override closeEvent to hide instead of close
             def _force_close_dialog(dlg):
                 try:
