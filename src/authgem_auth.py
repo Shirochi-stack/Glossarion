@@ -875,8 +875,13 @@ def _build_gemini_request_body(
                 thinking_config["thinkingBudget"] = thinking_budget
             # -1 = dynamic (don't set budget, let model decide)
 
-        # Include thoughts in stream so we can log them in real-time
-        if stream_thinking:
+        # Include thoughts in stream so we can log them in real-time.
+        # SKIP for minimal thinking (or budget=0) — at that level the API
+        # tags the actual output text as thought=True parts, which causes
+        # translated content to display under "🧠 Thinking..." instead of
+        # as normal text output.
+        _is_minimal = (thinking_level == "minimal") or (thinking_budget == 0)
+        if stream_thinking and not _is_minimal:
             thinking_config["includeThoughts"] = True
 
         if thinking_config:
