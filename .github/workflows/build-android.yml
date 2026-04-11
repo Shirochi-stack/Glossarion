@@ -55,9 +55,9 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v4-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v5-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
           restore-keys: |
-            buildozer-v4-${{ runner.os }}-
+            buildozer-v5-${{ runner.os }}-
       
       - name: Fix stale pyjnius cache
         run: |
@@ -219,6 +219,17 @@ jobs:
                           pass
           STUBEOF
       
+      - name: Inject build_extras.gradle into cached dist
+        run: |
+          # Ensure build_extras.gradle exists in any cached p4a dist.
+          # p4a's SDL2 bootstrap applies this file automatically if present.
+          EXTRAS="src/android/build_extras.gradle"
+          if [ -f "$EXTRAS" ]; then
+            for dist_dir in $(find src/android/.buildozer -path '*/dists/glossarion' -type d 2>/dev/null); do
+              cp -v "$EXTRAS" "$dist_dir/"
+            done
+          fi
+
       - name: Build debug APK
         working-directory: src/android
         run: |
@@ -313,5 +324,5 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v4-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v5-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
 

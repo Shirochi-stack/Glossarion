@@ -1,0 +1,10 @@
+// Fix Kotlin stdlib duplicate class conflict.
+// AndroidX 1.12+ pulls kotlin-stdlib 1.8.x which already contains the
+// classes that used to live in kotlin-stdlib-jdk7 / kotlin-stdlib-jdk8.
+// The p4a bootstrap still brings in the old split artifacts at 1.6.0,
+// causing :checkDebugDuplicateClasses to fail.
+
+configurations.all {
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+}

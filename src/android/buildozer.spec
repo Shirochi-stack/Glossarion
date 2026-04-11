@@ -5,7 +5,7 @@ title = Glossarion
 package.name = glossarion
 package.domain = com.glossarion
 source.dir = .
-source.include_exts = py,kv,png,jpg,ico,json,csv,txt,otf,ttf,ttc
+source.include_exts = py,kv,png,jpg,ico,json,csv,txt,otf,ttf,ttc,gradle
 source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 
 # Versioning
