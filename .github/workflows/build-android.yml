@@ -219,39 +219,17 @@ jobs:
                           pass
           STUBEOF
       
-      - name: Patch p4a build.gradle to fix Kotlin stdlib conflict
+      - name: Install Gradle init script to fix Kotlin stdlib conflict
         run: |
-          # Buildozer v1.5.0 git-clones p4a into .buildozer/android/platform/python-for-android
-          # and uses THAT copy (not the pip-installed package). We must patch its build.gradle
-          # template to exclude kotlin-stdlib-jdk7/jdk8 (merged into stdlib since 1.8+).
-          PATCH_BLOCK=$(printf '\n// --- Kotlin stdlib duplicate class fix (injected by CI) ---\nconfigurations.all {\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk7'"'"'\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk8'"'"'\n}\n')
-
-          PATCHED=0
-
-          # 1. Patch the git-cloned p4a SDL2 bootstrap template
-          P4A_TMPL="src/android/.buildozer/android/platform/python-for-android/pythonforandroid/bootstraps/sdl2/build/build.gradle"
-          if [ -f "$P4A_TMPL" ] && ! grep -q 'kotlin-stdlib-jdk7' "$P4A_TMPL"; then
-            echo "$PATCH_BLOCK" >> "$P4A_TMPL"
-            echo "✅ Patched git-cloned p4a template: $P4A_TMPL"
-            PATCHED=$((PATCHED+1))
-          elif [ -f "$P4A_TMPL" ]; then
-            echo "ℹ️  p4a template already patched"
-          else
-            echo "⚠️  p4a template not found at: $P4A_TMPL"
-          fi
-
-          # 2. Patch all generated dist build.gradle files (from cache)
-          for bg in $(find src/android/.buildozer -path '*/dists/*/build.gradle' -type f 2>/dev/null); do
-            if ! grep -q 'kotlin-stdlib-jdk7' "$bg"; then
-              echo "$PATCH_BLOCK" >> "$bg"
-              echo "✅ Patched dist build.gradle: $bg"
-              PATCHED=$((PATCHED+1))
-            else
-              echo "ℹ️  Already patched: $bg"
-            fi
-          done
-
-          echo "=== Total files patched: $PATCHED ==="
+          # Use a Gradle init script to globally exclude kotlin-stdlib-jdk7/jdk8.
+          # Init scripts in ~/.gradle/init.d/ are applied to EVERY Gradle build,
+          # regardless of what build.gradle files p4a generates or copies.
+          # This is the only reliable way since p4a overwrites dist build.gradle
+          # files during its internal copy chain.
+          mkdir -p ~/.gradle/init.d
+          printf 'allprojects {\n    configurations.all {\n        exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk7'"'"'\n        exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk8'"'"'\n    }\n}\n' > ~/.gradle/init.d/fix-kotlin-stdlib.gradle
+          echo "✅ Installed Gradle init script at ~/.gradle/init.d/fix-kotlin-stdlib.gradle"
+          cat ~/.gradle/init.d/fix-kotlin-stdlib.gradle
 
 
       - name: Build debug APK
@@ -280,55 +258,9 @@ jobs:
           echo "=== Build exit code: $BUILD_EXIT ==="
           
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "⚠️ First build attempt failed. Checking for Kotlin stdlib conflict..."
-            if grep -q 'checkDebugDuplicateClasses FAILED\|kotlin-stdlib-jdk[78]' build.log; then
-              echo "🔧 Detected Kotlin stdlib duplicate class error. Patching dist build.gradle and retrying..."
-              
-              # Patch ALL dist build.gradle files
-              PATCH_BLOCK=$(printf '\n// --- Kotlin stdlib duplicate class fix (injected by CI) ---\nconfigurations.all {\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk7'"'"'\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk8'"'"'\n}\n')
-              
-              for bg in $(find .buildozer -path '*/dists/*/build.gradle' -type f 2>/dev/null); do
-                if ! grep -q 'kotlin-stdlib-jdk7' "$bg"; then
-                  echo "$PATCH_BLOCK" >> "$bg"
-                  echo "✅ Patched: $bg"
-                fi
-              done
-              
-              # Also patch the p4a template for future dist recreations
-              P4A_TMPL=".buildozer/android/platform/python-for-android/pythonforandroid/bootstraps/sdl2/build/build.gradle"
-              if [ -f "$P4A_TMPL" ] && ! grep -q 'kotlin-stdlib-jdk7' "$P4A_TMPL"; then
-                echo "$PATCH_BLOCK" >> "$P4A_TMPL"
-                echo "✅ Patched p4a template: $P4A_TMPL"
-              fi
-              
-              # Re-run gradle directly from the dist directory
-              DIST_DIR=$(find .buildozer -path '*/dists/glossarion' -type d | head -1)
-              if [ -n "$DIST_DIR" ] && [ -f "$DIST_DIR/gradlew" ]; then
-                echo "🔄 Re-running gradle from: $DIST_DIR"
-                cd "$DIST_DIR"
-                ./gradlew assembleDebug 2>&1 | tee -a "$OLDPWD/build.log"
-                GRADLE_EXIT=$?
-                cd "$OLDPWD"
-                if [ $GRADLE_EXIT -eq 0 ]; then
-                  echo "✅ Gradle retry succeeded!"
-                  # Run buildozer again to package the APK properly
-                  buildozer android debug 2>&1 | tee -a build.log
-                  BUILD_EXIT=$?
-                else
-                  echo "❌ Gradle retry also failed (exit $GRADLE_EXIT)"
-                  tail -100 build.log
-                  exit $GRADLE_EXIT
-                fi
-              else
-                echo "❌ Could not find dist directory for retry"
-                tail -200 build.log
-                exit $BUILD_EXIT
-              fi
-            else
-              echo "❌ Buildozer failed with a non-Kotlin error"
-              tail -200 build.log
-              exit $BUILD_EXIT
-            fi
+            echo "❌ Buildozer failed! Last 200 lines of log:"
+            tail -200 build.log
+            exit $BUILD_EXIT
           fi
       
       - name: Find APK
