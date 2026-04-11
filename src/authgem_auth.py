@@ -205,6 +205,7 @@ def refresh_access_token(refresh_token: str) -> Dict:
 # ===========================================================================
 
 _cached_project_id: Optional[str] = None
+_project_set_by_gui: bool = False  # True when the GUI dropdown explicitly set the project
 
 
 def detect_gcp_project(access_token: str) -> Optional[str]:
@@ -287,8 +288,9 @@ def reset_cached_project():
     next ``detect_gcp_project()`` call re-queries the Resource Manager API
     instead of returning the stale cached project.
     """
-    global _cached_project_id
+    global _cached_project_id, _project_set_by_gui
     _cached_project_id = None
+    _project_set_by_gui = False
 
 
 # ===========================================================================
@@ -853,6 +855,12 @@ def _build_gemini_request_body(
     if temperature is not None:
         gen_config["temperature"] = temperature
     if max_tokens is not None:
+        # AuthGem endpoints (Code Assist proxy & Vertex AI) hard-limit at 65536
+        _AUTHGEM_MAX_OUTPUT = 65536
+        if max_tokens > _AUTHGEM_MAX_OUTPUT:
+            logger.warning("AuthGem: Capped maxOutputTokens from %d → %d", max_tokens, _AUTHGEM_MAX_OUTPUT)
+            print(f"⚠️ AuthGem: Capped maxOutputTokens from {max_tokens} → {_AUTHGEM_MAX_OUTPUT}")
+            max_tokens = _AUTHGEM_MAX_OUTPUT
         gen_config["maxOutputTokens"] = max_tokens
 
     # ── Thinking / reasoning configuration ──
@@ -957,13 +965,17 @@ def _reset_code_assist_setup():
     """Reset Code Assist setup state so the next authgem/ call re-runs setup.
 
     Call this when a 403 suggests the setup is stale or verification is needed.
+    Does NOT clear the Vertex AI cached project when it was explicitly set
+    by the GUI dropdown — that selection should persist across retries.
     """
     global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits
     _code_assist_project_id = None
     _code_assist_setup_done = False
     _code_assist_has_credits = False
-    # Also clear the cached Vertex AI project ID
-    reset_cached_project()
+    # Only clear the cached Vertex AI project if it was auto-detected.
+    # If the user explicitly picked a project in the GUI, preserve it.
+    if not _project_set_by_gui:
+        reset_cached_project()
 
 
 def _handle_403_verification(error_body: str, _log) -> None:

@@ -4082,6 +4082,7 @@ Recent translations to summarize:
         try:
             import authgem_auth
             authgem_auth._cached_project_id = project_id
+            authgem_auth._project_set_by_gui = True
             import os
             os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
         except Exception:
@@ -4592,6 +4593,7 @@ Recent translations to summarize:
             try:
                 import authgem_auth
                 authgem_auth._cached_project_id = saved_project
+                authgem_auth._project_set_by_gui = True
                 import os
                 os.environ['GOOGLE_CLOUD_PROJECT'] = saved_project
             except Exception:

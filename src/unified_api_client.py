@@ -16644,6 +16644,8 @@ class UnifiedClient:
 
                 # 403 — verification or permissions issue; reset Code Assist
                 # setup so the next attempt re-runs loadCodeAssist.
+                # Only reset Code Assist state for authgem/ — NOT for authgem-vertex/,
+                # because that would wipe the GUI-selected GCP project.
                 if "403" in error_str:
                     # If verification is required, abort immediately — don't retry
                     if "verif" in error_str.lower():
@@ -16651,7 +16653,7 @@ class UnifiedClient:
                             f"{label}: Account verification required. Complete it in your browser, then retry.",
                             error_type="auth",
                         )
-                    if _reset_code_assist_setup is not None:
+                    if _reset_code_assist_setup is not None and label != "AuthGem-Vertex":
                         _reset_code_assist_setup()
                     if store is not None and attempt < max_retries - 1:
                         print(f"🔄 {label}: 403 received, resetting setup and refreshing token…")
