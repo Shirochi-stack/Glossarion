@@ -1150,7 +1150,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.2.9"
+        __version__ = "8.3.0"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1225,7 +1225,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.2.9')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.3.0')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -3191,7 +3191,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.2.9 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.3.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -3644,7 +3644,9 @@ Recent translations to summarize:
 
         # Show/hide AuthGem login button + project dropdown
         if hasattr(self, 'authgem_login_btn'):
-            needs_authgem = model.startswith('authgem/') or model.startswith('authgem-vertex/')
+            import re as _re
+            _ag_match = _re.match(r'^authgem(?:-vertex)?\d{0,4}/', model)
+            needs_authgem = _ag_match is not None
             
             # Also check enabled key pools for authgem models
             if not needs_authgem:
@@ -3652,7 +3654,8 @@ Recent translations to summarize:
             
             # GCP project dropdown is ONLY needed for authgem-vertex/ (Vertex AI)
             # authgem/ uses AI Studio which doesn't require a GCP project
-            needs_vertex = model.startswith('authgem-vertex/') or self._has_authgem_vertex_in_key_pools()
+            _vx_match = _re.match(r'^authgem-vertex\d{0,4}/', model)
+            needs_vertex = _vx_match is not None or self._has_authgem_vertex_in_key_pools()
             
             if needs_authgem:
                 self.authgem_login_btn.show()
@@ -3661,8 +3664,8 @@ Recent translations to summarize:
                 if hasattr(self, 'authgem_project_combo'):
                     if needs_vertex:
                         try:
-                            from authgem_auth import get_default_store
-                            if get_default_store().has_tokens:
+                            store = self._get_authgem_store_for_current_model()
+                            if store.has_tokens:
                                 if self.authgem_project_combo.count() == 0:
                                     self._fetch_authgem_projects()
                                 else:
@@ -3721,7 +3724,7 @@ Recent translations to summarize:
                             m = key_data.get('model', '')
                         else:
                             m = getattr(key_data, 'model', '')
-                        if m.startswith('authgem/') or m.startswith('authgem-vertex/'):
+                        if m.startswith('authgem') and ('/' in m):
                             return True
         except Exception:
             pass
@@ -3744,7 +3747,8 @@ Recent translations to summarize:
                             m = key_data.get('model', '')
                         else:
                             m = getattr(key_data, 'model', '')
-                        if m.startswith('authgem-vertex/'):
+                        import re as _re
+                        if _re.match(r'^authgem-vertex\d{0,4}/', m):
                             return True
         except Exception:
             pass
@@ -3865,6 +3869,21 @@ Recent translations to summarize:
     # AuthGem (Gemini Login) – mirrors the AuthGPT pattern
     # ==================================================================
 
+    def _get_authgem_account_id(self) -> int:
+        """Extract the account slot number from the current model prefix.
+        
+        Returns 0 for the default account (authgem/, authgem-vertex/),
+        or N for numbered accounts (authgemN/, authgem-vertexN/).
+        """
+        import re
+        m = re.match(r'^authgem(?:-vertex)?(\d{1,4})/', self.model_var)
+        return int(m.group(1)) if m else 0
+
+    def _get_authgem_store_for_current_model(self):
+        """Return the AuthGemTokenStore for the current model's account slot."""
+        from authgem_auth import get_store
+        return get_store(self._get_authgem_account_id())
+
     def _update_authgem_login_status(self, needs_vertex=None):
         """Update the AuthGem login button text based on current token state.
         
@@ -3872,18 +3891,21 @@ Recent translations to summarize:
             needs_vertex: If True, show GCP project dropdown (only for authgem-vertex/).
                           If None, auto-detect from current model.
         """
+        import re as _re
         # Auto-detect if not explicitly provided
         if needs_vertex is None:
-            needs_vertex = self.model_var.startswith('authgem-vertex/') or self._has_authgem_vertex_in_key_pools()
+            needs_vertex = bool(_re.match(r'^authgem-vertex\d{0,4}/', self.model_var)) or self._has_authgem_vertex_in_key_pools()
+        
+        account_id = self._get_authgem_account_id()
+        acct_suffix = f" #{account_id}" if account_id else ""
         
         try:
-            from authgem_auth import get_default_store
-            store = get_default_store()
+            store = self._get_authgem_store_for_current_model()
             if store.has_tokens:
                 info = store.account_info
                 email = info.get('email', '')
                 name = info.get('name', '')
-                label = "✅ Gemini"
+                label = f"✅ Gemini{acct_suffix}"
                 if email:
                     label += f" ({email})"
                 elif name:
@@ -3906,7 +3928,7 @@ Recent translations to summarize:
                     else:
                         self.authgem_project_combo.hide()
             else:
-                self.authgem_login_btn.setText("🔐 Gemini Login")
+                self.authgem_login_btn.setText(f"🔐 Gemini{acct_suffix} Login")
                 self.authgem_login_btn.setStyleSheet(
                     "background-color: #4285f4; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
@@ -3914,7 +3936,7 @@ Recent translations to summarize:
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.hide()
         except ImportError:
-            self.authgem_login_btn.setText("🔐 Gemini Login (unavailable)")
+            self.authgem_login_btn.setText(f"🔐 Gemini{acct_suffix} Login (unavailable)")
             self.authgem_login_btn.setEnabled(False)
 
     def _fetch_authgem_projects(self):
@@ -3926,9 +3948,8 @@ Recent translations to summarize:
         import threading
         def _worker():
             try:
-                from authgem_auth import get_default_store
                 import requests as _req
-                store = get_default_store()
+                store = self._get_authgem_store_for_current_model()
                 token = store.get_valid_access_token(auto_login=False)
                 headers = {"Authorization": f"Bearer {token}"}
                 
@@ -4141,8 +4162,7 @@ Recent translations to summarize:
     def _authgem_login_clicked(self):
         """Handle Gemini Login button click – run OAuth flow in background thread."""
         try:
-            from authgem_auth import get_default_store
-            store = get_default_store()
+            store = self._get_authgem_store_for_current_model()
         except ImportError:
             QMessageBox.critical(
                 self, "AuthGem Unavailable",
@@ -4150,13 +4170,16 @@ Recent translations to summarize:
             )
             return
 
+        account_id = self._get_authgem_account_id()
+        acct_suffix = f" #{account_id}" if account_id else ""
+
         # If already logged in, offer to log out
         if store.has_tokens:
             info = store.account_info
             email = info.get('email', 'unknown')
             reply = QMessageBox.question(
-                self, "Gemini Account",
-                f"Currently logged in as: {email}\n\nDo you want to log out?",
+                self, f"Gemini Account{acct_suffix}",
+                f"Account{acct_suffix} logged in as: {email}\n\nDo you want to log out?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
@@ -4166,13 +4189,13 @@ Recent translations to summarize:
                     self.authgem_project_combo.clear()
                     self.authgem_project_combo.hide()
                 self._update_authgem_login_status()
-                self.append_log("🔓 Gemini: Logged out")
+                self.append_log(f"🔓 Gemini{acct_suffix}: Logged out")
             return
 
         # Start login in background thread
-        self.authgem_login_btn.setText("⏳ Logging in…")
+        self.authgem_login_btn.setText(f"⏳ Logging in{acct_suffix}…")
         self.authgem_login_btn.setEnabled(False)
-        self.append_log("🔐 Gemini: Opening browser for login…")
+        self.append_log(f"🔐 Gemini{acct_suffix}: Opening browser for login…")
 
         def _do_login():
             try:
@@ -4207,12 +4230,14 @@ Recent translations to summarize:
             self.authgem_project_combo.clear()
         self._update_authgem_login_status()
         try:
-            from authgem_auth import get_default_store
-            info = get_default_store().account_info
+            store = self._get_authgem_store_for_current_model()
+            info = store.account_info
             email = info.get('email', '')
             name = info.get('name', '')
             detail = email or name or 'success'
-            self.append_log(f"✅ Gemini: Logged in ({detail})")
+            account_id = self._get_authgem_account_id()
+            acct_suffix = f" #{account_id}" if account_id else ""
+            self.append_log(f"✅ Gemini{acct_suffix}: Logged in ({detail})")
         except Exception:
             self.append_log("✅ Gemini: Logged in")
 
@@ -20096,7 +20121,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.2.9...")
+    print("🚀 Starting Glossarion v8.3.0...")
     
     # Initialize splash screen
     splash_manager = None

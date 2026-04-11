@@ -737,6 +737,10 @@ class AuthGemTokenStore:
 _default_store: Optional[AuthGemTokenStore] = None
 _default_store_lock = threading.Lock()
 
+# Per-account store registry (account_id → AuthGemTokenStore)
+_account_stores: Dict[int, AuthGemTokenStore] = {}
+_account_stores_lock = threading.Lock()
+
 
 def get_default_store() -> AuthGemTokenStore:
     """Return the module-level default token store (singleton)."""
@@ -746,6 +750,35 @@ def get_default_store() -> AuthGemTokenStore:
             if _default_store is None:
                 _default_store = AuthGemTokenStore()
     return _default_store
+
+
+def get_store(account_id: Optional[int] = None) -> AuthGemTokenStore:
+    """Return the token store for a specific account slot.
+
+    Parameters
+    ----------
+    account_id : int or None
+        ``None`` or ``0`` returns the default store (``authgem_tokens.json``).
+        Any positive integer *N* returns a dedicated store backed by
+        ``authgem_tokens_N.json`` in the same directory, enabling
+        multi-account usage via ``authgemN/`` model prefixes.
+
+    Each numbered account triggers its own independent OAuth browser login
+    the first time it is used, so users can authenticate with different
+    Google accounts for each slot.
+    """
+    if account_id is None or account_id == 0:
+        return get_default_store()
+
+    with _account_stores_lock:
+        if account_id in _account_stores:
+            return _account_stores[account_id]
+
+        # Build a token file path like  ~/.glossarion/authgem_tokens_2.json
+        token_file = os.path.join(_DEFAULT_TOKEN_DIR, f"authgem_tokens_{account_id}.json")
+        store = AuthGemTokenStore(token_file=token_file)
+        _account_stores[account_id] = store
+        return store
 
 
 # ===========================================================================

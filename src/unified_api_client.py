@@ -975,6 +975,7 @@ except ImportError:
 # AuthGem - Gemini via Google OAuth / API key (optional)
 try:
     from authgem_auth import get_default_store as _authgem_get_store
+    from authgem_auth import get_store as _authgem_get_store_by_id
     from authgem_auth import send_chat_completion_aistudio as _authgem_send_aistudio
     from authgem_auth import send_chat_completion_aistudio_key as _authgem_send_aistudio_key
     from authgem_auth import send_chat_completion_vertex as _authgem_send_vertex
@@ -986,6 +987,7 @@ try:
     AUTHGEM_AVAILABLE = True
 except ImportError:
     _authgem_get_store = None
+    _authgem_get_store_by_id = None
     _authgem_send_aistudio = None
     _authgem_send_aistudio_key = None
     _authgem_send_vertex = None
@@ -1789,7 +1791,9 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem/', 'authgem', 'authgem-vertex/', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity')
+    # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
+    # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
     @classmethod
@@ -4645,10 +4649,24 @@ class UnifiedClient:
         
         # Determine client_type (no lock needed, just reading)
         self.client_type = None
+        self._authgem_account_id = None  # account slot for numbered authgem prefixes
         for prefix, provider in self.MODEL_PROVIDERS.items():
             if model_lower.startswith(prefix):
                 self.client_type = provider
                 break
+
+        # Dynamic fallback: match numbered authgem variants (authgem1/, authgem-vertex2/, etc.)
+        if self.client_type is None:
+            import re as _re
+            _m = _re.match(r'^authgem-vertex(\d{1,4})(?:/|$)', model_lower)
+            if _m:
+                self.client_type = 'authgem_vertex'
+                self._authgem_account_id = int(_m.group(1))
+            else:
+                _m = _re.match(r'^authgem(\d{1,4})(?:/|$)', model_lower)
+                if _m:
+                    self.client_type = 'authgem'
+                    self._authgem_account_id = int(_m.group(1))
         
         # Check if we're using a custom OpenAI base URL
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
@@ -5029,7 +5047,9 @@ class UnifiedClient:
                     "AuthGem package not found. Make sure 'authgem_auth.py' "
                     "exists under src/."
                 )
-            # logger.info("AuthGem will use Gemini API (%s mode)", self.client_type)
+            account_id = getattr(self, '_authgem_account_id', None)
+            if account_id:
+                print(f"🔐 AuthGem: Using account slot #{account_id}")
 
         elif self.client_type == 'antigravity':
             # Antigravity uses local proxy (antigravity-claude-proxy) – no SDK client needed
@@ -16562,8 +16582,32 @@ class UnifiedClient:
         'authgem/', 'authgem',
     )
 
+    @staticmethod
+    def _extract_authgem_account_id(model: str) -> Optional[int]:
+        """Extract the numeric account ID from a numbered authgem prefix.
+
+        Examples:
+            'authgem2/gemini-2.5-flash' → 2
+            'authgem-vertex10/gemini-2.5-pro' → 10
+            'authgem/gemini-2.5-flash' → None (default account)
+        """
+        import re
+        m = re.match(r'^authgem-vertex(\d{1,4})(?:/|$)', model, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m = re.match(r'^authgem(\d{1,4})(?:/|$)', model, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _strip_authgem_prefix(self, model: str) -> str:
-        """Strip any authgem* prefix and return the bare model name."""
+        """Strip any authgem* prefix (including numbered variants) and return the bare model name."""
+        import re
+        # Numbered variants first: authgem-vertex123/model or authgem42/model
+        m = re.match(r'^authgem(?:-vertex|-key)?\d{0,4}/(.*)', model, re.IGNORECASE)
+        if m:
+            return m.group(1).strip() or 'gemini-2.5-flash'
+        # Static prefixes (no number, no slash — treat entire string as prefix)
         for prefix in self._AUTHGEM_PREFIXES:
             if model.startswith(prefix):
                 return model[len(prefix):].lstrip('/') or 'gemini-2.5-flash'
@@ -16698,7 +16742,8 @@ class UnifiedClient:
     def _send_authgem(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via Google AI Studio using OAuth (no GCP project needed).
 
-        Model names prefixed with 'authgem/' (e.g. authgem/gemini-2.5-flash).
+        Model names prefixed with 'authgem/' or 'authgemN/' (e.g. authgem2/gemini-2.5-flash).
+        Numbered variants use a separate Google account per slot.
         """
         if not AUTHGEM_AVAILABLE or _authgem_get_store is None or _authgem_send_aistudio is None:
             raise UnifiedClientError(
@@ -16707,13 +16752,19 @@ class UnifiedClient:
             )
 
         actual_model = self._strip_authgem_prefix(self.model)
+        account_id = getattr(self, '_authgem_account_id', None) or self._extract_authgem_account_id(self.model)
 
         try:
-            store = _authgem_get_store()
+            if _authgem_get_store_by_id is not None and account_id:
+                store = _authgem_get_store_by_id(account_id)
+                acct_label = f" (Account #{account_id})"
+            else:
+                store = _authgem_get_store()
+                acct_label = ""
             access_token = store.get_valid_access_token(auto_login=True)
         except Exception as exc:
             raise UnifiedClientError(
-                f"AuthGem authentication failed: {exc}\n"
+                f"AuthGem{acct_label if 'acct_label' in dir() else ''} authentication failed: {exc}\n"
                 "Make sure you have a Google account and try again.",
                 error_type="auth_error"
             )
@@ -16727,7 +16778,8 @@ class UnifiedClient:
             except (ValueError, TypeError):
                 pass
 
-        print(f"🔐 AuthGem: Sending request to AI Studio (model={actual_model})")
+        label = f"AuthGem{acct_label}" if 'acct_label' in dir() and acct_label else "AuthGem"
+        print(f"\U0001f510 {label}: Sending request to AI Studio (model={actual_model})")
 
         # Mutable token holder so retry loop can refresh it
         token = [access_token]
@@ -16744,7 +16796,7 @@ class UnifiedClient:
                 connect_timeout=_connect_timeout,
             )
 
-        return self._authgem_retry_loop(_do_send, "AuthGem", actual_model, messages, temperature, max_tokens, store=store)
+        return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
 
     # ------------------------------------------------------------------
     # authgem-key/  →  Google AI Studio  +  API key (no OAuth)
@@ -16805,7 +16857,9 @@ class UnifiedClient:
     def _send_authgem_vertex(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via Vertex AI using OAuth (requires GCP project w/ billing).
 
-        Model names prefixed with 'authgem-vertex/' (e.g. authgem-vertex/gemini-2.5-flash).
+        Model names prefixed with 'authgem-vertex/' or 'authgem-vertexN/'
+        (e.g. authgem-vertex2/gemini-2.5-flash). Numbered variants use a separate
+        Google account per slot.
         """
         if not AUTHGEM_AVAILABLE or _authgem_get_store is None or _authgem_send_vertex is None:
             raise UnifiedClientError(
@@ -16814,9 +16868,15 @@ class UnifiedClient:
             )
 
         actual_model = self._strip_authgem_prefix(self.model)
+        account_id = getattr(self, '_authgem_account_id', None) or self._extract_authgem_account_id(self.model)
 
         try:
-            store = _authgem_get_store()
+            if _authgem_get_store_by_id is not None and account_id:
+                store = _authgem_get_store_by_id(account_id)
+                acct_label = f" (Account #{account_id})"
+            else:
+                store = _authgem_get_store()
+                acct_label = ""
             access_token = store.get_valid_access_token(auto_login=True)
         except Exception as exc:
             raise UnifiedClientError(
@@ -16834,7 +16894,8 @@ class UnifiedClient:
             except (ValueError, TypeError):
                 pass
 
-        print(f"🔐 AuthGem-Vertex: Sending request to Vertex AI (model={actual_model})")
+        label = f"AuthGem-Vertex{acct_label}"
+        print(f"\U0001f510 {label}: Sending request to Vertex AI (model={actual_model})")
 
         token = [access_token]
 
@@ -16850,7 +16911,7 @@ class UnifiedClient:
                 connect_timeout=_connect_timeout,
             )
 
-        return self._authgem_retry_loop(_do_send, "AuthGem-Vertex", actual_model, messages, temperature, max_tokens, store=store)
+        return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
 
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.
