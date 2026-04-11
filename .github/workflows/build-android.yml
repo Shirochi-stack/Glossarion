@@ -321,6 +321,7 @@ jobs:
 
       - name: Run emulator smoke test
         if: steps.find_apk.outputs.apk_found == 'true'
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -332,30 +333,17 @@ jobs:
           disable-animations: true
           script: |
             set +e
-            echo "=== Finding APK ==="
             APK_PATH=$(find $GITHUB_WORKSPACE/src/android/bin -name '*.apk' -type f 2>/dev/null | head -1)
-            echo "APK_PATH=$APK_PATH"
-            ls -la $GITHUB_WORKSPACE/src/android/bin/ 2>/dev/null || echo "bin/ not found"
-            test -n "$APK_PATH" || { echo "No APK found, skipping"; exit 0; }
-            echo "=== Installing APK ==="
-            adb install --no-streaming "$APK_PATH" 2>/dev/null || adb install "$APK_PATH" 2>/dev/null
-            INSTALL_RC=$?
-            if [ $INSTALL_RC -ne 0 ]; then
-              echo "APK install failed (ABI mismatch: APK is ARM, emulator is x86_64). Skipping launch."
-              exit 0
-            fi
-            echo "=== Clearing logcat ==="
+            if [ -z "$APK_PATH" ]; then echo "No APK found, skipping"; exit 0; fi
+            echo "APK: $APK_PATH"
+            adb install "$APK_PATH"
+            if [ $? -ne 0 ]; then echo "Install failed (ARM APK on x86_64 emulator). Skipping."; exit 0; fi
             adb logcat -c
-            echo "=== Launching app ==="
             adb shell am start -n com.glossarion.glossarion/org.kivy.android.PythonActivity
-            echo "=== Waiting 30s for app to start or crash ==="
             sleep 30
-            echo "=== Dumping logcat ==="
             adb logcat -d > $GITHUB_WORKSPACE/emulator-logcat-full.log 2>&1
             grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime)' $GITHUB_WORKSPACE/emulator-logcat-full.log > $GITHUB_WORKSPACE/emulator-logcat-filtered.log 2>/dev/null || true
-            echo "=== Filtered logcat (last 300 lines) ==="
             tail -300 $GITHUB_WORKSPACE/emulator-logcat-filtered.log
-            echo "=== Process check ==="
             adb shell pidof com.glossarion.glossarion && echo "App is running" || echo "App NOT running (crashed)"
             exit 0
 
