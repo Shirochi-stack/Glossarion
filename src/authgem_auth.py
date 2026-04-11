@@ -1553,7 +1553,13 @@ def _stream_gemini_common(
 
     # Always emit "in progress" with thread name (visible even when streaming is off)
     import threading as _threading
+    _model_name = body.get("model") or body.get("request", {}).get("model") or "?"
     _log(f"📤 [{_threading.current_thread().name}] API call in progress")
+
+    # For non-streaming, show a thinking indicator since there's no real-time feedback
+    _has_thinking = bool(_tc) and _think_desc != "disabled"
+    if not _enable_streaming and _has_thinking:
+        _log(f"🧠 [{_model_name}] is Thinking...")
 
     t_start = time.time()
 

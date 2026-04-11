@@ -9812,6 +9812,18 @@ class UnifiedClient:
             else:
                 # No wait needed — goes immediately
                 self._debug_log(f"📤 [{thread_name}] {label} ({ctx}) API call in progress")
+            # Show thinking indicator if any thinking mode is enabled
+            _thinking_active = False
+            if os.getenv('ENABLE_ANTHROPIC_THINKING', '0') == '1':
+                _thinking_active = True
+            elif os.getenv('ENABLE_GPT_THINKING', '0') == '1':
+                _thinking_active = True
+            elif os.getenv('ENABLE_DEEPSEEK_THINKING', '0') == '1':
+                _thinking_active = True
+            elif os.getenv('ENABLE_GEMINI_THINKING', '0') == '1':
+                _thinking_active = True
+            if _thinking_active:
+                self._debug_log(f"🧠 [{_model_lower}] is Thinking...")
 
     def _update_stagger_timestamp(self):
         """Push stagger reference to now (end of call) so the next call
@@ -12361,6 +12373,8 @@ class UnifiedClient:
                     import threading as _thr
                     if not self._is_stop_requested():
                         print(f"📤 [{_thr.current_thread().name}] API call in progress")
+                        if supports_thinking and (thinking_level or thinking_budget != 0):
+                            print(f"🧠 [{self.model}] is Thinking...")
                     response = self._send_openai_compatible(
                         messages=messages,
                         temperature=temperature,
@@ -12473,6 +12487,8 @@ class UnifiedClient:
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
                         import threading as _thr
                         print(f"📤 [{_thr.current_thread().name}] API call in progress")
+                        if supports_thinking and (thinking_level or thinking_budget != 0):
+                            print(f"🧠 [{self.model}] is Thinking...")
                     
                     try:
                         if use_streaming:
@@ -12544,6 +12560,8 @@ class UnifiedClient:
                     import threading as _thr
                     if not self._is_stop_requested():
                         print(f"📤 [{_thr.current_thread().name}] API call in progress")
+                        if supports_thinking and (thinking_level or thinking_budget != 0):
+                            print(f"🧠 [{self.model}] is Thinking...")
                     # Prepare content based on whether we have images
                     contents = []
                     has_raw_objects = any(msg.get('_raw_content_object') for msg in messages)
