@@ -231,28 +231,29 @@ def refresh_access_token(refresh_token: str) -> Dict:
 # GCP project auto-detection
 # ===========================================================================
 
-_cached_project_id: Optional[str] = None
-_project_set_by_gui: bool = False  # True when the GUI dropdown explicitly set the project
+_cached_project_id: Dict[int, Optional[str]] = {}
+_project_set_by_gui: Dict[int, bool] = {}
 
 
-def detect_gcp_project(access_token: str) -> Optional[str]:
+def detect_gcp_project(access_token: str, account_id: int = 0) -> Optional[str]:
     """Auto-detect the user's GCP project ID using the Resource Manager API.
 
     Uses the OAuth token to list projects the user has access to.
-    Only selects projects with billing enabled.  Result is cached for the
-    session.  The GUI dropdown can override this by setting
-    ``_cached_project_id`` directly.
+    Only selects projects with billing enabled.  Result is cached per-account
+    for the session.  The GUI dropdown can override this by setting
+    ``_cached_project_id[account_id]`` directly.
     """
     global _cached_project_id
-    if _cached_project_id:
-        return _cached_project_id
+    if _cached_project_id.get(account_id):
+        return _cached_project_id[account_id]
 
-    # Check env vars first
-    for env_key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GCP_PROJECT"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            _cached_project_id = val
-            return val
+    # Check env vars first (only for default account)
+    if account_id == 0:
+        for env_key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GCP_PROJECT"):
+            val = os.environ.get(env_key, "").strip()
+            if val:
+                _cached_project_id[account_id] = val
+                return val
 
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
@@ -276,7 +277,7 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
                         headers=headers, timeout=10,
                     )
                     if br.ok and br.json().get("billingEnabled", False):
-                        _cached_project_id = pid
+                        _cached_project_id[account_id] = pid
                         logger.info("AuthGem: Auto-detected GCP project (billing OK): %s", pid)
                         print(f"🔍 AuthGem: Using GCP project: {pid}")
                         return pid
@@ -290,7 +291,7 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
                         headers=headers, timeout=8,
                     )
                     if vr.ok:
-                        _cached_project_id = pid
+                        _cached_project_id[account_id] = pid
                         logger.info("AuthGem: Auto-detected GCP project (Vertex AI probe OK): %s", pid)
                         print(f"🔍 AuthGem: Using GCP project: {pid}")
                         return pid
@@ -308,16 +309,16 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
     return None
 
 
-def reset_cached_project():
-    """Clear the cached GCP project ID.
+def reset_cached_project(account_id: int = 0):
+    """Clear the cached GCP project ID for a specific account.
 
     Call this on logout or when the user switches accounts so that the
     next ``detect_gcp_project()`` call re-queries the Resource Manager API
     instead of returning the stale cached project.
     """
     global _cached_project_id, _project_set_by_gui
-    _cached_project_id = None
-    _project_set_by_gui = False
+    _cached_project_id.pop(account_id, None)
+    _project_set_by_gui.pop(account_id, None)
 
 
 # ===========================================================================
@@ -492,12 +493,13 @@ def run_oauth_flow(timeout: int = 300) -> Dict:
 class AuthGemTokenStore:
     """Thread-safe token store backed by a JSON file."""
 
-    def __init__(self, token_file: Optional[str] = None):
+    def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
         self._token_file = (
             token_file
             or os.environ.get("AUTHGEM_TOKEN_FILE")
             or _DEFAULT_TOKEN_FILE
         )
+        self._account_id = account_id
         self._lock = threading.RLock()
         self._tokens: Optional[Dict] = None
         self._on_change_callbacks: List = []  # called after save/clear
@@ -600,9 +602,9 @@ class AuthGemTokenStore:
             except Exception as exc:
                 logger.warning("Failed to remove token file: %s", exc)
         # Clear cached GCP project so re-login detects the new account's project
-        reset_cached_project()
+        reset_cached_project(self._account_id)
         # Reset Code Assist setup state as well
-        _reset_code_assist_setup()
+        _reset_code_assist_setup(self._account_id)
         self._fire_change_callbacks()
 
     # ------------------------------------------------------------------
@@ -776,7 +778,7 @@ def get_store(account_id: Optional[int] = None) -> AuthGemTokenStore:
 
         # Build a token file path like  ~/.glossarion/authgem_tokens_2.json
         token_file = os.path.join(_DEFAULT_TOKEN_DIR, f"authgem_tokens_{account_id}.json")
-        store = AuthGemTokenStore(token_file=token_file)
+        store = AuthGemTokenStore(token_file=token_file, account_id=account_id)
         _account_stores[account_id] = store
         return store
 
@@ -1011,9 +1013,10 @@ _CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 _CODE_ASSIST_API_VERSION = "v1internal"
 
 # Cached Code Assist project ID (set once per session by _code_assist_setup)
-_code_assist_project_id: Optional[str] = None
-_code_assist_setup_done = False
-_code_assist_has_credits = False  # Whether user has GOOGLE_ONE_AI credits
+# Per-account dicts keyed by account_id (0 = default)
+_code_assist_project_id: Dict[int, Optional[str]] = {}
+_code_assist_setup_done: Dict[int, bool] = {}
+_code_assist_has_credits: Dict[int, bool] = {}  # Whether user has GOOGLE_ONE_AI credits
 # Session ID for Code Assist — generated once per process, like Gemini CLI
 _code_assist_session_id: str = str(uuid.uuid4())
 # Tracks whether verification has been opened — prevents spam
@@ -1023,7 +1026,7 @@ def _code_assist_base_url() -> str:
     return f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}"
 
 
-def _reset_code_assist_setup():
+def _reset_code_assist_setup(account_id: int = 0):
     """Reset Code Assist setup state so the next authgem/ call re-runs setup.
 
     Call this when a 403 suggests the setup is stale or verification is needed.
@@ -1031,16 +1034,16 @@ def _reset_code_assist_setup():
     by the GUI dropdown — that selection should persist across retries.
     """
     global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits
-    _code_assist_project_id = None
-    _code_assist_setup_done = False
-    _code_assist_has_credits = False
+    _code_assist_project_id.pop(account_id, None)
+    _code_assist_setup_done.pop(account_id, None)
+    _code_assist_has_credits.pop(account_id, None)
     # Only clear the cached Vertex AI project if it was auto-detected.
     # If the user explicitly picked a project in the GUI, preserve it.
-    if not _project_set_by_gui:
-        reset_cached_project()
+    if not _project_set_by_gui.get(account_id, False):
+        reset_cached_project(account_id)
 
 
-def _handle_403_verification(error_body: str, _log) -> None:
+def _handle_403_verification(error_body: str, _log, account_id: int = 0) -> None:
     """Check a 403 error response for account verification URLs and open them.
 
     The Code Assist proxy may return 403 with a verification URL when the
@@ -1057,7 +1060,7 @@ def _handle_403_verification(error_body: str, _log) -> None:
     # But DON'T reset if verification is already pending — that would cause
     # setup to re-run and spam the browser again.
     if not _verification_pending:
-        _reset_code_assist_setup()
+        _reset_code_assist_setup(account_id)
 
     # If we already opened verification, raise immediately — don't let
     # the caller fall through to generic error handling that would retry.
@@ -1118,7 +1121,7 @@ def _handle_403_verification(error_body: str, _log) -> None:
         _log(f"⚠️ AuthGem: 403 Forbidden — account may need verification or permissions are insufficient")
         logger.warning("AuthGem 403 with no verification URL detected. Body: %s", error_body[:500])
 
-def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
+def _code_assist_setup(access_token: str, _log=None, account_id: int = 0) -> Optional[str]:
     """Onboard user with Code Assist (mirrors Gemini CLI's setupUser).
 
     Calls ``loadCodeAssist`` to register the user and obtain a managed
@@ -1128,8 +1131,8 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
     Returns the project ID (may be None for some tiers).
     """
     global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits, _verification_pending
-    if _code_assist_setup_done:
-        return _code_assist_project_id
+    if _code_assist_setup_done.get(account_id, False):
+        return _code_assist_project_id.get(account_id)
 
     _log = _log or (lambda *a, **kw: None)
     url = f"{_code_assist_base_url()}:loadCodeAssist"
@@ -1243,7 +1246,7 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
 
     # Cache credit eligibility for request building
     global _code_assist_has_credits
-    _code_assist_has_credits = has_g1_credits
+    _code_assist_has_credits[account_id] = has_g1_credits
 
     # If user needs onboarding (no currentTier), trigger it
     if not tier and resp_data.get("allowedTiers"):
@@ -1293,12 +1296,12 @@ def _code_assist_setup(access_token: str, _log=None) -> Optional[str]:
                    .get("id", project))
         _log(f"🔧 Code Assist: onboarded (project={project})")
 
-    _code_assist_project_id = project
+    _code_assist_project_id[account_id] = project
     # Only cache as "done" if we actually got a project.
     # If verification was needed (project=None), let setup re-run next time
     # so it picks up the project after the user completes verification.
     if project:
-        _code_assist_setup_done = True
+        _code_assist_setup_done[account_id] = True
 
     # Query server-side quota (Gemini CLI: retrieveUserQuota)
     try:
@@ -1367,6 +1370,7 @@ def send_chat_completion_aistudio(
     timeout: int = 300,
     log_fn=None,
     connect_timeout: Optional[float] = None,
+    account_id: int = 0,
 ) -> Dict:
     """Send a chat completion via Google Code Assist proxy using OAuth.
 
@@ -1378,8 +1382,8 @@ def send_chat_completion_aistudio(
 
     _log = log_fn or (lambda *a, **kw: None)
 
-    # Ensure user is set up with Code Assist (runs once per session)
-    project_id = _code_assist_setup(access_token, _log)
+    # Ensure user is set up with Code Assist (runs once per session per account)
+    project_id = _code_assist_setup(access_token, _log, account_id=account_id)
 
     if not project_id:
         # Don't block — the Code Assist proxy works without a pre-existing
@@ -1400,7 +1404,7 @@ def send_chat_completion_aistudio(
         "request": inner_body,
     }
     # Only enable credits when user has GOOGLE_ONE_AI balance (Gemini CLI: shouldEnableCredits)
-    if _code_assist_has_credits:
+    if _code_assist_has_credits.get(account_id, False):
         body["enabled_credit_types"] = ["GOOGLE_ONE_AI"]
 
     url = f"{_code_assist_base_url()}:streamGenerateContent?alt=sse"
@@ -1412,7 +1416,7 @@ def send_chat_completion_aistudio(
 
     logger.info("AuthGem-CodeAssist: POST %s  model=%s  credits=GOOGLE_ONE_AI", url.split("?")[0], model)
 
-    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout, account_id=account_id)
 
 
 # ===========================================================================
@@ -1522,7 +1526,7 @@ def send_chat_completion_aistudio_key(
 
     logger.info("AuthGem-Key: POST %s  model=%s", url.split("?")[0], model)
 
-    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout, account_id=0)
 
 
 # ===========================================================================
@@ -1539,6 +1543,7 @@ def send_chat_completion_vertex(
     timeout: int = 300,
     log_fn=None,
     connect_timeout: Optional[float] = None,
+    account_id: int = 0,
 ) -> Dict:
     """Send a chat completion via Vertex AI using an OAuth Bearer token.
 
@@ -1552,8 +1557,8 @@ def send_chat_completion_vertex(
     body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
 
 
-    # Resolve project — auto-detect from the OAuth token
-    project = detect_gcp_project(access_token)
+    # Resolve project — auto-detect from the OAuth token (per-account cache)
+    project = detect_gcp_project(access_token, account_id=account_id)
     location = VERTEX_LOCATION
     if not project:
         raise RuntimeError(
@@ -1589,7 +1594,7 @@ def send_chat_completion_vertex(
 
     logger.info("AuthGem-Vertex: POST %s  model=%s", url.split("?")[0], model)
 
-    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout)
+    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout, account_id=account_id)
 
 
 # Backward-compatible alias — old code imports send_chat_completion
@@ -1607,6 +1612,7 @@ def _stream_gemini_common(
     timeout: int,
     _log,
     connect_timeout: Optional[float] = None,
+    account_id: int = 0,
 ) -> Dict:
     """Shared streaming logic for all Gemini endpoints (AI Studio & Vertex)."""
     # Respect the "Enable streaming responses" toggle from other_settings.py
@@ -1674,7 +1680,7 @@ def _stream_gemini_common(
             err_text = resp.text[:500] if hasattr(resp, 'text') else str(resp.content[:500])
             # 403 — check for verification URL and open browser
             if status == 403:
-                _handle_403_verification(err_text, _log)
+                _handle_403_verification(err_text, _log, account_id=account_id)
             # Clarify misleading "No capacity" 429 — it's temporary server overload, not quota exhaustion
             if status == 429 and "No capacity" in err_text:
                 raise RuntimeError(f"AuthGem HTTP 429. Server busy — no capacity for this model right now, retrying")
@@ -2047,7 +2053,7 @@ def _stream_with_httpx_gemini(
             summary = detail or reason or "Bad Request"
             # 403 — check for verification URL and open browser
             if resp.status_code == 403:
-                _handle_403_verification(error_body, _log)
+                _handle_403_verification(error_body, _log, account_id=account_id)
             # Clarify misleading "No capacity" 429
             if resp.status_code == 429 and "No capacity" in str(summary):
                 summary = f"Server busy — no capacity for this model right now, retrying"

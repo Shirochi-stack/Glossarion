@@ -16794,6 +16794,7 @@ class UnifiedClient:
                 timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
+                account_id=account_id or 0,
             )
 
         return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
@@ -16909,6 +16910,7 @@ class UnifiedClient:
                 timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
+                account_id=account_id or 0,
             )
 
         return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)

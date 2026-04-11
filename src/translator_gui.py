@@ -4105,8 +4105,9 @@ Recent translations to summarize:
         # Push to authgem module so API calls use this project
         try:
             import authgem_auth
-            authgem_auth._cached_project_id = project_id
-            authgem_auth._project_set_by_gui = True
+            _acct = self._get_authgem_account_id()
+            authgem_auth._cached_project_id[_acct] = project_id
+            authgem_auth._project_set_by_gui[_acct] = True
             import os
             os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
         except Exception:
@@ -4620,8 +4621,8 @@ Recent translations to summarize:
         if saved_project:
             try:
                 import authgem_auth
-                authgem_auth._cached_project_id = saved_project
-                authgem_auth._project_set_by_gui = True
+                authgem_auth._cached_project_id[0] = saved_project
+                authgem_auth._project_set_by_gui[0] = True
                 import os
                 os.environ['GOOGLE_CLOUD_PROJECT'] = saved_project
             except Exception:
