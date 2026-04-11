@@ -140,6 +140,9 @@ _THINKING_LEVEL_TO_BUDGET_MAP = {
     'HIGH': 32768,
 }
 
+# One-shot flag: print the maxOutputTokens cap warning only once per session
+_token_cap_warned = False
+
 
 # ===========================================================================
 # Port helpers
@@ -858,7 +861,10 @@ def _build_gemini_request_body(
         # AuthGem endpoints (Code Assist proxy & Vertex AI) hard-limit at 65536
         _AUTHGEM_MAX_OUTPUT = 65536
         if max_tokens > _AUTHGEM_MAX_OUTPUT:
-            logger.warning("AuthGem: Capped maxOutputTokens from %d → %d", max_tokens, _AUTHGEM_MAX_OUTPUT)
+            global _token_cap_warned
+            if not _token_cap_warned:
+                _token_cap_warned = True
+                print(f"⚠️ AuthGem: Capped maxOutputTokens from {max_tokens} → {_AUTHGEM_MAX_OUTPUT}")
             max_tokens = _AUTHGEM_MAX_OUTPUT
         gen_config["maxOutputTokens"] = max_tokens
 
