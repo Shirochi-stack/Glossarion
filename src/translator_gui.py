@@ -6766,7 +6766,7 @@ Recent translations to summarize:
         languages = [
             "English", "Spanish", "French", "German", "Italian", "Portuguese",
             "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-            "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
+            "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
         ]
         self.target_lang_combo.addItems(languages)
         

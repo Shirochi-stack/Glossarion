@@ -1491,7 +1491,7 @@ class GlossaryManagerMixin:
             languages = [
                 "English", "Spanish", "French", "German", "Italian", "Portuguese",
                 "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
+                "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
             ]
             self.manual_target_language_combo.addItems(languages)
             
@@ -2695,7 +2695,7 @@ CRITICAL EXTRACTION RULES:
             languages = [
                 "English", "Spanish", "French", "German", "Italian", "Portuguese",
                 "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
+                "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
             ]
             self.glossary_target_language_combo.addItems(languages)
             

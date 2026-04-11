@@ -18245,7 +18245,8 @@ class UnifiedClient:
                 "chinese": "ZH",
                 "japanese": "JA",
                 "korean": "KO",
-                "turkish": "TR"
+                "turkish": "TR",
+                "vietnamese": "VI"
             }
             
             # Default to EN-US if not found or if Traditional Chinese (not supported by DeepL yet?)
@@ -18417,9 +18418,9 @@ class UnifiedClient:
                 "chinese (traditional)": "zh-TW",
                 "japanese": "ja",
                 "korean": "ko",
-                "turkish": "tr"
+                "turkish": "tr",
+                "vietnamese": "vi"
             }
-            
             target_lang = google_lang_map.get(output_lang_name, "en")
             
             # Extract only user messages, ignore system prompts completely
@@ -18618,7 +18619,8 @@ class UnifiedClient:
                 "chinese (traditional)": "zh-TW",
                 "japanese": "ja",
                 "korean": "ko",
-                "turkish": "tr"
+                "turkish": "tr",
+                "vietnamese": "vi"
             }
             
             target_lang = google_lang_map.get(output_lang_name, "en")

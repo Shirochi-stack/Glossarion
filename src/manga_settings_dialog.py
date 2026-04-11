@@ -2197,7 +2197,7 @@ class MangaSettingsDialog(QDialog):
         languages = [
             "English", "Spanish", "French", "German", "Italian", "Portuguese",
             "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-            "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
+            "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
         ]
         self.manual_translate_language.addItems(languages)
         
