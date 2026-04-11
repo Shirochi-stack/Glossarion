@@ -768,7 +768,13 @@ def _parse_sse_responses(raw_text: str) -> Dict:
         # Final completed event has the full response
         elif event_type == "response.completed":
             resp_obj = data.get("response", data)
-            return _parse_responses_result(resp_obj)
+            result = _parse_responses_result(resp_obj)
+            # The Codex API's completed event often omits the full text
+            # in its output items — only metadata (usage, status) is present.
+            # Fall back to accumulated deltas when content is empty.
+            if not result.get("content") and content_parts:
+                result["content"] = "".join(content_parts)
+            return result
 
         last_data = data
 
