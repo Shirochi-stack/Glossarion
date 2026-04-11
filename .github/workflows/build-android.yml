@@ -323,17 +323,30 @@ jobs:
         if: steps.find_apk.outputs.apk_found == 'true'
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          api-level: 34
           arch: x86_64
+          target: google_apis
           profile: pixel_5
           ram-size: 2048M
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           script: |
             set +e
-            echo "=== Installing APK ==="
-            APK_PATH=$(find src/android/bin -name '*.apk' | head -1)
-            adb install "$APK_PATH"
+            echo "=== Finding APK ==="
+            APK_PATH=$(find $GITHUB_WORKSPACE/src/android/bin -name '*.apk' -type f 2>/dev/null | head -1)
+            echo "APK_PATH=$APK_PATH"
+            if [ -z "$APK_PATH" ]; then
+              echo "❌ No APK found at $GITHUB_WORKSPACE/src/android/bin/"
+              ls -la $GITHUB_WORKSPACE/src/android/bin/ 2>/dev/null || echo "bin/ dir not found"
+              exit 0
+            fi
+            echo "=== Installing APK (with --no-streaming for CI) ==="
+            adb install --no-streaming "$APK_PATH" || {
+              echo "⚠️ Install failed — likely ARM/x86 ABI mismatch"
+              echo "APK ABI: arm64-v8a, armeabi-v7a  |  Emulator ABI: x86_64"
+              echo "Trying with -t flag..."
+              adb install -t --no-streaming "$APK_PATH" || echo "❌ Install completely failed"
+            }
             echo "=== Clearing logcat ==="
             adb logcat -c
             echo "=== Launching app ==="
@@ -341,11 +354,11 @@ jobs:
             echo "=== Waiting 30s for app to start (or crash) ==="
             sleep 30
             echo "=== Capturing logcat ==="
-            adb logcat -d > emulator-logcat-full.log 2>&1
+            adb logcat -d > $GITHUB_WORKSPACE/emulator-logcat-full.log 2>&1
             # Filter for Python/Kivy related output
-            grep -iE '(python|kivy|glossarion|SDL|Exception|Error|Traceback|ModuleNotFoundError|ImportError|FATAL|AndroidRuntime|art\b)' emulator-logcat-full.log > emulator-logcat-filtered.log 2>/dev/null || true
+            grep -iE '(python|kivy|glossarion|SDL|Exception|Error|Traceback|ModuleNotFoundError|ImportError|FATAL|AndroidRuntime)' $GITHUB_WORKSPACE/emulator-logcat-full.log > $GITHUB_WORKSPACE/emulator-logcat-filtered.log 2>/dev/null || true
             echo "=== Filtered logcat (last 300 lines) ==="
-            tail -300 emulator-logcat-filtered.log
+            tail -300 $GITHUB_WORKSPACE/emulator-logcat-filtered.log
             echo "=== App process status ==="
             adb shell pidof com.glossarion.glossarion || echo "⚠️ App process NOT running (crashed)"
             # Always exit 0 — this is a diagnostic step
