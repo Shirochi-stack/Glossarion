@@ -4039,8 +4039,11 @@ Recent translations to summarize:
         saved = self.config.get('authgem_project', '')
         selected_idx = -1
         if saved:
-            selected_idx = combo.findData(saved)
-        # If no saved or saved not found, pick first billed; if none, first unknown
+            # Only restore saved project if it's NOT known-unbilled;
+            # prefer a billed project over a previously-saved unbilled one.
+            if saved not in unbilled:
+                selected_idx = combo.findData(saved)
+        # If no saved or saved not found/unbilled, pick first billed; if none, first unknown
         if selected_idx < 0 and billed:
             selected_idx = 0
         elif selected_idx < 0 and unknown:
