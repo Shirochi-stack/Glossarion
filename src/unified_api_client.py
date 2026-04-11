@@ -12379,58 +12379,94 @@ class UnifiedClient:
                     # Skip if streaming already reported thinking stats
                     if hasattr(response, '_streaming_thinking_chunks') and response._streaming_thinking_chunks > 0:
                         thinking_tokens_displayed = True
-                    elif hasattr(response, 'raw_response'):
+                    elif hasattr(response, 'raw_response') and response.raw_response is not None:
                         raw_resp = response.raw_response
                         
-                        # Check multiple possible locations for thinking tokens
-                        # raw_resp is a JSON dict from _send_openai_compatible
+                        # Extract thinking tokens from SDK response object
                         thinking_tokens = 0
                         
-                        # Check in usage dict
+                        # Get usage from SDK object or dict
                         usage = raw_resp.get('usage') if isinstance(raw_resp, dict) else getattr(raw_resp, 'usage', None)
                         if usage:
                             if isinstance(usage, dict):
                                 # Dict access for JSON response
                                 thinking_tokens = usage.get('thoughts_token_count', 0) or 0
                                 if not thinking_tokens:
-                                    thinking_tokens = usage.get('thinking_tokens', 0) or 0
+                                    thinking_tokens = usage.get('thoughtsTokenCount', 0) or 0
                                 if not thinking_tokens:
                                     thinking_tokens = usage.get('reasoning_tokens', 0) or 0
-                                # Check completion_tokens_details
                                 if not thinking_tokens:
                                     details = usage.get('completion_tokens_details') or {}
                                     if isinstance(details, dict):
                                         thinking_tokens = details.get('reasoning_tokens', 0) or 0
                             else:
-                                # Object attribute access (fallback)
-                                if hasattr(usage, 'thoughts_token_count'):
-                                    thinking_tokens = usage.thoughts_token_count or 0
-                                elif hasattr(usage, 'thinking_tokens'):
-                                    thinking_tokens = usage.thinking_tokens or 0
-                                elif hasattr(usage, 'reasoning_tokens'):
-                                    thinking_tokens = usage.reasoning_tokens or 0
-                                if not thinking_tokens and hasattr(usage, 'completion_tokens_details'):
-                                    details = usage.completion_tokens_details
-                                    if hasattr(details, 'reasoning_tokens'):
-                                        thinking_tokens = details.reasoning_tokens or 0
+                                # Pydantic SDK object — check model_extra first (Gemini non-standard fields)
+                                _u_extra = getattr(usage, 'model_extra', None) or {}
+                                if isinstance(_u_extra, dict):
+                                    thinking_tokens = _u_extra.get('thoughts_token_count', 0) or 0
+                                    if not thinking_tokens:
+                                        thinking_tokens = _u_extra.get('thoughtsTokenCount', 0) or 0
+                                # Check completion_tokens_details
+                                if not thinking_tokens:
+                                    _ctd = getattr(usage, 'completion_tokens_details', None)
+                                    if _ctd:
+                                        thinking_tokens = getattr(_ctd, 'reasoning_tokens', 0) or 0
+                                        if not thinking_tokens:
+                                            _ctd_extra = getattr(_ctd, 'model_extra', None) or {}
+                                            thinking_tokens = _ctd_extra.get('reasoning_tokens', 0) or 0
+                                # model_dump() fallback
+                                if not thinking_tokens and hasattr(usage, 'model_dump'):
+                                    _u_dict = usage.model_dump()
+                                    thinking_tokens = _u_dict.get('thoughts_token_count', 0) or 0
+                                    if not thinking_tokens:
+                                        thinking_tokens = _u_dict.get('thoughtsTokenCount', 0) or 0
+                                # Direct attribute fallback
+                                if not thinking_tokens:
+                                    thinking_tokens = getattr(usage, 'thoughts_token_count', 0) or 0
                         
-                        # Display thinking tokens if found or if thinking was requested - only if not stopping
+                        # Display thinking tokens if found or if thinking was requested
                         if supports_thinking and not self._is_stop_requested():
+                            # Fallback: infer thinking tokens from total - prompt - completion
+                            if not thinking_tokens and usage:
+                                try:
+                                    if hasattr(usage, 'model_dump'):
+                                        _u_d = usage.model_dump()
+                                    elif isinstance(usage, dict):
+                                        _u_d = usage
+                                    else:
+                                        _u_d = {}
+                                    _total = _u_d.get('total_tokens', 0) or 0
+                                    _prompt = _u_d.get('prompt_tokens', 0) or 0
+                                    _completion = _u_d.get('completion_tokens', 0) or 0
+                                    _diff = _total - _prompt - _completion
+                                    if _diff > 0:
+                                        thinking_tokens = _diff
+                                except Exception:
+                                    pass
+                            
                             if thinking_tokens > 0:
-                                print(f"   💭 Thinking tokens used: {thinking_tokens}")
+                                print(f"   💭 Thinking tokens used: {thinking_tokens:,}")
                                 thinking_tokens_displayed = True
                             elif is_gemini_3 and thinking_level:
-                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
+                                # Debug: dump completion_tokens_details to find the thinking token field
+                                _dbg = ""
+                                try:
+                                    if usage and hasattr(usage, 'model_dump'):
+                                        _u_d = usage.model_dump()
+                                        _ctd_d = _u_d.get('completion_tokens_details')
+                                        _ptd_d = _u_d.get('prompt_tokens_details')
+                                        _dbg = f"ctd={_ctd_d}, ptd={_ptd_d}, total={_u_d.get('total_tokens')}, prompt={_u_d.get('prompt_tokens')}, completion={_u_d.get('completion_tokens')}"
+                                except Exception:
+                                    _dbg = "?"
+                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level}) [debug: {_dbg}]")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == 0:
                                 print(f"   ✅ Thinking disabled")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == -1:
-                                # Dynamic thinking - might not be reported
                                 print(f"   💭 Thinking: Dynamic mode (tokens may not be reported via OpenAI endpoint)")
                                 thinking_tokens_displayed = True
                             elif thinking_budget > 0:
-                                # Specific budget requested but not reported
                                 print(f"   ⚠️ Thinking budget set to {thinking_budget} but tokens not reported via OpenAI endpoint")
                                 thinking_tokens_displayed = True
                     
@@ -14660,8 +14696,13 @@ class UnifiedClient:
                                 
                                 if level != 'none':
                                     thinking_cfg = {"thinking_level": level.upper()}
-                                    if stream_thoughts:
-                                        thinking_cfg["include_thoughts"] = True
+                                    # Always include thoughts so the API reports thinking token
+                                    # counts in usage metadata. The thought-flagged parts are
+                                    # already filtered out of the response content downstream.
+                                    # STREAM_THINKING_LOGS only controls whether we PRINT
+                                    # the thinking text during streaming — not whether we
+                                    # request it from the API.
+                                    thinking_cfg["include_thoughts"] = True
                                     extra_body["extra_body"] = {
                                         "google": {
                                             "thinking_config": thinking_cfg
@@ -15605,6 +15646,43 @@ class UnifiedClient:
                             pass  # Silent fail for logging
                     
                     self._save_response(content, response_name)
+                    
+                    # Report thinking/reasoning tokens for non-streaming responses
+                    if not self._is_stop_requested():
+                        try:
+                            _ns_thinking = 0
+                            if hasattr(resp, 'usage') and resp.usage is not None:
+                                _u = resp.usage
+                                # 1) Standard SDK: completion_tokens_details.reasoning_tokens
+                                _ctd = getattr(_u, 'completion_tokens_details', None)
+                                if _ctd:
+                                    _ns_thinking = getattr(_ctd, 'reasoning_tokens', 0) or 0
+                                    # Also check model_extra on the details object
+                                    if not _ns_thinking:
+                                        _ctd_extra = getattr(_ctd, 'model_extra', None) or {}
+                                        _ns_thinking = _ctd_extra.get('reasoning_tokens', 0) or 0
+                                # 2) Pydantic model_extra on usage (Gemini non-standard fields)
+                                if not _ns_thinking:
+                                    _u_extra = getattr(_u, 'model_extra', None) or {}
+                                    _ns_thinking = _u_extra.get('thoughts_token_count', 0) or 0
+                                    if not _ns_thinking:
+                                        _ns_thinking = _u_extra.get('thoughtsTokenCount', 0) or 0
+                                # 3) model_dump() to get all fields as a flat dict
+                                if not _ns_thinking and hasattr(_u, 'model_dump'):
+                                    _u_dict = _u.model_dump()
+                                    _ns_thinking = _u_dict.get('thoughts_token_count', 0) or 0
+                                    if not _ns_thinking:
+                                        _ns_thinking = _u_dict.get('thoughtsTokenCount', 0) or 0
+                                    if not _ns_thinking:
+                                        _ctd_d = _u_dict.get('completion_tokens_details') or {}
+                                        _ns_thinking = _ctd_d.get('reasoning_tokens', 0) or 0
+                                # 4) Direct attribute (in case SDK maps it)
+                                if not _ns_thinking:
+                                    _ns_thinking = getattr(_u, 'thoughts_token_count', 0) or 0
+                            if _ns_thinking > 0:
+                                print(f"   💭 Thinking tokens used: {_ns_thinking:,}")
+                        except Exception:
+                            pass
                     
                     return UnifiedResponse(
                         content=content,
