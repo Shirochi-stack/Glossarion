@@ -1556,11 +1556,6 @@ def _stream_gemini_common(
     _model_name = body.get("model") or body.get("request", {}).get("model") or "?"
     _log(f"📤 [{_threading.current_thread().name}] API call in progress")
 
-    # For non-streaming, show a thinking indicator since there's no real-time feedback
-    _has_thinking = bool(_tc) and _think_desc != "disabled"
-    if not _enable_streaming and _has_thinking:
-        _log(f"🧠 [{_model_name}] is Thinking...")
-
     t_start = time.time()
 
     # ── Non-streaming path: use generateContent instead of streamGenerateContent ──
