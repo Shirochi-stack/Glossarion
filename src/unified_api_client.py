@@ -15173,6 +15173,8 @@ class UnifiedClient:
                                                 # Strip <thought> XML wrapper tags that some endpoints include
                                                 if reasoning_frag and isinstance(reasoning_frag, str):
                                                     reasoning_frag = reasoning_frag.replace("<thought>", "").replace("</thought>", "")
+                                                    # Unescape literal \n sequences that Gemini may return
+                                                    reasoning_frag = reasoning_frag.replace("\\n", "\n")
                                         
                                         if reasoning_frag and isinstance(reasoning_frag, str):
                                             oai_thinking_chunks += 1
