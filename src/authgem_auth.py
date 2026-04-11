@@ -74,6 +74,12 @@ def _is_externally_stopped() -> bool:
     Combines the authgem-internal ``_cancel_event`` with the global stop
     flags used by the translation engine and manga integration so that
     an in-flight stream is aborted promptly when the user presses Stop.
+
+    NOTE: ``GRACEFUL_STOP`` is intentionally NOT checked here.  Graceful
+    stop means "let the current in-flight request finish" — killing the
+    SSE stream would defeat that purpose.  The outer retry loop in
+    ``unified_api_client.py`` handles graceful stop by not scheduling
+    new work (via ``_should_abort_retry()``).
     """
     if _cancel_event.is_set():
         return True
@@ -84,10 +90,8 @@ def _is_externally_stopped() -> bool:
             return True
     except Exception:
         pass
-    # Env-var-based stops set by the manga / translation engine
+    # Env-var-based hard stop set by the manga / translation engine
     if os.environ.get("TRANSLATION_CANCELLED") == "1":
-        return True
-    if os.environ.get("GRACEFUL_STOP") == "1":
         return True
     return False
 

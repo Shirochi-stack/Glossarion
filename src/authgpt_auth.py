@@ -320,12 +320,13 @@ def run_oauth_flow(timeout: int = 300) -> Dict:
 class AuthGPTTokenStore:
     """Thread-safe token store backed by a JSON file."""
 
-    def __init__(self, token_file: Optional[str] = None):
+    def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
         self._token_file = (
             token_file
             or os.environ.get("AUTHGPT_TOKEN_FILE")
             or _DEFAULT_TOKEN_FILE
         )
+        self._account_id = account_id
         self._lock = threading.RLock()
         self._tokens: Optional[Dict] = None
         self._on_change_callbacks: List = []  # called after save/clear
@@ -570,6 +571,40 @@ def get_default_store() -> AuthGPTTokenStore:
             if _default_store is None:
                 _default_store = AuthGPTTokenStore()
     return _default_store
+
+
+# Per-account store registry (account_id → AuthGPTTokenStore)
+_account_stores: Dict[int, AuthGPTTokenStore] = {}
+_account_stores_lock = threading.Lock()
+
+
+def get_store(account_id: Optional[int] = None) -> AuthGPTTokenStore:
+    """Return the token store for a specific account slot.
+
+    Parameters
+    ----------
+    account_id : int or None
+        ``None`` or ``0`` returns the default store (``authgpt_tokens.json``).
+        Any positive integer *N* returns a dedicated store backed by
+        ``authgpt_tokens_N.json`` in the same directory, enabling
+        multi-account usage via ``authgptN/`` model prefixes.
+
+    Each numbered account triggers its own independent OAuth browser login
+    the first time it is used, so users can authenticate with different
+    ChatGPT accounts for each slot.
+    """
+    if account_id is None or account_id == 0:
+        return get_default_store()
+
+    with _account_stores_lock:
+        if account_id in _account_stores:
+            return _account_stores[account_id]
+
+        # Build a token file path like  ~/.glossarion/authgpt_tokens_2.json
+        token_file = os.path.join(_DEFAULT_TOKEN_DIR, f"authgpt_tokens_{account_id}.json")
+        store = AuthGPTTokenStore(token_file=token_file, account_id=account_id)
+        _account_stores[account_id] = store
+        return store
 
 
 # ===========================================================================

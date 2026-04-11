@@ -3630,7 +3630,9 @@ Recent translations to summarize:
         
         # Show/hide AuthGPT login button
         if hasattr(self, 'authgpt_login_btn'):
-            needs_authgpt = model.startswith('authgpt/')
+            import re as _re
+            _gpt_match = _re.match(r'^authgpt\d{0,4}/', model)
+            needs_authgpt = _gpt_match is not None
             
             # Also check enabled key pools for authgpt models
             if not needs_authgpt:
@@ -3701,7 +3703,8 @@ Recent translations to summarize:
                             m = key_data.get('model', '')
                         else:
                             m = getattr(key_data, 'model', '')
-                        if m.startswith('authgpt/'):
+                        import re as _re
+                        if _re.match(r'^authgpt\d{0,4}/', m):
                             return True
         except Exception:
             pass
@@ -3755,16 +3758,35 @@ Recent translations to summarize:
         return False
 
 
+    def _get_authgpt_account_id(self):
+        """Return the numeric account ID from the current model's authgpt prefix.
+
+        ``authgpt/`` → 0, ``authgpt2/`` → 2, ``authgpt99/`` → 99.
+        Also checks key pools for any numbered authgpt model.
+        """
+        model = self.config.get('model', '')
+        import re as _re
+        m = _re.match(r'^authgpt(\d{1,4})/', model)
+        if m:
+            return int(m.group(1))
+        return 0
+
+    def _get_authgpt_store_for_current_model(self):
+        """Return the AuthGPTTokenStore for the currently selected model's account slot."""
+        from authgpt_auth import get_store
+        return get_store(self._get_authgpt_account_id())
+
     def _update_authgpt_login_status(self):
         """Update the AuthGPT login button text based on current token state."""
         try:
-            from authgpt_auth import get_default_store
-            store = get_default_store()
+            store = self._get_authgpt_store_for_current_model()
+            acct_id = self._get_authgpt_account_id()
+            acct_suffix = f" #{acct_id}" if acct_id else ""
             if store.has_tokens:
                 info = store.account_info
                 email = info.get('email', '')
                 plan = info.get('plan_type', '')
-                label = "✅ ChatGPT"
+                label = f"\u2705 ChatGPT{acct_suffix}"
                 if email:
                     label += f" ({email})"
                 elif plan:
@@ -3775,20 +3797,19 @@ Recent translations to summarize:
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
             else:
-                self.authgpt_login_btn.setText("🔐 ChatGPT Login")
+                self.authgpt_login_btn.setText(f"\ud83d\udd10 ChatGPT{acct_suffix} Login")
                 self.authgpt_login_btn.setStyleSheet(
                     "background-color: #10a37f; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
         except ImportError:
-            self.authgpt_login_btn.setText("🔐 ChatGPT Login (unavailable)")
+            self.authgpt_login_btn.setText("\ud83d\udd10 ChatGPT Login (unavailable)")
             self.authgpt_login_btn.setEnabled(False)
 
     def _authgpt_login_clicked(self):
         """Handle ChatGPT Login button click – run OAuth flow in background thread."""
         try:
-            from authgpt_auth import get_default_store
-            store = get_default_store()
+            store = self._get_authgpt_store_for_current_model()
         except ImportError:
             QMessageBox.critical(
                 self, "AuthGPT Unavailable",
@@ -3796,25 +3817,28 @@ Recent translations to summarize:
             )
             return
 
+        acct_id = self._get_authgpt_account_id()
+        acct_suffix = f" #{acct_id}" if acct_id else ""
+
         # If already logged in, offer to log out
         if store.has_tokens:
             info = store.account_info
             email = info.get('email', 'unknown')
             reply = QMessageBox.question(
                 self, "ChatGPT Account",
-                f"Currently logged in as: {email}\n\nDo you want to log out?",
+                f"Currently logged in as: {email}{acct_suffix}\n\nDo you want to log out?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
                 store.clear_tokens()
                 self._update_authgpt_login_status()
-                self.append_log("🔓 ChatGPT: Logged out")
+                self.append_log(f"\ud83d\udd13 ChatGPT{acct_suffix}: Logged out")
             return
 
         # Start login in background thread
-        self.authgpt_login_btn.setText("⏳ Logging in…")
+        self.authgpt_login_btn.setText("\u23f3 Logging in\u2026")
         self.authgpt_login_btn.setEnabled(False)
-        self.append_log("🔐 ChatGPT: Opening browser for login…")
+        self.append_log(f"\ud83d\udd10 ChatGPT{acct_suffix}: Opening browser for login\u2026")
 
         def _do_login():
             try:
@@ -3847,14 +3871,16 @@ Recent translations to summarize:
         self.authgpt_login_btn.setEnabled(True)
         self._update_authgpt_login_status()
         try:
-            from authgpt_auth import get_default_store
-            info = get_default_store().account_info
+            store = self._get_authgpt_store_for_current_model()
+            info = store.account_info
             email = info.get('email', '')
             plan = info.get('plan_type', '')
             detail = email or plan or 'success'
-            self.append_log(f"✅ ChatGPT: Logged in ({detail})")
+            acct_id = self._get_authgpt_account_id()
+            acct_suffix = f" #{acct_id}" if acct_id else ""
+            self.append_log(f"\u2705 ChatGPT{acct_suffix}: Logged in ({detail})")
         except Exception:
-            self.append_log("✅ ChatGPT: Logged in")
+            self.append_log("\u2705 ChatGPT: Logged in")
 
     @Slot()
     def _authgpt_login_failed(self):
@@ -3862,7 +3888,7 @@ Recent translations to summarize:
         self.authgpt_login_btn.setEnabled(True)
         self._update_authgpt_login_status()
         err = getattr(self, '_authgpt_login_error', 'Unknown error')
-        self.append_log(f"❌ ChatGPT login failed: {err}")
+        self.append_log(f"\u274c ChatGPT login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"ChatGPT login failed:\n{err}")
 
     # ==================================================================

@@ -961,12 +961,14 @@ except ImportError:
 # AuthGPT - ChatGPT subscription via OAuth (optional)
 try:
     from authgpt_auth import get_default_store as _authgpt_get_store
+    from authgpt_auth import get_store as _authgpt_get_store_by_id
     from authgpt_auth import send_chat_completion as _authgpt_send
     from authgpt_auth import cancel_stream as _authgpt_cancel_stream
     from authgpt_auth import reset_cancel as _authgpt_reset_cancel
     AUTHGPT_AVAILABLE = True
 except ImportError:
     _authgpt_get_store = None
+    _authgpt_get_store_by_id = None
     _authgpt_send = None
     _authgpt_cancel_stream = None
     _authgpt_reset_cancel = None
@@ -4667,6 +4669,14 @@ class UnifiedClient:
                 if _m:
                     self.client_type = 'authgem'
                     self._authgem_account_id = int(_m.group(1))
+
+        # Dynamic fallback: match numbered authgpt variants (authgpt1/, authgpt2/, etc.)
+        if self.client_type is None:
+            import re as _re
+            _m = _re.match(r'^authgpt(\d{1,4})(?:/|$)', model_lower)
+            if _m:
+                self.client_type = 'authgpt'
+                self._authgpt_account_id = int(_m.group(1))
         
         # Check if we're using a custom OpenAI base URL
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
@@ -16398,7 +16408,7 @@ class UnifiedClient:
 
         Uses the authgpt package to obtain/refresh OAuth tokens and send
         messages to the ChatGPT backend (chatgpt.com/backend-api/).
-        Model names should be prefixed with 'authgpt/' (e.g. authgpt/gpt-4o).
+        Model names should be prefixed with 'authgpt/' or 'authgptN/' (e.g. authgpt/gpt-4o, authgpt2/o3).
         """
         if not AUTHGPT_AVAILABLE or _authgpt_get_store is None or _authgpt_send is None:
             raise UnifiedClientError(
@@ -16407,22 +16417,32 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
-        # Strip the authgpt/ prefix to get the actual model name
+        # Strip the authgpt/ or authgptN/ prefix to get the actual model name
         actual_model = self.model
-        for prefix in ('authgpt/', 'authgpt'):
-            if actual_model.startswith(prefix):
-                actual_model = actual_model[len(prefix):].lstrip('/')
-                break
+        import re as _re
+        _m = _re.match(r'^authgpt\d{0,4}/', actual_model)
+        if _m:
+            actual_model = actual_model[_m.end():]
+        elif actual_model.startswith('authgpt'):
+            actual_model = actual_model[len('authgpt'):].lstrip('/')
         if not actual_model:
             actual_model = 'gpt-5.2'  # sensible default
 
+        # Extract account ID from prefix
+        account_id = getattr(self, '_authgpt_account_id', None) or self._extract_authgpt_account_id(self.model)
+
         # Obtain a valid OAuth access token (auto-refreshes or triggers browser login)
         try:
-            store = _authgpt_get_store()
+            if _authgpt_get_store_by_id is not None and account_id:
+                store = _authgpt_get_store_by_id(account_id)
+                acct_label = f" (Account #{account_id})"
+            else:
+                store = _authgpt_get_store()
+                acct_label = ""
             access_token = store.get_valid_access_token(auto_login=True)
         except Exception as exc:
             raise UnifiedClientError(
-                f"AuthGPT authentication failed: {exc}\n"
+                f"AuthGPT{acct_label if 'acct_label' in dir() else ''} authentication failed: {exc}\n"
                 "Make sure you have a ChatGPT Plus/Pro subscription and try again.",
                 error_type="auth_error"
             )
@@ -16431,7 +16451,8 @@ class UnifiedClient:
         max_retries = self._get_max_retries()
         rate_limit_retry_count = 0  # Track consecutive rate-limit retries for logging
         last_error = None
-        print(f"🔐 AuthGPT: Sending request via Codex API (model={actual_model})")
+        label = f"AuthGPT{acct_label}" if 'acct_label' in dir() and acct_label else "AuthGPT"
+        print(f"🔐 {label}: Sending request via Codex API (model={actual_model})")
         for attempt in range(max_retries):
             # Check stop flag before each attempt
             if self._is_stop_requested():
@@ -16612,6 +16633,20 @@ class UnifiedClient:
             if model.startswith(prefix):
                 return model[len(prefix):].lstrip('/') or 'gemini-2.5-flash'
         return model or 'gemini-2.5-flash'
+
+    @staticmethod
+    def _extract_authgpt_account_id(model: str) -> Optional[int]:
+        """Extract the numeric account ID from a numbered authgpt prefix.
+
+        Examples:
+            'authgpt2/gpt-5.2' → 2
+            'authgpt/gpt-4o' → None (default account)
+        """
+        import re
+        m = re.match(r'^authgpt(\d{1,4})(?:/|$)', model, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
 
     def _authgem_retry_loop(self, send_fn, label: str, actual_model: str,
                             messages, temperature, max_tokens,
