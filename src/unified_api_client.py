@@ -16594,9 +16594,10 @@ class UnifiedClient:
 
                 # 429 rate limit
                 if "429" in error_str:
-                    print(f"⚠️ {label} rate limit (attempt {attempt+1}/{max_retries})")
                     if attempt < max_retries - 1:
-                        delay = self._get_send_interval() * (attempt + 1)
+                        interval = self._get_send_interval()
+                        delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
+                        print(f"⚠️ {label} rate limit – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
                         if not self._sleep_with_cancel(delay, 0.5):
                             raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
                         continue
