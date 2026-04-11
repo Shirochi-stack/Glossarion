@@ -2109,7 +2109,7 @@ def _stream_with_requests_gemini(
         summary = detail or reason or "Bad Request"
         # 403 — check for verification URL and open browser
         if resp.status_code == 403:
-            _handle_403_verification(error_body, _log)
+            _handle_403_verification(error_body, _log, account_id=account_id)
         # Clarify misleading "No capacity" 429
         if resp.status_code == 429 and "No capacity" in str(summary):
             summary = f"Server busy — no capacity for this model right now, retrying"
