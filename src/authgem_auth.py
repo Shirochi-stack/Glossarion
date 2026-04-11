@@ -69,28 +69,22 @@ def is_cancelled() -> bool:
 
 
 def _is_externally_stopped() -> bool:
-    """Check if any external stop flag has been raised.
+    """Check if any **hard** stop flag has been raised.
 
-    Combines the authgem-internal ``_cancel_event`` with the global stop
-    flags used by the translation engine and manga integration so that
-    an in-flight stream is aborted promptly when the user presses Stop.
+    Only checks signals that indicate the user wants to abort the current
+    in-flight request immediately:
 
-    NOTE: ``GRACEFUL_STOP`` is intentionally NOT checked here.  Graceful
-    stop means "let the current in-flight request finish" — killing the
-    SSE stream would defeat that purpose.  The outer retry loop in
-    ``unified_api_client.py`` handles graceful stop by not scheduling
-    new work (via ``_should_abort_retry()``).
+    - ``_cancel_event``: set by ``cancel_stream()`` / ``hard_cancel_all()``
+    - ``TRANSLATION_CANCELLED``: hard-abort env var from the manga/translation engine
+
+    NOTE: ``global_stop_flag`` and ``GRACEFUL_STOP`` are intentionally NOT
+    checked here.  Those are *soft* stop signals meaning "don't start new
+    work, but let the current request finish."  The outer retry loop in
+    ``unified_api_client.py`` handles them via ``_should_abort_retry()``.
     """
     if _cancel_event.is_set():
         return True
-    # Check unified_api_client's module-level global stop flag
-    try:
-        from unified_api_client import global_stop_flag
-        if global_stop_flag:
-            return True
-    except Exception:
-        pass
-    # Env-var-based hard stop set by the manga / translation engine
+    # Env-var-based hard abort set by the manga / translation engine
     if os.environ.get("TRANSLATION_CANCELLED") == "1":
         return True
     return False

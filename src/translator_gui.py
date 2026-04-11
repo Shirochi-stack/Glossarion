@@ -3762,9 +3762,8 @@ Recent translations to summarize:
         """Return the numeric account ID from the current model's authgpt prefix.
 
         ``authgpt/`` → 0, ``authgpt2/`` → 2, ``authgpt99/`` → 99.
-        Also checks key pools for any numbered authgpt model.
         """
-        model = self.config.get('model', '')
+        model = getattr(self, 'model_var', '') or self.config.get('model', '')
         import re as _re
         m = _re.match(r'^authgpt(\d{1,4})/', model)
         if m:
@@ -14100,8 +14099,11 @@ Important rules:
                     self.run_button_text.setText("Stopping...")
             self.run_button.setStyleSheet("QPushButton { background-color: #6c757d; border: none; }")
         
-        # Set environment variable to suppress multi-key logging
-        os.environ['TRANSLATION_CANCELLED'] = '1'
+        # Set environment variable to suppress multi-key logging and signal hard abort.
+        # During graceful stop, do NOT set TRANSLATION_CANCELLED — it would kill
+        # in-flight AuthGem/AuthGPT SSE streams via _is_externally_stopped().
+        if not graceful_stop:
+            os.environ['TRANSLATION_CANCELLED'] = '1'
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
