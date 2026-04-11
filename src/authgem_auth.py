@@ -1775,12 +1775,16 @@ def _process_gemini_sse_line(
                     state["_thinking_chunks"] = state.get("_thinking_chunks", 0) + 1
                     if log_stream:
                         thought_buf = state.get("_thought_log_buf", [])
-                        thought_buf.append(text)
+                        # Replace literal \n sequences with real newlines
+                        # (API sometimes double-escapes newlines in thought parts)
+                        _clean = text.replace("\\n", "\n")
+                        thought_buf.append(_clean)
                         combined = "".join(thought_buf)
                         if "\n" in combined:
                             parts_t = combined.split("\n")
                             for p in parts_t[:-1]:
-                                _log(f"    {p}")
+                                if p.strip():  # skip blank lines from \n\n
+                                    _log(f"    {p}")
                             state["_thought_log_buf"] = [parts_t[-1]]
                         else:
                             state["_thought_log_buf"] = thought_buf
