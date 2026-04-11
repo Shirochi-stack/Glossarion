@@ -1590,8 +1590,6 @@ def _stream_gemini_common(
             raise RuntimeError(f"AuthGem HTTP {status}. {err_text}")
 
         data = resp.json()
-        if log_stream:
-            _log(f"📡 AuthGem: Response received in {elapsed:.1f}s (non-streaming)")
 
         # Unwrap Code Assist envelope
         if "response" in data and isinstance(data["response"], dict):
@@ -1618,6 +1616,14 @@ def _stream_gemini_common(
         usage = data.get("usageMetadata", {})
         final_content = "".join(text_parts)
         thought_text = "".join(thought_parts) if thought_parts else None
+
+        # Always report response summary + thinking tokens (non-streaming)
+        thinking_tokens = usage.get("thoughtsTokenCount", 0) if usage else 0
+        total_chars = len(final_content)
+        summary = f"📡 AuthGem: Response received in {elapsed:.1f}s ({total_chars} chars, non-streaming)"
+        if thinking_tokens > 0:
+            summary += f" | 🧠 {thinking_tokens} thinking tokens"
+        _log(summary)
 
         # Fallback: if text content is empty but thoughts contain text,
         # the API returned everything as thought-annotated parts.
