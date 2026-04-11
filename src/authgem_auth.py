@@ -1618,7 +1618,7 @@ def _stream_gemini_common(
         total_chars = len(final_content)
         summary = f"📡 AuthGem: Response received in {elapsed:.1f}s ({total_chars} chars, non-streaming)"
         if thinking_tokens > 0:
-            summary += f" | 🧠 {thinking_tokens} thinking tokens"
+            summary += f" | 🧠 {thinking_tokens} thinking tokens used"
         _log(summary)
 
         # Fallback: if text content is empty but thoughts contain text,
