@@ -285,9 +285,9 @@ jobs:
             echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
             echo "apk_found=true" >> $GITHUB_OUTPUT
             echo "✅ Found APK: $APK_PATH"
-            # Copy to a known location for upload
+            # Copy to a known location for upload (skip if already there)
             mkdir -p src/android/bin
-            cp "$APK_PATH" src/android/bin/
+            cp -n "$APK_PATH" src/android/bin/ 2>/dev/null || true
           else
             echo "apk_found=false" >> $GITHUB_OUTPUT
             echo "❌ No APK found anywhere!"
