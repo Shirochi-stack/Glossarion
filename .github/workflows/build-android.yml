@@ -93,47 +93,40 @@ jobs:
           cp "$SRC_DIR/android/reader_translator.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
           
           # Stubs for modules not available on Android
-          cat > "$ANDROID_DIR/_backend/image_translator.py" << 'EOF'
+          # NOTE: Using python3 to write files instead of heredocs, because
+          # YAML block scalar indentation breaks shell heredoc closing markers.
+          python3 -c "
+          import os, textwrap
+          bd = os.environ.get('ANDROID_DIR', 'src/android') + '/_backend'
+
+          files = {
+            'image_translator.py': '''
           class ImageTranslator:
-              """Stub — image translation not supported on Android."""
+              \"\"\"Stub - image translation not supported on Android.\"\"\"
               pass
-          EOF
-          
-          cat > "$ANDROID_DIR/_backend/ai_hunter_enhanced.py" << 'EOF'
+          ''',
+            'ai_hunter_enhanced.py': '''
           class ImprovedAIHunterDetection:
-              """Stub — AI hunter not available on Android."""
+              \"\"\"Stub - AI hunter not available on Android.\"\"\"
               pass
-          EOF
-          
-          cat > "$ANDROID_DIR/_backend/pdf_extractor.py" << 'EOF'
-          def extract_text_from_pdf(*args, **kwargs): return ""
-          def extract_pdf_with_formatting(*args, **kwargs): return "", {}
-          def generate_css_from_pdf(*args, **kwargs): return ""
+          ''',
+            'pdf_extractor.py': '''
+          def extract_text_from_pdf(*args, **kwargs): return \"\"
+          def extract_pdf_with_formatting(*args, **kwargs): return \"\", {}
+          def generate_css_from_pdf(*args, **kwargs): return \"\"
           def create_pdf_from_html(*args, **kwargs): return False
           def create_pdf_from_text(*args, **kwargs): return False
-          EOF
-          
-          # Create __init__.py
-          touch "$ANDROID_DIR/_backend/__init__.py"
-          
-          # Copy assets
-          mkdir -p "$ANDROID_DIR/assets"
-          cp "$SRC_DIR/Halgakos.png" "$ANDROID_DIR/assets/" 2>/dev/null || true
-          cp "$SRC_DIR/Halgakos.ico" "$ANDROID_DIR/assets/" 2>/dev/null || true
-          
-          # Stubs for packages removed from buildozer requirements
-          # These allow backend code to import without crashing on Android
-          cat > "$ANDROID_DIR/_backend/httpx_stub.py" << 'STUBEOF'
-          """Stub — httpx not available on Android, use requests instead."""
+          ''',
+            'httpx_stub.py': '''
+          \"\"\"Stub - httpx not available on Android, use requests instead.\"\"\"
           class Client:
               def __init__(self, *a, **kw): pass
-              def get(self, *a, **kw): raise NotImplementedError("httpx unavailable")
-              def post(self, *a, **kw): raise NotImplementedError("httpx unavailable")
+              def get(self, *a, **kw): raise NotImplementedError(\"httpx unavailable\")
+              def post(self, *a, **kw): raise NotImplementedError(\"httpx unavailable\")
           class AsyncClient(Client): pass
-          STUBEOF
-          
-          cat > "$ANDROID_DIR/_backend/rapidfuzz_stub.py" << 'STUBEOF'
-          """Stub — rapidfuzz not available on Android, falls back to difflib."""
+          ''',
+            'rapidfuzz_stub.py': '''
+          \"\"\"Stub - rapidfuzz not available on Android, falls back to difflib.\"\"\"
           import difflib
           class fuzz:
               @staticmethod
@@ -145,18 +138,15 @@ jobs:
               def extractOne(query, choices, **kw):
                   best = max(choices, key=lambda c: difflib.SequenceMatcher(None, query, c).ratio())
                   score = int(difflib.SequenceMatcher(None, query, best).ratio() * 100)
-                  return (best, score, 0) if score > kw.get('score_cutoff', 0) else None
-          STUBEOF
-          
-          cat > "$ANDROID_DIR/_backend/langdetect_stub.py" << 'STUBEOF'
-          """Stub — langdetect not available on Android."""
-          def detect(text): return "unknown"
+                  return (best, score, 0) if score > kw.get(\"score_cutoff\", 0) else None
+          ''',
+            'langdetect_stub.py': '''
+          \"\"\"Stub - langdetect not available on Android.\"\"\"
+          def detect(text): return \"unknown\"
           def detect_langs(text): return []
-          STUBEOF
-          
-          # ebooklib stub — must work for both `import ebooklib` and `from ebooklib import epub`
-          cat > "$ANDROID_DIR/_backend/ebooklib_stub.py" << 'STUBEOF'
-          """Stub — ebooklib not available on Android."""
+          ''',
+            'ebooklib_stub.py': '''
+          \"\"\"Stub - ebooklib not available on Android.\"\"\"
           ITEM_DOCUMENT = 9
           ITEM_STYLE = 3
           ITEM_IMAGE = 6
@@ -165,11 +155,9 @@ jobs:
           class EpubBook: pass
           class EpubHtml: pass
           class EpubItem: pass
-          def read_epub(*a, **kw): raise NotImplementedError("ebooklib unavailable on Android")
-          def write_epub(*a, **kw): raise NotImplementedError("ebooklib unavailable on Android")
-          # Sub-module alias so `from ebooklib import epub` works
+          def read_epub(*a, **kw): raise NotImplementedError(\"ebooklib unavailable on Android\")
+          def write_epub(*a, **kw): raise NotImplementedError(\"ebooklib unavailable on Android\")
           import sys as _sys
-          _self = _sys.modules[__name__]
           class _EpubModule:
               ITEM_DOCUMENT = 9
               ITEM_STYLE = 3
@@ -182,30 +170,26 @@ jobs:
               read_epub = staticmethod(read_epub)
               write_epub = staticmethod(write_epub)
           epub = _EpubModule()
-          STUBEOF
-          
-          # tiktoken stub — TransateKRtoEN imports it at module level
-          cat > "$ANDROID_DIR/_backend/tiktoken_stub.py" << 'STUBEOF'
-          """Stub — tiktoken not available on Android."""
+          ''',
+            'tiktoken_stub.py': '''
+          \"\"\"Stub - tiktoken not available on Android.\"\"\"
           class _DummyEncoding:
               def encode(self, text, *a, **kw): return list(range(len(text) // 4))
-              def decode(self, tokens, *a, **kw): return ""
+              def decode(self, tokens, *a, **kw): return \"\"
           def encoding_for_model(model_name, **kw): return _DummyEncoding()
           def get_encoding(name): return _DummyEncoding()
-          STUBEOF
-          
-          # Create sitecustomize.py to register stubs as real module names
-          cat > "$ANDROID_DIR/_backend/sitecustomize.py" << 'STUBEOF'
+          ''',
+            'sitecustomize.py': '''
           import importlib, sys
           _stub_map = {
-              'httpx': 'httpx_stub',
-              'rapidfuzz': 'rapidfuzz_stub',
-              'rapidfuzz.fuzz': 'rapidfuzz_stub',
-              'rapidfuzz.process': 'rapidfuzz_stub',
-              'langdetect': 'langdetect_stub',
-              'ebooklib': 'ebooklib_stub',
-              'ebooklib.epub': 'ebooklib_stub',
-              'tiktoken': 'tiktoken_stub',
+              \"httpx\": \"httpx_stub\",
+              \"rapidfuzz\": \"rapidfuzz_stub\",
+              \"rapidfuzz.fuzz\": \"rapidfuzz_stub\",
+              \"rapidfuzz.process\": \"rapidfuzz_stub\",
+              \"langdetect\": \"langdetect_stub\",
+              \"ebooklib\": \"ebooklib_stub\",
+              \"ebooklib.epub\": \"ebooklib_stub\",
+              \"tiktoken\": \"tiktoken_stub\",
           }
           for mod_name, stub_name in _stub_map.items():
               if mod_name not in sys.modules:
@@ -217,7 +201,21 @@ jobs:
                           sys.modules[mod_name] = stub
                       except Exception:
                           pass
-          STUBEOF
+          ''',
+          }
+
+          for fname, content in files.items():
+              with open(os.path.join(bd, fname), 'w') as f:
+                  f.write(textwrap.dedent(content).lstrip())
+          "
+          
+          # Create __init__.py
+          touch "$ANDROID_DIR/_backend/__init__.py"
+          
+          # Copy assets
+          mkdir -p "$ANDROID_DIR/assets"
+          cp "$SRC_DIR/Halgakos.png" "$ANDROID_DIR/assets/" 2>/dev/null || true
+          cp "$SRC_DIR/Halgakos.ico" "$ANDROID_DIR/assets/" 2>/dev/null || true
       
       - name: Install Gradle init script to fix Kotlin stdlib conflict
         run: |
