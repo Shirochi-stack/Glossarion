@@ -1551,14 +1551,9 @@ def _stream_gemini_common(
     if log_stream:
         _log(f"⚙️ AuthGem: temperature={_temp}, thinking={_think_desc}, safety={_safety_desc}")
 
-    # Emit "in progress" here (after config summary) so it appears last
+    # Always emit "in progress" with thread name (visible even when streaming is off)
     import threading as _threading
-    if log_stream:
-        _log(f"📤 [{_threading.current_thread().name}] API call in progress")
-    else:
-        # Minimal indicator when batch stream logs are suppressed
-        _model = body.get("model") or body.get("request", {}).get("model") or "?"
-        _log(f"📤 AuthGem: {_model} — streaming internally…")
+    _log(f"📤 [{_threading.current_thread().name}] API call in progress")
 
     t_start = time.time()
 
