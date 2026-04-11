@@ -47,8 +47,8 @@ android.gradle_dependencies = androidx.core:core:1.12.0,androidx.appcompat:appco
 # Services (foreground translation service)
 # services = GlossarionTranslation:service.py:foreground
 
-# Arch — build for ARM64 (most modern devices) and ARM (older devices)
-android.archs = arm64-v8a,armeabi-v7a
+# Arch — ARM64 + ARM for real devices, x86_64 for CI emulator smoke test
+android.archs = arm64-v8a,armeabi-v7a,x86_64
 
 # Allow backup
 android.allow_backup = True
