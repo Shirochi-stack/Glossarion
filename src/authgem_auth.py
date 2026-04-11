@@ -859,7 +859,6 @@ def _build_gemini_request_body(
         _AUTHGEM_MAX_OUTPUT = 65536
         if max_tokens > _AUTHGEM_MAX_OUTPUT:
             logger.warning("AuthGem: Capped maxOutputTokens from %d → %d", max_tokens, _AUTHGEM_MAX_OUTPUT)
-            print(f"⚠️ AuthGem: Capped maxOutputTokens from {max_tokens} → {_AUTHGEM_MAX_OUTPUT}")
             max_tokens = _AUTHGEM_MAX_OUTPUT
         gen_config["maxOutputTokens"] = max_tokens
 
