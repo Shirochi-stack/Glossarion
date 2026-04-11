@@ -219,32 +219,20 @@ jobs:
             ls -la $GITHUB_WORKSPACE/src/android/bin/ 2>/dev/null || echo "bin/ not found"
             test -n "$APK_PATH" || { echo "No APK found, skipping"; exit 0; }
             echo "=== Installing APK ==="
-            INSTALL_OK=false
-            if adb install --no-streaming "$APK_PATH" 2>&1; then
-              INSTALL_OK=true
-            elif adb install "$APK_PATH" 2>&1; then
-              INSTALL_OK=true
-            else
-              echo "⚠️ APK install failed — likely ABI mismatch (APK is ARM, emulator is x86_64)"
-              echo "   This is expected; the smoke test only validates installability on matching hardware."
-            fi
-            if [ "$INSTALL_OK" = "true" ]; then
-              echo "=== Clearing logcat ==="
-              adb logcat -c
-              echo "=== Launching app ==="
-              adb shell am start -n com.glossarion.glossarion/org.kivy.android.PythonActivity
-              echo "=== Waiting 30s for app to start or crash ==="
-              sleep 30
-              echo "=== Dumping logcat ==="
-              adb logcat -d > $GITHUB_WORKSPACE/emulator-logcat-full.log 2>&1
-              grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime)' $GITHUB_WORKSPACE/emulator-logcat-full.log > $GITHUB_WORKSPACE/emulator-logcat-filtered.log 2>/dev/null || true
-              echo "=== Filtered logcat (last 300 lines) ==="
-              tail -300 $GITHUB_WORKSPACE/emulator-logcat-filtered.log
-              echo "=== Process check ==="
-              adb shell pidof com.glossarion.glossarion && echo "App is running" || echo "App NOT running (crashed)"
-            else
-              echo "=== Skipping launch/logcat (install failed) ==="
-            fi
+            adb install --no-streaming "$APK_PATH" 2>&1 || adb install "$APK_PATH" 2>&1 || { echo "APK install failed (ABI mismatch). Skipping launch."; exit 0; }
+            echo "=== Clearing logcat ==="
+            adb logcat -c
+            echo "=== Launching app ==="
+            adb shell am start -n com.glossarion.glossarion/org.kivy.android.PythonActivity
+            echo "=== Waiting 30s for app to start or crash ==="
+            sleep 30
+            echo "=== Dumping logcat ==="
+            adb logcat -d > $GITHUB_WORKSPACE/emulator-logcat-full.log 2>&1
+            grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime)' $GITHUB_WORKSPACE/emulator-logcat-full.log > $GITHUB_WORKSPACE/emulator-logcat-filtered.log 2>/dev/null || true
+            echo "=== Filtered logcat (last 300 lines) ==="
+            tail -300 $GITHUB_WORKSPACE/emulator-logcat-filtered.log
+            echo "=== Process check ==="
+            adb shell pidof com.glossarion.glossarion && echo "App is running" || echo "App NOT running (crashed)"
             exit 0
 
       - name: Upload emulator logcat
