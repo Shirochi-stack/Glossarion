@@ -4157,6 +4157,10 @@ Recent translations to summarize:
             )
             if reply == QMessageBox.Yes:
                 store.clear_tokens()
+                # Clear the project dropdown so it re-fetches for the next account
+                if hasattr(self, 'authgem_project_combo'):
+                    self.authgem_project_combo.clear()
+                    self.authgem_project_combo.hide()
                 self._update_authgem_login_status()
                 self.append_log("🔓 Gemini: Logged out")
             return
@@ -4194,6 +4198,9 @@ Recent translations to summarize:
     def _authgem_login_finished(self):
         """Called on GUI thread after successful AuthGem login."""
         self.authgem_login_btn.setEnabled(True)
+        # Clear and re-fetch projects for the new account
+        if hasattr(self, 'authgem_project_combo'):
+            self.authgem_project_combo.clear()
         self._update_authgem_login_status()
         try:
             from authgem_auth import get_default_store

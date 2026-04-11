@@ -280,6 +280,17 @@ def detect_gcp_project(access_token: str) -> Optional[str]:
     return None
 
 
+def reset_cached_project():
+    """Clear the cached GCP project ID.
+
+    Call this on logout or when the user switches accounts so that the
+    next ``detect_gcp_project()`` call re-queries the Resource Manager API
+    instead of returning the stale cached project.
+    """
+    global _cached_project_id
+    _cached_project_id = None
+
+
 # ===========================================================================
 # User info helpers
 # ===========================================================================
@@ -559,6 +570,10 @@ class AuthGemTokenStore:
                     logger.info("AuthGem tokens removed")
             except Exception as exc:
                 logger.warning("Failed to remove token file: %s", exc)
+        # Clear cached GCP project so re-login detects the new account's project
+        reset_cached_project()
+        # Reset Code Assist setup state as well
+        _reset_code_assist_setup()
         self._fire_change_callbacks()
 
     # ------------------------------------------------------------------
@@ -947,6 +962,8 @@ def _reset_code_assist_setup():
     _code_assist_project_id = None
     _code_assist_setup_done = False
     _code_assist_has_credits = False
+    # Also clear the cached Vertex AI project ID
+    reset_cached_project()
 
 
 def _handle_403_verification(error_body: str, _log) -> None:
@@ -1842,6 +1859,22 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
 
     if log_stream:
         _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
+        # Report thinking tokens used (from usageMetadata or estimation)
+        try:
+            um = state.get("usage_metadata") or {}
+            _thinking_tok = um.get("thoughtsTokenCount", 0) or 0
+            if not _thinking_tok:
+                # Fallback: estimate from total - prompt - completion
+                _total = um.get("totalTokenCount", 0) or 0
+                _prompt = um.get("promptTokenCount", 0) or 0
+                _completion = um.get("candidatesTokenCount", 0) or 0
+                _diff = _total - _prompt - _completion
+                if _diff > 0:
+                    _thinking_tok = _diff
+            if _thinking_tok > 0:
+                _log(f"   💭 Thinking tokens used: {_thinking_tok:,}")
+        except Exception:
+            pass
 
     content = "".join(state["text_parts"])
     thought_content = "".join(state["thought_parts"]) if state["thought_parts"] else None
