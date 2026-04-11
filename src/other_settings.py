@@ -2552,7 +2552,7 @@ def _create_response_handling_section(self, parent):
         self.stream_thinking_logs_var = bool(
             self.config.get(
                 'stream_thinking_logs',
-                str(os.environ.get('STREAM_THINKING_LOGS', '1')) == '1'
+                str(os.environ.get('STREAM_THINKING_LOGS', '0')) == '1'
             )
         )
     try:

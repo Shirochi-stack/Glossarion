@@ -2940,7 +2940,7 @@ Recent translations to summarize:
             # Preserve streaming logs during batch mode; must be initialized here so save_config
             # keeps the user's choice even if the Other Settings dialog is never opened.
             ('allow_batch_stream_logs_var', 'allow_batch_stream_logs', False),
-            ('stream_thinking_logs_var', 'stream_thinking_logs', True),
+            ('stream_thinking_logs_var', 'stream_thinking_logs', False),
             ('html2text_escape_snob_var', 'html2text_escape_snob', False),
 
         ]
@@ -11974,7 +11974,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             try:
-                stream_thinking = bool(self.config.get('stream_thinking_logs', True))
+                stream_thinking = bool(self.config.get('stream_thinking_logs', False))
                 os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
             except Exception:
                 pass
@@ -17068,6 +17068,9 @@ Important rules:
                     def handler(state):
                         toggle_states[key] = checkbox.isChecked()
                         chk_lbl.setStyleSheet(f"color: {'#1a1a2e' if checkbox.isChecked() else 'transparent'}; background: transparent; border: none;")
+                        # When streaming is toggled ON, also enable stream thinking logs
+                        if key == 'enable_streaming':
+                            toggle_states['stream_thinking_logs'] = checkbox.isChecked()
                     return handler
                 cb.stateChanged.connect(_make_toggle_handler(td["key"], cb, check_label, td["accent"]))
                 
@@ -17367,6 +17370,11 @@ Important rules:
                     tb_streaming = toggle_states.get('enable_streaming', False)
                     self.config['enable_streaming'] = tb_streaming
                     self.enable_streaming_var = tb_streaming
+                    # Stream thinking follows streaming: if user enables streaming, also enable stream thinking
+                    tb_stream_thinking = toggle_states.get('stream_thinking_logs', tb_streaming)
+                    self.config['stream_thinking_logs'] = tb_stream_thinking
+                    self.stream_thinking_logs_var = tb_stream_thinking
+                    os.environ['STREAM_THINKING_LOGS'] = '1' if tb_stream_thinking else '0'
                     tb_pdf = toggle_states.get('enable_pdf_output', False)
                     self.config['enable_pdf_output'] = tb_pdf
                     self.enable_pdf_output_var = tb_pdf
@@ -18895,7 +18903,7 @@ Important rules:
                 ('ignore_retry_after', ['ignore_retry_after_checkbox', 'ignore_retry_after_var'], False, bool),
                 ('enable_streaming', ['enable_streaming_checkbox', 'enable_streaming_var'], False, bool),
                 ('allow_batch_stream_logs', ['allow_batch_stream_logs_checkbox', 'allow_batch_stream_logs_var'], False, bool),
-                ('stream_thinking_logs', ['stream_thinking_logs_checkbox', 'stream_thinking_logs_var'], True, bool),
+                ('stream_thinking_logs', ['stream_thinking_logs_checkbox', 'stream_thinking_logs_var'], False, bool),
                 ('max_retries', ['max_retries_var'], 3, lambda v: safe_int(v, 3)),
                 ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
 
@@ -19570,7 +19578,7 @@ Important rules:
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if self.config.get('allow_authgpt_batch_stream_logs', False) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
-                ('STREAM_THINKING_LOGS', '1' if self.config.get('stream_thinking_logs', True) else '0'),
+                ('STREAM_THINKING_LOGS', '1' if self.config.get('stream_thinking_logs', False) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 
                 # General settings
