@@ -47,7 +47,7 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer==1.5.0 "cython<3" virtualenv python-for-android
+          pip install buildozer==1.5.0 "cython<3" virtualenv
       
       - name: Restore Buildozer cache
         uses: actions/cache/restore@v4
@@ -221,32 +221,37 @@ jobs:
       
       - name: Patch p4a build.gradle to fix Kotlin stdlib conflict
         run: |
-          # Buildozer installs p4a via pip. We need to patch the build.gradle
-          # template inside the installed pythonforandroid package to exclude
-          # kotlin-stdlib-jdk7/jdk8 (merged into kotlin-stdlib since 1.8+).
+          # Buildozer v1.5.0 git-clones p4a into .buildozer/android/platform/python-for-android
+          # and uses THAT copy (not the pip-installed package). We must patch its build.gradle
+          # template to exclude kotlin-stdlib-jdk7/jdk8 (merged into stdlib since 1.8+).
           PATCH_BLOCK=$(printf '\n// --- Kotlin stdlib duplicate class fix (injected by CI) ---\nconfigurations.all {\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk7'"'"'\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk8'"'"'\n}\n')
 
-          # 1. Patch the pip-installed p4a SDL2 bootstrap template
-          P4A_SITE=$(python -c "import pythonforandroid; import os; print(os.path.dirname(pythonforandroid.__file__))" 2>/dev/null || true)
-          if [ -n "$P4A_SITE" ]; then
-            BUILD_TMPL="$P4A_SITE/bootstraps/sdl2/build/build.gradle"
-            if [ -f "$BUILD_TMPL" ] && ! grep -q 'kotlin-stdlib-jdk7' "$BUILD_TMPL"; then
-              echo "$PATCH_BLOCK" >> "$BUILD_TMPL"
-              echo "✅ Patched pip-installed p4a template: $BUILD_TMPL"
-            else
-              echo "ℹ️  pip p4a template already patched or not found at: $BUILD_TMPL"
-            fi
+          PATCHED=0
+
+          # 1. Patch the git-cloned p4a SDL2 bootstrap template
+          P4A_TMPL="src/android/.buildozer/android/platform/python-for-android/pythonforandroid/bootstraps/sdl2/build/build.gradle"
+          if [ -f "$P4A_TMPL" ] && ! grep -q 'kotlin-stdlib-jdk7' "$P4A_TMPL"; then
+            echo "$PATCH_BLOCK" >> "$P4A_TMPL"
+            echo "✅ Patched git-cloned p4a template: $P4A_TMPL"
+            PATCHED=$((PATCHED+1))
+          elif [ -f "$P4A_TMPL" ]; then
+            echo "ℹ️  p4a template already patched"
           else
-            echo "⚠️  pythonforandroid not installed yet (will be installed by buildozer)"
+            echo "⚠️  p4a template not found at: $P4A_TMPL"
           fi
 
-          # 2. Patch any existing cached dist build.gradle files
+          # 2. Patch all generated dist build.gradle files (from cache)
           for bg in $(find src/android/.buildozer -path '*/dists/*/build.gradle' -type f 2>/dev/null); do
             if ! grep -q 'kotlin-stdlib-jdk7' "$bg"; then
               echo "$PATCH_BLOCK" >> "$bg"
-              echo "✅ Patched cached dist build.gradle: $bg"
+              echo "✅ Patched dist build.gradle: $bg"
+              PATCHED=$((PATCHED+1))
+            else
+              echo "ℹ️  Already patched: $bg"
             fi
           done
+
+          echo "=== Total files patched: $PATCHED ==="
 
 
       - name: Build debug APK
@@ -275,9 +280,55 @@ jobs:
           echo "=== Build exit code: $BUILD_EXIT ==="
           
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "❌ Buildozer failed! Last 200 lines of log:"
-            tail -200 build.log
-            exit $BUILD_EXIT
+            echo "⚠️ First build attempt failed. Checking for Kotlin stdlib conflict..."
+            if grep -q 'checkDebugDuplicateClasses FAILED\|kotlin-stdlib-jdk[78]' build.log; then
+              echo "🔧 Detected Kotlin stdlib duplicate class error. Patching dist build.gradle and retrying..."
+              
+              # Patch ALL dist build.gradle files
+              PATCH_BLOCK=$(printf '\n// --- Kotlin stdlib duplicate class fix (injected by CI) ---\nconfigurations.all {\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk7'"'"'\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk8'"'"'\n}\n')
+              
+              for bg in $(find .buildozer -path '*/dists/*/build.gradle' -type f 2>/dev/null); do
+                if ! grep -q 'kotlin-stdlib-jdk7' "$bg"; then
+                  echo "$PATCH_BLOCK" >> "$bg"
+                  echo "✅ Patched: $bg"
+                fi
+              done
+              
+              # Also patch the p4a template for future dist recreations
+              P4A_TMPL=".buildozer/android/platform/python-for-android/pythonforandroid/bootstraps/sdl2/build/build.gradle"
+              if [ -f "$P4A_TMPL" ] && ! grep -q 'kotlin-stdlib-jdk7' "$P4A_TMPL"; then
+                echo "$PATCH_BLOCK" >> "$P4A_TMPL"
+                echo "✅ Patched p4a template: $P4A_TMPL"
+              fi
+              
+              # Re-run gradle directly from the dist directory
+              DIST_DIR=$(find .buildozer -path '*/dists/glossarion' -type d | head -1)
+              if [ -n "$DIST_DIR" ] && [ -f "$DIST_DIR/gradlew" ]; then
+                echo "🔄 Re-running gradle from: $DIST_DIR"
+                cd "$DIST_DIR"
+                ./gradlew assembleDebug 2>&1 | tee -a "$OLDPWD/build.log"
+                GRADLE_EXIT=$?
+                cd "$OLDPWD"
+                if [ $GRADLE_EXIT -eq 0 ]; then
+                  echo "✅ Gradle retry succeeded!"
+                  # Run buildozer again to package the APK properly
+                  buildozer android debug 2>&1 | tee -a build.log
+                  BUILD_EXIT=$?
+                else
+                  echo "❌ Gradle retry also failed (exit $GRADLE_EXIT)"
+                  tail -100 build.log
+                  exit $GRADLE_EXIT
+                fi
+              else
+                echo "❌ Could not find dist directory for retry"
+                tail -200 build.log
+                exit $BUILD_EXIT
+              fi
+            else
+              echo "❌ Buildozer failed with a non-Kotlin error"
+              tail -200 build.log
+              exit $BUILD_EXIT
+            fi
           fi
       
       - name: Find APK
