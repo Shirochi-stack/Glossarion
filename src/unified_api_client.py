@@ -12448,17 +12448,7 @@ class UnifiedClient:
                                 print(f"   💭 Thinking tokens used: {thinking_tokens:,}")
                                 thinking_tokens_displayed = True
                             elif is_gemini_3 and thinking_level:
-                                # Debug: dump completion_tokens_details to find the thinking token field
-                                _dbg = ""
-                                try:
-                                    if usage and hasattr(usage, 'model_dump'):
-                                        _u_d = usage.model_dump()
-                                        _ctd_d = _u_d.get('completion_tokens_details')
-                                        _ptd_d = _u_d.get('prompt_tokens_details')
-                                        _dbg = f"ctd={_ctd_d}, ptd={_ptd_d}, total={_u_d.get('total_tokens')}, prompt={_u_d.get('prompt_tokens')}, completion={_u_d.get('completion_tokens')}"
-                                except Exception:
-                                    _dbg = "?"
-                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level}) [debug: {_dbg}]")
+                                print(f"   💭 Thinking tokens used: 0 (thinking level: {thinking_level})")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == 0:
                                 print(f"   ✅ Thinking disabled")
