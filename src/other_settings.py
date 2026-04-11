@@ -940,6 +940,12 @@ def _sync_thoughts_lock_state(self, stream_thinking_on):
             cb.blockSignals(True)
             cb.setChecked(False)
             cb.blockSignals(False)
+            # Manually hide the ✓ overlay since stateChanged didn't fire
+            from PySide6.QtWidgets import QLabel
+            for child in cb.findChildren(QLabel):
+                if child.text() == "✓":
+                    child.hide()
+                    break
             self.enable_thoughts_var = False
             self.config['enable_thoughts'] = False
             os.environ['ENABLE_THOUGHTS'] = '0'
