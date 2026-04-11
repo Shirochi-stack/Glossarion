@@ -936,6 +936,13 @@ def _sync_thoughts_lock_state(self, stream_thinking_on):
                 cb.style().polish(cb)
                 cb.update()
                 cb._mode_locked = False
+            # Also uncheck thoughts when stream thinking is turned off
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+            self.enable_thoughts_var = False
+            self.config['enable_thoughts'] = False
+            os.environ['ENABLE_THOUGHTS'] = '0'
     except Exception:
         pass
 
