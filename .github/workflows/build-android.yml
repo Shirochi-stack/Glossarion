@@ -47,7 +47,7 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer==1.5.0 "cython<3" virtualenv
+          pip install buildozer==1.5.0 "cython<3" virtualenv python-for-android
       
       - name: Restore Buildozer cache
         uses: actions/cache/restore@v4
@@ -219,16 +219,35 @@ jobs:
                           pass
           STUBEOF
       
-      - name: Inject build_extras.gradle into cached dist
+      - name: Patch p4a build.gradle to fix Kotlin stdlib conflict
         run: |
-          # Ensure build_extras.gradle exists in any cached p4a dist.
-          # p4a's SDL2 bootstrap applies this file automatically if present.
-          EXTRAS="src/android/build_extras.gradle"
-          if [ -f "$EXTRAS" ]; then
-            for dist_dir in $(find src/android/.buildozer -path '*/dists/glossarion' -type d 2>/dev/null); do
-              cp -v "$EXTRAS" "$dist_dir/"
-            done
+          # Buildozer installs p4a via pip. We need to patch the build.gradle
+          # template inside the installed pythonforandroid package to exclude
+          # kotlin-stdlib-jdk7/jdk8 (merged into kotlin-stdlib since 1.8+).
+          PATCH_BLOCK=$(printf '\n// --- Kotlin stdlib duplicate class fix (injected by CI) ---\nconfigurations.all {\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk7'"'"'\n    exclude group: '"'"'org.jetbrains.kotlin'"'"', module: '"'"'kotlin-stdlib-jdk8'"'"'\n}\n')
+
+          # 1. Patch the pip-installed p4a SDL2 bootstrap template
+          P4A_SITE=$(python -c "import pythonforandroid; import os; print(os.path.dirname(pythonforandroid.__file__))" 2>/dev/null || true)
+          if [ -n "$P4A_SITE" ]; then
+            BUILD_TMPL="$P4A_SITE/bootstraps/sdl2/build/build.gradle"
+            if [ -f "$BUILD_TMPL" ] && ! grep -q 'kotlin-stdlib-jdk7' "$BUILD_TMPL"; then
+              echo "$PATCH_BLOCK" >> "$BUILD_TMPL"
+              echo "✅ Patched pip-installed p4a template: $BUILD_TMPL"
+            else
+              echo "ℹ️  pip p4a template already patched or not found at: $BUILD_TMPL"
+            fi
+          else
+            echo "⚠️  pythonforandroid not installed yet (will be installed by buildozer)"
           fi
+
+          # 2. Patch any existing cached dist build.gradle files
+          for bg in $(find src/android/.buildozer -path '*/dists/*/build.gradle' -type f 2>/dev/null); do
+            if ! grep -q 'kotlin-stdlib-jdk7' "$bg"; then
+              echo "$PATCH_BLOCK" >> "$bg"
+              echo "✅ Patched cached dist build.gradle: $bg"
+            fi
+          done
+
 
       - name: Build debug APK
         working-directory: src/android
