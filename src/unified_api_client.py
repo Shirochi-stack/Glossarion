@@ -14653,23 +14653,7 @@ class UnifiedClient:
                                         }
                                     }
                                 
-                                # Log once per thread
-                                try:
-                                    tls = self._get_thread_local_client()
-                                    if not hasattr(tls, 'gemini_openai_thinking_logged'):
-                                        tls.gemini_openai_thinking_logged = set()
-                                    state_key = (str(effective_model or ''), level)
-                                    if state_key not in tls.gemini_openai_thinking_logged:
-                                        tls.gemini_openai_thinking_logged.add(state_key)
-                                        try:
-                                            tname = threading.current_thread().name
-                                        except Exception:
-                                            tname = "unknown-thread"
-                                        self._debug_log(
-                                            f"🧠 [gemini-openai:{tname}] thinking_level={level.upper()}, include_thoughts={stream_thoughts} (model={effective_model})"
-                                        )
-                                except Exception:
-                                    pass
+                                
                         except Exception:
                             pass
                     
