@@ -9791,10 +9791,11 @@ class UnifiedClient:
                 elapsed += dt
         
         # Log stagger status — shows queued+delay or immediate in-progress
-        # (Skip for authgem providers — they emit this after their own config summary)
+        # (Skip for authgem and native gemini providers — they emit this after their own config summary)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
-        if not _is_authgem and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+        _is_native_gemini = _model_lower.startswith('gemini')
+        if not _is_authgem and not _is_native_gemini and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
@@ -12357,6 +12358,9 @@ class UnifiedClient:
                             gemini_endpoint = gemini_endpoint + '/openai/'
                     
                     # Call OpenAI-compatible endpoint
+                    import threading as _thr
+                    if not self._is_stop_requested():
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress")
                     response = self._send_openai_compatible(
                         messages=messages,
                         temperature=temperature,
@@ -12377,34 +12381,36 @@ class UnifiedClient:
                         raw_resp = response.raw_response
                         
                         # Check multiple possible locations for thinking tokens
+                        # raw_resp is a JSON dict from _send_openai_compatible
                         thinking_tokens = 0
                         
-                        # Check in usage object
-                        if hasattr(raw_resp, 'usage'):
-                            usage = raw_resp.usage
-                            
-                            # Try various field names that might contain thinking tokens
-                            if hasattr(usage, 'thoughts_token_count'):
-                                thinking_tokens = usage.thoughts_token_count or 0
-                            elif hasattr(usage, 'thinking_tokens'):
-                                thinking_tokens = usage.thinking_tokens or 0
-                            elif hasattr(usage, 'reasoning_tokens'):
-                                thinking_tokens = usage.reasoning_tokens or 0
-                            
-                            # Also check if there's a breakdown in the usage
-                            if hasattr(usage, 'completion_tokens_details'):
-                                details = usage.completion_tokens_details
-                                if hasattr(details, 'reasoning_tokens'):
-                                    thinking_tokens = details.reasoning_tokens or 0
-                        
-                        # Check in the raw response itself
-                        if thinking_tokens == 0 and hasattr(raw_resp, '__dict__'):
-                            # Look for thinking-related fields in the response
-                            for field_name in ['thoughts_token_count', 'thinking_tokens', 'reasoning_tokens']:
-                                if field_name in raw_resp.__dict__:
-                                    thinking_tokens = raw_resp.__dict__[field_name] or 0
-                                    if thinking_tokens > 0:
-                                        break
+                        # Check in usage dict
+                        usage = raw_resp.get('usage') if isinstance(raw_resp, dict) else getattr(raw_resp, 'usage', None)
+                        if usage:
+                            if isinstance(usage, dict):
+                                # Dict access for JSON response
+                                thinking_tokens = usage.get('thoughts_token_count', 0) or 0
+                                if not thinking_tokens:
+                                    thinking_tokens = usage.get('thinking_tokens', 0) or 0
+                                if not thinking_tokens:
+                                    thinking_tokens = usage.get('reasoning_tokens', 0) or 0
+                                # Check completion_tokens_details
+                                if not thinking_tokens:
+                                    details = usage.get('completion_tokens_details') or {}
+                                    if isinstance(details, dict):
+                                        thinking_tokens = details.get('reasoning_tokens', 0) or 0
+                            else:
+                                # Object attribute access (fallback)
+                                if hasattr(usage, 'thoughts_token_count'):
+                                    thinking_tokens = usage.thoughts_token_count or 0
+                                elif hasattr(usage, 'thinking_tokens'):
+                                    thinking_tokens = usage.thinking_tokens or 0
+                                elif hasattr(usage, 'reasoning_tokens'):
+                                    thinking_tokens = usage.reasoning_tokens or 0
+                                if not thinking_tokens and hasattr(usage, 'completion_tokens_details'):
+                                    details = usage.completion_tokens_details
+                                    if hasattr(details, 'reasoning_tokens'):
+                                        thinking_tokens = details.reasoning_tokens or 0
                         
                         # Display thinking tokens if found or if thinking was requested - only if not stopping
                         if supports_thinking and not self._is_stop_requested():
@@ -12465,6 +12471,8 @@ class UnifiedClient:
                     
                     if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
+                        import threading as _thr
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress")
                     
                     try:
                         if use_streaming:
@@ -12533,6 +12541,9 @@ class UnifiedClient:
                 
                 else:
                     # Native Gemini API call
+                    import threading as _thr
+                    if not self._is_stop_requested():
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress")
                     # Prepare content based on whether we have images
                     contents = []
                     has_raw_objects = any(msg.get('_raw_content_object') for msg in messages)
