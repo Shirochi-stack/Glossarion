@@ -218,17 +218,23 @@ jobs:
             echo "APK_PATH=$APK_PATH"
             ls -la $GITHUB_WORKSPACE/src/android/bin/ 2>/dev/null || echo "bin/ not found"
             test -n "$APK_PATH" || { echo "No APK found, skipping"; exit 0; }
+            echo "=== APK architecture check ==="
+            unzip -l "$APK_PATH" | grep -E '\.so$' | head -20
+            echo "=== Emulator ABI ==="
+            adb shell getprop ro.product.cpu.abi
+            adb shell getprop ro.product.cpu.abilist
             echo "=== Installing APK ==="
-            adb install --no-streaming "$APK_PATH" 2>&1 || adb install "$APK_PATH" 2>&1 || { echo "APK install failed (ABI mismatch). Skipping launch."; exit 0; }
-            echo "=== Clearing logcat ==="
-            adb logcat -c
+            adb install --no-streaming "$APK_PATH" > $GITHUB_WORKSPACE/adb-install.log 2>&1 || adb install "$APK_PATH" >> $GITHUB_WORKSPACE/adb-install.log 2>&1
+            cat $GITHUB_WORKSPACE/adb-install.log
+            echo "=== Verifying installation ==="
+            adb shell pm list packages | grep glossarion || { echo "PACKAGE NOT INSTALLED — install failed"; cat $GITHUB_WORKSPACE/adb-install.log; exit 0; }
             echo "=== Launching app ==="
             adb shell am start -n com.glossarion.glossarion/org.kivy.android.PythonActivity
             echo "=== Waiting 30s for app to start or crash ==="
             sleep 30
             echo "=== Dumping logcat ==="
             adb logcat -d > $GITHUB_WORKSPACE/emulator-logcat-full.log 2>&1
-            grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime)' $GITHUB_WORKSPACE/emulator-logcat-full.log > $GITHUB_WORKSPACE/emulator-logcat-filtered.log 2>/dev/null || true
+            grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime|Exception|Error)' $GITHUB_WORKSPACE/emulator-logcat-full.log > $GITHUB_WORKSPACE/emulator-logcat-filtered.log 2>/dev/null || true
             echo "=== Filtered logcat (last 300 lines) ==="
             tail -300 $GITHUB_WORKSPACE/emulator-logcat-filtered.log
             echo "=== Process check ==="
@@ -243,6 +249,7 @@ jobs:
           path: |
             emulator-logcat-full.log
             emulator-logcat-filtered.log
+            adb-install.log
           if-no-files-found: ignore
       
       - name: Upload to Release (if tagged)
