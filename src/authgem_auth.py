@@ -68,6 +68,30 @@ def is_cancelled() -> bool:
     return _cancel_event.is_set()
 
 
+def _is_externally_stopped() -> bool:
+    """Check if any external stop flag has been raised.
+
+    Combines the authgem-internal ``_cancel_event`` with the global stop
+    flags used by the translation engine and manga integration so that
+    an in-flight stream is aborted promptly when the user presses Stop.
+    """
+    if _cancel_event.is_set():
+        return True
+    # Check unified_api_client's module-level global stop flag
+    try:
+        from unified_api_client import global_stop_flag
+        if global_stop_flag:
+            return True
+    except Exception:
+        pass
+    # Env-var-based stops set by the manga / translation engine
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return True
+    if os.environ.get("GRACEFUL_STOP") == "1":
+        return True
+    return False
+
+
 # ===========================================================================
 # Constants – Gemini CLI OAuth client (same as google-gemini/gemini-cli)
 # ===========================================================================
@@ -1590,6 +1614,10 @@ def _stream_gemini_common(
     _model_name = body.get("model") or body.get("request", {}).get("model") or "?"
     _log(f"📤 [{_threading.current_thread().name}] API call in progress")
 
+    # Pre-flight: bail out immediately if a stop was already requested
+    if _is_externally_stopped():
+        raise RuntimeError("AuthGem: stream cancelled by user")
+
     t_start = time.time()
 
     # ── Non-streaming path: use generateContent instead of streamGenerateContent ──
@@ -1996,7 +2024,7 @@ def _stream_with_httpx_gemini(
             )
 
         for line in resp.iter_lines():
-            if _cancel_event.is_set():
+            if _is_externally_stopped():
                 resp.close()
                 raise RuntimeError("AuthGem: stream cancelled by user")
             if _process_gemini_sse_line(line, state, _log, log_stream, t_start, stream_thinking=stream_thinking):
@@ -2052,7 +2080,7 @@ def _stream_with_requests_gemini(
         )
 
     for raw_line in resp.iter_lines(chunk_size=1):
-        if _cancel_event.is_set():
+        if _is_externally_stopped():
             resp.close()
             raise RuntimeError("AuthGem: stream cancelled by user")
         if raw_line is None:
