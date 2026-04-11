@@ -16357,10 +16357,16 @@ class UnifiedClient:
                 if _authgpt_reset_cancel is not None:
                     _authgpt_reset_cancel()
 
-                # Determine connect timeout: only apply a separate connect
-                # timeout when the user has HTTP tuning enabled.
+                # Determine connect/read timeout: only apply overrides
+                # when the user has HTTP tuning enabled.
                 _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
                 _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+                _read_timeout = self.request_timeout
+                if _http_tuning_on:
+                    try:
+                        _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+                    except (ValueError, TypeError):
+                        pass
 
                 result = _authgpt_send(
                     access_token=access_token,
@@ -16368,7 +16374,7 @@ class UnifiedClient:
                     model=actual_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    timeout=self.request_timeout,
+                    timeout=_read_timeout,
                     log_fn=print,
                     connect_timeout=_connect_timeout,
                 )
@@ -16642,6 +16648,12 @@ class UnifiedClient:
 
         _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
         _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+        _read_timeout = self.request_timeout
+        if _http_tuning_on:
+            try:
+                _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+            except (ValueError, TypeError):
+                pass
 
         print(f"🔐 AuthGem: Sending request to AI Studio (model={actual_model})")
 
@@ -16655,7 +16667,7 @@ class UnifiedClient:
                 model=actual_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=self.request_timeout,
+                timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
             )
@@ -16691,6 +16703,12 @@ class UnifiedClient:
 
         _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
         _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+        _read_timeout = self.request_timeout
+        if _http_tuning_on:
+            try:
+                _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+            except (ValueError, TypeError):
+                pass
 
         print(f"🔑 AuthGem-Key: Sending request to AI Studio (model={actual_model})")
 
@@ -16701,7 +16719,7 @@ class UnifiedClient:
                 model=actual_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=self.request_timeout,
+                timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
             )
@@ -16737,6 +16755,12 @@ class UnifiedClient:
 
         _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
         _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+        _read_timeout = self.request_timeout
+        if _http_tuning_on:
+            try:
+                _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+            except (ValueError, TypeError):
+                pass
 
         print(f"🔐 AuthGem-Vertex: Sending request to Vertex AI (model={actual_model})")
 
@@ -16749,7 +16773,7 @@ class UnifiedClient:
                 model=actual_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=self.request_timeout,
+                timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
             )
