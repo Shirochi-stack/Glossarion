@@ -1789,8 +1789,11 @@ def _process_gemini_sse_line(
                         if "\n" in combined:
                             parts_t = combined.split("\n")
                             for p in parts_t[:-1]:
-                                if p.strip():  # skip blank lines from \n\n
-                                    _log(f"    {p}")
+                                # Add visual separator before **bold** section headings
+                                # (matches gemini-grpc formatting)
+                                if p.strip().startswith("**") and state.get("_thinking_chunks", 0) > 1:
+                                    _log("\u200b")
+                                _log(f"    {p}")
                             state["_thought_log_buf"] = [parts_t[-1]]
                         else:
                             state["_thought_log_buf"] = thought_buf
