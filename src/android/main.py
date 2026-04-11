@@ -13,6 +13,40 @@ _src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
+# Add _backend/ to sys.path — contains shared translation engine + stubs
+_backend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_backend')
+if os.path.isdir(_backend_dir) and _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
+# Pre-register Android stubs for modules that don't exist on Android
+# (tiktoken, ebooklib, httpx, rapidfuzz, langdetect)
+# This MUST run before any _backend module is imported, because e.g.
+# TransateKRtoEN.py does `import tiktoken` at module level.
+try:
+    import importlib
+    _stub_map = {
+        'tiktoken': 'tiktoken_stub',
+        'ebooklib': 'ebooklib_stub',
+        'ebooklib.epub': 'ebooklib_stub',
+        'httpx': 'httpx_stub',
+        'rapidfuzz': 'rapidfuzz_stub',
+        'rapidfuzz.fuzz': 'rapidfuzz_stub',
+        'rapidfuzz.process': 'rapidfuzz_stub',
+        'langdetect': 'langdetect_stub',
+    }
+    for _mod_name, _stub_name in _stub_map.items():
+        if _mod_name not in sys.modules:
+            try:
+                importlib.import_module(_mod_name)
+            except ImportError:
+                try:
+                    _stub = importlib.import_module(_stub_name)
+                    sys.modules[_mod_name] = _stub
+                except Exception:
+                    pass
+except Exception:
+    pass  # stubs dir may not exist on desktop
+
 # Kivy config must be set BEFORE importing kivy
 os.environ['KIVY_LOG_LEVEL'] = 'info'
 
