@@ -2919,8 +2919,10 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
     temp_translator = None  # Track temporary translator for pool cleanup
     try:
         # ===== CANCELLATION CHECK: At start of sync inpainting =====
-        if _is_translation_cancelled(self):
-            print(f"[INPAINT_SYNC] Cancelled at start")
+        # Only abort on FORCE stop — graceful stop should let inpainting finish
+        # since it runs concurrently with translation and aborting wastes the work.
+        if _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1':
+            print(f"[INPAINT_SYNC] Force-cancelled at start")
             return None
         
         import cv2
@@ -3051,9 +3053,9 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                     while time.time() - start_time < poll_timeout:
                         attempt += 1
                         
-                        # Check for cancellation while polling
-                        if _is_translation_cancelled(self):
-                            print(f"[INPAINT_SYNC] Cancelled while waiting for inpainter")
+                        # Check for cancellation while polling — only abort on force stop
+                        if _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1':
+                            print(f"[INPAINT_SYNC] Force-cancelled while waiting for inpainter")
                             return None
                         
                         with MangaTranslator._inpaint_pool_lock:
@@ -3123,9 +3125,9 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                 print(f"[INPAINT_SYNC] No valid model path for {local_model}")
                 return None
             
-            # ===== CANCELLATION CHECK: Before running inpainting =====
-            if _is_translation_cancelled(self):
-                print(f"[INPAINT_SYNC] Cancelled before inpainting")
+            # ===== CANCELLATION CHECK: Before running inpainting — only abort on force stop =====
+            if _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1':
+                print(f"[INPAINT_SYNC] Force-cancelled before inpainting")
                 return None
             
             # Run inpainting
