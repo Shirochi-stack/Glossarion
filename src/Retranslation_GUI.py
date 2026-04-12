@@ -1825,6 +1825,25 @@ class RetranslationMixin:
         def _show_glossary_progress():
             """Show glossary extraction progress for all EPUBs with progress files."""
             try:
+                # Reuse cached dialog if it still exists
+                _cached = getattr(dialog, '_glossary_progress_dialog', None)
+                if _cached is not None:
+                    try:
+                        # Refresh all panels before showing
+                        for rfn in getattr(dialog, '_gp_refresh_funcs', []):
+                            try:
+                                rfn()
+                            except Exception:
+                                pass
+                        _cached.show()
+                        _cached.raise_()
+                        _cached.activateWindow()
+                        return
+                    except RuntimeError:
+                        # Widget was deleted
+                        dialog._glossary_progress_dialog = None
+                        dialog._gp_refresh_funcs = []
+                
                 # Gather all EPUB paths from multi-file dialog or just this file
                 all_files = [file_path]
                 if parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog'):
@@ -1845,6 +1864,7 @@ class RetranslationMixin:
                 
                 # Create dialog
                 gp_dialog = QDialog(dialog)
+                gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
                 n_files = len(files_with_gp)
                 if n_files == 1:
                     gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {os.path.basename(files_with_gp[0][0])}")
@@ -1991,7 +2011,7 @@ class RetranslationMixin:
                     "border-radius: 4px; font-size: 10pt; } "
                     "QPushButton:hover { background-color: #666; }"
                 )
-                close_btn.clicked.connect(gp_dialog.close)
+                close_btn.clicked.connect(gp_dialog.hide)
                 gp_main_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
                 
                 # Auto-refresh timer (2s) — calls all panel refresh functions
@@ -2011,6 +2031,10 @@ class RetranslationMixin:
                 _gp_timer.setInterval(2000)
                 _gp_timer.timeout.connect(_gp_refresh_all)
                 _gp_timer.start()
+                
+                # Cache on parent dialog so all tabs share the same instance
+                dialog._glossary_progress_dialog = gp_dialog
+                dialog._gp_refresh_funcs = all_refresh_funcs
                 
                 gp_dialog.show()
             
