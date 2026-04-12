@@ -1071,6 +1071,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         header.extend(custom_fields)
                     except:
                         custom_fields = []
+                    # Detect description from entry dicts if not already in custom_fields
+                    include_description_legacy = (
+                        'description' not in [f.lower() for f in custom_fields] and
+                        (os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
+                         any(entry.get('description', '').strip() for entry in sorted_glossary))
+                    )
+                    if include_description_legacy:
+                        header.append('description')
                     writer.writerow(header)
                     for entry in sorted_glossary:
                         entry_type = entry.get('type', 'term')
@@ -1080,7 +1088,9 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             row.append(entry.get('gender', ''))
                         for field in custom_fields:
                             row.append(entry.get(field, ''))
-                        expected_fields = 4 + len(custom_fields)
+                        if include_description_legacy:
+                            row.append(entry.get('description', ''))
+                        expected_fields = 4 + len(custom_fields) + (1 if include_description_legacy else 0)
                         while len(row) > expected_fields and row[-1] == '':
                             row.pop()
                         while len(row) < 3:
@@ -1116,6 +1126,13 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 except:
                     custom_fields = []
                 
+                # Detect if any entries have a description field (AI returned it)
+                # or if the user explicitly enabled it via GLOSSARY_INCLUDE_DESCRIPTION
+                include_description = (
+                    os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
+                    any(entry.get('description', '').strip() for entry in sorted_glossary)
+                )
+                
                 with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, suffix='.tmp') as temp_f:
                     temp_path = temp_f.name
                     
@@ -1125,6 +1142,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                     if has_gender:
                         column_headers.append('gender')
+                    if include_description and 'description' not in [f.lower() for f in custom_fields]:
+                        column_headers.append('description')
                     if custom_fields:
                         column_headers.extend(custom_fields)
                     temp_f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
@@ -1141,8 +1160,18 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                 gender = entry.get('gender', '')
                                 if gender and gender != 'Unknown':
                                     line += f" [{gender}]"
+                            # Write description directly from entry dict (not just custom_fields)
+                            desc_written = False
+                            if include_description:
+                                desc_value = entry.get('description', '').strip()
+                                if desc_value:
+                                    line += f": {desc_value}"
+                                    desc_written = True
                             custom_field_parts = []
                             for field in custom_fields:
+                                # Skip description if already written above
+                                if field.lower() == 'description' and desc_written:
+                                    continue
                                 value = entry.get(field, '').strip()
                                 if value:
                                     if field.lower() in ['description', 'notes', 'details']:
@@ -1188,6 +1217,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             header.extend(custom_fields)
                         except:
                             custom_fields = []
+                        # Detect description from entry dicts if not already in custom_fields
+                        include_description_legacy = (
+                            'description' not in [f.lower() for f in custom_fields] and
+                            (os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
+                             any(entry.get('description', '').strip() for entry in sorted_glossary))
+                        )
+                        if include_description_legacy:
+                            header.append('description')
                         writer.writerow(header)
                         for entry in sorted_glossary:
                             entry_type = entry.get('type', 'term')
@@ -1197,6 +1234,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                 row.append(entry.get('gender', ''))
                             for field in custom_fields:
                                 row.append(entry.get(field, ''))
+                            if include_description_legacy:
+                                row.append(entry.get('description', ''))
                             writer.writerow(row)
                 else:
                     grouped_entries = {}
