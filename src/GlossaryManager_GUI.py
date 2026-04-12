@@ -4238,19 +4238,71 @@ CRITICAL EXTRACTION RULES:
                        entries = []
                        with open(path, 'r', encoding='utf-8') as f:
                            reader = csv.reader(f)
-                           for row in reader:
+                           rows = list(reader)
+
+                       # Detect header row: first row whose first cell is 'type'
+                       header_names = None
+                       data_start = 0
+                       if rows and rows[0] and rows[0][0].strip().lower() == 'type':
+                           header_names = [h.strip().lower() for h in rows[0]]
+                           data_start = 1
+
+                       if header_names:
+                           # Build column map from header
+                           col_map = {}  # name -> index
+                           for i, name in enumerate(header_names):
+                               col_map[name] = i
+                           expected_cols = len(header_names)
+
+                           # Find the description column index if it exists
+                           desc_idx = col_map.get('description', -1)
+                           # Count how many named columns come AFTER description
+                           cols_after_desc = 0
+                           if desc_idx >= 0:
+                               cols_after_desc = expected_cols - desc_idx - 1
+
+                           for row in rows[data_start:]:
+                               if not row or len(row) < 3:
+                                   continue
+                               entry = {}
+                               excess = len(row) - expected_cols
+
+                               if excess > 0 and desc_idx >= 0:
+                                   # Row has more cells than expected — description has unquoted commas.
+                                   # Assign columns before description normally
+                                   for name, idx in col_map.items():
+                                       if idx < desc_idx:
+                                           entry[name] = row[idx] if idx < len(row) else ''
+                                   # Assign columns after description from the END of the row
+                                   after_desc_names = [n for n, i in sorted(col_map.items(), key=lambda x: x[1]) if i > desc_idx]
+                                   for offset, name in enumerate(after_desc_names):
+                                       # Read from the tail end of the row
+                                       tail_idx = len(row) - cols_after_desc + offset
+                                       entry[name] = row[tail_idx] if tail_idx < len(row) else ''
+                                   # Everything in the middle is the description
+                                   desc_end = len(row) - cols_after_desc
+                                   entry['description'] = ', '.join(row[desc_idx:desc_end])
+                               else:
+                                   # Normal case — row has expected number of cells (or fewer)
+                                   for name, idx in col_map.items():
+                                       entry[name] = row[idx] if idx < len(row) else ''
+
+                               entries.append(entry)
+                       else:
+                           # No header — fall back to positional parsing
+                           for row in rows[data_start:]:
                                if len(row) >= 3:
                                    entry = {
                                        'type': row[0],
                                        'raw_name': row[1],
                                        'translated_name': row[2]
                                    }
-                                   if row[0] == 'character' and len(row) > 3:
+                                   if len(row) > 3:
                                        entry['gender'] = row[3]
-                                   # include any extra columns
                                    if len(row) > 4:
-                                       entry['description'] = row[4]
+                                       entry['description'] = ', '.join(row[4:])
                                    entries.append(entry)
+
                        self.current_glossary_data = entries
                        self.current_glossary_format = 'list'
                        for e in entries:
@@ -4518,6 +4570,7 @@ CRITICAL EXTRACTION RULES:
                                    extra_fields.append(k)
                        with open(path, 'w', encoding='utf-8', newline='') as f:
                            writer = csv.writer(f)
+                           writer.writerow(standard_fields + extra_fields)
                            for entry in self.current_glossary_data:
                                row = [
                                    entry.get('type', ''),
