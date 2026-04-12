@@ -1514,8 +1514,154 @@ class EPUBCompiler:
                                 for num in list(translated_headers.keys())[:3]:
                                     self.log(f"    Chapter {num}: {translated_headers[num]}")
                                 
-                                # Get the source EPUB path
+                                # --- Reconcile: detect new chapters added to the source EPUB ---
                                 source_epub_path = os.getenv('EPUB_PATH')
+                                if source_epub_path and os.path.exists(source_epub_path):
+                                    try:
+                                        source_mapping, spine_order = extract_source_chapters_with_opf_mapping(
+                                            source_epub_path, self.log
+                                        )
+                                        
+                                        # Build numbered headers from spine for comparison
+                                        from translate_headers_standalone import get_basename_without_ext
+                                        all_source_headers = {}
+                                        for idx, src_file in enumerate(spine_order, 1):
+                                            src_basename = get_basename_without_ext(os.path.basename(src_file))
+                                            if src_basename in source_mapping:
+                                                all_source_headers[idx] = source_mapping[src_basename]
+                                        
+                                        existing_nums = set(chapters_info.keys()) if chapters_info else set()
+                                        current_nums = set(all_source_headers.keys())
+                                        new_nums = current_nums - existing_nums
+                                        
+                                        if new_nums:
+                                            self.log(f"📦 Source EPUB has {len(new_nums)} NEW chapter(s) not in translated_headers.txt: {sorted(new_nums)}")
+                                            
+                                            new_headers_to_translate = {n: all_source_headers[n] for n in sorted(new_nums)}
+                                            
+                                            # Try to translate the new entries
+                                            if hasattr(self, 'header_translator') and self.header_translator and \
+                                               hasattr(self.header_translator, 'client') and self.header_translator.client:
+                                                try:
+                                                    _hpb = getattr(self, 'headers_per_batch', -1)
+                                                    new_translations = self.header_translator.translate_headers_batch(
+                                                        new_headers_to_translate,
+                                                        batch_size=_hpb if _hpb > 0 else None,
+                                                        translation_type='header'
+                                                    ) or {}
+                                                    
+                                                    if new_translations:
+                                                        self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                                        translated_headers.update(new_translations)
+                                                        
+                                                        # Append new entries to the existing file
+                                                        try:
+                                                            with open(translations_file, 'r', encoding='utf-8') as f:
+                                                                existing_content = f.read()
+                                                            
+                                                            import re as _re
+                                                            summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                                            if summary_match:
+                                                                existing_content = existing_content[:summary_match.start()]
+                                                            
+                                                            with open(translations_file, 'w', encoding='utf-8') as f:
+                                                                f.write(existing_content.rstrip('\n') + '\n')
+                                                                
+                                                                for num in sorted(new_nums):
+                                                                    orig = all_source_headers.get(num, "")
+                                                                    trans = new_translations.get(num, orig)
+                                                                    f.write(f"Chapter {num}:\n")
+                                                                    f.write(f"  Original:   {orig}\n")
+                                                                    f.write(f"  Translated: {trans}\n")
+                                                                    if num not in new_translations:
+                                                                        f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                                                    f.write("-" * 40 + "\n")
+                                                                
+                                                                all_nums = sorted(existing_nums | new_nums)
+                                                                f.write(f"\nSummary:\n")
+                                                                f.write(f"Total chapters: {len(all_nums)}\n")
+                                                                if all_nums:
+                                                                    f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                                                f.write(f"Successfully translated: {len(translated_headers)}\n")
+                                                            
+                                                            self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                                        except Exception as append_err:
+                                                            self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
+                                                    else:
+                                                        self.log("⚠️ Translation of new headers returned no results — using originals")
+                                                        for num in new_nums:
+                                                            translated_headers[num] = all_source_headers[num]
+                                                except Exception as new_trans_err:
+                                                    self.log(f"⚠️ Failed to translate new headers: {new_trans_err}")
+                                                    for num in new_nums:
+                                                        translated_headers[num] = all_source_headers[num]
+                                            elif getattr(self, 'api_client', None):
+                                                # Try using api_client directly
+                                                try:
+                                                    from metadata_batch_translator import BatchHeaderTranslator
+                                                    _bt_config = {}
+                                                    if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                                                        _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                                                    if os.environ.get('BATCH_HEADER_PROMPT'):
+                                                        _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                                                    if os.environ.get('OUTPUT_LANGUAGE'):
+                                                        _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                                                    tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                                                    _hpb = getattr(self, 'headers_per_batch', -1)
+                                                    new_translations = tr.translate_headers_batch(
+                                                        new_headers_to_translate,
+                                                        batch_size=_hpb if _hpb > 0 else None,
+                                                        translation_type='header'
+                                                    ) or {}
+                                                    
+                                                    if new_translations:
+                                                        self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                                        translated_headers.update(new_translations)
+                                                        
+                                                        try:
+                                                            with open(translations_file, 'r', encoding='utf-8') as f:
+                                                                existing_content = f.read()
+                                                            import re as _re
+                                                            summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                                            if summary_match:
+                                                                existing_content = existing_content[:summary_match.start()]
+                                                            with open(translations_file, 'w', encoding='utf-8') as f:
+                                                                f.write(existing_content.rstrip('\n') + '\n')
+                                                                for num in sorted(new_nums):
+                                                                    orig = all_source_headers.get(num, "")
+                                                                    trans = new_translations.get(num, orig)
+                                                                    f.write(f"Chapter {num}:\n")
+                                                                    f.write(f"  Original:   {orig}\n")
+                                                                    f.write(f"  Translated: {trans}\n")
+                                                                    if num not in new_translations:
+                                                                        f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                                                    f.write("-" * 40 + "\n")
+                                                                all_nums = sorted(existing_nums | new_nums)
+                                                                f.write(f"\nSummary:\n")
+                                                                f.write(f"Total chapters: {len(all_nums)}\n")
+                                                                if all_nums:
+                                                                    f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                                                f.write(f"Successfully translated: {len(translated_headers)}\n")
+                                                            self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                                        except Exception as append_err:
+                                                            self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
+                                                    else:
+                                                        for num in new_nums:
+                                                            translated_headers[num] = all_source_headers[num]
+                                                except Exception as new_trans_err:
+                                                    self.log(f"⚠️ Failed to translate new headers via api_client: {new_trans_err}")
+                                                    for num in new_nums:
+                                                        translated_headers[num] = all_source_headers[num]
+                                            else:
+                                                self.log("⚠️ No translator/API client available — using original titles for new chapters")
+                                                for num in new_nums:
+                                                    translated_headers[num] = all_source_headers[num]
+                                    except Exception as recon_err:
+                                        self.log(f"⚠️ Reconciliation check failed: {recon_err} — proceeding with existing translations")
+                                
+                                # Get the source EPUB path (may already be set from reconciliation)
+                                if not source_epub_path:
+                                    source_epub_path = os.getenv('EPUB_PATH')
                                 self.log(f"  Source EPUB path: {source_epub_path}")
                                 
                                 if source_epub_path and os.path.exists(source_epub_path):
