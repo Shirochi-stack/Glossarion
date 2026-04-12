@@ -1621,6 +1621,11 @@ class RetranslationMixin:
                 gp_title.setStyleSheet("color: #52b788;")
                 gp_layout.addWidget(gp_title)
                 
+                gp_note = QLabel("ℹ️ Tracks Balanced / Full auto glossary modes (Extract Glossary logic)")
+                gp_note.setStyleSheet("color: #7a8a9e; font-size: 8pt; font-style: italic;")
+                gp_note.setWordWrap(True)
+                gp_layout.addWidget(gp_note)
+                
                 if book_title:
                     bt_label = QLabel(f"📖 {book_title}")
                     bt_label.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 10pt;")
