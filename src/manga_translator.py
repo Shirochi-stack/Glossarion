@@ -14535,10 +14535,11 @@ class MangaTranslator:
             
             def _task_inpaint():
                 try:
-                    # If graceful stop is active, skip all inpainting work immediately
+                    # If force stop is active (not graceful), skip all inpainting work
+                    # Graceful stop should let inpainting finish since it's concurrent
                     try:
-                        if os.environ.get('GRACEFUL_STOP') == '1':
-                            self._log("⏹️ Graceful stop active - skipping inpainting task", "warning")
+                        if self._check_stop() and os.environ.get('GRACEFUL_STOP') != '1':
+                            self._log("⏹️ Force stop active - skipping inpainting task", "warning")
                             return image.copy()
                     except Exception:
                         pass
@@ -14733,9 +14734,11 @@ class MangaTranslator:
                                     inpainted = image.copy()  # Fallback to original
                                     break
                                 
-                                # Check stop flag during wait
-                                if os.environ.get('GRACEFUL_STOP') == '1' or self._check_stop() or self.is_globally_cancelled():
-                                    self._log("⏹️ Early inpainting interrupted by stop request", "warning")
+                                # Check stop flag during wait — only interrupt on FORCE stop
+                                # Graceful stop should let early inpainting finish
+                                is_force_stop = (self._check_stop() or self.is_globally_cancelled()) and os.environ.get('GRACEFUL_STOP') != '1'
+                                if is_force_stop:
+                                    self._log("⏹️ Early inpainting interrupted by force stop", "warning")
                                     # Cancel the future if possible
                                     try:
                                         fut_inpaint_result.cancel()
