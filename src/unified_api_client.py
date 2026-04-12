@@ -13090,6 +13090,9 @@ class UnifiedClient:
                                             # If we already got text from .text, we don't need to rebuild it, 
                                             # but iterating ensures we validate structure.
                                             for part in candidate.content.parts:
+                                                # Skip thinking/reasoning parts — only extract actual output
+                                                if hasattr(part, 'thought') and part.thought is True:
+                                                    continue
                                                 # Extract text
                                                 if hasattr(part, 'text') and part.text:
                                                     if not text_content:

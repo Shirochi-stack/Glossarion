@@ -1648,6 +1648,14 @@ def parse_api_response(response_text: str) -> List[Dict]:
         # Clean up response text
         cleaned_text = response_text.strip()
         
+        # Strip AI thinking/reasoning blocks that may have leaked into the response.
+        # Various providers use different tags: <thinking>, <think>, <thought>, etc.
+        import re
+        cleaned_text = re.sub(
+            r'<(?:thinking|think|thought)>.*?</(?:thinking|think|thought)>',
+            '', cleaned_text, flags=re.DOTALL | re.IGNORECASE
+        ).strip()
+        
         # Remove markdown code blocks if present
         if '```json' in cleaned_text or '```' in cleaned_text:
             import re
