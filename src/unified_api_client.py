@@ -14727,12 +14727,8 @@ class UnifiedClient:
                                 
                                 if level != 'none':
                                     thinking_cfg = {"thinking_level": level.upper()}
-                                    # Always include thoughts so the API reports thinking token
-                                    # counts in usage metadata. The thought-flagged parts are
-                                    # already filtered out of the response content downstream.
-                                    # STREAM_THINKING_LOGS only controls whether we PRINT
-                                    # the thinking text during streaming — not whether we
-                                    # request it from the API.
+                                    # Always include thoughts so the API reports thinking
+                                    # token counts in usage metadata.
                                     thinking_cfg["include_thoughts"] = True
                                     extra_body["extra_body"] = {
                                         "google": {
@@ -15594,6 +15590,59 @@ class UnifiedClient:
                                 else:
                                     # Regular text response
                                     content = msg_content or ""
+                                    
+                                    # Gemini OAI non-streaming: the SDK flattens multipart
+                                    # content (including thought-flagged parts) into a single
+                                    # string.  Recover the original parts from the raw response
+                                    # object and filter out thought-flagged ones.
+                                    if content and is_gemini_endpoint:
+                                        _thought_stripped = False
+                                        try:
+                                            # Dump the raw response to get structured parts
+                                            _raw = None
+                                            if hasattr(resp, 'model_dump'):
+                                                _raw = resp.model_dump()
+                                            elif hasattr(resp, 'to_dict'):
+                                                _raw = resp.to_dict()
+                                            
+                                            if _raw and isinstance(_raw, dict):
+                                                _choices = _raw.get('choices', [])
+                                                if _choices and isinstance(_choices[0], dict):
+                                                    _msg = _choices[0].get('message', {})
+                                                    _raw_content = _msg.get('content') if isinstance(_msg, dict) else None
+                                                    
+                                                    # If content is a list of parts in the raw dump,
+                                                    # filter out thought-flagged parts
+                                                    if isinstance(_raw_content, list):
+                                                        _clean_parts = []
+                                                        for _part in _raw_content:
+                                                            if not isinstance(_part, dict):
+                                                                continue
+                                                            # Check thought flag
+                                                            _ec = _part.get('extra_content', {})
+                                                            _g = _ec.get('google', {}) if isinstance(_ec, dict) else {}
+                                                            if isinstance(_g, dict) and _g.get('thought') is True:
+                                                                continue
+                                                            if _part.get('type') == 'text':
+                                                                _clean_parts.append(_part.get('text', ''))
+                                                        if _clean_parts:
+                                                            content = ''.join(_clean_parts)
+                                                            _thought_stripped = True
+                                        except Exception:
+                                            pass
+                                        
+                                        # Fallback: strip XML thinking tags if raw dump didn't help
+                                        if not _thought_stripped:
+                                            import re as _re_think
+                                            content = _re_think.sub(
+                                                r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>',
+                                                '', content, flags=_re_think.DOTALL | _re_think.IGNORECASE
+                                            ).strip()
+                                            content = content.replace('</thought>', '').replace('<thought>', '')
+                                            content = content.replace('</thinking>', '').replace('<thinking>', '')
+                                            content = content.replace('</think>', '').replace('<think>', '')
+                                            content = content.strip()
+                                    
                                     if content is None and is_gemini_endpoint:
                                         content = "[BLOCKED BY GEMINI SAFETY FILTER]"
                                         finish_reason = 'content_filter'

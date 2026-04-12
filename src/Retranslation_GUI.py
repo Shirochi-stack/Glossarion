@@ -1888,7 +1888,7 @@ class RetranslationMixin:
             
             p_layout.addWidget(gp_listbox)
             
-            # Progress file path + open folder button
+            # Progress file path + open folder button + open glossary button
             path_row = QHBoxLayout()
             path_label = QLabel(f"📁 {gp_path}")
             path_label.setStyleSheet("color: #666; font-size: 8pt;")
@@ -1914,6 +1914,94 @@ class RetranslationMixin:
                     subprocess.Popen(['xdg-open', folder])
             open_folder_btn.clicked.connect(_open_gp_folder)
             path_row.addWidget(open_folder_btn)
+            
+            # ── Open Glossary button ──
+            open_glossary_btn = QPushButton("✏️ Open Glossary")
+            open_glossary_btn.setCursor(Qt.PointingHandCursor)
+            open_glossary_btn.setStyleSheet(
+                "QPushButton { background-color: #1e3a5f; color: #93c5fd; border: 1px solid #3b82f6; "
+                "border-radius: 3px; padding: 2px 8px; font-size: 8pt; } "
+                "QPushButton:hover { background-color: #1e40af; }"
+            )
+            open_glossary_btn.setFixedHeight(22)
+            
+            def _find_glossary_file(_gp_dir=_gp_folder, _epub_path=fp):
+                """Find the glossary file (csv/json/txt) in the same directory as the progress file."""
+                import glob
+                base = os.path.splitext(os.path.basename(_epub_path))[0]
+                # Search priority: book-specific glossary > generic glossary
+                for ext in ['.csv', '.json', '.txt', '.md']:
+                    for pattern in [
+                        os.path.join(_gp_dir, f"{base}_glossary{ext}"),
+                        os.path.join(_gp_dir, f"{base}{ext}"),
+                        os.path.join(_gp_dir, f"glossary{ext}"),
+                    ]:
+                        if os.path.isfile(pattern):
+                            return pattern
+                # Also check parent dir (if progress is in Glossary/ subfolder)
+                parent = os.path.dirname(_gp_dir)
+                if os.path.basename(_gp_dir).lower() == 'glossary':
+                    for ext in ['.csv', '.json', '.txt', '.md']:
+                        for pattern in [
+                            os.path.join(parent, f"glossary{ext}"),
+                            os.path.join(parent, f"{base}_glossary{ext}"),
+                        ]:
+                            if os.path.isfile(pattern):
+                                return pattern
+                return None
+            
+            def _open_glossary_file(_checked=False):
+                """Open the glossary file in the best available text editor."""
+                import subprocess, shutil, sys
+                
+                glossary_path = _find_glossary_file()
+                if not glossary_path or not os.path.isfile(glossary_path):
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.information(
+                        panel, "No Glossary Found",
+                        f"No glossary file found in:\n{_gp_folder}\n\n"
+                        "Expected: glossary.csv, glossary.json, or <book>_glossary.csv"
+                    )
+                    return
+                
+                try:
+                    if sys.platform == 'win32':
+                        _npp_paths = [
+                            r'C:\Program Files\Notepad++\notepad++.exe',
+                            r'C:\Program Files (x86)\Notepad++\notepad++.exe',
+                        ]
+                        _npp = next((p for p in _npp_paths if os.path.exists(p)), None)
+                        if _npp:
+                            subprocess.Popen([_npp, glossary_path])
+                        else:
+                            subprocess.Popen(['notepad.exe', glossary_path])
+                    elif sys.platform == 'darwin':
+                        if shutil.which('code'):
+                            subprocess.Popen(['code', glossary_path])
+                        else:
+                            subprocess.Popen(['open', '-t', glossary_path])
+                    else:
+                        if shutil.which('gedit'):
+                            subprocess.Popen(['gedit', glossary_path])
+                        elif shutil.which('kate'):
+                            subprocess.Popen(['kate', glossary_path])
+                        elif shutil.which('code'):
+                            subprocess.Popen(['code', glossary_path])
+                        else:
+                            _linux_editors = ['mousepad', 'xed', 'pluma', 'nano', 'xdg-open']
+                            _editor = next((e for e in _linux_editors if shutil.which(e)), 'xdg-open')
+                            subprocess.Popen([_editor, glossary_path])
+                except Exception as _e:
+                    print(f"⚠️ Could not open glossary editor: {_e}")
+            
+            open_glossary_btn.clicked.connect(_open_glossary_file)
+            # Show tooltip with glossary path if found
+            _initial_glossary = _find_glossary_file()
+            if _initial_glossary:
+                open_glossary_btn.setToolTip(f"Open in text editor:\n{_initial_glossary}")
+            else:
+                open_glossary_btn.setToolTip("No glossary file found yet")
+            path_row.addWidget(open_glossary_btn)
             
             p_layout.addLayout(path_row)
             
