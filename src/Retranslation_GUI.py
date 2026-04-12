@@ -1645,7 +1645,7 @@ class RetranslationMixin:
             n_completed = len(completed_indices)
             n_failed = len(failed_indices)
             n_merged = len(merged_indices)
-            n_remaining = max(0, total_epub_chapters - n_completed - n_merged)
+            n_remaining = max(0, total_epub_chapters - len(set(completed_indices) | set(failed_indices) | set(merged_indices)))
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
@@ -1676,7 +1676,7 @@ class RetranslationMixin:
             if n_merged == 0:
                 lbl_gp_merged.setVisible(False)
             
-            lbl_gp_remaining = QLabel(f"⬜ Remaining: {n_remaining}")
+            lbl_gp_remaining = QLabel(f"⬜ Not Completed: {n_remaining}")
             lbl_gp_remaining.setFont(gp_stats_font)
             lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
             lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
@@ -1709,7 +1709,7 @@ class RetranslationMixin:
                 elif ci in merged_set:
                     icon, status, color = '🔗', 'merged', '#17a2b8'
                 else:
-                    icon, status, color = '⬜', 'not_processed', '#5a9fd4'
+                    icon, status, color = '⬜', 'not_completed', '#5a9fd4'
                 
                 display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
                 item = QListWidgetItem(display)
@@ -1735,7 +1735,7 @@ class RetranslationMixin:
             lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed',), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
-            lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_processed',), gp_listbox)
+            lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed',), gp_listbox)
             
             p_layout.addWidget(gp_listbox)
             
@@ -1781,13 +1781,13 @@ class RetranslationMixin:
                     _merg = set(_d.get('merged_indices', []))
                     
                     _nc, _nf, _nm = len(_comp), len(_fail), len(_merg)
-                    _nr = max(0, total_epub_chapters - _nc - _nm)
+                    _nr = max(0, total_epub_chapters - len(_comp | _fail | _merg))
                     lbl_total.setText(f"Total: {total_epub_chapters} | ")
                     lbl_gp_completed.setText(f"✅ Completed: {_nc} | ")
                     lbl_gp_failed.setText(f"❌ Failed: {_nf} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {_nm} | ")
                     lbl_gp_merged.setVisible(_nm > 0)
-                    lbl_gp_remaining.setText(f"⬜ Remaining: {_nr}")
+                    lbl_gp_remaining.setText(f"⬜ Not Completed: {_nr}")
                     
                     _bt = _d.get('book_title', '')
                     if _bt and bt_label:
@@ -1805,14 +1805,14 @@ class RetranslationMixin:
                         elif ci in _merg:
                             new_status, new_color = 'merged', '#17a2b8'
                         else:
-                            new_status, new_color = 'not_processed', '#5a9fd4'
+                            new_status, new_color = 'not_completed', '#5a9fd4'
                         
                         if new_status != old_status:
                             fname = chapter_map.get(ci, f'chapter {ci + 1}')
                             import re as _re2
                             _nums2 = _re2.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                             ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
-                            _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_processed': '⬜'}
+                            _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
                             display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
                             item.setText(display2)
                             item.setForeground(QColor(new_color))
@@ -1950,19 +1950,19 @@ class RetranslationMixin:
                     nav_prev = QPushButton("◀")
                     nav_prev.setFixedWidth(36)
                     nav_prev.setStyleSheet(
-                        "QPushButton { background-color:#2d6a4f; color:white; font-weight:bold; "
-                        "font-size:13pt; border:1px solid #40916c; border-radius:4px; padding:4px; }"
-                        "QPushButton:hover { background-color:#40916c; }"
-                        "QPushButton:disabled { color:#666; background-color:#1a2a2a; }"
+                        "QPushButton { background-color:#3a3a3a; color:white; font-weight:bold; "
+                        "font-size:13pt; border:1px solid #5a9fd4; border-radius:4px; padding:4px; }"
+                        "QPushButton:hover { background-color:#4a8fc4; }"
+                        "QPushButton:disabled { color:#666; background-color:#2a2a2a; }"
                     )
                     
                     combo = QComboBox()
                     combo.setStyleSheet(
-                        "QComboBox { background-color:#2d6a4f; color:white; font-weight:bold; "
-                        "font-size:11pt; padding:6px 10px; border:1px solid #40916c; border-radius:4px; }"
+                        "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; "
+                        "font-size:11pt; padding:6px 10px; border:1px solid #5a9fd4; border-radius:4px; }"
                         "QComboBox::drop-down { border:none; }"
-                        "QComboBox QAbstractItemView { background-color:#1a3a2a; color:white; "
-                        "selection-background-color:#40916c; }"
+                        "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
+                        "selection-background-color:#5a9fd4; }"
                     )
                     
                     nav_counter = QLabel("1 / 1")
