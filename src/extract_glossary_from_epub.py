@@ -1248,7 +1248,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             except Exception as e2:
                 print(f"[Error] Failed to save CSV: {e2}")
             
-def extract_chapters_from_epub(epub_path: str) -> List[str]:
+def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) -> List:
+    """Extract chapters from EPUB for glossary extraction.
+    
+    Args:
+        epub_path: Path to the EPUB file
+        return_metadata: If True, returns list of (text, filename) tuples.
+                        If False (default), returns list of text strings for backward compat.
+    """
     chapters = []
     items = []
     
@@ -1332,9 +1339,9 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             
         try:
             # Skip special files when TRANSLATE_SPECIAL_FILES is disabled
+            item_name = item.get_name() if hasattr(item, 'get_name') else ''
             if not translate_special:
-                name = item.get_name() if hasattr(item, 'get_name') else ''
-                name_noext = os.path.splitext(os.path.basename(name))[0] if name else ''
+                name_noext = os.path.splitext(os.path.basename(item_name))[0] if item_name else ''
                 if name_noext:
                     name_lower = name_noext.lower()
                     # Strip trailing digits to catch files like notice01, cover001
@@ -1355,7 +1362,10 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             soup = BeautifulSoup(raw, 'html.parser')
             text = soup.get_text("\n", strip=True)
             if text:
-                chapters.append(text)
+                if return_metadata:
+                    chapters.append((text, os.path.basename(item_name) if item_name else ''))
+                else:
+                    chapters.append(text)
         except Exception as e:
             name = item.get_name() if hasattr(item, 'get_name') else repr(item)
             print(f"[Warning] Skipped corrupted chapter {name}: {e}")
@@ -3364,15 +3374,19 @@ def main(log_callback=None, stop_callback=None):
         # Import text processor
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(epub_path)
+        _chapter_filenames = {}  # No filename metadata for txt files
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
     elif is_pdf_file:
         # PDF: extract page-by-page using subprocess to prevent GUI lag
         chapters = _extract_pdf_chapters_for_glossary(epub_path, check_stop)
+        _chapter_filenames = {}  # No filename metadata for PDF files
 
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
     else:
-        # Existing EPUB code
-        chapters = extract_chapters_from_epub(epub_path)
+        # Existing EPUB code — request metadata so we can show filenames in logs
+        _raw_chapters = extract_chapters_from_epub(epub_path, return_metadata=True)
+        chapters = [text for text, _fn in _raw_chapters]
+        _chapter_filenames = {idx: fn for idx, (text, fn) in enumerate(_raw_chapters)}
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
         file_base = epub_base
 
@@ -3673,11 +3687,15 @@ def main(log_callback=None, stop_callback=None):
     if is_text_file:
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(args.epub)
+        _chapter_filenames = {}
     elif args.epub.lower().endswith('.pdf'):
         # PDF: extract page-by-page using subprocess to prevent GUI lag
         chapters = _extract_pdf_chapters_for_glossary(args.epub, check_stop)
+        _chapter_filenames = {}
     else:
-        chapters = extract_chapters_from_epub(args.epub)
+        _raw_chapters = extract_chapters_from_epub(args.epub, return_metadata=True)
+        chapters = [text for text, _fn in _raw_chapters]
+        _chapter_filenames = {idx: fn for idx, (text, fn) in enumerate(_raw_chapters)}
     
     if not chapters:
         print("No chapters found. Exiting.")
@@ -4513,7 +4531,12 @@ def main(log_callback=None, stop_callback=None):
                 # print(f"Skipping {terminology} {idx+1} (already processed)")  # Redundant - already shown in summary
                 continue
                     
-            print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
+            # Show filename alongside chapter number when available
+            _fname = _chapter_filenames.get(idx, '')
+            if _fname:
+                print(f"🔄 Processing Chapter {idx+1}/{total_chapters} ({_fname})")
+            else:
+                print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
             
             # Request merging: If this is a parent chapter, merge content from child chapters
             chapter_content = chap
