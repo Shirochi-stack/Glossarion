@@ -1645,10 +1645,10 @@ class RetranslationMixin:
             _comp_set_init = set(completed_indices)
             _merg_set_init = set(merged_indices)
             _fail_set_init = set(failed_indices)
-            n_comp_merged = len(_comp_set_init & _merg_set_init)
-            n_completed = len(_comp_set_init) - n_comp_merged
+            # Completed count excludes chapters that are also merged
+            n_completed = len(_comp_set_init - _merg_set_init)
             n_failed = len(_fail_set_init)
-            n_merged = len(_merg_set_init) - n_comp_merged
+            n_merged = len(_merg_set_init)
             n_remaining = max(0, total_epub_chapters - len(_comp_set_init | _fail_set_init | _merg_set_init))
             
             gp_stats_frame = QWidget()
@@ -1659,14 +1659,6 @@ class RetranslationMixin:
             lbl_total = QLabel(f"Total: {total_epub_chapters} | ")
             lbl_total.setFont(gp_stats_font)
             gp_stats_layout.addWidget(lbl_total)
-            
-            lbl_gp_comp_merged = QLabel(f"✅🔗 Completed + Merged: {n_comp_merged} | ")
-            lbl_gp_comp_merged.setFont(gp_stats_font)
-            lbl_gp_comp_merged.setStyleSheet("color: #2ecc71;")
-            lbl_gp_comp_merged.setCursor(Qt.PointingHandCursor)
-            gp_stats_layout.addWidget(lbl_gp_comp_merged)
-            if n_comp_merged == 0:
-                lbl_gp_comp_merged.setVisible(False)
             
             lbl_gp_completed = QLabel(f"✅ Completed: {n_completed} | ")
             lbl_gp_completed.setFont(gp_stats_font)
@@ -1716,12 +1708,10 @@ class RetranslationMixin:
                 _nums = _re.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                 ch_num = int(_nums[-1]) if _nums else ci + 1
                 
-                if ci in merged_set and ci in completed_set:
-                    icon, status, color = '✅🔗', 'completed_merged', '#2ecc71'
+                if ci in merged_set:
+                    icon, status, color = '🔗', 'merged', '#17a2b8'
                 elif ci in completed_set:
                     icon, status, color = '✅', 'completed', '#27ae60'
-                elif ci in merged_set:
-                    icon, status, color = '🔗', 'merged', '#17a2b8'
                 elif ci in failed_set:
                     icon, status, color = '❌', 'failed', '#e74c3c'
                 else:
@@ -1739,20 +1729,17 @@ class RetranslationMixin:
                 _comp2 = set(_d.get('completed', []))
                 _fail2 = set(_d.get('failed', []))
                 _merg2 = set(_d.get('merged_indices', []))
-                _n_cm2 = len(_comp2 & _merg2)
-                lbl_gp_comp_merged.setText(f"✅🔗 Completed + Merged: {_n_cm2} | ")
-                lbl_gp_comp_merged.setVisible(_n_cm2 > 0)
-                lbl_gp_completed.setText(f"✅ Completed: {len(_comp2) - _n_cm2} | ")
+                lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
                 lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
-                lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2) - _n_cm2} | ")
-                lbl_gp_merged.setVisible(len(_merg2) - _n_cm2 > 0)
+                lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
+                lbl_gp_merged.setVisible(len(_merg2) > 0)
                 lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, total_epub_chapters - len(_comp2 | _fail2 | _merg2))}")
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
                 # Gather selected items that are deletable
                 selected = gp_listbox.selectedItems()
-                deletable_statuses = ('completed', 'merged', 'failed', 'completed_merged')
+                deletable_statuses = ('completed', 'merged', 'failed')
                 targets = [(it, it.data(Qt.UserRole + 1)) for it in selected
                            if it.data(Qt.UserRole) in deletable_statuses and it.data(Qt.UserRole + 1) is not None]
                 if not targets:
@@ -1828,7 +1815,6 @@ class RetranslationMixin:
                     lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
                 return _handler
             
-            lbl_gp_comp_merged.mousePressEvent = _gp_make_cycle(('completed_merged',), gp_listbox)
             lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed',), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
@@ -1877,18 +1863,12 @@ class RetranslationMixin:
                     _fail = set(_d.get('failed', []))
                     _merg = set(_d.get('merged_indices', []))
                     
-                    _n_cm = len(_comp & _merg)
-                    _nc = len(_comp) - _n_cm
-                    _nf = len(_fail)
-                    _nm = len(_merg) - _n_cm
                     _nr = max(0, total_epub_chapters - len(_comp | _fail | _merg))
                     lbl_total.setText(f"Total: {total_epub_chapters} | ")
-                    lbl_gp_comp_merged.setText(f"✅🔗 Completed + Merged: {_n_cm} | ")
-                    lbl_gp_comp_merged.setVisible(_n_cm > 0)
-                    lbl_gp_completed.setText(f"✅ Completed: {_nc} | ")
-                    lbl_gp_failed.setText(f"❌ Failed: {_nf} | ")
-                    lbl_gp_merged.setText(f"🔗 Merged: {_nm} | ")
-                    lbl_gp_merged.setVisible(_nm > 0)
+                    lbl_gp_completed.setText(f"✅ Completed: {len(_comp - _merg)} | ")
+                    lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
+                    lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
+                    lbl_gp_merged.setVisible(len(_merg) > 0)
                     lbl_gp_remaining.setText(f"⬜ Not Completed: {_nr}")
                     
                     _bt = _d.get('book_title', '')
@@ -1900,12 +1880,10 @@ class RetranslationMixin:
                         if not item:
                             continue
                         old_status = item.data(Qt.UserRole)
-                        if ci in _comp and ci in _merg:
-                            new_status, new_color = 'completed_merged', '#2ecc71'
+                        if ci in _merg:
+                            new_status, new_color = 'merged', '#17a2b8'
                         elif ci in _comp:
                             new_status, new_color = 'completed', '#27ae60'
-                        elif ci in _merg:
-                            new_status, new_color = 'merged', '#17a2b8'
                         elif ci in _fail:
                             new_status, new_color = 'failed', '#e74c3c'
                         else:
@@ -1916,7 +1894,7 @@ class RetranslationMixin:
                             import re as _re2
                             _nums2 = _re2.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                             ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
-                            _icons = {'completed_merged': '✅🔗', 'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
+                            _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
                             display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
                             item.setText(display2)
                             item.setForeground(QColor(new_color))
