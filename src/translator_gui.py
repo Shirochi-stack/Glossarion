@@ -17940,16 +17940,20 @@ Important rules:
         try:
             if hasattr(self, 'append_log'):
                 if assigned:
-                    self.append_log(f"📑 Auto-mapped glossaries for {assigned}/{len(epubs)} EPUB(s)")
-                    # Show a short preview of mappings
-                    try:
-                        preview = log_pairs[:5]
-                        for epub_name, gloss_name in preview:
-                            self.append_log(f"   • {epub_name} → {gloss_name}")
-                        if len(log_pairs) > 5:
-                            self.append_log(f"   • …and {len(log_pairs) - 5} more")
-                    except Exception:
-                        pass
+                    # Deduplicate: only log when the mapping actually changed
+                    _map_key = tuple(sorted(mapping.items()))
+                    if getattr(self, '_last_automap_multilog_key', None) != _map_key:
+                        self._last_automap_multilog_key = _map_key
+                        self.append_log(f"📑 Auto-mapped glossaries for {assigned}/{len(epubs)} EPUB(s)")
+                        # Show a short preview of mappings
+                        try:
+                            preview = log_pairs[:5]
+                            for epub_name, gloss_name in preview:
+                                self.append_log(f"   • {epub_name} → {gloss_name}")
+                            if len(log_pairs) > 5:
+                                self.append_log(f"   • …and {len(log_pairs) - 5} more")
+                        except Exception:
+                            pass
                 else:
                     self.append_log("📑 Auto-map glossaries: no matches found")
         except Exception:
