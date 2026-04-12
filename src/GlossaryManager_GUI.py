@@ -4186,6 +4186,36 @@ CRITICAL EXTRACTION RULES:
                                    k, v = part.split(':', 1)
                                    extra_values[k.strip()] = v.strip()
 
+                       # Detect inline column names the AI wrote directly in the text
+                       # e.g. "description (fun fact: some value)"
+                       # e.g. "description, fun fact: some value"
+                       if desc and extra_columns:
+                           import re as _re
+                           for col in extra_columns:
+                               if col in extra_values:
+                                   continue  # already found via | split
+                               col_esc = _re.escape(col)
+                               # 1. Parenthesized: "(col_name: value)"
+                               p1 = _re.compile(r'\s*\(\s*' + col_esc + r'\s*:\s*(.*?)\)\s*$', _re.IGNORECASE)
+                               m1 = p1.search(desc)
+                               if m1:
+                                   extra_values[col] = m1.group(1).strip()
+                                   desc = desc[:m1.start()].strip().rstrip(',').strip()
+                                   continue
+                               # 2. Comma-prefixed: ", col_name: value"
+                               p2 = _re.compile(r',\s*' + col_esc + r'\s*:\s*', _re.IGNORECASE)
+                               m2 = p2.search(desc)
+                               if m2:
+                                   extra_values[col] = desc[m2.end():].strip()
+                                   desc = desc[:m2.start()].strip()
+                                   continue
+                               # 3. At start: "col_name: value"
+                               p3 = _re.compile(r'^' + col_esc + r'\s*:\s*', _re.IGNORECASE)
+                               m3 = p3.search(desc)
+                               if m3:
+                                   extra_values[col] = desc[m3.end():].strip()
+                                   desc = ''
+
                        gender = ''
                        if bracket:
                            gender = bracket
