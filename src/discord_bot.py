@@ -1349,8 +1349,8 @@ async def translate(
         os.environ['CONTEXTUAL'] = '0'
         # Disable emergency paragraph restoration
         os.environ['EMERGENCY_PARAGRAPH_RESTORE'] = '0'
-        # Enable AI artifact removal
-        os.environ['REMOVE_AI_ARTIFACTS'] = '1'
+        # Enable AI artifact removal (tiered: off/low/medium/high)
+        os.environ['REMOVE_AI_ARTIFACTS'] = 'medium'
         # Retain original source filenames (no 'response_' prefix)
         os.environ['RETAIN_SOURCE_EXTENSION'] = '1'
         

@@ -983,7 +983,7 @@ class GlossarionWeb:
             # OVERRIDE critical safety features AFTER config load
             # CORRECT variable name is EMERGENCY_PARAGRAPH_RESTORE (no ATION)
             os.environ['EMERGENCY_PARAGRAPH_RESTORE'] = '0'  # DISABLED
-            os.environ['REMOVE_AI_ARTIFACTS'] = '1'  # ENABLED
+            os.environ['REMOVE_AI_ARTIFACTS'] = 'medium'  # Tiered: off/low/medium/high
             
             # Debug: Verify ALL critical settings
             translation_logs.append(f"\n🔧 Debug: EMERGENCY_PARAGRAPH_RESTORE = '{os.environ.get('EMERGENCY_PARAGRAPH_RESTORE', 'NOT SET')}'")

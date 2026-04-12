@@ -292,7 +292,7 @@ def translate_chapter_streaming(
             try:
                 from TransateKRtoEN import PostProcessor
                 translated = PostProcessor.strip_split_markers(translated)
-                translated = PostProcessor.clean_ai_artifacts(translated, remove_artifacts=True)
+                translated = PostProcessor.clean_ai_artifacts(translated, remove_artifacts="medium")
             except Exception:
                 pass
 
