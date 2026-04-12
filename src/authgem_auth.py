@@ -1359,6 +1359,168 @@ def _code_assist_setup(access_token: str, _log=None, account_id: int = 0) -> Opt
     return project
 
 
+# ===========================================================================
+# Public status check — called by GUI "Check Status" button
+# ===========================================================================
+
+def check_account_status(access_token: str, account_id: int = 0) -> Dict:
+    """Check quota and verification status without side effects.
+
+    Calls ``loadCodeAssist`` and ``retrieveUserQuota`` and returns a dict:
+
+    - ``verified`` (bool): True if account is verified and has a project.
+    - ``verification_url`` (str|None): URL the user must visit if unverified.
+    - ``verification_message`` (str|None): Human message from the server.
+    - ``tier_name`` (str): Subscription tier name (e.g. "Standard", "Pro").
+    - ``sub_label`` (str): User-friendly subscription label.
+    - ``credit_label`` (str): Credit status string.
+    - ``g1_balance`` (int): Google One AI credit balance.
+    - ``project`` (str|None): Companion project ID.
+    - ``quota_buckets`` (list[dict]): Raw quota buckets from retrieveUserQuota.
+    - ``quota_lines`` (list[str]): Pre-formatted quota lines for display.
+    - ``quota_exhausted`` (bool): True if all buckets are ≈ empty.
+    - ``error`` (str|None): Error message if something went wrong.
+    """
+    result: Dict[str, Any] = {
+        "verified": True,
+        "verification_url": None,
+        "verification_message": None,
+        "tier_name": "unknown",
+        "sub_label": "Free tier",
+        "credit_label": "free tier (no credits)",
+        "g1_balance": 0,
+        "project": None,
+        "quota_buckets": [],
+        "quota_lines": [],
+        "quota_exhausted": False,
+        "error": None,
+    }
+
+    base = _code_assist_base_url()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "metadata": {
+            "ideType": "IDE_UNSPECIFIED",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        },
+    }
+
+    # --- 1. loadCodeAssist (tier + verification) ---
+    try:
+        try:
+            import httpx as _httpx
+            resp = _httpx.post(f"{base}:loadCodeAssist", json=payload, headers=headers, timeout=30)
+            resp_data = resp.json()
+        except ImportError:
+            resp = requests.post(f"{base}:loadCodeAssist", json=payload, headers=headers, timeout=30)
+            resp_data = resp.json()
+    except Exception as exc:
+        result["error"] = f"loadCodeAssist failed: {exc}"
+        return result
+
+    project = resp_data.get("cloudaicompanionProject")
+    result["project"] = project
+
+    # Check verification
+    for inelig in resp_data.get("ineligibleTiers", []):
+        v_url = inelig.get("validationUrl", "")
+        v_msg = inelig.get("reasonMessage", "Account verification required")
+        reason_code = inelig.get("reasonCode", "")
+        if v_url and reason_code == "VALIDATION_REQUIRED":
+            result["verified"] = False
+            result["verification_url"] = v_url
+            result["verification_message"] = v_msg
+            break
+
+    # Parse tier info
+    paid_tier = resp_data.get("paidTier") or {}
+    current_tier = resp_data.get("currentTier") or {}
+    tier = paid_tier if paid_tier else current_tier
+    tier_name = paid_tier.get("name") or current_tier.get("name", "unknown")
+    result["tier_name"] = tier_name
+
+    # Credits
+    available_credits = tier.get("availableCredits", [])
+    g1_credits = [c for c in available_credits if c.get("creditType") == "GOOGLE_ONE_AI"]
+    g1_balance = sum(int(c.get("creditAmount", 0)) for c in g1_credits) if g1_credits else 0
+    has_paid_tier = bool(paid_tier)
+    result["g1_balance"] = g1_balance
+
+    # Sub label
+    tier_lower = tier_name.lower() if tier_name else ""
+    if "ultra" in tier_lower:
+        result["sub_label"] = "Google AI Ultra ✨"
+    elif "pro" in tier_lower:
+        result["sub_label"] = "Google AI Pro ⭐"
+    elif "enterprise" in tier_lower:
+        result["sub_label"] = "Enterprise 🏢"
+    elif "standard" in tier_lower:
+        result["sub_label"] = "Standard"
+    elif tier_name and tier_name != "unknown":
+        result["sub_label"] = tier_name
+    else:
+        result["sub_label"] = "Free tier"
+
+    # Credit label
+    if g1_balance > 0:
+        result["credit_label"] = f"GOOGLE_ONE_AI ({g1_balance} credits)"
+    elif has_paid_tier:
+        result["credit_label"] = "enabled (paid tier)"
+    else:
+        result["credit_label"] = "free tier (no credits)"
+
+    # --- 2. retrieveUserQuota ---
+    try:
+        quota_url = f"{base}:retrieveUserQuota"
+        quota_payload = {"project": project} if project else {}
+        try:
+            import httpx as _httpx
+            q_resp = _httpx.post(quota_url, json=quota_payload, headers=headers, timeout=15)
+            q_data = q_resp.json()
+        except ImportError:
+            q_resp = requests.post(quota_url, json=quota_payload, headers=headers, timeout=15)
+            q_data = q_resp.json()
+
+        buckets = q_data.get("buckets", [])
+        result["quota_buckets"] = buckets
+        if buckets:
+            any_remaining = False
+            for b in buckets:
+                fraction = b.get("remainingFraction", 0) or 0
+                reset_time = b.get("resetTime", "")
+                model_id = b.get("modelId", "all")
+                pct_used = (1.0 - fraction) * 100
+
+                reset_str = ""
+                if reset_time:
+                    try:
+                        from datetime import datetime, timezone
+                        rt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
+                        local_rt = rt.astimezone()
+                        delta = rt - datetime.now(timezone.utc)
+                        hrs, rem = divmod(max(int(delta.total_seconds()), 0), 3600)
+                        mins = rem // 60
+                        reset_str = f"{local_rt.strftime('%I:%M %p').lstrip('0')} ({hrs}h {mins}m)"
+                    except Exception:
+                        reset_str = reset_time[:16]
+                else:
+                    reset_str = "midnight PT"
+
+                if fraction > 0.01:
+                    any_remaining = True
+                result["quota_lines"].append(f"  {model_id}: {pct_used:.1f}% used — resets {reset_str}")
+
+            result["quota_exhausted"] = not any_remaining
+    except Exception as exc:
+        logger.debug("check_account_status: retrieveUserQuota failed: %s", exc)
+
+    return result
+
+
 def send_chat_completion_aistudio(
     access_token: str,
     messages: List[Dict],

@@ -3661,6 +3661,8 @@ Recent translations to summarize:
             
             if needs_authgem:
                 self.authgem_login_btn.show()
+                if hasattr(self, 'authgem_status_btn'):
+                    self.authgem_status_btn.show()
                 self._update_authgem_login_status(needs_vertex=needs_vertex)
                 # Show project dropdown ONLY for authgem-vertex/ (Vertex AI needs GCP project)
                 if hasattr(self, 'authgem_project_combo'):
@@ -3680,6 +3682,8 @@ Recent translations to summarize:
                         self.authgem_project_combo.hide()
             else:
                 self.authgem_login_btn.hide()
+                if hasattr(self, 'authgem_status_btn'):
+                    self.authgem_status_btn.hide()
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.hide()
         
@@ -4276,6 +4280,99 @@ Recent translations to summarize:
         self.append_log(f"❌ Gemini login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"Gemini login failed:\n{err}")
 
+    # ==================================================================
+    # AuthGem Status — check quota / verification
+    # ==================================================================
+
+    def _authgem_status_clicked(self):
+        """Handle Status button click — check quota & verification in background."""
+        try:
+            store = self._get_authgem_store_for_current_model()
+        except ImportError:
+            self.append_log("❌ AuthGem module is not installed.")
+            return
+
+        if not store.has_tokens:
+            self.append_log("⚠️ Not logged in — click the 🔐 Gemini Login button first.")
+            return
+
+        # Disable while checking
+        self.authgem_status_btn.setEnabled(False)
+        self.authgem_status_btn.setText("⏳")
+        account_id = self._get_authgem_account_id()
+        acct_suffix = f" #{account_id}" if account_id else ""
+        self.append_log(f"📊 Gemini{acct_suffix}: Checking account status…")
+
+        def _worker():
+            try:
+                token = store.get_valid_access_token(auto_login=False)
+                from authgem_auth import check_account_status
+                status = check_account_status(token, account_id)
+                self._authgem_status_data = status
+                QMetaObject.invokeMethod(
+                    self, "_authgem_status_result",
+                    Qt.QueuedConnection,
+                )
+            except Exception as exc:
+                self._authgem_status_error_msg = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authgem_status_error",
+                    Qt.QueuedConnection,
+                )
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _authgem_status_result(self):
+        """Display status check results in the log panel."""
+        self.authgem_status_btn.setEnabled(True)
+        self.authgem_status_btn.setText("📊")
+
+        status = getattr(self, '_authgem_status_data', {})
+        account_id = self._get_authgem_account_id()
+        acct_suffix = f" #{account_id}" if account_id else ""
+
+        if status.get("error"):
+            self.append_log(f"❌ Gemini{acct_suffix} status: {status['error']}")
+            return
+
+        # If verification is needed, open the URL
+        if not status.get("verified", True):
+            v_url = status.get("verification_url", "")
+            v_msg = status.get("verification_message", "Account verification required")
+            self.append_log(f"⚠️ Gemini{acct_suffix}: {v_msg}")
+            if v_url:
+                self.append_log(f"🔗 Opening verification page…")
+                import webbrowser
+                webbrowser.open(v_url)
+            return
+
+        # Log summary
+        self.append_log(f"📊 Gemini{acct_suffix}: {status.get('sub_label', '')} | Credits: {status.get('credit_label', '')}")
+        if status.get("project"):
+            self.append_log(f"   Project: {status['project']}")
+
+        quota_lines = status.get("quota_lines", [])
+        if quota_lines:
+            if status.get("quota_exhausted"):
+                self.append_log("⚠️ Daily Quota: EXHAUSTED")
+            else:
+                self.append_log("📊 Daily Quota:")
+            for ql in quota_lines:
+                self.append_log(ql)
+        else:
+            self.append_log("   No quota data available")
+
+    @Slot()
+    def _authgem_status_error(self):
+        """Display status check error in the log panel."""
+        self.authgem_status_btn.setEnabled(True)
+        self.authgem_status_btn.setText("📊")
+        err = getattr(self, '_authgem_status_error_msg', 'Unknown error')
+        self.append_log(f"❌ Gemini status check failed: {err}")
+
+
     def _show_model_info_dialog(self):
         """Show information dialog about API provider shortcuts"""
         info_text = """<h3>API Provider Shortcuts</h3>
@@ -4623,6 +4720,23 @@ Recent translations to summarize:
         self.authgem_login_btn.clicked.connect(self._authgem_login_clicked)
         self.authgem_login_btn.hide()
         model_btn_layout.addWidget(self.authgem_login_btn)
+        
+        # AuthGem Status button — check quota / verify account (next to login)
+        self.authgem_status_btn = QPushButton("📊")
+        self.authgem_status_btn.setFixedWidth(36)
+        self.authgem_status_btn.setStyleSheet(
+            "background-color: #344c68; color: white; font-weight: bold; "
+            "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
+            "border: 1px solid #4285f4;"
+        )
+        self.authgem_status_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Check your Gemini quota and account verification status.<br>"
+            "If your account needs verification, opens the verification page.</p></qt>"
+        )
+        self.authgem_status_btn.clicked.connect(self._authgem_status_clicked)
+        self.authgem_status_btn.hide()
+        model_btn_layout.addWidget(self.authgem_status_btn)
         
         # AuthGem GCP Project dropdown (visible after login, managed separately)
         self.authgem_project_combo = QComboBox()
