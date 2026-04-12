@@ -1628,7 +1628,7 @@ class RetranslationMixin:
                         bt_label.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 10pt;")
                         gp_layout.addWidget(bt_label)
                     
-                    # Stats row
+                    # Stats row (clickable — cycles to next matching item)
                     n_completed = len(completed_indices)
                     n_failed = len(failed_indices)
                     n_merged = len(merged_indices)
@@ -1636,14 +1636,44 @@ class RetranslationMixin:
                     if n_remaining < 0:
                         n_remaining = 0
                     
-                    stats_label = QLabel(
-                        f"Total: {total_epub_chapters} | "
-                        f"✅ Completed: {n_completed} | "
-                        f"❌ Failed: {n_failed} | "
-                        f"⬜ Remaining: {n_remaining}"
-                    )
-                    stats_label.setFont(QFont('Arial', 10))
-                    gp_layout.addWidget(stats_label)
+                    gp_stats_frame = QWidget()
+                    gp_stats_layout = QHBoxLayout(gp_stats_frame)
+                    gp_stats_layout.setContentsMargins(0, 5, 0, 5)
+                    
+                    gp_stats_font = QFont('Arial', 10)
+                    
+                    lbl_total = QLabel(f"Total: {total_epub_chapters} | ")
+                    lbl_total.setFont(gp_stats_font)
+                    gp_stats_layout.addWidget(lbl_total)
+                    
+                    lbl_gp_completed = QLabel(f"✅ Completed: {n_completed} | ")
+                    lbl_gp_completed.setFont(gp_stats_font)
+                    lbl_gp_completed.setStyleSheet("color: #27ae60;")
+                    lbl_gp_completed.setCursor(Qt.PointingHandCursor)
+                    gp_stats_layout.addWidget(lbl_gp_completed)
+                    
+                    lbl_gp_failed = QLabel(f"❌ Failed: {n_failed} | ")
+                    lbl_gp_failed.setFont(gp_stats_font)
+                    lbl_gp_failed.setStyleSheet("color: #e74c3c;")
+                    lbl_gp_failed.setCursor(Qt.PointingHandCursor)
+                    gp_stats_layout.addWidget(lbl_gp_failed)
+                    
+                    lbl_gp_merged = QLabel(f"🔗 Merged: {n_merged} | ")
+                    lbl_gp_merged.setFont(gp_stats_font)
+                    lbl_gp_merged.setStyleSheet("color: #17a2b8;")
+                    lbl_gp_merged.setCursor(Qt.PointingHandCursor)
+                    gp_stats_layout.addWidget(lbl_gp_merged)
+                    if n_merged == 0:
+                        lbl_gp_merged.setVisible(False)
+                    
+                    lbl_gp_remaining = QLabel(f"⬜ Remaining: {n_remaining}")
+                    lbl_gp_remaining.setFont(gp_stats_font)
+                    lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
+                    lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
+                    gp_stats_layout.addWidget(lbl_gp_remaining)
+                    
+                    gp_stats_layout.addStretch()
+                    gp_layout.addWidget(gp_stats_frame)
                     
                     # Chapter list
                     gp_listbox = QListWidget()
@@ -1666,26 +1696,50 @@ class RetranslationMixin:
                         
                         if ci in completed_set:
                             icon = '✅'
-                            status = 'Completed'
+                            status = 'completed'
                             color = '#27ae60'
                         elif ci in failed_set:
                             icon = '❌'
-                            status = 'Failed'
+                            status = 'failed'
                             color = '#e74c3c'
                         elif ci in merged_set:
                             icon = '🔗'
-                            status = 'Merged'
+                            status = 'merged'
                             color = '#17a2b8'
                         else:
                             icon = '⬜'
-                            status = 'Not Processed'
+                            status = 'not_processed'
                             color = '#5a9fd4'
                         
-                        display = f"Ch.{ch_num:03d} | {icon} {status:14s} | {fname}"
+                        display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
                         
                         item = QListWidgetItem(display)
                         item.setForeground(QColor(color))
+                        item.setData(Qt.UserRole, status)
                         gp_listbox.addItem(item)
+                    
+                    # Cycle handler: click stat label → jump to next item with matching status
+                    def _gp_make_cycle(target_statuses, lb_ref):
+                        def _handler(_event=None):
+                            lb = lb_ref
+                            if not lb:
+                                return
+                            indices = [
+                                i for i in range(lb.count())
+                                if lb.item(i).data(Qt.UserRole) in target_statuses
+                            ]
+                            if not indices:
+                                return
+                            current = lb.currentRow()
+                            nxt = next((i for i in indices if i > current), indices[0])
+                            lb.setCurrentRow(nxt)
+                            lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
+                        return _handler
+                    
+                    lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
+                    lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed',), gp_listbox)
+                    lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
+                    lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_processed',), gp_listbox)
                     
                     gp_layout.addWidget(gp_listbox)
                     
@@ -1704,6 +1758,76 @@ class RetranslationMixin:
                     )
                     close_btn.clicked.connect(gp_dialog.close)
                     gp_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+                    
+                    # Auto-refresh timer (2s) — re-read progress file and update UI
+                    def _gp_refresh():
+                        try:
+                            # Don't refresh if dialog is hidden
+                            if not gp_dialog.isVisible():
+                                return
+                            _rp = _find_glossary_progress_file()
+                            if not _rp or not os.path.isfile(_rp):
+                                return
+                            with open(_rp, 'r', encoding='utf-8') as _f:
+                                _d = json.load(_f)
+                            _comp = set(_d.get('completed', []))
+                            _fail = set(_d.get('failed', []))
+                            _merg = set(_d.get('merged_indices', []))
+                            
+                            # Update stat labels
+                            _nc = len(_comp)
+                            _nf = len(_fail)
+                            _nm = len(_merg)
+                            _nr = max(0, total_epub_chapters - _nc - _nm)
+                            lbl_total.setText(f"Total: {total_epub_chapters} | ")
+                            lbl_gp_completed.setText(f"✅ Completed: {_nc} | ")
+                            lbl_gp_failed.setText(f"❌ Failed: {_nf} | ")
+                            lbl_gp_merged.setText(f"🔗 Merged: {_nm} | ")
+                            lbl_gp_merged.setVisible(_nm > 0)
+                            lbl_gp_remaining.setText(f"⬜ Remaining: {_nr}")
+                            
+                            # Update book title if changed
+                            _bt = _d.get('book_title', '')
+                            if _bt and 'bt_label' in dir():
+                                bt_label.setText(f"📖 {_bt}")
+                            
+                            # Update list items in-place
+                            for ci in range(min(gp_listbox.count(), total_epub_chapters)):
+                                item = gp_listbox.item(ci)
+                                if not item:
+                                    continue
+                                old_status = item.data(Qt.UserRole)
+                                if ci in _comp:
+                                    new_status = 'completed'
+                                    new_color = '#27ae60'
+                                elif ci in _fail:
+                                    new_status = 'failed'
+                                    new_color = '#e74c3c'
+                                elif ci in _merg:
+                                    new_status = 'merged'
+                                    new_color = '#17a2b8'
+                                else:
+                                    new_status = 'not_processed'
+                                    new_color = '#5a9fd4'
+                                
+                                if new_status != old_status:
+                                    # Update the display text (preserve Ch.XXX and filename)
+                                    fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                                    import re as _re2
+                                    _nums2 = _re2.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
+                                    ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
+                                    _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_processed': '⬜'}
+                                    display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
+                                    item.setText(display2)
+                                    item.setForeground(QColor(new_color))
+                                    item.setData(Qt.UserRole, new_status)
+                        except Exception:
+                            pass
+                    
+                    _gp_timer = QTimer(gp_dialog)
+                    _gp_timer.setInterval(2000)
+                    _gp_timer.timeout.connect(_gp_refresh)
+                    _gp_timer.start()
                     
                     gp_dialog.show()
                 
