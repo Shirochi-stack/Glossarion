@@ -4314,13 +4314,10 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         
         print(f"[TRANSLATE_CONCURRENT] Translation completed, checking inpainting status...")
         
-        # ===== CANCELLATION CHECK: After translation, before rendering =====
-        if _is_translation_cancelled(self):
-            self._log(f"⏹ Translation cancelled - discarding results", "warning")
-            print(f"[TRANSLATE_CONCURRENT] Cancelled after translation - NOT sending results")
-            return
-        
-        # Check if translation returned empty (cancelled inside translate function)
+        # NOTE: We intentionally do NOT check cancellation here if we already
+        # have results.  The API call consumed quota; discarding the response
+        # is wasteful.  Only bail if the translate function itself returned
+        # nothing (meaning it was cancelled before any tokens came back).
         if not translated_texts:
             self._log(f"⏹ Translation returned no results (likely cancelled)", "warning")
             print(f"[TRANSLATE_CONCURRENT] No translation results - skipping render")
@@ -4328,6 +4325,8 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         
         # Wait for inpainting to complete (if not already done) to determine render path
         # This doesn't block the translation API calls - those already happened above
+        # Even if stop was requested, we wait for inpainting since discarding a
+        # completed clean is equally wasteful.
         inpaint_thread.join(timeout=30)  # Wait up to 30 seconds for inpainting
         
         with inpaint_lock:
@@ -4335,12 +4334,6 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
             if not inpaint_result['completed']:
                 print(f"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image")
                 self._log(f"⏱️ Inpainting still running, rendering on original image", "info")
-        
-        # ===== CANCELLATION CHECK: Final gate before sending results =====
-        if _is_translation_cancelled(self):
-            self._log(f"⏹ Translation cancelled - NOT rendering results", "warning")
-            print(f"[TRANSLATE_CONCURRENT] Cancelled at final gate - NOT sending translate_results")
-            return
         
         # Send results to main thread with render image path
         render_image_path = cleaned_image_path if cleaned_image_path else image_path
@@ -4526,11 +4519,8 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
         translations_dict = self._manga_translator.translate_full_page_context(regions, image_path)
         print(f"[DEBUG] Got translations dict: {list(translations_dict.keys()) if translations_dict else 'None'}")
         
-        # ===== CANCELLATION CHECK: After getting translation results =====
-        if _is_translation_cancelled(self):
-            self._log(f"⏹ Translation cancelled - discarding full page context results", "warning")
-            print(f"[TRANSLATE_FULL_PAGE] Cancelled after translate_full_page_context - returning empty")
-            return []
+        # NOTE: Do NOT discard results here — the API call already completed
+        # and consumed quota.  Always process and return whatever came back.
         
         # Convert the results back to the expected format
         translated_texts = []
@@ -4831,10 +4821,10 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         for i, text_data in enumerate(recognized_texts):
             # ===== CANCELLATION CHECK: At start of each text =====
             if _is_translation_cancelled(self):
-                self._log(f"⏹ Translation cancelled at text {i+1}/{len(recognized_texts)}", "warning")
-                print(f"[TRANSLATE_INDIVIDUAL] Cancelled at start of text {i+1}")
-                # Return empty list to signal cancellation - no partial results
-                return []
+                self._log(f"⏹ Translation stopped at text {i+1}/{len(recognized_texts)} — returning {len(translated_texts)} already-translated results", "warning")
+                print(f"[TRANSLATE_INDIVIDUAL] Stopped at text {i+1}, returning {len(translated_texts)} partial results")
+                # Return whatever we already translated — don't waste completed API calls
+                return translated_texts
             
             text = text_data['text']
             print(f"[DEBUG] Translating text {i+1}/{len(recognized_texts)}: '{text[:30]}...'")
@@ -4872,11 +4862,10 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                 
                 print(f"[DEBUG] Processed response: '{translated_text[:50]}...'")
                 
-                # ===== CANCELLATION CHECK: After getting response (prevent raw text return) =====
-                if _is_translation_cancelled(self):
-                    self._log(f"⏹ Translation cancelled after response - discarding all results", "warning")
-                    print(f"[TRANSLATE_INDIVIDUAL] Cancelled after getting response for text {i+1} - returning empty")
-                    return []
+                # NOTE: Do NOT discard the response — the API call already
+                # completed and consumed quota.  We append the result below
+                # and the next iteration's cancellation check will return
+                # the partial list if stop is still requested.
                 
                 translated_texts.append({
                     'original': text_data,
@@ -10701,11 +10690,9 @@ def _run_translate_all_background(self, image_paths: list):
                     self._log(f"📝 [{idx}/{total}] Using individual translation for {len(recognized_texts)} regions", "info")
                     translated_texts = _translate_individually(self, recognized_texts, image_path)
                 
-                # ===== CANCELLATION CHECK: After translation (critical - prevents raw text from being shown) =====
-                if _is_translation_cancelled(self):
-                    self._log(f"⏹ Translation cancelled - discarding results for image {idx}/{total}", "warning")
-                    print(f"[TRANSLATE_ALL] Cancelled after translation - NOT sending results for image {idx}")
-                    break
+                # NOTE: We intentionally do NOT discard results after translation
+                # completes with data — the API call already consumed quota.
+                # Only bail if the translate function returned nothing (cancelled mid-call).
                 
                 if not translated_texts:
                     self._log(f"⚠️ [{idx}/{total}] Translation failed", "warning")
@@ -10713,12 +10700,6 @@ def _run_translate_all_background(self, image_paths: list):
                     continue
                 
                 self._log(f"✅ [{idx}/{total}] Translated {len(translated_texts)} regions", "success")
-                
-                # ===== CANCELLATION CHECK: Before sending results (final gate) =====
-                if _is_translation_cancelled(self):
-                    self._log(f"⏹ Translation cancelled - NOT rendering results for image {idx}/{total}", "warning")
-                    print(f"[TRANSLATE_ALL] Cancelled - NOT sending translate_results for image {idx}")
-                    break
                 
                 # Send results to main thread for rendering
                 # Use cleaned image if available, otherwise original
