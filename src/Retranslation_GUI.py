@@ -1689,21 +1689,18 @@ class RetranslationMixin:
                 lbl_gp_merged.setVisible(False)
             
             lbl_gp_remaining = QLabel(f"⬜ Not Completed: {n_remaining}")
-            lbl_gp_remaining.setFont(gp_stats_font)
+                lbl_gp_remaining.setFont(gp_stats_font)
             lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
             lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
             gp_stats_layout.addWidget(lbl_gp_remaining)
             
-            gp_stats_layout.addStretch()
-            p_layout.addWidget(gp_stats_frame)
-            
-            # Chapter list
             gp_listbox = QListWidget()
             gp_listbox.setFont(QFont('Courier', 10))
             gp_listbox.setSpacing(0)
             gp_listbox.setUniformItemSizes(True)
             gp_listbox.setStyleSheet("QListWidget::item { padding: 1px 2px; margin: 0px; }")
             gp_listbox.setContextMenuPolicy(Qt.CustomContextMenu)
+            gp_listbox.setSelectionMode(QListWidget.ExtendedSelection)
             
             completed_set = set(completed_indices)
             failed_set = set(failed_indices)
@@ -1733,16 +1730,28 @@ class RetranslationMixin:
                 item.setData(Qt.UserRole + 1, ci)  # Store chapter index for deletion
                 gp_listbox.addItem(item)
             
-            # Right-click context menu to delete entry from progress
+            # Helper to refresh stats labels from a loaded progress dict
+            def _refresh_stats_from_dict(_d):
+                _comp2 = set(_d.get('completed', []))
+                _fail2 = set(_d.get('failed', []))
+                _merg2 = set(_d.get('merged_indices', []))
+                _n_cm2 = len(_comp2 & _merg2)
+                lbl_gp_comp_merged.setText(f"✅🔗 Completed + Merged: {_n_cm2} | ")
+                lbl_gp_comp_merged.setVisible(_n_cm2 > 0)
+                lbl_gp_completed.setText(f"✅ Completed: {len(_comp2) - _n_cm2} | ")
+                lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
+                lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2) - _n_cm2} | ")
+                lbl_gp_merged.setVisible(len(_merg2) - _n_cm2 > 0)
+                lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, total_epub_chapters - len(_comp2 | _fail2 | _merg2))}")
+            
+            # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
-                item = gp_listbox.itemAt(pos)
-                if not item:
-                    return
-                status = item.data(Qt.UserRole)
-                if status not in ('completed', 'merged', 'failed', 'completed_merged'):
-                    return
-                ci = item.data(Qt.UserRole + 1)
-                if ci is None:
+                # Gather selected items that are deletable
+                selected = gp_listbox.selectedItems()
+                deletable_statuses = ('completed', 'merged', 'failed', 'completed_merged')
+                targets = [(it, it.data(Qt.UserRole + 1)) for it in selected
+                           if it.data(Qt.UserRole) in deletable_statuses and it.data(Qt.UserRole + 1) is not None]
+                if not targets:
                     return
                 
                 from PySide6.QtWidgets import QMenu
@@ -1751,8 +1760,15 @@ class RetranslationMixin:
                     "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; }"
                     "QMenu::item:selected { background-color: #c0392b; }"
                 )
-                fname = chapter_map.get(ci, f'chapter {ci + 1}')
-                action = menu.addAction(f"🗑️ Remove Ch.{ci+1} from progress ({status})")
+                
+                n = len(targets)
+                if n == 1:
+                    ci = targets[0][1]
+                    status = targets[0][0].data(Qt.UserRole)
+                    action = menu.addAction(f"🗑️ Remove Ch.{ci+1} from progress ({status})")
+                else:
+                    action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
+                
                 chosen = menu.exec(gp_listbox.viewport().mapToGlobal(pos))
                 if chosen != action:
                     return
@@ -1765,39 +1781,31 @@ class RetranslationMixin:
                     with open(_rp, 'r', encoding='utf-8') as _f:
                         _d = json.load(_f)
                     
+                    indices_to_remove = set(ci for _, ci in targets)
                     changed = False
                     for key in ('completed', 'failed', 'merged_indices'):
                         lst = _d.get(key, [])
-                        if ci in lst:
-                            lst.remove(ci)
-                            _d[key] = lst
+                        new_lst = [v for v in lst if v not in indices_to_remove]
+                        if len(new_lst) != len(lst):
+                            _d[key] = new_lst
                             changed = True
                     
                     if changed:
                         with open(_rp, 'w', encoding='utf-8') as _f:
                             json.dump(_d, _f, ensure_ascii=False, indent=2)
-                        # Update item display immediately
+                        # Update all affected items
                         import re as _re3
-                        _nums3 = _re3.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
-                        ch_num3 = int(_nums3[-1]) if _nums3 else ci + 1
-                        display3 = f"Ch.{ch_num3:03d} | ⬜ {'Not Completed':14s} | {fname}"
-                        item.setText(display3)
-                        item.setForeground(QColor('#5a9fd4'))
-                        item.setData(Qt.UserRole, 'not_completed')
-                        # Refresh stats
-                        _comp2 = set(_d.get('completed', []))
-                        _fail2 = set(_d.get('failed', []))
-                        _merg2 = set(_d.get('merged_indices', []))
-                        _n_cm2 = len(_comp2 & _merg2)
-                        lbl_gp_comp_merged.setText(f"✅🔗 Completed + Merged: {_n_cm2} | ")
-                        lbl_gp_comp_merged.setVisible(_n_cm2 > 0)
-                        lbl_gp_completed.setText(f"✅ Completed: {len(_comp2) - _n_cm2} | ")
-                        lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
-                        lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2) - _n_cm2} | ")
-                        lbl_gp_merged.setVisible(len(_merg2) - _n_cm2 > 0)
-                        lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, total_epub_chapters - len(_comp2 | _fail2 | _merg2))}")
+                        for it, ci in targets:
+                            fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                            _nums3 = _re3.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
+                            ch_num3 = int(_nums3[-1]) if _nums3 else ci + 1
+                            display3 = f"Ch.{ch_num3:03d} | ⬜ {'Not Completed':14s} | {fname}"
+                            it.setText(display3)
+                            it.setForeground(QColor('#5a9fd4'))
+                            it.setData(Qt.UserRole, 'not_completed')
+                        _refresh_stats_from_dict(_d)
                 except Exception as e:
-                    print(f"⚠️ Error removing chapter from progress: {e}")
+                    print(f"⚠️ Error removing chapters from progress: {e}")
             
             gp_listbox.customContextMenuRequested.connect(_gp_context_menu)
             
