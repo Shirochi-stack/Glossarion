@@ -1375,8 +1375,11 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.skip_toc_thinking_var = self.config.get('skip_toc_thinking', False)
         self.lightweight_thinking_level_var = self.config.get('lightweight_thinking_level', 1)
         self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.1))
-        self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
-        print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
+        _raw_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "off")
+        if _raw_artifacts == "0": _raw_artifacts = "off"
+        elif _raw_artifacts == "1": _raw_artifacts = "medium"
+        self.remove_ai_artifacts = _raw_artifacts if _raw_artifacts in ("off", "low", "medium", "high") else "off"
+        print(f"   🎨 Remove AI Artifacts: {self.remove_ai_artifacts.upper()}")
         self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
         # Review settings
         self.review_system_prompt_var = self.config.get('review_system_prompt', '')
@@ -2928,7 +2931,6 @@ Recent translations to summarize:
             ('emergency_image_restore_var', 'emergency_image_restore', False),
             ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', False),
             ('contextual_var', 'contextual', False),
-            ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),
             ('save_cleaned_images_var', 'save_cleaned_images', False),
             ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
@@ -2954,6 +2956,7 @@ Recent translations to summarize:
         
         # String variables
         str_vars = [
+            ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', 'off'),
             ('summary_role_var', 'summary_role', 'system'),
             ('rolling_summary_exchanges_var', 'rolling_summary_exchanges', '5'),
             ('rolling_summary_mode_var', 'rolling_summary_mode', 'replace'),
@@ -2996,6 +2999,15 @@ Recent translations to summarize:
         
         for var_name, key, default in str_vars:
             setattr(self, var_name, create_var(str, key, str(default)))
+        
+        # Backward compat: old configs stored boolean True/False or "0"/"1"
+        _rav = self.REMOVE_AI_ARTIFACTS_var
+        if _rav in (True, 'True', '1'):
+            self.REMOVE_AI_ARTIFACTS_var = 'medium'
+        elif _rav in (False, 'False', '0'):
+            self.REMOVE_AI_ARTIFACTS_var = 'off'
+        elif _rav not in ('off', 'low', 'medium', 'high'):
+            self.REMOVE_AI_ARTIFACTS_var = 'off'
         
         # Emergency glossary compliance custom types (list)
         self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
@@ -6576,11 +6588,10 @@ Recent translations to summarize:
         if hasattr(self, 'batch_size_entry'):
             self.batch_size_entry.setEnabled(is_batch)
     
-    def _on_remove_artifacts_toggle(self, state=None):
-        """Handle Remove AI Artifacts toggle"""
-        # If called with a state (Qt.CheckState), update the var
-        if state is not None:
-            self.REMOVE_AI_ARTIFACTS_var = (state == Qt.Checked)
+    def _on_remove_artifacts_toggle(self, index=None):
+        """Handle Remove AI Artifacts dropdown change"""
+        if hasattr(self, 'remove_artifacts_combo'):
+            self.REMOVE_AI_ARTIFACTS_var = self.remove_artifacts_combo.currentData() or "off"
     
     def _auto_save_system_prompt(self):
         """Auto-save system prompt to current profile as user types (in-memory only)"""
@@ -6856,12 +6867,48 @@ Recent translations to summarize:
         other_settings_btn.setMinimumWidth(120)
         self.frame.addWidget(other_settings_btn, 7, 4)
         
-        # Remove AI Artifacts checkbox (row 7, spans all columns)
-        self.remove_artifacts_checkbox = self._create_styled_checkbox("Remove AI Artifacts")
-        self.remove_artifacts_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Automatically cleans AI filler text like “Here is the translation” or “I hope this helps”.</p></qt>")
-        self.remove_artifacts_checkbox.setChecked(self.REMOVE_AI_ARTIFACTS_var)
-        self.remove_artifacts_checkbox.stateChanged.connect(self._on_remove_artifacts_toggle)
-        self.frame.addWidget(self.remove_artifacts_checkbox, 7, 0, 1, 5, Qt.AlignLeft)
+        # Remove AI Artifacts dropdown (row 7) — packed into a compact container
+        from PySide6.QtWidgets import QHBoxLayout, QWidget
+        artifacts_container = QWidget()
+        artifacts_layout = QHBoxLayout(artifacts_container)
+        artifacts_layout.setContentsMargins(0, 0, 0, 0)
+        artifacts_layout.setSpacing(6)
+        
+        artifacts_label = QLabel("Remove AI Artifacts:")
+        artifacts_layout.addWidget(artifacts_label)
+        
+        self.remove_artifacts_combo = QComboBox()
+        self.remove_artifacts_combo.addItem("Off", "off")
+        self.remove_artifacts_combo.addItem("Low", "low")
+        self.remove_artifacts_combo.addItem("Medium", "medium")
+        self.remove_artifacts_combo.addItem("High", "high")
+        self.remove_artifacts_combo.setFixedWidth(70)
+        self.remove_artifacts_combo.setStyleSheet("""
+            QComboBox::drop-down { border: none; width: 0px; }
+            QComboBox::down-arrow { image: none; width: 0px; }
+        """)
+        self.remove_artifacts_combo.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
+            "<b>Off</b> – Only strips &lt;think&gt;/&lt;thinking&gt; tags (always done).<br><br>"
+            "<b>Low</b> – Strips all thinking/reasoning tags "
+            "(&lt;thoughts&gt;, &lt;reasoning&gt;, &lt;analysis&gt;, &lt;reflection&gt;, [thinking], [ANALYSIS], etc.) "
+            "and stray code-block markers.<br><br>"
+            "<b>Medium</b> – Low + structural AI patterns: role prefixes (System:/Assistant:), "
+            "[PART 1/2] markers, &lt;!DOCTYPE&gt;, and single-word artifacts (html, text, content).<br><br>"
+            "<b>High</b> – Medium + conversational AI filler: "
+            "\"Sure, here is the translation\", \"I'll help you\", \"Translation note\", etc."
+            "</p></qt>"
+        )
+        # Restore saved level
+        level = self.REMOVE_AI_ARTIFACTS_var if isinstance(self.REMOVE_AI_ARTIFACTS_var, str) else "off"
+        idx = self.remove_artifacts_combo.findData(level)
+        if idx >= 0:
+            self.remove_artifacts_combo.setCurrentIndex(idx)
+        self.remove_artifacts_combo.currentIndexChanged.connect(self._on_remove_artifacts_toggle)
+        artifacts_layout.addWidget(self.remove_artifacts_combo)
+        artifacts_layout.addStretch()
+        
+        self.frame.addWidget(artifacts_container, 7, 0, 1, 4, Qt.AlignLeft)
     
     def _create_prompt_section(self):
         """Create system prompt section"""
@@ -11746,7 +11793,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."),
-            'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var else "0",
+            'REMOVE_AI_ARTIFACTS': self.REMOVE_AI_ARTIFACTS_var if isinstance(self.REMOVE_AI_ARTIFACTS_var, str) else "off",
             'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var) else ("1" if self.config.get('use_rolling_summary') else "0"),
             'SUMMARY_ROLE': self.config.get('summary_role', 'system'),
             'ROLLING_SUMMARY_EXCHANGES': str(self.rolling_summary_exchanges_var),
@@ -18865,7 +18912,11 @@ Important rules:
                 if hasattr(attr, 'isChecked'): return attr.isChecked()
                 if hasattr(attr, 'toPlainText'): return attr.toPlainText().strip()
                 if hasattr(attr, 'text'): return attr.text().strip()
-                if hasattr(attr, 'currentIndex'): return attr.currentIndex()
+                if hasattr(attr, 'currentData'):
+                    data = attr.currentData()
+                    if data is not None:
+                        return data
+                    return attr.currentIndex()
                 return attr
 
             # Central mapping of configuration settings
@@ -18890,7 +18941,7 @@ Important rules:
                 ('duplicate_lookback_chapters', ['duplicate_lookback_var'], 5, lambda v: safe_int(v, 5)),
 
                 # Boolean toggles - prioritize checkboxes over vars
-                ('REMOVE_AI_ARTIFACTS', ['remove_artifacts_checkbox', 'REMOVE_AI_ARTIFACTS_var'], False, bool),
+                ('REMOVE_AI_ARTIFACTS', ['remove_artifacts_combo', 'REMOVE_AI_ARTIFACTS_var'], 'off', str),
                 ('attach_css_to_chapters', ['attach_css_to_chapters_var'], False, bool),
                 ('epub_use_html_method', ['epub_use_html_method_var'], False, bool),
                 # Optional path to a user-selected CSS file for EPUB converter

@@ -506,7 +506,11 @@ class TranslationConfig:
             # Strip placeholder - the actual instruction will be added via get_system_prompt()
             self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
             
-        self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
+        _raw_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "off")
+        # Backward compat: "0" → "off", "1" → "medium"
+        if _raw_artifacts == "0": _raw_artifacts = "off"
+        elif _raw_artifacts == "1": _raw_artifacts = "medium"
+        self.REMOVE_AI_ARTIFACTS = _raw_artifacts if _raw_artifacts in ("off", "low", "medium", "high") else "off"
         self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
         self.HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
         self.MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
@@ -2558,13 +2562,28 @@ class ContentProcessor:
         return text
     
     @staticmethod
-    def clean_ai_artifacts(text, remove_artifacts=True):
-        """Remove AI response artifacts from text - but ONLY when enabled"""
-        # Always strip thinking tags regardless of the toggle —
-        # these are structural model artifacts, not stylistic.
-        text = ContentProcessor._remove_thinking_tags(text)
+    def clean_ai_artifacts(text, remove_artifacts="medium"):
+        """Remove AI response artifacts from text based on level.
         
-        if not remove_artifacts:
+        Levels:
+            off:    Only strips <think>/<thinking> tags (always done)
+            low:    Strips all thinking/reasoning tags + code block markers
+            medium: Low + structural AI patterns (role prefixes, [PART], <!DOCTYPE, single-word artifacts)
+            high:   Medium + conversational AI filler (Sure/Here's/I'll translate...)
+        
+        Backward compat: True → "medium", False → "off"
+        """
+        # Backward compat for boolean callers
+        if remove_artifacts is True:
+            remove_artifacts = "medium"
+        elif not remove_artifacts or remove_artifacts == "off":
+            remove_artifacts = "off"
+        
+        # Always strip <think> and <thinking> tags regardless of the level
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+        
+        if remove_artifacts == "off":
             return text
         
         # Protect split markers used by request merging during AI artifact cleanup.
@@ -2583,8 +2602,19 @@ class ContentProcessor:
             
             text = re.sub(split_marker_pattern, preserve_marker, text, flags=re.DOTALL | re.IGNORECASE)
         
-        # After removing thinking tags, re-analyze the text structure
-        # to catch AI artifacts that may now be at the beginning
+        def _restore_markers(t):
+            if has_split_markers:
+                for i, marker in enumerate(split_markers):
+                    t = t.replace(f"__SPLIT_MARKER_{i}__", marker)
+            return t
+        
+        # LOW+: Strip all thinking/reasoning tags + code block markers
+        text = ContentProcessor._remove_thinking_tags(text)
+        
+        if remove_artifacts == "low":
+            return _restore_markers(text)
+        
+        # MEDIUM+: Re-analyze text structure after thinking tag removal
         lines = text.split('\n')
         
         # Clean up empty lines at the beginning
@@ -2592,21 +2622,26 @@ class ContentProcessor:
             lines.pop(0)
         
         if not lines:
-            # Restore split markers before returning
-            if has_split_markers:
-                for i, marker in enumerate(split_markers):
-                    text = text.replace(f"__SPLIT_MARKER_{i}__", marker)
-            return text
+            return _restore_markers(text)
         
         # Check the first non-empty line for AI artifacts
         first_line = lines[0].strip()
         
+        # Build pattern list based on level
         ai_patterns = [
             r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
             r'^\[PART\s+\d+/\d+\]',
             r'^```(?:html|xml|text)?\s*$',  # Enhanced code block detection
             r'^<!DOCTYPE',
         ]
+        
+        # HIGH: Add conversational AI filler patterns
+        if remove_artifacts == "high":
+            ai_patterns.extend([
+                r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
+                r'^(?:I\'ll|I will|Let me) (?:translate|help|assist)',
+                r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
+            ])
         
         for pattern in ai_patterns:
             if re.search(pattern, first_line, re.IGNORECASE):
@@ -2623,28 +2658,17 @@ class ContentProcessor:
                         len(remaining_text.strip()) > 50):  # Reduced from 100 to 50
                         
                         print(f"✂️ Removed AI artifact: {first_line[:50]}...")
-                        return remaining_text.lstrip()
+                        return _restore_markers(remaining_text.lstrip())
         
         if first_line.lower() in ['html', 'text', 'content', 'translation', 'output']:
             remaining_lines = lines[1:]
             remaining_text = '\n'.join(remaining_lines)
             if remaining_text.strip():
                 print(f"✂️ Removed single word artifact: {first_line}")
-                result = remaining_text.lstrip()
-                # Restore split markers
-                if has_split_markers:
-                    for i, marker in enumerate(split_markers):
-                        result = result.replace(f"__SPLIT_MARKER_{i}__", marker)
-                return result
+                return _restore_markers(remaining_text.lstrip())
         
         result = '\n'.join(lines)
-        
-        # Restore split markers before returning
-        if has_split_markers:
-            for i, marker in enumerate(split_markers):
-                result = result.replace(f"__SPLIT_MARKER_{i}__", marker)
-        
-        return result
+        return _restore_markers(result)
     
     @staticmethod
     def _remove_thinking_tags(text):
@@ -5476,8 +5500,8 @@ class BatchTranslationProcessor:
                 source_html = chapter.get('original_html', chapter_body)
                 result = ContentProcessor.emergency_restore_images(result, source_html)
             
-            if self.config.REMOVE_AI_ARTIFACTS:
-                result = ContentProcessor.clean_ai_artifacts(result, True)
+            if self.config.REMOVE_AI_ARTIFACTS != "off":
+                result = ContentProcessor.clean_ai_artifacts(result, self.config.REMOVE_AI_ARTIFACTS)
                 
             result = ContentProcessor.clean_memory_artifacts(result)
             
@@ -6193,8 +6217,8 @@ class BatchTranslationProcessor:
                 
                 # Clean the merged response
                 cleaned = merged_response
-                if self.config.REMOVE_AI_ARTIFACTS:
-                    cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
+                if self.config.REMOVE_AI_ARTIFACTS != "off":
+                    cleaned = ContentProcessor.clean_ai_artifacts(cleaned, self.config.REMOVE_AI_ARTIFACTS)
                 cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
                 cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
                 cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
@@ -9210,11 +9234,11 @@ def main(log_callback=None, stop_callback=None):
         print("⚠️ Emergency paragraph restoration is DISABLED")
     
     print(f"[DEBUG] REMOVE_AI_ARTIFACTS environment variable: {os.getenv('REMOVE_AI_ARTIFACTS', 'NOT SET')}")
-    print(f"[DEBUG] REMOVE_AI_ARTIFACTS parsed value: {config.REMOVE_AI_ARTIFACTS}")
-    if config.REMOVE_AI_ARTIFACTS:
-        print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
+    print(f"[DEBUG] REMOVE_AI_ARTIFACTS parsed level: {config.REMOVE_AI_ARTIFACTS}")
+    if config.REMOVE_AI_ARTIFACTS != "off":
+        print(f"⚠️ AI artifact removal is ENABLED (level: {config.REMOVE_AI_ARTIFACTS})")
     else:
-        print("✅ AI artifact removal is DISABLED - preserving all content as-is")
+        print("✅ AI artifact removal is OFF - preserving all content as-is")
        
     if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md'))):
         import argparse
@@ -13155,13 +13179,13 @@ def main(log_callback=None, stop_callback=None):
                 if chunk_abort:
                     break
 
-                if config.REMOVE_AI_ARTIFACTS:
-                    result = ContentProcessor.clean_ai_artifacts(result, True)
+                if config.REMOVE_AI_ARTIFACTS != "off":
+                    result = ContentProcessor.clean_ai_artifacts(result, config.REMOVE_AI_ARTIFACTS)
 
                 if config.EMERGENCY_RESTORE:
                     result = ContentProcessor.emergency_restore_paragraphs(result, chunk_html)
 
-                if config.REMOVE_AI_ARTIFACTS:
+                if config.REMOVE_AI_ARTIFACTS != "off":
                     lines = result.split('\n')
                     
                     json_line_count = 0

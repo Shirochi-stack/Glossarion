@@ -3253,7 +3253,7 @@ class AsyncProcessingDialog:
         
         # Processing options
         env_vars['CHAPTER_RANGE'] = _text(getattr(self.gui, 'chapter_range_entry', None), '').strip()
-        env_vars['REMOVE_AI_ARTIFACTS'] = "1" if _val(self.gui.REMOVE_AI_ARTIFACTS_var, False) else "0"
+        env_vars['REMOVE_AI_ARTIFACTS'] = str(getattr(self.gui, 'REMOVE_AI_ARTIFACTS_var', 'off') or 'off')
         env_vars['BATCH_TRANSLATION'] = "1" if _val(self.gui.batch_translation_var, False) else "0"
         env_vars['BATCH_SIZE'] = _val(self.gui.batch_size_var, 1)
         env_vars['BATCHING_MODE'] = str(_val(getattr(self.gui, 'batch_mode_var', 'direct'), 'direct'))

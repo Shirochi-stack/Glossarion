@@ -140,7 +140,10 @@ class ImageTranslator:
         self.contextual_enabled = os.getenv("CONTEXTUAL", "1") == "1"
         self.history_manager = history_manager
         self.chunk_context_manager = chunk_context_manager
-        self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
+        _raw = os.getenv("REMOVE_AI_ARTIFACTS", "off")
+        if _raw == "0": _raw = "off"
+        elif _raw == "1": _raw = "medium"
+        self.remove_ai_artifacts = _raw if _raw in ("off", "low", "medium", "high") else "off"
 
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
@@ -972,12 +975,12 @@ class ImageTranslator:
                     translation_response += "\n\n[TRANSLATION TRUNCATED DUE TO TOKEN LIMIT]"
 
                 # Clean translation based on REMOVE_AI_ARTIFACTS setting
-                if self.remove_ai_artifacts:
+                if self.remove_ai_artifacts != "off":
                     cleaned_translation = self._clean_translation_response(translation_response)
-                    print("   🧹 Cleaned translation (artifact removal enabled)")
+                    print(f"   🧹 Cleaned translation (artifact removal: {self.remove_ai_artifacts})")
                 else:
                     cleaned_translation = translation_response
-                    print("   📝 Using raw translation (artifact removal disabled)")
+                    print("   📝 Using raw translation (artifact removal off)")
 
                 # Normalize and sanitize to avoid squared/cubed glyphs
                 cleaned_translation = self._normalize_unicode_width(cleaned_translation)
@@ -1640,7 +1643,7 @@ class ImageTranslator:
         translation = self._call_vision_api(image_bytes, context, check_stop_fn)
         
         if translation:
-            if self.remove_ai_artifacts:
+            if self.remove_ai_artifacts != "off":
                 translation = self._clean_translation_response(translation)
             # Normalize and sanitize output
             translation = self._normalize_unicode_width(translation)
@@ -2010,7 +2013,7 @@ class ImageTranslator:
             
             if translation:
                 # Clean AI artifacts from chunk
-                if self.remove_ai_artifacts:
+                if self.remove_ai_artifacts != "off":
                     chunk_text = self._clean_translation_response(translation)
                 else:
                     chunk_text = translation
