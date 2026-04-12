@@ -2560,6 +2560,10 @@ class ContentProcessor:
     @staticmethod
     def clean_ai_artifacts(text, remove_artifacts=True):
         """Remove AI response artifacts from text - but ONLY when enabled"""
+        # Always strip thinking tags regardless of the toggle —
+        # these are structural model artifacts, not stylistic.
+        text = ContentProcessor._remove_thinking_tags(text)
+        
         if not remove_artifacts:
             return text
         
@@ -2578,9 +2582,6 @@ class ContentProcessor:
                 return marker_id
             
             text = re.sub(split_marker_pattern, preserve_marker, text, flags=re.DOTALL | re.IGNORECASE)
-        
-        # First, remove thinking tags if they exist
-        text = ContentProcessor._remove_thinking_tags(text)
         
         # After removing thinking tags, re-analyze the text structure
         # to catch AI artifacts that may now be at the beginning
@@ -2601,11 +2602,8 @@ class ContentProcessor:
         first_line = lines[0].strip()
         
         ai_patterns = [
-            r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
-            r'^(?:I\'ll|I will|Let me) (?:translate|help|assist)',
             r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
             r'^\[PART\s+\d+/\d+\]',
-            r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
             r'^```(?:html|xml|text)?\s*$',  # Enhanced code block detection
             r'^<!DOCTYPE',
         ]
