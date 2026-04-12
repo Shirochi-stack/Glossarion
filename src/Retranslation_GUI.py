@@ -1689,11 +1689,15 @@ class RetranslationMixin:
                 lbl_gp_merged.setVisible(False)
             
             lbl_gp_remaining = QLabel(f"⬜ Not Completed: {n_remaining}")
-                lbl_gp_remaining.setFont(gp_stats_font)
+            lbl_gp_remaining.setFont(gp_stats_font)
             lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
             lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
             gp_stats_layout.addWidget(lbl_gp_remaining)
             
+            gp_stats_layout.addStretch()
+            p_layout.addWidget(gp_stats_frame)
+            
+            # Chapter list
             gp_listbox = QListWidget()
             gp_listbox.setFont(QFont('Courier', 10))
             gp_listbox.setSpacing(0)
