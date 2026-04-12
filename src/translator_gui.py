@@ -4346,9 +4346,11 @@ Recent translations to summarize:
                 self.append_log(f"🔗 Opening verification page…")
                 import webbrowser
                 webbrowser.open(v_url)
+            self.append_log(f"💡 After completing verification, click 📊 again to confirm.")
             return
 
         # Log summary
+        self.append_log(f"✅ Gemini{acct_suffix}: Account verified")
         self.append_log(f"📊 Gemini{acct_suffix}: {status.get('sub_label', '')} | Credits: {status.get('credit_label', '')}")
         if status.get("project"):
             self.append_log(f"   Project: {status['project']}")
