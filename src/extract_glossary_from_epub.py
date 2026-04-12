@@ -3078,7 +3078,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     chapter_nums = []
     
     for idx, chap in merge_group:
-        chapter_num = idx + 1  # 1-based chapter numbering
+        chapter_num = idx + 1  # Fallback for module-level function
         chapter_nums.append(chapter_num)
         merged_parts.append(chap)
     
@@ -3390,6 +3390,106 @@ def main(log_callback=None, stop_callback=None):
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
         file_base = epub_base
 
+    # ── Build chapter position mapping ──────────────────────────────────
+    # Maps idx → chapter_number matching the same numbering TransateKRtoEN.py uses.
+    # This ensures CHAPTER_RANGE selects the same chapters in both scripts.
+    _chapter_positions = {}  # idx → chapter number for range filtering
+    use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
+
+    if _chapter_filenames and not is_text_file and not is_pdf_file:
+        if use_spine_order:
+            # ── Spine order mode: build OPF offset positions from within the EPUB ──
+            # Same logic as TransateKRtoEN.py's _spine_pos_by_idx
+            try:
+                import xml.etree.ElementTree as _ET
+                import zipfile as _zf
+                translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+
+                with _zf.ZipFile(epub_path, 'r') as zf:
+                    # Find content.opf inside the EPUB
+                    opf_content = None
+                    for name in zf.namelist():
+                        if name.lower().endswith('.opf'):
+                            opf_content = zf.read(name).decode('utf-8')
+                            break
+
+                if opf_content:
+                    _opf_root = _ET.fromstring(opf_content)
+                    _ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if _opf_root.tag.startswith('{'):
+                        _default_ns = _opf_root.tag[1:_opf_root.tag.index('}')]
+                        _ns = {'opf': _default_ns}
+
+                    _manifest = {}
+                    for _item in _opf_root.findall('.//opf:manifest/opf:item', _ns):
+                        _iid = _item.get('id')
+                        _href = _item.get('href')
+                        _mtype = _item.get('media-type', '')
+                        if _iid and _href and (
+                            'html' in _mtype.lower() or
+                            _href.endswith(('.html', '.xhtml', '.htm'))
+                        ):
+                            _manifest[_iid] = os.path.basename(_href)
+
+                    _spine_el = _opf_root.find('.//opf:spine', _ns)
+                    _all_spine_basenames = []
+                    if _spine_el is not None:
+                        for _iref in _spine_el.findall('opf:itemref', _ns):
+                            _idref = _iref.get('idref')
+                            if _idref and _idref in _manifest:
+                                _all_spine_basenames.append(_manifest[_idref])
+
+                    # Build offset positions, skip special files (same as TransateKRtoEN)
+                    def _is_special_spine(fname):
+                        fl = fname.lower()
+                        fnoext = os.path.splitext(fl)[0]
+                        if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
+                            return True
+                        if not re.search(r'\d', fnoext):
+                            return True
+                        return False
+
+                    _offset_by_basename = {}  # basename → offset pos (1-based)
+                    _tpos = 0
+                    for _sb in _all_spine_basenames:
+                        _special = _is_special_spine(_sb)
+                        _skip = (not translate_special and _special)
+                        if not _skip:
+                            _tpos += 1
+                            _offset_by_basename[_sb] = _tpos
+                            _offset_by_basename[os.path.splitext(_sb)[0]] = _tpos
+
+                    # Map each glossary chapter to its spine offset
+                    for _ci, _fn in _chapter_filenames.items():
+                        _bn_noext = os.path.splitext(_fn)[0] if _fn else ''
+                        _pos = _offset_by_basename.get(_fn) or _offset_by_basename.get(_bn_noext)
+                        if _pos is not None:
+                            _chapter_positions[_ci] = _pos
+
+                    if _chapter_positions:
+                        print(f"📊 Spine order: mapped {len(_chapter_positions)}/{len(chapters)} chapters to OPF positions")
+                    else:
+                        print("⚠️ Spine order: could not map chapters to OPF positions, falling back to filename numbering")
+            except Exception as _e:
+                print(f"⚠️ Spine order: failed to read content.opf from EPUB: {_e}")
+
+        # ── Normal mode (or spine order fallback): extract number from filename ──
+        # Same logic as extract_chapter_number_from_filename in TransateKRtoEN.py:
+        # use the rightmost digit sequence in the filename stem.
+        if not _chapter_positions:
+            for _ci, _fn in _chapter_filenames.items():
+                if _fn:
+                    _stem = os.path.splitext(_fn)[0]
+                    _nums = re.findall(r'[0-9]+', _stem)
+                    if _nums:
+                        _chapter_positions[_ci] = int(_nums[-1])
+                    else:
+                        _chapter_positions[_ci] = _ci + 1  # fallback
+
+    # For txt/pdf, positions are just 1-based index
+    if not _chapter_positions:
+        _chapter_positions = {i: i + 1 for i in range(len(chapters))}
+
     # If user didn't override --output, derive it from the EPUB filename:
     if args.output == 'glossary.json':
         args.output = f"{file_base}_glossary.json" 
@@ -3638,7 +3738,10 @@ def main(log_callback=None, stop_callback=None):
     range_end = None
     if chapter_range and re.match(r"^\d+\s*-\s*\d+$", chapter_range):
         range_start, range_end = map(int, chapter_range.split("-", 1))
-        print(f"📊 Chapter Range Filter: {range_start} to {range_end}")
+        if use_spine_order:
+            print(f"📊 Chapter Range Filter (SPINE ORDER): positions {range_start} to {range_end}")
+        else:
+            print(f"📊 Chapter Range Filter: {range_start} to {range_end}")
     elif chapter_range:
         print(f"⚠️ Invalid chapter range format: {chapter_range} (use format: 5-10)")
 
@@ -3697,6 +3800,77 @@ def main(log_callback=None, stop_callback=None):
         chapters = [text for text, _fn in _raw_chapters]
         _chapter_filenames = {idx: fn for idx, (text, fn) in enumerate(_raw_chapters)}
     
+    # Rebuild chapter positions from the final chapter list
+    # (this is the definitive load used for processing)
+    if _chapter_filenames and not is_text_file and not is_pdf_file:
+        _chapter_positions = {}
+        if use_spine_order:
+            # Spine order positions were already built from OPF above
+            # Rebuild from current filenames using same OPF logic
+            try:
+                import xml.etree.ElementTree as _ET2
+                import zipfile as _zf2
+                translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                with _zf2.ZipFile(epub_path, 'r') as zf:
+                    opf_content = None
+                    for name in zf.namelist():
+                        if name.lower().endswith('.opf'):
+                            opf_content = zf.read(name).decode('utf-8')
+                            break
+                if opf_content:
+                    _opf_root2 = _ET2.fromstring(opf_content)
+                    _ns2 = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if _opf_root2.tag.startswith('{'):
+                        _ns2 = {'opf': _opf_root2.tag[1:_opf_root2.tag.index('}')]}
+                    _manifest2 = {}
+                    for _item in _opf_root2.findall('.//opf:manifest/opf:item', _ns2):
+                        _iid = _item.get('id')
+                        _href = _item.get('href')
+                        _mtype = _item.get('media-type', '')
+                        if _iid and _href and ('html' in _mtype.lower() or _href.endswith(('.html', '.xhtml', '.htm'))):
+                            _manifest2[_iid] = os.path.basename(_href)
+                    _spine_el2 = _opf_root2.find('.//opf:spine', _ns2)
+                    _all_spine2 = []
+                    if _spine_el2 is not None:
+                        for _iref in _spine_el2.findall('opf:itemref', _ns2):
+                            _idref = _iref.get('idref')
+                            if _idref and _idref in _manifest2:
+                                _all_spine2.append(_manifest2[_idref])
+                    def _is_special2(fname):
+                        fl = fname.lower()
+                        fnoext = os.path.splitext(fl)[0]
+                        if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
+                            return True
+                        if not re.search(r'\d', fnoext):
+                            return True
+                        return False
+                    _off2 = {}
+                    _tpos2 = 0
+                    for _sb in _all_spine2:
+                        if not (not translate_special and _is_special2(_sb)):
+                            _tpos2 += 1
+                            _off2[_sb] = _tpos2
+                            _off2[os.path.splitext(_sb)[0]] = _tpos2
+                    for _ci, _fn in _chapter_filenames.items():
+                        _bn = os.path.splitext(_fn)[0] if _fn else ''
+                        _pos = _off2.get(_fn) or _off2.get(_bn)
+                        if _pos is not None:
+                            _chapter_positions[_ci] = _pos
+            except Exception:
+                pass
+        # Fallback: extract number from filename (same as first load)
+        if not _chapter_positions:
+            for _ci, _fn in _chapter_filenames.items():
+                if _fn:
+                    _stem = os.path.splitext(_fn)[0]
+                    _nums = re.findall(r'[0-9]+', _stem)
+                    if _nums:
+                        _chapter_positions[_ci] = int(_nums[-1])
+                    else:
+                        _chapter_positions[_ci] = _ci + 1
+    if not _chapter_positions:
+        _chapter_positions = {i: i + 1 for i in range(len(chapters))}
+
     if not chapters:
         print("No chapters found. Exiting.")
         return
@@ -3758,7 +3932,7 @@ def main(log_callback=None, stop_callback=None):
     for idx, chap in enumerate(chapters):
         # Skip if chapter is outside the range
         if range_start is not None and range_end is not None:
-            chapter_num = idx + 1  # 1-based chapter numbering
+            chapter_num = _chapter_positions.get(idx, idx + 1)
             if not (range_start <= chapter_num <= range_end):
                 continue
         if idx not in completed:
@@ -4423,7 +4597,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Apply chapter range filter
                 if range_start is not None and range_end is not None:
-                    chapter_num = idx + 1
+                    chapter_num = _chapter_positions.get(idx, idx + 1)
                     if not (range_start <= chapter_num <= range_end):
                         continue
                 
@@ -4514,7 +4688,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Apply chapter range filter
             if range_start is not None and range_end is not None:
-                chapter_num = idx + 1  # 1-based chapter numbering
+                chapter_num = _chapter_positions.get(idx, idx + 1)
                 if not (range_start <= chapter_num <= range_end):
                     # Track skipped chapters for summary (don't print individually)
                     if '_skipped_chapters' not in globals():
@@ -4533,10 +4707,11 @@ def main(log_callback=None, stop_callback=None):
                     
             # Show filename alongside chapter number when available
             _fname = _chapter_filenames.get(idx, '')
+            _chap_num = _chapter_positions.get(idx, idx + 1)
             if _fname:
-                print(f"🔄 Processing Chapter {idx+1}/{total_chapters} ({_fname})")
+                print(f"🔄 Processing Chapter {_chap_num}/{total_chapters} ({_fname})")
             else:
-                print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
+                print(f"🔄 Processing Chapter {_chap_num}/{total_chapters}")
             
             # Request merging: If this is a parent chapter, merge content from child chapters
             chapter_content = chap
@@ -5032,7 +5207,7 @@ def main(log_callback=None, stop_callback=None):
                         raw_name = entry.get("raw_name", "?")
                         trans_name = entry.get("translated_name", "?")
                         
-                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')    
+                        print(f'[Chapter {_chapter_positions.get(idx, idx+1)}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')    
                     
                 # Check if this was actually a failure (empty/refused content)
                 _resp_text = locals().get('resp', '') or ''
@@ -5106,7 +5281,7 @@ def main(log_callback=None, stop_callback=None):
                     # Check if we're within the range or if there are more chapters to process
                     next_chapter_in_range = True
                     if range_start is not None and range_end is not None:
-                        next_chapter_num = idx + 2  # idx+1 is current, idx+2 is next
+                        next_chapter_num = _chapter_positions.get(idx + 1, idx + 2)
                         next_chapter_in_range = (range_start <= next_chapter_num <= range_end)
                     else:
                         # No range filter, check if next chapter is already completed

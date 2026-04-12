@@ -1484,6 +1484,237 @@ class RetranslationMixin:
         
         title_layout.addWidget(show_special_files_cb)
         
+        # ── Glossary Progress button ──
+        # Find the glossary progress file based on automapping settings
+        def _find_glossary_progress_file():
+            """Locate the glossary progress file for the current EPUB."""
+            try:
+                base = os.path.splitext(os.path.basename(file_path))[0]
+                progress_name = f"{base}_glossary_progress.json"
+                
+                # Determine output root (same logic as automapping)
+                _override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
+                if not _override_dir and hasattr(self, 'config'):
+                    _override_dir = self.config.get('output_directory')
+                
+                search_dirs = []
+                if _override_dir:
+                    _root = os.path.abspath(_override_dir)
+                    search_dirs.append(os.path.join(_root, 'Glossary'))
+                    search_dirs.append(os.path.join(_root, base, 'Glossary'))
+                    search_dirs.append(os.path.join(_root, base))
+                
+                # CWD-based paths
+                try:
+                    from translator_gui import _get_app_dir
+                    _app_dir = _get_app_dir()
+                except Exception:
+                    _app_dir = os.getcwd()
+                search_dirs.append(os.path.join(_app_dir, 'Glossary'))
+                search_dirs.append(os.path.join(_app_dir, base, 'Glossary'))
+                search_dirs.append(os.path.join(_app_dir, base))
+                
+                # Also check app base_dir
+                if hasattr(self, 'base_dir'):
+                    search_dirs.append(os.path.join(self.base_dir, 'Glossary'))
+                    search_dirs.append(os.path.join(self.base_dir, base, 'Glossary'))
+                
+                for d in search_dirs:
+                    if not os.path.isdir(d):
+                        continue
+                    candidate = os.path.join(d, progress_name)
+                    if os.path.isfile(candidate):
+                        return candidate
+                    # Also check generic name
+                    generic = os.path.join(d, 'glossary_progress.json')
+                    if os.path.isfile(generic):
+                        return generic
+            except Exception:
+                pass
+            return None
+        
+        glossary_progress_path = _find_glossary_progress_file()
+        
+        if glossary_progress_path:
+            from PySide6.QtWidgets import QPushButton
+            glossary_progress_btn = QPushButton("📊 Glossary Progress")
+            glossary_progress_btn.setCursor(Qt.PointingHandCursor)
+            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{glossary_progress_path}")
+            glossary_progress_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2d6a4f;
+                    color: #d8f3dc;
+                    border: 1px solid #40916c;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #40916c;
+                    border-color: #52b788;
+                }
+            """)
+            
+            def _show_glossary_progress():
+                """Show a popup with glossary extraction progress."""
+                try:
+                    # Re-check path (may have been updated since dialog opened)
+                    gp_path = _find_glossary_progress_file()
+                    if not gp_path or not os.path.isfile(gp_path):
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.information(dialog, "Glossary Progress", "Glossary progress file no longer exists.")
+                        return
+                    
+                    with open(gp_path, 'r', encoding='utf-8') as f:
+                        gp_data = json.load(f)
+                    
+                    completed_indices = gp_data.get('completed', [])
+                    failed_indices = gp_data.get('failed', [])
+                    merged_indices = gp_data.get('merged_indices', [])
+                    book_title = gp_data.get('book_title', '')
+                    
+                    # Build display using the EPUB's chapters to map idx → filename
+                    chapter_map = {}  # idx → filename
+                    total_epub_chapters = 0
+                    if file_path.lower().endswith('.epub') and os.path.exists(file_path):
+                        try:
+                            from extract_glossary_from_epub import extract_chapters_from_epub
+                            raw = extract_chapters_from_epub(file_path, return_metadata=True)
+                            total_epub_chapters = len(raw)
+                            for ci, (_text, fn) in enumerate(raw):
+                                chapter_map[ci] = fn
+                        except Exception:
+                            # Fallback: use spine_chapters if available
+                            if spine_chapters:
+                                total_epub_chapters = len(spine_chapters)
+                                for ci, sc in enumerate(spine_chapters):
+                                    chapter_map[ci] = sc.get('filename', f'chapter {ci+1}')
+                    
+                    if total_epub_chapters == 0:
+                        total_epub_chapters = max(
+                            max(completed_indices, default=0),
+                            max(failed_indices, default=0),
+                            max(merged_indices, default=0)
+                        ) + 1
+                    
+                    # Create the glossary progress dialog
+                    gp_dialog = QDialog(dialog)
+                    gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {os.path.basename(file_path)}")
+                    gp_dialog.setWindowModality(Qt.NonModal)
+                    gp_width, gp_height = self._get_dialog_size(0.30, 0.40)
+                    gp_dialog.resize(gp_width, gp_height)
+                    
+                    # Inherit stylesheet
+                    try:
+                        ss = dialog.styleSheet()
+                        if ss:
+                            gp_dialog.setStyleSheet(ss)
+                    except Exception:
+                        pass
+                    
+                    gp_layout = QVBoxLayout(gp_dialog)
+                    
+                    # Title
+                    gp_title = QLabel(f"Glossary Extraction Progress")
+                    gp_title_font = QFont('Arial', 12)
+                    gp_title_font.setBold(True)
+                    gp_title.setFont(gp_title_font)
+                    gp_title.setStyleSheet("color: #52b788;")
+                    gp_layout.addWidget(gp_title)
+                    
+                    if book_title:
+                        bt_label = QLabel(f"📖 {book_title}")
+                        bt_label.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 10pt;")
+                        gp_layout.addWidget(bt_label)
+                    
+                    # Stats row
+                    n_completed = len(completed_indices)
+                    n_failed = len(failed_indices)
+                    n_merged = len(merged_indices)
+                    n_remaining = total_epub_chapters - n_completed - n_merged
+                    if n_remaining < 0:
+                        n_remaining = 0
+                    
+                    stats_label = QLabel(
+                        f"Total: {total_epub_chapters} | "
+                        f"✅ Completed: {n_completed} | "
+                        f"❌ Failed: {n_failed} | "
+                        f"⬜ Remaining: {n_remaining}"
+                    )
+                    stats_label.setFont(QFont('Arial', 10))
+                    gp_layout.addWidget(stats_label)
+                    
+                    # Chapter list
+                    gp_listbox = QListWidget()
+                    gp_listbox.setFont(QFont('Courier', 10))
+                    gp_listbox.setSpacing(0)
+                    gp_listbox.setUniformItemSizes(True)
+                    gp_listbox.setStyleSheet("QListWidget::item { padding: 1px 2px; margin: 0px; }")
+                    
+                    completed_set = set(completed_indices)
+                    failed_set = set(failed_indices)
+                    merged_set = set(merged_indices)
+                    
+                    for ci in range(total_epub_chapters):
+                        fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                        
+                        # Extract chapter number from filename
+                        import re as _re
+                        _nums = _re.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
+                        ch_num = int(_nums[-1]) if _nums else ci + 1
+                        
+                        if ci in completed_set:
+                            icon = '✅'
+                            status = 'Completed'
+                            color = '#27ae60'
+                        elif ci in failed_set:
+                            icon = '❌'
+                            status = 'Failed'
+                            color = '#e74c3c'
+                        elif ci in merged_set:
+                            icon = '🔗'
+                            status = 'Merged'
+                            color = '#17a2b8'
+                        else:
+                            icon = '⬜'
+                            status = 'Not Processed'
+                            color = '#5a9fd4'
+                        
+                        display = f"Ch.{ch_num:03d} | {icon} {status:14s} | {fname}"
+                        
+                        item = QListWidgetItem(display)
+                        item.setForeground(QColor(color))
+                        gp_listbox.addItem(item)
+                    
+                    gp_layout.addWidget(gp_listbox)
+                    
+                    # Progress file path
+                    path_label = QLabel(f"📁 {gp_path}")
+                    path_label.setStyleSheet("color: #666; font-size: 8pt;")
+                    path_label.setWordWrap(True)
+                    gp_layout.addWidget(path_label)
+                    
+                    # Close button
+                    close_btn = QPushButton("Close")
+                    close_btn.setStyleSheet(
+                        "QPushButton { background-color: #555; color: white; padding: 6px 20px; "
+                        "border-radius: 4px; font-size: 10pt; } "
+                        "QPushButton:hover { background-color: #666; }"
+                    )
+                    close_btn.clicked.connect(gp_dialog.close)
+                    gp_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+                    
+                    gp_dialog.show()
+                
+                except Exception as e:
+                    print(f"⚠️ Error showing glossary progress: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            glossary_progress_btn.clicked.connect(_show_glossary_progress)
+            title_layout.addWidget(glossary_progress_btn)
+        
         container_layout.addWidget(title_row)
         
         # Store reference to the listbox (will be created later)
