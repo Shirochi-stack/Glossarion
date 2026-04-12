@@ -1644,6 +1644,92 @@ class EPUBCompiler:
                         if translated_headers:
                             self.log(f"📋 Loaded {len(translated_headers)} existing translations")
                             
+                            # --- Reconcile: detect new chapters added to the source EPUB ---
+                            existing_nums = set(translated_headers.keys())
+                            source_nums = set(source_headers.keys())
+                            new_nums = source_nums - existing_nums
+                            
+                            if new_nums:
+                                self.log(f"📦 Source EPUB has {len(new_nums)} NEW chapter(s) not in translated_headers.txt: {sorted(new_nums)}")
+                                
+                                # Translate only the new entries
+                                new_headers_to_translate = {n: source_headers[n] for n in sorted(new_nums)}
+                                
+                                if hasattr(self.header_translator, 'client') and self.header_translator.client:
+                                    try:
+                                        _hpb = getattr(self, 'headers_per_batch', -1)
+                                        new_translations = self.header_translator.translate_headers_batch(
+                                            new_headers_to_translate,
+                                            batch_size=_hpb if _hpb > 0 else None,
+                                            translation_type='header'
+                                        ) or {}
+                                        
+                                        if new_translations:
+                                            self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                            translated_headers.update(new_translations)
+                                            
+                                            # Append new entries to the existing file
+                                            try:
+                                                with open(translations_file, 'r', encoding='utf-8') as f:
+                                                    existing_content = f.read()
+                                                
+                                                # Remove the Summary block at the end so we can rewrite it
+                                                import re as _re
+                                                summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                                if summary_match:
+                                                    existing_content = existing_content[:summary_match.start()]
+                                                
+                                                with open(translations_file, 'w', encoding='utf-8') as f:
+                                                    f.write(existing_content.rstrip('\n') + '\n')
+                                                    
+                                                    for num in sorted(new_nums):
+                                                        orig = source_headers.get(num, "")
+                                                        trans = new_translations.get(num, orig)
+                                                        f.write(f"Chapter {num}:\n")
+                                                        f.write(f"  Original:   {orig}\n")
+                                                        f.write(f"  Translated: {trans}\n")
+                                                        # Add output file if available
+                                                        if current_titles and num in current_titles:
+                                                            filename = current_titles[num].get('filename', '')
+                                                            if filename:
+                                                                clean_fn = filename
+                                                                if clean_fn.startswith('response_'):
+                                                                    clean_fn = clean_fn[9:]
+                                                                while True:
+                                                                    _n, _e = os.path.splitext(clean_fn)
+                                                                    if _e and _e.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                                                        clean_fn = _n
+                                                                    else:
+                                                                        break
+                                                                f.write(f"  Output File: {clean_fn}\n")
+                                                        if num not in new_translations:
+                                                            f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                                        f.write("-" * 40 + "\n")
+                                                    
+                                                    # Rewrite summary
+                                                    all_nums = sorted(existing_nums | new_nums)
+                                                    f.write(f"\nSummary:\n")
+                                                    f.write(f"Total chapters: {len(all_nums)}\n")
+                                                    if all_nums:
+                                                        f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                                    f.write(f"Successfully translated: {len(translated_headers)}\n")
+                                                
+                                                self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                            except Exception as append_err:
+                                                self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
+                                        else:
+                                            self.log("⚠️ Translation of new headers returned no results — using originals")
+                                            for num in new_nums:
+                                                translated_headers[num] = source_headers[num]
+                                    except Exception as new_trans_err:
+                                        self.log(f"⚠️ Failed to translate new headers: {new_trans_err}")
+                                        for num in new_nums:
+                                            translated_headers[num] = source_headers[num]
+                                else:
+                                    self.log("⚠️ No API client available — using original titles for new chapters")
+                                    for num in new_nums:
+                                        translated_headers[num] = source_headers[num]
+                            
                             # Apply translations to HTML files using the same method
                             if hasattr(self, 'update_html_headers') and self.update_html_headers:
                                 self.header_translator._update_html_headers_exact(
@@ -4879,10 +4965,125 @@ img {
             toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
             if os.path.exists(toc_txt_path):
                 self.log("📁 Found existing TOC.txt - using cached toc.ncx translations")
-                toc_source_headers, translations, _ = self._load_toc_translations_file(toc_txt_path)
+                toc_source_headers, translations, toc_output_files = self._load_toc_translations_file(toc_txt_path)
                 # If TOC.txt exists, treat it as authoritative: only include entries present in the file.
                 if toc_source_headers:
                     toc_filter_nums = set(toc_source_headers.keys())
+                
+                # --- Reconcile: detect new entries added to the source EPUB ---
+                existing_toc_nums = set(toc_source_headers.keys()) if toc_source_headers else set()
+                current_toc_nums = set(original.keys())
+                new_toc_nums = current_toc_nums - existing_toc_nums
+                
+                if new_toc_nums:
+                    self.log(f"📦 Source EPUB has {len(new_toc_nums)} NEW toc.ncx entry(ies) not in TOC.txt: {sorted(new_toc_nums)}")
+                    
+                    # Translate only the new entries
+                    new_toc_to_translate = {n: original[n] for n in sorted(new_toc_nums)}
+                    
+                    if getattr(self, 'api_client', None):
+                        try:
+                            from metadata_batch_translator import BatchHeaderTranslator
+                            _bt_config = {}
+                            if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                                _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                            if os.environ.get('BATCH_HEADER_PROMPT'):
+                                _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                            if os.environ.get('OUTPUT_LANGUAGE'):
+                                _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                            tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                            toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
+                            new_toc_translations = tr.translate_headers_batch(
+                                new_toc_to_translate,
+                                batch_size=toc_ncx_per_batch if toc_ncx_per_batch > 0 else None,
+                                translation_type='toc'
+                            ) or {}
+                            
+                            if new_toc_translations:
+                                self.log(f"✅ Translated {len(new_toc_translations)} new TOC entry(ies)")
+                                translations.update(new_toc_translations)
+                                
+                                # Compute output refs for new entries
+                                new_output_refs = {}
+                                for _idx in new_toc_nums:
+                                    if _idx <= len(entries):
+                                        _ent = entries[_idx - 1]
+                                        _src = (_ent.get('src') or '').strip()
+                                        if _src:
+                                            _src_base = _src.split('#', 1)[0] if '#' in _src else _src
+                                            _core = self._normalize_core_name(_src_base)
+                                            _target = spine_href_by_core.get(_core)
+                                            _resolved = _target if _target else _src_base
+                                            _clean = os.path.basename(_resolved)
+                                            while True:
+                                                _name, _ext = os.path.splitext(_clean)
+                                                if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                                    _clean = _name
+                                                else:
+                                                    break
+                                            new_output_refs[_idx] = _clean
+                                        else:
+                                            _fb = refs.get(_idx, '')
+                                            _fb_base = os.path.basename(_fb) if _fb else ''
+                                            while _fb_base:
+                                                _n, _e = os.path.splitext(_fb_base)
+                                                if _e and _e.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                                    _fb_base = _n
+                                                else:
+                                                    break
+                                            new_output_refs[_idx] = _fb_base
+                                
+                                # Append new entries to the existing file
+                                try:
+                                    with open(toc_txt_path, 'r', encoding='utf-8') as f:
+                                        existing_content = f.read()
+                                    
+                                    import re as _re
+                                    summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                    if summary_match:
+                                        existing_content = existing_content[:summary_match.start()]
+                                    
+                                    with open(toc_txt_path, 'w', encoding='utf-8') as f:
+                                        f.write(existing_content.rstrip('\n') + '\n')
+                                        
+                                        for num in sorted(new_toc_nums):
+                                            orig = original.get(num, "")
+                                            trans = new_toc_translations.get(num, orig)
+                                            f.write(f"Chapter {num}:\n")
+                                            f.write(f"  Original:   {orig}\n")
+                                            f.write(f"  Translated: {trans}\n")
+                                            if new_output_refs.get(num):
+                                                f.write(f"  Output File: {new_output_refs[num]}\n")
+                                            if num not in new_toc_translations:
+                                                f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                            f.write("-" * 40 + "\n")
+                                        
+                                        all_toc_nums = sorted(existing_toc_nums | new_toc_nums)
+                                        f.write(f"\nSummary:\n")
+                                        f.write(f"Total entries: {len(all_toc_nums)}\n")
+                                        if all_toc_nums:
+                                            f.write(f"Entry range: {min(all_toc_nums)} to {max(all_toc_nums)}\n")
+                                        f.write(f"Successfully translated: {len(translations)}\n")
+                                    
+                                    self.log(f"📝 Updated TOC.txt with {len(new_toc_translations)} new entries")
+                                except Exception as append_err:
+                                    self.log(f"⚠️ Failed to update TOC.txt: {append_err}")
+                            else:
+                                self.log("⚠️ Translation of new TOC entries returned no results — using originals")
+                                for num in new_toc_nums:
+                                    translations[num] = original[num]
+                        except Exception as new_trans_err:
+                            self.log(f"⚠️ Failed to translate new TOC entries: {new_trans_err}")
+                            for num in new_toc_nums:
+                                translations[num] = original[num]
+                    else:
+                        self.log("⚠️ No API client available — using original labels for new TOC entries")
+                        for num in new_toc_nums:
+                            translations[num] = original[num]
+                    
+                    # Update filter to include the new entries
+                    if toc_filter_nums is not None:
+                        toc_filter_nums.update(new_toc_nums)
             else:
                 if not getattr(self, 'api_client', None):
                     self.log("⚠️ TRANSLATE_TOC_NCX enabled but API client is not initialized; using original toc.ncx labels")

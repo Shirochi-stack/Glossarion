@@ -1020,9 +1020,94 @@ def run_translate_headers_gui(gui_instance):
             if os.path.exists(translations_file):
                 gui_instance.append_log(f"📁 Found existing translated_headers.txt for: {epub_base}")
                 gui_instance.append_log(f"   File: {translations_file}")
-                gui_instance.append_log(f"   🔄 Will update HTML files using existing translations...")
+                
+                # --- Reconcile: check if the source EPUB has new chapters ---
+                try:
+                    existing_source, existing_trans, existing_out = load_translations_from_file(
+                        translations_file, gui_instance.append_log
+                    )
+                    source_mapping, spine_order = extract_source_chapters_with_opf_mapping(
+                        current_epub, gui_instance.append_log
+                    )
+                    
+                    # Build numbered source headers from spine for comparison
+                    current_source_count = len(source_mapping)
+                    existing_count = len(existing_source)
+                    
+                    if current_source_count > existing_count:
+                        new_count = current_source_count - existing_count
+                        gui_instance.append_log(f"📦 Source EPUB has {new_count} NEW chapter(s) ({existing_count} → {current_source_count})")
+                        
+                        # Build the full numbered headers from spine order
+                        all_headers = {}
+                        for idx, src_file in enumerate(spine_order, 1):
+                            src_basename = get_basename_without_ext(os.path.basename(src_file))
+                            if src_basename in source_mapping:
+                                all_headers[idx] = source_mapping[src_basename]
+                        
+                        # Find which chapter numbers are new
+                        new_nums = set(all_headers.keys()) - set(existing_source.keys())
+                        
+                        if new_nums and hasattr(gui_instance, 'api_client') and gui_instance.api_client:
+                            gui_instance.append_log(f"🌐 Translating {len(new_nums)} new chapter header(s)...")
+                            new_headers_to_translate = {n: all_headers[n] for n in sorted(new_nums)}
+                            
+                            try:
+                                from metadata_batch_translator import BatchHeaderTranslator
+                                tr = BatchHeaderTranslator(gui_instance.api_client, config or {})
+                                
+                                if hasattr(gui_instance, '_batch_header_translator'):
+                                    gui_instance._batch_header_translator = tr
+                                
+                                new_translations = tr.translate_headers_batch(
+                                    new_headers_to_translate,
+                                    batch_size=config.get('headers_per_batch', -1) if config else None,
+                                    translation_type='header'
+                                ) or {}
+                                
+                                if new_translations:
+                                    gui_instance.append_log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                    
+                                    # Append to the file
+                                    with open(translations_file, 'r', encoding='utf-8') as f:
+                                        existing_content = f.read()
+                                    
+                                    import re as _re
+                                    summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                    if summary_match:
+                                        existing_content = existing_content[:summary_match.start()]
+                                    
+                                    with open(translations_file, 'w', encoding='utf-8') as f:
+                                        f.write(existing_content.rstrip('\n') + '\n')
+                                        
+                                        for num in sorted(new_nums):
+                                            orig = all_headers.get(num, "")
+                                            trans = new_translations.get(num, orig)
+                                            f.write(f"Chapter {num}:\n")
+                                            f.write(f"  Original:   {orig}\n")
+                                            f.write(f"  Translated: {trans}\n")
+                                            if num not in new_translations:
+                                                f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                            f.write("-" * 40 + "\n")
+                                        
+                                        all_nums = sorted(set(existing_source.keys()) | new_nums)
+                                        f.write(f"\nSummary:\n")
+                                        f.write(f"Total chapters: {len(all_nums)}\n")
+                                        if all_nums:
+                                            f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                        total_translated = len(existing_trans) + len(new_translations)
+                                        f.write(f"Successfully translated: {total_translated}\n")
+                                    
+                                    gui_instance.append_log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                            except Exception as new_err:
+                                gui_instance.append_log(f"⚠️ Failed to translate new headers: {new_err}")
+                        elif new_nums:
+                            gui_instance.append_log(f"⚠️ {len(new_nums)} new chapter(s) detected but no API client — will use originals")
+                except Exception as recon_err:
+                    gui_instance.append_log(f"⚠️ Reconciliation check failed: {recon_err} — proceeding with existing file")
                 
                 # Use existing translations to update HTML files and toc.ncx
+                gui_instance.append_log(f"   🔄 Will update HTML files using existing translations...")
                 try:
                     result = apply_existing_translations(
                         epub_path=current_epub,
