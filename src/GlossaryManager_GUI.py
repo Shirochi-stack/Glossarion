@@ -4187,34 +4187,49 @@ CRITICAL EXTRACTION RULES:
                                    extra_values[k.strip()] = v.strip()
 
                        # Detect inline column names the AI wrote directly in the text
-                       # e.g. "description (fun fact: some value)"
-                       # e.g. "description, fun fact: some value"
+                       # Handles: "(fun fact: X, bad fact: Y)" and ", fun fact: X"
                        if desc and extra_columns:
                            import re as _re
-                           for col in extra_columns:
-                               if col in extra_values:
-                                   continue  # already found via | split
-                               col_esc = _re.escape(col)
-                               # 1. Parenthesized: "(col_name: value)"
-                               p1 = _re.compile(r'\s*\(\s*' + col_esc + r'\s*:\s*(.*?)\)\s*$', _re.IGNORECASE)
-                               m1 = p1.search(desc)
-                               if m1:
-                                   extra_values[col] = m1.group(1).strip()
-                                   desc = desc[:m1.start()].strip().rstrip(',').strip()
-                                   continue
-                               # 2. Comma-prefixed: ", col_name: value"
-                               p2 = _re.compile(r',\s*' + col_esc + r'\s*:\s*', _re.IGNORECASE)
-                               m2 = p2.search(desc)
-                               if m2:
-                                   extra_values[col] = desc[m2.end():].strip()
-                                   desc = desc[:m2.start()].strip()
-                                   continue
-                               # 3. At start: "col_name: value"
-                               p3 = _re.compile(r'^' + col_esc + r'\s*:\s*', _re.IGNORECASE)
-                               m3 = p3.search(desc)
-                               if m3:
-                                   extra_values[col] = desc[m3.end():].strip()
-                                   desc = ''
+                           remaining_cols = [c for c in extra_columns if c not in extra_values]
+                           if remaining_cols:
+                               # Phase 1: Extract trailing (...) block containing field labels
+                               paren_match = _re.search(r'\s*\((.+)\)\s*$', desc)
+                               if paren_match:
+                                   paren_content = paren_match.group(1).strip()
+                                   cols_in_paren = [c for c in remaining_cols
+                                                    if _re.search(_re.escape(c) + r'\s*:', paren_content, _re.IGNORECASE)]
+                                   if cols_in_paren:
+                                       positions = []
+                                       for c in cols_in_paren:
+                                           m = _re.search(_re.escape(c) + r'\s*:\s*', paren_content, _re.IGNORECASE)
+                                           if m:
+                                               positions.append((m.start(), m.end(), c))
+                                       positions.sort(key=lambda x: x[0])
+                                       for i, (start, end, col) in enumerate(positions):
+                                           if i + 1 < len(positions):
+                                               val = paren_content[end:positions[i+1][0]].strip().rstrip(',').strip()
+                                           else:
+                                               val = paren_content[end:].strip()
+                                           extra_values[col] = val
+                                       desc = desc[:paren_match.start()].strip().rstrip(',').strip()
+                                       remaining_cols = [c for c in remaining_cols if c not in extra_values]
+
+                               # Phase 2: comma-prefixed or start-of-string patterns
+                               for col in remaining_cols:
+                                   if not desc:
+                                       break
+                                   col_esc = _re.escape(col)
+                                   p2 = _re.compile(r',\s*' + col_esc + r'\s*:\s*', _re.IGNORECASE)
+                                   m2 = p2.search(desc)
+                                   if m2:
+                                       extra_values[col] = desc[m2.end():].strip()
+                                       desc = desc[:m2.start()].strip()
+                                       continue
+                                   p3 = _re.compile(r'^' + col_esc + r'\s*:\s*', _re.IGNORECASE)
+                                   m3 = p3.search(desc)
+                                   if m3:
+                                       extra_values[col] = desc[m3.end():].strip()
+                                       desc = ''
 
                        gender = ''
                        if bracket:
