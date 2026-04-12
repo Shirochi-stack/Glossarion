@@ -1607,21 +1607,71 @@ class RetranslationMixin:
             merged_indices = gp_data.get('merged_indices', [])
             book_title = gp_data.get('book_title', '')
             
-            # Build chapter map
+            # Build chapter map (lightweight — only reads OPF spine, no HTML parsing)
             chapter_map = {}
             total_epub_chapters = 0
             if fp.lower().endswith('.epub') and os.path.exists(fp):
                 try:
-                    from extract_glossary_from_epub import extract_chapters_from_epub
-                    raw = extract_chapters_from_epub(fp, return_metadata=True)
-                    total_epub_chapters = len(raw)
-                    for ci, (_text, fn) in enumerate(raw):
-                        chapter_map[ci] = fn
+                    import zipfile
+                    from xml.etree import ElementTree as ET
+                    with zipfile.ZipFile(fp, 'r') as zf:
+                        # Find OPF file from container.xml
+                        opf_path = None
+                        try:
+                            container = ET.fromstring(zf.read('META-INF/container.xml'))
+                            ns = {'c': 'urn:oasis:names:tc:opendocument:xmlns:container'}
+                            rootfile = container.find('.//c:rootfile', ns)
+                            if rootfile is not None:
+                                opf_path = rootfile.get('full-path')
+                        except Exception:
+                            # Fallback: find .opf file
+                            opf_path = next((n for n in zf.namelist() if n.endswith('.opf')), None)
+                        
+                        if opf_path:
+                            opf_xml = ET.fromstring(zf.read(opf_path))
+                            opf_ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                            opf_dir = os.path.dirname(opf_path)
+                            
+                            # Build id->href map from manifest
+                            id_to_href = {}
+                            html_types = {'application/xhtml+xml', 'text/html', 'application/html+xml'}
+                            for item in opf_xml.findall('.//opf:manifest/opf:item', opf_ns):
+                                mid = item.get('id', '')
+                                mtype = item.get('media-type', '')
+                                href = item.get('href', '')
+                                if mtype in html_types:
+                                    id_to_href[mid] = href
+                            
+                            # Get spine order
+                            spine_hrefs = []
+                            for itemref in opf_xml.findall('.//opf:spine/opf:itemref', opf_ns):
+                                idref = itemref.get('idref', '')
+                                if idref in id_to_href:
+                                    spine_hrefs.append(id_to_href[idref])
+                            
+                            # Filter special files (same logic as extraction)
+                            special_keywords = [
+                                'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
+                                'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+                                'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
+                                'bibliography'
+                            ]
+                            import re as _re_spine
+                            ci = 0
+                            for href in spine_hrefs:
+                                basename = os.path.basename(href)
+                                name_noext = os.path.splitext(basename)[0]
+                                name_lower = name_noext.lower()
+                                name_stripped = _re_spine.sub(r'\d+$', '', name_lower).rstrip('_- ')
+                                if any(kw in name_lower for kw in special_keywords):
+                                    has_digits = bool(_re_spine.search(r'\d', name_noext))
+                                    if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
+                                        continue
+                                chapter_map[ci] = basename
+                                ci += 1
+                            total_epub_chapters = ci
                 except Exception:
-                    if spine_chapters:
-                        total_epub_chapters = len(spine_chapters)
-                        for ci, sc in enumerate(spine_chapters):
-                            chapter_map[ci] = sc.get('filename', f'chapter {ci+1}')
+                    pass
             
             if total_epub_chapters == 0:
                 total_epub_chapters = max(
