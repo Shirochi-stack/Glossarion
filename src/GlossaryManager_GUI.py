@@ -1074,10 +1074,20 @@ class GlossaryManagerMixin:
         custom_frame_layout.addWidget(QLabel("Additional fields to extract (will be added as extra columns):"))
         
         self.custom_fields_listbox = QListWidget()
+        self.custom_fields_listbox.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.custom_fields_listbox.setDefaultDropAction(Qt.DropAction.MoveAction)
         # Use screen ratio: ~10% of screen height
         listbox_height = int(self._screen.height() * 0.10)
         self.custom_fields_listbox.setMaximumHeight(listbox_height)
         custom_frame_layout.addWidget(self.custom_fields_listbox)
+
+        # Sync backing list when items are reordered via drag-and-drop
+        def _sync_custom_fields_order():
+            self.custom_glossary_fields = [
+                self.custom_fields_listbox.item(i).text()
+                for i in range(self.custom_fields_listbox.count())
+            ]
+        self.custom_fields_listbox.model().rowsMoved.connect(_sync_custom_fields_order)
         
         # Initialize custom_glossary_fields if not exists
         if not hasattr(self, 'custom_glossary_fields'):
@@ -4156,7 +4166,12 @@ CRITICAL EXTRACTION RULES:
                            header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
                            if len(header_columns) < 4:
                                header_columns = ['translated_name', 'raw_name', 'gender', 'description']
-                           extra_columns = header_columns[4:] or list(default_extra_columns)
+                           # Only translated_name, raw_name, gender are positionally fixed
+                           # Everything else (including description) is extracted from tail text
+                           positional = {'translated_name', 'raw_name', 'gender'}
+                           extra_columns = [c for c in header_columns if c.lower() not in positional]
+                           if not extra_columns:
+                               extra_columns = list(default_extra_columns)
                            continue
                        if line.startswith('===') and line.endswith('==='):
                            section_name = line.strip('=').strip()
@@ -4242,7 +4257,11 @@ CRITICAL EXTRACTION RULES:
                            'gender': gender,
                        }
                        if desc:
-                           entry['description'] = desc
+                           # If 'description' is an extra column, it was already handled
+                           # by inline detection. Assign leftover text to 'description'
+                           # only if not already set from extra_values.
+                           if 'description' not in extra_values:
+                               entry['description'] = desc
                        if current_section:
                            entry['_section'] = current_section
                        # Apply any extra columns from header
@@ -4587,7 +4606,9 @@ CRITICAL EXTRACTION RULES:
                                    if gender:
                                        line += f" [{gender}]"
                                    extra_tail = []
-                                   for col in header_cols[4:]:
+                                   for col in header_cols:
+                                       if col in ['translated_name', 'raw_name', 'gender', 'description']:
+                                           continue
                                        val = e.get(col, '')
                                        if val:
                                            extra_tail.append(f"{col}: {val}")
