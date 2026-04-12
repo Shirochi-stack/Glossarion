@@ -6875,7 +6875,7 @@ Recent translations to summarize:
         artifacts_layout.setSpacing(6)
         
         artifacts_label = QLabel("Remove AI Artifacts:")
-        artifacts_layout.addWidget(artifacts_label)
+        artifacts_label.setStyleSheet("font-size: 7.5pt;")
         
         self.remove_artifacts_combo = QComboBox()
         self.remove_artifacts_combo.addItem("Off", "off")
@@ -6884,6 +6884,7 @@ Recent translations to summarize:
         self.remove_artifacts_combo.addItem("High", "high")
         self.remove_artifacts_combo.setFixedWidth(70)
         self.remove_artifacts_combo.setStyleSheet("""
+            QComboBox { font-size: 7.5pt; }
             QComboBox::drop-down { border: none; width: 0px; }
             QComboBox::down-arrow { image: none; width: 0px; }
         """)
@@ -6905,6 +6906,7 @@ Recent translations to summarize:
         if idx >= 0:
             self.remove_artifacts_combo.setCurrentIndex(idx)
         self.remove_artifacts_combo.currentIndexChanged.connect(self._on_remove_artifacts_toggle)
+        artifacts_layout.addWidget(artifacts_label)
         artifacts_layout.addWidget(self.remove_artifacts_combo)
         artifacts_layout.addStretch()
         
