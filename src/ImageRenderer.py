@@ -4314,15 +4314,6 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         
         print(f"[TRANSLATE_CONCURRENT] Translation completed, checking inpainting status...")
         
-        # NOTE: We intentionally do NOT check cancellation here if we already
-        # have results.  The API call consumed quota; discarding the response
-        # is wasteful.  Only bail if the translate function itself returned
-        # nothing (meaning it was cancelled before any tokens came back).
-        if not translated_texts:
-            self._log(f"⏹ Translation returned no results (likely cancelled)", "warning")
-            print(f"[TRANSLATE_CONCURRENT] No translation results - skipping render")
-            return
-        
         # Wait for inpainting to complete (if not already done) to determine render path
         # This doesn't block the translation API calls - those already happened above
         # Even if stop was requested, we wait for inpainting since discarding a
@@ -4334,6 +4325,22 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
             if not inpaint_result['completed']:
                 print(f"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image")
                 self._log(f"⏱️ Inpainting still running, rendering on original image", "info")
+        
+        # NOTE: We intentionally do NOT check cancellation here if we already
+        # have results.  The API call consumed quota; discarding the response
+        # is wasteful.  Only bail if the translate function itself returned
+        # nothing (meaning it was cancelled before any tokens came back).
+        if not translated_texts:
+            self._log(f"⏹ Translation returned no results (likely cancelled)", "warning")
+            print(f"[TRANSLATE_CONCURRENT] No translation results - skipping render")
+            # Even with no translations, if inpainting completed, show the cleaned image
+            if cleaned_image_path:
+                self.update_queue.put(('preview_update', {
+                    'translated_path': cleaned_image_path,
+                    'source_path': image_path
+                }))
+                print(f"[TRANSLATE_CONCURRENT] Inpainting result preserved despite no translation")
+            return
         
         # Send results to main thread with render image path
         render_image_path = cleaned_image_path if cleaned_image_path else image_path
@@ -11022,10 +11029,11 @@ def _process_recognize_results(self, results: dict):
 
 def _process_translate_results(self, results: dict):       
     """Process translation results on main thread - USE PIL RENDERING!"""
-    # ===== CANCELLATION CHECK: Discard results if stop was clicked =====
-    if _is_translation_cancelled(self):
-        print(f"[TRANSLATE_RESULTS] Discarding results - stop was clicked")
-        return
+    # NOTE: We intentionally do NOT check _is_translation_cancelled() here.
+    # If the background thread sent results, the API call already completed
+    # and consumed quota. Discarding the response would waste that work.
+    # The background thread already handles cancellation checks and only
+    # sends results that should be processed.
     
     try:
         translated_texts = results['translated_texts']

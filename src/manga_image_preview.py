@@ -2617,7 +2617,12 @@ class MangaImagePreviewWidget(QWidget):
                     pass
                 
             else:
-                # === GRACEFUL STOP: set flags, keep button enabled for double-click ===
+                # === GRACEFUL STOP: set ImageRenderer-level flags ONLY ===
+                # Do NOT set UnifiedClient/MangaTranslator global cancellation here!
+                # Those abort in-flight API calls, which defeats graceful stop.
+                # Only set flags that _is_translation_cancelled() checks on the
+                # ImageRenderer side — this lets the current API call finish,
+                # then the next iteration's check returns True and stops.
                 self.stop_translation_btn.setEnabled(True)  # Stay enabled for double-click
                 self.stop_translation_btn.setText("⏹ Click again to force stop")
                 self.stop_translation_btn.setToolTip(
@@ -2630,42 +2635,35 @@ class MangaImagePreviewWidget(QWidget):
                     return
                 
                 if hasattr(mi, '_log'):
-                    mi._log("🛑 Stop requested — cancelling queued/in-flight API calls", "warning")
+                    mi._log("🛑 Graceful stop requested — waiting for in-flight API call to finish", "warning")
                 
-                # Set is_running to False
+                # Set GRACEFUL_STOP env so background threads know this is graceful
+                os.environ['GRACEFUL_STOP'] = '1'
+                os.environ['WAIT_FOR_CHUNKS'] = '1'
+                
+                # Set is_running to False (prevents new operations from starting)
                 if hasattr(mi, 'is_running'):
                     mi.is_running = False
                 
-                # Set stop_flag
+                # Set stop_flag (checked by _is_translation_cancelled)
                 if hasattr(mi, 'stop_flag') and mi.stop_flag:
                     mi.stop_flag.set()
                     print("[STOP] Set stop_flag")
                 
-                # Clear batch mode flag
+                # Clear batch mode flag (prevents next image in batch)
                 if hasattr(mi, '_batch_mode_active'):
                     mi._batch_mode_active = False
                     print("[STOP] Cleared batch mode flag")
                 
-                # Set global cancellation on manga_integration
-                if hasattr(mi, 'set_global_cancellation'):
-                    mi.set_global_cancellation(True)
-                    print("[STOP] Set global cancellation on manga_integration")
+                # Set _global_cancellation on manga_integration instance
+                # This is checked by _is_translation_cancelled() in ImageRenderer
+                if hasattr(mi, '_global_cancellation'):
+                    mi._global_cancellation = True
+                    print("[STOP] Set _global_cancellation on manga_integration")
                 
-                # Set global cancellation on MangaTranslator (for API calls only)
-                try:
-                    from manga_translator import MangaTranslator
-                    MangaTranslator.set_global_cancellation(True)
-                    print("[STOP] Set MangaTranslator global cancellation")
-                except ImportError:
-                    pass
-                
-                # Set global cancellation on UnifiedClient (for API calls)
-                try:
-                    from unified_api_client import UnifiedClient
-                    UnifiedClient.set_global_cancellation(True)
-                    print("[STOP] Set UnifiedClient global cancellation")
-                except ImportError:
-                    pass
+                # NOTE: We intentionally do NOT call MangaTranslator.set_global_cancellation()
+                # or UnifiedClient.set_global_cancellation() here. Those abort in-flight
+                # API calls. The force-stop path (double-click) handles that.
                 
                 # Update Translate All button to show stopping state (if visible)
                 if hasattr(self, 'translate_all_btn'):
@@ -2678,7 +2676,7 @@ class MangaImagePreviewWidget(QWidget):
                 except Exception:
                     pass
                 
-                print("[STOP] Graceful stop — waiting for operations to finish...")
+                print("[STOP] Graceful stop — in-flight API call will finish, then stop")
             
         except Exception as e:
             print(f"[STOP] Error stopping translation: {e}")
