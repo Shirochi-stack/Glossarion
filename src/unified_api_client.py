@@ -16745,9 +16745,25 @@ class UnifiedClient:
                 # 429 rate limit
                 if "429" in error_str:
                     if attempt < max_retries - 1:
-                        interval = self._get_send_interval()
-                        delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
-                        print(f"⚠️ {label} rate limit – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
+                        # Try to extract quota reset time from the error message
+                        # (e.g. "Your quota will reset after 32s")
+                        quota_delay = None
+                        try:
+                            import re as _re
+                            _m = _re.search(r'reset\s+(?:after|in)\s+(\d+)\s*s', error_str, _re.IGNORECASE)
+                            if _m:
+                                quota_delay = int(_m.group(1))
+                        except Exception:
+                            pass
+                        if quota_delay and quota_delay > 0:
+                            # Use quota reset time + small jitter
+                            delay = quota_delay + random.uniform(0.5, 2.0)
+                            print(f"⏳ {label} quota exhausted – waiting {delay:.0f}s for reset (attempt {attempt+1}/{max_retries})")
+                        else:
+                            # Fallback to API call interval
+                            interval = self._get_send_interval()
+                            delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
+                            print(f"⚠️ {label} rate limit – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
                         if not self._sleep_with_cancel(delay, 0.5):
                             raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
                         continue

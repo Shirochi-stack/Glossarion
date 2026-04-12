@@ -2523,80 +2523,162 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_all_clicked.emit()
     
     def _on_stop_translation_clicked(self):
-        """Stop the current translation operation using all standard cancellation flags."""
-        print("[STOP] Stop translation button clicked")
+        """Stop the current translation operation.
+        
+        First click: graceful stop — sets cancellation flags, waits for
+        background threads to finish naturally.
+        
+        Double-click (within 1s): force stop — hard-cancels all in-flight
+        API calls and operations immediately.
+        """
+        import time
+        
+        # --- Double-click detection ---
+        current_time = time.time()
+        if not hasattr(self, '_stop_click_times'):
+            self._stop_click_times = []
+        
+        self._stop_click_times.append(current_time)
+        # Keep only clicks within the last 1 second
+        self._stop_click_times = [t for t in self._stop_click_times if current_time - t < 1.0]
+        
+        force_stop = len(self._stop_click_times) >= 2
+        if force_stop:
+            self._stop_click_times = []  # reset counter
+        
+        print(f"[STOP] Stop translation button clicked (force_stop={force_stop})")
         
         try:
-            # Update button to show stopping state
-            self.stop_translation_btn.setEnabled(False)
-            self.stop_translation_btn.setText("⏹ Stopping...")
-            
             mi = getattr(self, 'manga_integration', None)
-            if not mi:
-                print("[STOP] No manga_integration reference")
-                return
             
-            # Set is_running to False
-            if hasattr(mi, 'is_running'):
-                mi.is_running = False
-            
-            # Set stop_flag
-            if hasattr(mi, 'stop_flag') and mi.stop_flag:
-                mi.stop_flag.set()
-                print("[STOP] Set stop_flag")
-            
-            # Clear batch mode flag
-            if hasattr(mi, '_batch_mode_active'):
-                mi._batch_mode_active = False
-                print("[STOP] Cleared batch mode flag")
-            
-            # Set global cancellation on manga_integration
-            if hasattr(mi, 'set_global_cancellation'):
-                mi.set_global_cancellation(True)
-                print("[STOP] Set global cancellation on manga_integration")
-            
-            # Set global cancellation on MangaTranslator (for API calls only)
-            # NOTE: We do NOT call force_release_all_pool_checkouts() here because
-            # that would interrupt ongoing model loading (inpainter, bubble detector)
-            try:
-                from manga_translator import MangaTranslator
-                MangaTranslator.set_global_cancellation(True)
-                print("[STOP] Set MangaTranslator global cancellation (preserved model loading)")
-            except ImportError:
-                pass
-            
-            # Set global cancellation on UnifiedClient (for API calls)
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.set_global_cancellation(True)
-                print("[STOP] Set UnifiedClient global cancellation")
-            except ImportError:
-                pass
-            
-            # NOTE: We do NOT call hard_cancel_all() here because it would
-            # interrupt any ongoing model downloads or loading operations
-            
-            # Update Translate All button to show stopping state (if visible)
-            if hasattr(self, 'translate_all_btn'):
-                self.translate_all_btn.setText("Stopping...")
-            
-            # Log the stop action
-            if hasattr(mi, '_log'):
-                mi._log("⏹ Translation stopped by user", "warning")
-            
-            # Remove processing overlay
-            try:
-                import ImageRenderer
-                ImageRenderer._remove_processing_overlay(mi, None)
-            except Exception:
-                pass
-            
-            # NOTE: We do NOT restore buttons here with a fixed timer.
-            # The button stays as "Stopping..." until the background operation
-            # actually completes (either successfully or via cancellation check).
-            # The background threads call _enable_workflow_buttons() in their
-            # finally blocks, which will restore the stop button properly.
-            print("[STOP] Waiting for ongoing operations to complete...")
+            if force_stop:
+                # === FORCE STOP: immediate hard cancel ===
+                self.stop_translation_btn.setEnabled(False)
+                self.stop_translation_btn.setText("⏹ Stopping...")
+                
+                if mi and hasattr(mi, '_log'):
+                    mi._log("⚡ Double-click detected — forcing immediate stop!", "warning")
+                
+                os.environ['TRANSLATION_CANCELLED'] = '1'
+                os.environ['GRACEFUL_STOP'] = '0'
+                os.environ['WAIT_FOR_CHUNKS'] = '0'
+                
+                if mi:
+                    if hasattr(mi, 'is_running'):
+                        mi.is_running = False
+                    if hasattr(mi, 'stop_flag') and mi.stop_flag:
+                        mi.stop_flag.set()
+                    if hasattr(mi, '_batch_mode_active'):
+                        mi._batch_mode_active = False
+                    if hasattr(mi, 'set_global_cancellation'):
+                        mi.set_global_cancellation(True)
+                
+                # Hard cancel on MangaTranslator
+                try:
+                    from manga_translator import MangaTranslator
+                    MangaTranslator.set_global_cancellation(True)
+                    if hasattr(MangaTranslator, 'hard_cancel_all'):
+                        MangaTranslator.hard_cancel_all()
+                    print("[STOP] MangaTranslator hard_cancel_all()")
+                except ImportError:
+                    pass
+                
+                # === CRITICAL: Module-level stop — matches main stop_translation ===
+                # This sets global_stop_flag, closes HTTP sessions/httpx/OpenAI SDK
+                # clients, and cancels AuthGPT/AuthGem/Antigravity SSE streams.
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'set_stop_flag'):
+                        unified_api_client.set_stop_flag(True)
+                    if hasattr(unified_api_client, 'global_stop_flag'):
+                        unified_api_client.global_stop_flag = True
+                    if hasattr(unified_api_client, 'UnifiedClient'):
+                        unified_api_client.UnifiedClient._global_cancelled = True
+                    # Hard cancel: close active HTTP sessions to abort in-flight requests
+                    if hasattr(unified_api_client, 'hard_cancel_all'):
+                        unified_api_client.hard_cancel_all()
+                    print("[STOP] unified_api_client hard_cancel_all() + set_stop_flag(True)")
+                except Exception as e:
+                    print(f"[STOP] unified_api_client force-cancel failed: {e}")
+                
+                # Also set TransateKRtoEN stop flag
+                try:
+                    import TransateKRtoEN
+                    if hasattr(TransateKRtoEN, 'set_stop_flag'):
+                        TransateKRtoEN.set_stop_flag(True)
+                except ImportError:
+                    pass
+                
+                # Remove processing overlay
+                try:
+                    import ImageRenderer
+                    ImageRenderer._remove_processing_overlay(mi, None)
+                except Exception:
+                    pass
+                
+            else:
+                # === GRACEFUL STOP: set flags, keep button enabled for double-click ===
+                self.stop_translation_btn.setEnabled(True)  # Stay enabled for double-click
+                self.stop_translation_btn.setText("⏹ Click again to force stop")
+                self.stop_translation_btn.setToolTip(
+                    "Click again quickly to force-stop immediately.\n"
+                    "Currently waiting for in-flight operations to finish."
+                )
+                
+                if not mi:
+                    print("[STOP] No manga_integration reference")
+                    return
+                
+                if hasattr(mi, '_log'):
+                    mi._log("🛑 Stop requested — cancelling queued/in-flight API calls", "warning")
+                
+                # Set is_running to False
+                if hasattr(mi, 'is_running'):
+                    mi.is_running = False
+                
+                # Set stop_flag
+                if hasattr(mi, 'stop_flag') and mi.stop_flag:
+                    mi.stop_flag.set()
+                    print("[STOP] Set stop_flag")
+                
+                # Clear batch mode flag
+                if hasattr(mi, '_batch_mode_active'):
+                    mi._batch_mode_active = False
+                    print("[STOP] Cleared batch mode flag")
+                
+                # Set global cancellation on manga_integration
+                if hasattr(mi, 'set_global_cancellation'):
+                    mi.set_global_cancellation(True)
+                    print("[STOP] Set global cancellation on manga_integration")
+                
+                # Set global cancellation on MangaTranslator (for API calls only)
+                try:
+                    from manga_translator import MangaTranslator
+                    MangaTranslator.set_global_cancellation(True)
+                    print("[STOP] Set MangaTranslator global cancellation")
+                except ImportError:
+                    pass
+                
+                # Set global cancellation on UnifiedClient (for API calls)
+                try:
+                    from unified_api_client import UnifiedClient
+                    UnifiedClient.set_global_cancellation(True)
+                    print("[STOP] Set UnifiedClient global cancellation")
+                except ImportError:
+                    pass
+                
+                # Update Translate All button to show stopping state (if visible)
+                if hasattr(self, 'translate_all_btn'):
+                    self.translate_all_btn.setText("Stopping...")
+                
+                # Remove processing overlay
+                try:
+                    import ImageRenderer
+                    ImageRenderer._remove_processing_overlay(mi, None)
+                except Exception:
+                    pass
+                
+                print("[STOP] Graceful stop — waiting for operations to finish...")
             
         except Exception as e:
             print(f"[STOP] Error stopping translation: {e}")
