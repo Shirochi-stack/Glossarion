@@ -15207,6 +15207,9 @@ class UnifiedClient:
                                                     reasoning_frag = reasoning_frag.replace("\\n", "\n")
                                         
                                         if reasoning_frag and isinstance(reasoning_frag, str):
+                                            # Unescape literal \\n sequences that some providers
+                                            # (OpenRouter, Gemini) send in reasoning content
+                                            reasoning_frag = reasoning_frag.replace("\\n", "\n")
                                             oai_thinking_chunks += 1
                                             oai_thinking_text_parts.append(reasoning_frag)
                                             if oai_thinking_start_ts is None:
