@@ -7589,6 +7589,10 @@ class UnifiedClient:
                             text_parts = []
                             
                             for i, part in enumerate(content.parts):
+                                # Skip thinking/reasoning parts — only extract actual output
+                                if hasattr(part, 'thought') and part.thought is True:
+                                    self._debug_log(f"   🧠 [Gemini] Skipping thought part {i+1}")
+                                    continue
                                 part_text = self._extract_part_text(part, provider='gemini', part_index=i+1)
                                 if part_text:
                                     text_parts.append(part_text)
@@ -7655,6 +7659,10 @@ class UnifiedClient:
                 print(f"   🔍 [Gemini] Found parts directly on response")
                 text_parts = []
                 for i, part in enumerate(response.parts):
+                    # Skip thinking/reasoning parts
+                    if hasattr(part, 'thought') and part.thought is True:
+                        self._debug_log(f"   🧠 [Gemini] Skipping thought part {i+1}")
+                        continue
                     part_text = self._extract_part_text(part, provider='gemini', part_index=i+1)
                     if part_text:
                         text_parts.append(part_text)
