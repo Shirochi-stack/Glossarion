@@ -11031,11 +11031,11 @@ def _process_recognize_results(self, results: dict):
 
 def _process_translate_results(self, results: dict):       
     """Process translation results on main thread - USE PIL RENDERING!"""
-    # NOTE: We intentionally do NOT check _is_translation_cancelled() here.
-    # If the background thread sent results, the API call already completed
-    # and consumed quota. Discarding the response would waste that work.
-    # The background thread already handles cancellation checks and only
-    # sends results that should be processed.
+    # Discard results on FORCE stop only — graceful stop should keep them
+    # since the API call completed and consumed quota.
+    if _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1':
+        print(f"[TRANSLATE_RESULTS] Discarding results - force stop was clicked")
+        return
     
     try:
         translated_texts = results['translated_texts']
