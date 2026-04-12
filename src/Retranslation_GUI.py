@@ -1650,6 +1650,7 @@ class RetranslationMixin:
                                     spine_hrefs.append(id_to_href[idref])
                             
                             # Filter special files (same logic as extraction)
+                            _translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                             special_keywords = [
                                 'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
                                 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
@@ -1660,13 +1661,14 @@ class RetranslationMixin:
                             ci = 0
                             for href in spine_hrefs:
                                 basename = os.path.basename(href)
-                                name_noext = os.path.splitext(basename)[0]
-                                name_lower = name_noext.lower()
-                                name_stripped = _re_spine.sub(r'\d+$', '', name_lower).rstrip('_- ')
-                                if any(kw in name_lower for kw in special_keywords):
-                                    has_digits = bool(_re_spine.search(r'\d', name_noext))
-                                    if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
-                                        continue
+                                if not _translate_special:
+                                    name_noext = os.path.splitext(basename)[0]
+                                    name_lower = name_noext.lower()
+                                    name_stripped = _re_spine.sub(r'\d+$', '', name_lower).rstrip('_- ')
+                                    if any(kw in name_lower for kw in special_keywords):
+                                        has_digits = bool(_re_spine.search(r'\d', name_noext))
+                                        if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
+                                            continue
                                 chapter_map[ci] = basename
                                 ci += 1
                             total_epub_chapters = ci
