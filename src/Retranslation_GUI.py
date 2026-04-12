@@ -1607,15 +1607,16 @@ class RetranslationMixin:
             merged_indices = gp_data.get('merged_indices', [])
             book_title = gp_data.get('book_title', '')
             
-            # Build chapter map (lightweight — only reads OPF spine, no HTML parsing)
-            chapter_map = {}
-            total_epub_chapters = 0
-            if fp.lower().endswith('.epub') and os.path.exists(fp):
+            # Lightweight spine reader — returns (chapter_map, total_chapters)
+            def _read_spine_map(epub_path, translate_special):
+                """Read OPF spine and return (chapter_map, total_chapters) without parsing HTML."""
+                cmap = {}
+                if not (epub_path.lower().endswith('.epub') and os.path.exists(epub_path)):
+                    return cmap, 0
                 try:
                     import zipfile
                     from xml.etree import ElementTree as ET
-                    with zipfile.ZipFile(fp, 'r') as zf:
-                        # Find OPF file from container.xml
+                    with zipfile.ZipFile(epub_path, 'r') as zf:
                         opf_path = None
                         try:
                             container = ET.fromstring(zf.read('META-INF/container.xml'))
@@ -1624,63 +1625,70 @@ class RetranslationMixin:
                             if rootfile is not None:
                                 opf_path = rootfile.get('full-path')
                         except Exception:
-                            # Fallback: find .opf file
                             opf_path = next((n for n in zf.namelist() if n.endswith('.opf')), None)
                         
-                        if opf_path:
-                            opf_xml = ET.fromstring(zf.read(opf_path))
-                            opf_ns = {'opf': 'http://www.idpf.org/2007/opf'}
-                            opf_dir = os.path.dirname(opf_path)
-                            
-                            # Build id->href map from manifest
-                            id_to_href = {}
-                            html_types = {'application/xhtml+xml', 'text/html', 'application/html+xml'}
-                            for item in opf_xml.findall('.//opf:manifest/opf:item', opf_ns):
-                                mid = item.get('id', '')
-                                mtype = item.get('media-type', '')
-                                href = item.get('href', '')
-                                if mtype in html_types:
-                                    id_to_href[mid] = href
-                            
-                            # Get spine order
-                            spine_hrefs = []
-                            for itemref in opf_xml.findall('.//opf:spine/opf:itemref', opf_ns):
-                                idref = itemref.get('idref', '')
-                                if idref in id_to_href:
-                                    spine_hrefs.append(id_to_href[idref])
-                            
-                            # Filter special files (same logic as extraction)
-                            _translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                            special_keywords = [
-                                'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
-                                'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
-                                'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
-                                'bibliography'
-                            ]
-                            import re as _re_spine
-                            ci = 0
-                            for href in spine_hrefs:
-                                basename = os.path.basename(href)
-                                if not _translate_special:
-                                    name_noext = os.path.splitext(basename)[0]
-                                    name_lower = name_noext.lower()
-                                    name_stripped = _re_spine.sub(r'\d+$', '', name_lower).rstrip('_- ')
-                                    if any(kw in name_lower for kw in special_keywords):
-                                        has_digits = bool(_re_spine.search(r'\d', name_noext))
-                                        if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
-                                            continue
-                                chapter_map[ci] = basename
-                                ci += 1
-                            total_epub_chapters = ci
+                        if not opf_path:
+                            return cmap, 0
+                        
+                        opf_xml = ET.fromstring(zf.read(opf_path))
+                        opf_ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                        
+                        id_to_href = {}
+                        html_types = {'application/xhtml+xml', 'text/html', 'application/html+xml'}
+                        for item in opf_xml.findall('.//opf:manifest/opf:item', opf_ns):
+                            mid = item.get('id', '')
+                            mtype = item.get('media-type', '')
+                            href = item.get('href', '')
+                            if mtype in html_types:
+                                id_to_href[mid] = href
+                        
+                        spine_hrefs = []
+                        for itemref in opf_xml.findall('.//opf:spine/opf:itemref', opf_ns):
+                            idref = itemref.get('idref', '')
+                            if idref in id_to_href:
+                                spine_hrefs.append(id_to_href[idref])
+                        
+                        special_keywords = [
+                            'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
+                            'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+                            'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
+                            'bibliography'
+                        ]
+                        import re as _re_spine
+                        ci = 0
+                        for href in spine_hrefs:
+                            basename = os.path.basename(href)
+                            if not translate_special:
+                                name_noext = os.path.splitext(basename)[0]
+                                name_lower = name_noext.lower()
+                                name_stripped = _re_spine.sub(r'\d+$', '', name_lower).rstrip('_- ')
+                                if any(kw in name_lower for kw in special_keywords):
+                                    has_digits = bool(_re_spine.search(r'\d', name_noext))
+                                    if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
+                                        continue
+                            cmap[ci] = basename
+                            ci += 1
+                        return cmap, ci
                 except Exception:
-                    pass
+                    return cmap, 0
             
-            if total_epub_chapters == 0:
-                total_epub_chapters = max(
+            # Mutable state so refresh can update chapter_map when toggle changes
+            _ts_init = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+            _cmap_init, _total_init = _read_spine_map(fp, _ts_init)
+            
+            if _total_init == 0:
+                _total_init = max(
                     max(completed_indices, default=0),
                     max(failed_indices, default=0),
                     max(merged_indices, default=0)
                 ) + 1
+            
+            # Store in mutable dict so closures can update
+            panel_state = {
+                'chapter_map': _cmap_init,
+                'total': _total_init,
+                'translate_special': _ts_init,
+            }
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -1701,14 +1709,14 @@ class RetranslationMixin:
             n_completed = len(_comp_set_init - _merg_set_init)
             n_failed = len(_fail_set_init)
             n_merged = len(_merg_set_init)
-            n_remaining = max(0, total_epub_chapters - len(_comp_set_init | _fail_set_init | _merg_set_init))
+            n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init))
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
             gp_stats_layout.setContentsMargins(0, 5, 0, 5)
             gp_stats_font = QFont('Arial', 10)
             
-            lbl_total = QLabel(f"Total: {total_epub_chapters} | ")
+            lbl_total = QLabel(f"Total: {panel_state['total']} | ")
             lbl_total.setFont(gp_stats_font)
             gp_stats_layout.addWidget(lbl_total)
             
@@ -1754,6 +1762,9 @@ class RetranslationMixin:
             failed_set = set(failed_indices)
             merged_set = set(merged_indices)
             
+            chapter_map = panel_state['chapter_map']
+            total_epub_chapters = panel_state['total']
+            
             for ci in range(total_epub_chapters):
                 fname = chapter_map.get(ci, f'chapter {ci + 1}')
                 import re as _re
@@ -1781,11 +1792,13 @@ class RetranslationMixin:
                 _comp2 = set(_d.get('completed', []))
                 _fail2 = set(_d.get('failed', []))
                 _merg2 = set(_d.get('merged_indices', []))
+                _total = panel_state['total']
+                lbl_total.setText(f"Total: {_total} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
                 lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
                 lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
                 lbl_gp_merged.setVisible(len(_merg2) > 0)
-                lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, total_epub_chapters - len(_comp2 | _fail2 | _merg2))}")
+                lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, _total - len(_comp2 | _fail2 | _merg2))}")
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
@@ -1838,8 +1851,9 @@ class RetranslationMixin:
                             json.dump(_d, _f, ensure_ascii=False, indent=2)
                         # Update all affected items
                         import re as _re3
+                        _cmap = panel_state['chapter_map']
                         for it, ci in targets:
-                            fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                            fname = _cmap.get(ci, f'chapter {ci + 1}')
                             _nums3 = _re3.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                             ch_num3 = int(_nums3[-1]) if _nums3 else ci + 1
                             display3 = f"Ch.{ch_num3:03d} | ⬜ {'Not Completed':14s} | {fname}"
@@ -1903,6 +1917,37 @@ class RetranslationMixin:
             
             p_layout.addLayout(path_row)
             
+            # Helper to fully rebuild the listbox when chapter_map changes
+            def _rebuild_listbox(_d):
+                _cmap = panel_state['chapter_map']
+                _total = panel_state['total']
+                _comp = set(_d.get('completed', []))
+                _fail = set(_d.get('failed', []))
+                _merg = set(_d.get('merged_indices', []))
+                
+                gp_listbox.clear()
+                import re as _re_rb
+                for ci in range(_total):
+                    fname = _cmap.get(ci, f'chapter {ci + 1}')
+                    _nums = _re_rb.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
+                    ch_num = int(_nums[-1]) if _nums else ci + 1
+                    
+                    if ci in _merg:
+                        icon, status, color = '🔗', 'merged', '#17a2b8'
+                    elif ci in _comp:
+                        icon, status, color = '✅', 'completed', '#27ae60'
+                    elif ci in _fail:
+                        icon, status, color = '❌', 'failed', '#e74c3c'
+                    else:
+                        icon, status, color = '⬜', 'not_completed', '#5a9fd4'
+                    
+                    display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
+                    item = QListWidgetItem(display)
+                    item.setForeground(QColor(color))
+                    item.setData(Qt.UserRole, status)
+                    item.setData(Qt.UserRole + 1, ci)
+                    gp_listbox.addItem(item)
+            
             # Refresh function (called by timer)
             def _refresh():
                 try:
@@ -1911,12 +1956,30 @@ class RetranslationMixin:
                         return
                     with open(_rp, 'r', encoding='utf-8') as _f:
                         _d = json.load(_f)
+                    
+                    # Check if TRANSLATE_SPECIAL_FILES toggle changed — rebuild chapter map if so
+                    _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                    if _cur_ts != panel_state['translate_special']:
+                        panel_state['translate_special'] = _cur_ts
+                        new_cmap, new_total = _read_spine_map(fp, _cur_ts)
+                        if new_total > 0:
+                            panel_state['chapter_map'] = new_cmap
+                            panel_state['total'] = new_total
+                        elif new_total == 0:
+                            _all_idx = set(_d.get('completed', [])) | set(_d.get('failed', [])) | set(_d.get('merged_indices', []))
+                            panel_state['total'] = (max(_all_idx, default=0) + 1) if _all_idx else 1
+                        _rebuild_listbox(_d)
+                        _refresh_stats_from_dict(_d)
+                        return
+                    
                     _comp = set(_d.get('completed', []))
                     _fail = set(_d.get('failed', []))
                     _merg = set(_d.get('merged_indices', []))
+                    _total = panel_state['total']
+                    _cmap = panel_state['chapter_map']
                     
-                    _nr = max(0, total_epub_chapters - len(_comp | _fail | _merg))
-                    lbl_total.setText(f"Total: {total_epub_chapters} | ")
+                    _nr = max(0, _total - len(_comp | _fail | _merg))
+                    lbl_total.setText(f"Total: {_total} | ")
                     lbl_gp_completed.setText(f"✅ Completed: {len(_comp - _merg)} | ")
                     lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
@@ -1927,7 +1990,7 @@ class RetranslationMixin:
                     if _bt and bt_label:
                         bt_label.setText(f"📖 {_bt}")
                     
-                    for ci in range(min(gp_listbox.count(), total_epub_chapters)):
+                    for ci in range(min(gp_listbox.count(), _total)):
                         item = gp_listbox.item(ci)
                         if not item:
                             continue
@@ -1942,7 +2005,7 @@ class RetranslationMixin:
                             new_status, new_color = 'not_completed', '#5a9fd4'
                         
                         if new_status != old_status:
-                            fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                            fname = _cmap.get(ci, f'chapter {ci + 1}')
                             import re as _re2
                             _nums2 = _re2.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                             ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
