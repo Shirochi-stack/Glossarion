@@ -3052,6 +3052,20 @@ class QAScannerMixin:
         ai_truncation_tail_spinbox.setSingleStep(100)
         ai_truncation_tail_spinbox.setValue(int(qa_settings.get('ai_truncation_tail_chars', 400)))
         ai_truncation_tail_spinbox.setFixedWidth(100)
+        ai_truncation_tail_spinbox.setStyleSheet("""
+            QSpinBox {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 2px 4px;
+            }
+            QSpinBox:disabled {
+                background-color: #1a1a1a;
+                color: #555555;
+                border-color: #333333;
+            }
+        """)
         disable_wheel_event(ai_truncation_tail_spinbox)
         ai_trunc_tail_layout.addWidget(ai_truncation_tail_spinbox)
 
