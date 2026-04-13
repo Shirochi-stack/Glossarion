@@ -4490,7 +4490,7 @@ Recent translations to summarize:
         </p>
 
         <h4>Zhipu AI International (za/)</h4>
-        <p>Route to the GLM international endpoint (open.bigmodel.cn) instead of the Chinese endpoint</p>
+        <p>Route to the GLM international endpoint (https://api.z.ai/api/paas/v4) instead of the Chinese endpoint</p>
         <ul>
             <li><b>za/glm-4-plus</b> - GLM-4 Plus via international endpoint</li>
             <li><b>za/glm-4</b> - GLM-4 via international endpoint</li>
