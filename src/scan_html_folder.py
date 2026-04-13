@@ -4842,11 +4842,12 @@ def _extract_paragraphs(html):
 def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', target_lang='en', log=print,
                                  tail_paragraphs=3, sleep_time=2,
                                  cheap_threshold=0.12, borderline_score=0.40,
-                                 length_threshold=0.30, embed_threshold=0.30):
+                                 length_threshold=0.30, embed_threshold=0.30,
+                                 min_tail_chars=400):
     """Check if translated content silently truncated the ending of the source.
 
-    Compares the last ~500 chars of the raw (source) HTML with the last
-    ~500 chars of the translated HTML via:
+    Compares the last `min_tail_chars` chars of the raw (source) HTML with the last
+    `min_tail_chars` chars of the translated HTML via:
       0. Paragraph count ratio (early exit if ≥70% paragraphs present).
       1. Back-translate the raw tail to the target language (GoogleTranslator).
       2. Cheap composite score (SequenceMatcher + keyword overlap + length ratio).
@@ -4871,10 +4872,6 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
         if not raw_paragraphs or not trans_paragraphs:
             result['details'] = 'insufficient_paragraphs'
             return result
-
-
-
-        min_tail_chars = 500
 
         def _build_tail(paragraphs, min_chars):
             """Take paragraphs from the end, expanding until min_chars reached."""
