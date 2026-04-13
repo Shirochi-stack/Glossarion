@@ -7675,6 +7675,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         _border_t = int(qa_settings.get('truncation_borderline_score', 40)) / 100
         _len_t = int(qa_settings.get('truncation_length_threshold', 30)) / 100
         _embed_t = int(qa_settings.get('truncation_embed_threshold', 30)) / 100
+        _heuristic_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))
 
         # Use a lock for thread-safe translator / cache access
         _trunc_lock = _threading.Lock()
@@ -7721,6 +7722,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     source_lang=src_lang, target_lang=tgt_lang, log=log,
                     cheap_threshold=_cheap_t, borderline_score=_border_t,
                     length_threshold=_len_t, embed_threshold=_embed_t,
+                    min_tail_chars=_heuristic_tail_chars,
                 )
                 return (result_obj, trunc_result)
             except Exception as e:
@@ -7836,9 +7838,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     _ai_safe_log(f"   ⚠️ AI truncation check failed for {result_obj.get('filename', '?')}: {_e}")
                     return None
 
-            # Use 2 threads — API calls are I/O bound but we don't want to overwhelm rate limits
-            _ai_max_workers = min(2, len(results))
-            log(f"\n🤖 Running AI Truncation Detection ({_ai_max_workers} threads, {_ai_tail_chars} tail chars)...")
+            # Respect Batch Translation toggle and batch size from config
+            _batch_enabled = _ai_config.get('batch_translation', False)
+            if _batch_enabled:
+                try:
+                    _ai_max_workers = max(1, min(int(_ai_config.get('batch_size', 3)), len(results)))
+                except (ValueError, TypeError):
+                    _ai_max_workers = min(3, len(results))
+            else:
+                _ai_max_workers = 1  # Sequential when batch mode is off
+            log(f"\n🤖 Running AI Truncation Detection ({_ai_max_workers} thread{'s' if _ai_max_workers > 1 else ''}, {_ai_tail_chars} tail chars)...")
 
             _ai_checked = 0
             _ai_flagged = 0

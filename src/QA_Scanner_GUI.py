@@ -4013,6 +4013,9 @@ class QAScannerMixin:
                 truncation_borderline_slider.setValue(40)
                 truncation_length_slider.setValue(30)
                 truncation_embed_slider.setValue(30)
+                check_ai_truncation_checkbox.setChecked(False)
+                ai_truncation_tail_spinbox.setValue(400)
+                _ai_trunc_prompt_holder[0] = _ai_trunc_default_prompt
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
 
                 # Reset cache settings
