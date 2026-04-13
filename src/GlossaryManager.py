@@ -4831,6 +4831,14 @@ def _process_ai_response(response_text, all_text, min_frequency,
     response_text = response_text.replace("\\'", "'")
     response_text = response_text.replace('\\\\', '\\')
     
+    # --- Normalize separator: literal \x1F text → actual byte, tab fallback ---
+    # Models sometimes output the escape sequence as visible text instead of the control char
+    if '\\x1F' in response_text or '\\x1f' in response_text:
+        response_text = response_text.replace('\\x1F', GLOSSARY_SEP).replace('\\x1f', GLOSSARY_SEP)
+    # Some models use tabs when they can't produce the control character
+    if GLOSSARY_SEP not in response_text and '\t' in response_text and response_text.count('\t') >= 3:
+        response_text = response_text.replace('\t', GLOSSARY_SEP)
+    
     # Clean up markdown code blocks if present
     if '```' in response_text:
         parts = response_text.split('```')
@@ -4848,10 +4856,32 @@ def _process_ai_response(response_text, all_text, min_frequency,
 
     import csv
 
+    # --- Per-line fallback: detect space-separated output (AI couldn't produce \x1F) ---
+    # If we still have no \x1F after bulk normalization, try to detect space-aligned columns
+    # by checking if lines start with known entry types followed by spaces.
+    _entry_type_prefixes = ('character ', 'term ', 'location ', 'skill ', 'item ', 'organization ', 'title ', 'book ')
+    if GLOSSARY_SEP not in '\n'.join(lines) and ',' not in '\n'.join(lines[:3]):
+        # Heuristic: check if multiple lines start with entry type keywords followed by space
+        space_sep_count = sum(1 for ln in lines if any(ln.lower().startswith(p) for p in _entry_type_prefixes))
+        if space_sep_count >= 2:
+            # Also check header line
+            header_space = any('type' in ln.lower() and 'raw_name' in ln.lower() for ln in lines)
+            if header_space or space_sep_count >= 3:
+                # Convert multi-space sequences (2+) to \x1F as column separators
+                normalized_lines = []
+                for ln in lines:
+                    low = ln.lower()
+                    if ('type' in low and 'raw_name' in low) or any(low.startswith(p) for p in _entry_type_prefixes):
+                        # Replace runs of 2+ spaces with \x1F
+                        ln = re.sub(r'  +', GLOSSARY_SEP, ln)
+                    normalized_lines.append(ln)
+                lines = normalized_lines
+                print(f"📑 Detected space-separated AI output — normalized to \\x1F separator")
+
     # --- Dynamic header capture: accept every column the AI returns ---
     dynamic_header = None
     dynamic_rows = []
-    ai_sep = _gsep(response_text)  # Auto-detect if AI used \x1F or comma
+    ai_sep = _gsep('\n'.join(lines))  # Auto-detect if AI used \x1F or comma
     for ln in lines:
         low = ln.lower()
         if 'type' in low and 'raw_name' in low:

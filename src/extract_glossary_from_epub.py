@@ -1812,6 +1812,13 @@ def parse_api_response(response_text: str) -> List[Dict]:
             # Normalize tab-separated output to \x1F (some models use tabs when they can't produce the control char)
             if _GSEP not in line and '\t' in line and line.count('\t') >= 2:
                 line = line.replace('\t', _GSEP)
+            # Space-separated fallback: when model can't produce \x1F and uses aligned spaces
+            if _GSEP not in line and ',' not in line:
+                _low = line.lower()
+                _space_prefixes = ('character ', 'term ', 'location ', 'skill ', 'item ', 'organization ', 'title ', 'book ')
+                if any(_low.startswith(p) for p in _space_prefixes) or ('type' in _low and 'raw_name' in _low):
+                    if '  ' in line:  # 2+ consecutive spaces = column separator
+                        line = re.sub(r'  +', _GSEP, line)
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 if _GSEP in line:
                     header_fields = [c.strip() for c in line.split(_GSEP) if c.strip()]
