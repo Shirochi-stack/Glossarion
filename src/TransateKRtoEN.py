@@ -10172,10 +10172,11 @@ def main(log_callback=None, stop_callback=None):
                                             lines.insert(insert_idx, bl)
                                 else:
                                     # Standard CSV injection
-                                    book_line = f"book,{r_val},{t_val},,\n"
+                                    _GSEP = '\x1F'
+                                    book_line = f"book{_GSEP}{r_val}{_GSEP}{t_val}{_GSEP}{_GSEP}\n"
                                     # Find insertion point (after header if present)
                                     insert_idx = 0
-                                    if lines and "type," in lines[0].lower():
+                                    if lines and ("type," in lines[0].lower() or f"type{_GSEP}" in lines[0].lower()):
                                         insert_idx = 1
                                     lines.insert(insert_idx, book_line)
                                 

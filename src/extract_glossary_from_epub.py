@@ -1824,7 +1824,9 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     # If the model failed to quote a comma-containing description, merge overflow into the last column
                     desc_idx = next((i for i, h in enumerate(header_fields) if h.lower() == 'description'), None)
                     if desc_idx is not None and desc_idx < len(header_fields):
-                        row = row[:desc_idx] + [','.join(row[desc_idx:])]
+                        # Rejoin with the same separator that was used to split
+                        _rejoin_sep = _GSEP if _GSEP in line else ','
+                        row = row[:desc_idx] + [_rejoin_sep.join(row[desc_idx:])]
                     else:
                         row = row[:len(header_fields)]
                 entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}

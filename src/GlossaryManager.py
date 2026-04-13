@@ -1211,7 +1211,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     chunk_lines = []
                     if isinstance(chunk_glossary, list):
                         for line in chunk_glossary:
-                            if line and not line.startswith('type,'):
+                            if line and not _is_glossary_header(line):
                                 all_glossary_entries.append(line)
                                 chunk_lines.append(line)
                     else:
@@ -1258,7 +1258,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     inc_content = f.read()
                 
                 # Simple parse to count lines/entries
-                inc_lines = [line for line in inc_content.split('\n') if line.strip() and not line.startswith('type,')]
+                inc_lines = [line for line in inc_content.split('\n') if line.strip() and not _is_glossary_header(line)]
                 print(f"📑 Found incremental glossary: {len(inc_lines)} entries (Memory: {len(all_glossary_entries)} entries)")
                 
                 if len(inc_lines) > len(all_glossary_entries):
