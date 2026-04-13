@@ -17448,7 +17448,7 @@ class UnifiedClient:
             'yi': lambda: os.getenv("YI_API_BASE_URL", "https://api.01.ai/v1"),
             'qwen': "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             'baichuan': "https://api.baichuan-ai.com/v1",
-            'zhipu': "https://api.z.ai/api/paas/v4",
+            'zhipu': "https://open.bigmodel.cn/api/paas/v4",
             'moonshot': "https://api.moonshot.cn/v1",
             'groq': lambda: os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
             'baidu': "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
