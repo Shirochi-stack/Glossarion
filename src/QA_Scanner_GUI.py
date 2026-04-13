@@ -3017,9 +3017,9 @@ class QAScannerMixin:
 
         additional_layout.addSpacing(10)
 
-        # ---- AI Hunter Truncation Detection (no heavy deps needed) ----
+        # ---- AI Truncation Detection (no heavy deps needed) ----
         check_ai_truncation_checkbox = self._create_styled_checkbox(
-            "Truncation detection AI Hunter (uses your API to detect truncated chapters)"
+            "AI Truncation Detection (uses your API to detect truncated chapters)"
         )
         check_ai_truncation_checkbox.setChecked(qa_settings.get('check_ai_truncation_detection', False))
         additional_layout.addWidget(check_ai_truncation_checkbox)
@@ -3136,7 +3136,11 @@ class QAScannerMixin:
                 "border-radius: 3px; font-weight: bold; } "
                 "QPushButton:hover { background-color: #e0a800; }"
             )
-            reset_btn.clicked.connect(lambda: p_edit.setPlainText(_ai_trunc_default_prompt))
+            def _reset_all_defaults():
+                p_edit.setPlainText(_ai_trunc_default_prompt)
+                check_ai_truncation_checkbox.setChecked(False)
+                ai_truncation_tail_spinbox.setValue(400)
+            reset_btn.clicked.connect(_reset_all_defaults)
             btn_row.addWidget(reset_btn)
             btn_row.addStretch()
 

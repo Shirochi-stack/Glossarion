@@ -4990,7 +4990,7 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
     return result
 
 
-# ---------- AI Hunter Truncation Detection ----------
+# ---------- AI Truncation Detection ----------
 
 def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
                             custom_system_prompt=None):
@@ -7750,7 +7750,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 except Exception:
                     pass
 
-    # ---- AI Hunter Truncation Detection (uses API, threaded) ----
+    # ---- AI Truncation Detection (uses API, threaded) ----
     if check_ai_truncation and original_html_content and not should_stop():
         import threading as _threading_ai
         from concurrent.futures import ThreadPoolExecutor as _AIThreadPool, as_completed as _ai_as_completed
@@ -7841,7 +7841,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             # Use 2 threads — API calls are I/O bound but we don't want to overwhelm rate limits
             _ai_max_workers = min(2, len(results))
-            log(f"\n🤖 Running AI Hunter truncation detection ({_ai_max_workers} threads, {_ai_tail_chars} tail chars)...")
+            log(f"\n🤖 Running AI Truncation Detection ({_ai_max_workers} threads, {_ai_tail_chars} tail chars)...")
 
             _ai_checked = 0
             _ai_flagged = 0
