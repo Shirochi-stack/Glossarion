@@ -986,9 +986,9 @@ def _build_gemini_request_body(
     # ── Safety settings ──
     # AuthGem endpoints always disable safety filters (ignores DISABLE_GEMINI_SAFETY toggle).
     # Threshold is configurable via dropdown: OFF, BLOCK_NONE, BLOCK_ONLY_HIGH, etc.
-    _threshold = os.getenv("GEMINI_SAFETY_THRESHOLD", "OFF").strip().upper()
+    _threshold = os.getenv("GEMINI_SAFETY_THRESHOLD", "BLOCK_NONE").strip().upper()
     if _threshold not in ("OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"):
-        _threshold = "OFF"
+        _threshold = "BLOCK_NONE"
     body["safetySettings"] = [
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": _threshold},
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": _threshold},
@@ -1802,7 +1802,7 @@ def _stream_gemini_common(
     # Check if safety settings are in the body
     _safety = _inner.get("safetySettings")
     if _safety and isinstance(_safety, list) and len(_safety) > 0:
-        _safety_desc = _safety[0].get("threshold", "OFF")
+        _safety_desc = _safety[0].get("threshold", "BLOCK_NONE")
     else:
         _safety_desc = "default"
     if log_stream:
