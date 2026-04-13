@@ -1,18 +1,19 @@
-# authza_auth.py - Z.AI (Zhipu AI) pseudo-OAuth API key management
-# Mirrors authgpt_auth.py's architecture but uses a browser-based key-paste
-# flow instead of real OAuth, since Z.AI relies on static API keys.
-# Prefix models with 'authza/' to route through this module.
+# authza_auth.py - Z.AI subscription authentication via Google OAuth
+# Z.AI's chat interface (https://chat.z.ai) is powered by Open WebUI,
+# which uses Google OAuth → JWT stored in localStorage.
+# Prefix models with 'authza/' to route through the Z.AI chat backend
+# using your Z.AI subscription instead of API key credits.
 """
-Pseudo-OAuth key-capture flow for Z.AI (Zhipu AI):
+Google OAuth flow for Z.AI subscription authentication:
 
-  1. Start a local HTTP server on a random high port
-  2. Open the Z.AI API key management page in the user's browser
-  3. Serve a local HTML page where the user pastes their API key
-  4. Capture the key via the local callback
-  5. Store the key encrypted in ~/.glossarion/authza_tokens.json
+  1. Open browser to https://chat.z.ai → user clicks "Continue with Google"
+  2. Google OAuth completes → Z.AI issues a JWT
+  3. Capture the JWT from the browser (via local callback interception)
+  4. Store JWT locally (~/.glossarion/authza_tokens.json)
+  5. Hit https://chat.z.ai/api/v1/chat/completions with Bearer <JWT>
 
-The send_chat_completion() function then uses that key to hit Z.AI's
-OpenAI-compatible chat completions endpoint with SSE streaming.
+The chat backend is OpenAI-compatible (Open WebUI), so standard
+messages/model/temperature/max_tokens parameters work directly.
 """
 import os
 import json
@@ -22,6 +23,7 @@ import threading
 import webbrowser
 import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger(__name__)
@@ -49,21 +51,29 @@ def is_cancelled() -> bool:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-ZA_BASE_URL = "https://api.z.ai/api/paas/v4"
-ZA_KEY_PAGE = "https://open.bigmodel.cn/usercenter/apikeys"
+ZA_CHAT_BASE_URL = "https://chat.z.ai"
+ZA_LOGIN_URL = "https://chat.z.ai"
+ZA_CHAT_COMPLETIONS = "/openai/v1/chat/completions"
+ZA_MODELS_ENDPOINT = "/api/models"
+# The OAuth callback seen in the site's login flow
+ZA_OAUTH_CALLBACK_PATH = "/login/callback"
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authza_tokens.json")
 
+# Token refresh margin — re-login when JWT is about to expire
+# Open WebUI JWTs typically last 24-48 hours
+TOKEN_REFRESH_MARGIN_SECONDS = 1800  # 30 minutes
+
 
 # ---------------------------------------------------------------------------
-# Token / Key Store
+# Token Store
 # ---------------------------------------------------------------------------
 class AuthZATokenStore:
-    """File-backed API key store for Z.AI, mirroring AuthGPTTokenStore's API.
+    """File-backed JWT store for Z.AI, mirroring AuthGPTTokenStore's API.
 
-    Z.AI keys do not expire, so there is no refresh logic.  The store
-    simply persists the key and provides ``get_valid_access_token()``
-    which triggers a browser flow when no key is present.
+    After Google OAuth login on chat.z.ai, the JWT is captured and stored
+    locally.  ``get_valid_access_token()`` triggers a browser login flow
+    when no valid JWT is present.
     """
 
     def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
@@ -90,7 +100,6 @@ class AuthZATokenStore:
             tmp = self._token_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self._tokens, fh, indent=2)
-            # Atomic rename (best-effort on Windows)
             if os.path.exists(self._token_file):
                 os.replace(tmp, self._token_file)
             else:
@@ -100,9 +109,9 @@ class AuthZATokenStore:
 
     # -- public API ----------------------------------------------------------
 
-    def save_tokens(self, api_key: str):
+    def save_tokens(self, jwt_token: str):
         with self._lock:
-            self._tokens["api_key"] = api_key
+            self._tokens["jwt"] = jwt_token
             self._tokens["saved_at"] = time.time()
             self._save()
 
@@ -112,47 +121,76 @@ class AuthZATokenStore:
             self._save()
 
     @property
-    def api_key(self) -> Optional[str]:
-        return self._tokens.get("api_key")
+    def jwt(self) -> Optional[str]:
+        return self._tokens.get("jwt")
 
     @property
     def account_id(self) -> int:
         return self._account_id
 
     def account_info(self) -> str:
-        """Return a masked summary of the stored key for display."""
-        key = self.api_key
-        if not key:
-            return "(no key)"
-        return f"{key[:8]}…" if len(key) > 8 else key
+        """Return a masked summary of the stored JWT for display."""
+        token = self.jwt
+        if not token:
+            return "(not logged in)"
+        return f"{token[:20]}…" if len(token) > 20 else token
+
+    def _is_jwt_expired(self) -> bool:
+        """Check if the stored JWT is likely expired.
+
+        Parse the JWT payload (base64-encoded middle segment) to read
+        the ``exp`` claim.  If unparseable, assume it's valid.
+        """
+        token = self.jwt
+        if not token:
+            return True
+        try:
+            import base64
+            parts = token.split(".")
+            if len(parts) != 3:
+                return False  # Not a standard JWT — can't check
+            # JWT base64url decode (add padding)
+            payload_b64 = parts[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+            exp = payload.get("exp")
+            if exp is None:
+                return False  # No expiry claim — assume valid
+            return time.time() >= (exp - TOKEN_REFRESH_MARGIN_SECONDS)
+        except Exception:
+            return False  # Can't parse — assume valid
 
     def get_valid_access_token(self, auto_login: bool = True) -> str:
-        """Return the stored API key, triggering a browser flow if needed."""
-        key = self.api_key
-        if key:
-            return key
+        """Return the stored JWT, triggering a browser login if needed."""
+        token = self.jwt
+        if token and not self._is_jwt_expired():
+            return token
 
         if not auto_login:
             raise RuntimeError(
-                "AuthZA: No API key stored and auto_login is False.  "
+                "AuthZA: No valid JWT and auto_login is False.  "
                 "Run the login flow first."
             )
 
         acct_label = f" (Account #{self._account_id})" if self._account_id else ""
-        print(f"🔐 AuthZA{acct_label}: No API key found — launching browser to capture key…")
-        captured_key = _run_browser_key_capture(self._account_id)
-        if not captured_key:
+        if token and self._is_jwt_expired():
+            print(f"🔄 AuthZA{acct_label}: JWT expired — launching browser to re-login…")
+        else:
+            print(f"🔐 AuthZA{acct_label}: No JWT found — launching browser to login…")
+
+        captured_jwt = _run_browser_login(self._account_id)
+        if not captured_jwt:
             raise RuntimeError(
-                "AuthZA: Browser key capture was cancelled or timed out.  "
+                "AuthZA: Browser login was cancelled or timed out.  "
                 "Please try again."
             )
-        self.save_tokens(captured_key)
-        print(f"✅ AuthZA{acct_label}: API key saved ({self.account_info()})")
-        return captured_key
+        self.save_tokens(captured_jwt)
+        print(f"✅ AuthZA{acct_label}: JWT saved ({self.account_info()})")
+        return captured_jwt
 
 
 # ---------------------------------------------------------------------------
-# Browser-based key capture
+# Browser-based login + JWT capture
 # ---------------------------------------------------------------------------
 
 def _find_free_port() -> int:
@@ -162,23 +200,33 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _run_browser_key_capture(account_id: int = 0, timeout: int = 300) -> Optional[str]:
-    """Open the Z.AI key management page and serve a local form for key paste.
+def _run_browser_login(account_id: int = 0, timeout: int = 300) -> Optional[str]:
+    """Open Z.AI login page and serve a local page to capture the JWT.
 
-    Returns the captured API key string, or None on timeout/cancel.
+    Flow:
+      1. Open https://chat.z.ai → user logs in via Google
+      2. After login, user is redirected to the chat interface
+      3. Open a local helper page that reads localStorage['token'] from
+         chat.z.ai and sends it back to our local server
+      4. Alternatively, user can paste the JWT manually
+
+    Returns the captured JWT string, or None on timeout/cancel.
     """
     port = _find_free_port()
-    captured: Dict[str, Optional[str]] = {"key": None}
+    captured: Dict[str, Optional[str]] = {"jwt": None}
     server_ready = threading.Event()
+    server_ref: Dict[str, Any] = {"server": None}
 
     acct_label = f" (Account #{account_id})" if account_id else ""
 
+    # The local capture page — instructs the user to paste the JWT
+    # from localStorage after logging in.
     _HTML_PAGE = f"""\
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AuthZA — Paste Your Z.AI API Key</title>
+<title>AuthZA — Z.AI Login Token Capture</title>
 <style>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -193,20 +241,33 @@ def _run_browser_key_capture(account_id: int = 0, timeout: int = 300) -> Optiona
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 16px;
     padding: 40px 36px;
-    max-width: 520px; width: 100%;
+    max-width: 580px; width: 100%;
     box-shadow: 0 8px 32px rgba(0,0,0,0.4);
   }}
   h1 {{ margin: 0 0 8px; font-size: 1.6rem; color: #7dd3fc; }}
   p {{ color: #9ca3af; line-height: 1.6; margin: 0 0 20px; font-size: 0.95rem; }}
   .step {{ color: #a78bfa; font-weight: 600; }}
-  input[type=text] {{
+  code {{
+    background: rgba(0,0,0,0.4); padding: 2px 7px; border-radius: 4px;
+    font-size: 0.9rem; color: #f9a8d4;
+  }}
+  .code-block {{
+    background: rgba(0,0,0,0.5); padding: 10px 14px; border-radius: 8px;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 0.85rem;
+    color: #86efac; margin: 12px 0; word-break: break-all;
+    user-select: all; cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.1);
+  }}
+  textarea {{
     width: 100%; padding: 12px 14px; border-radius: 8px;
     border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3);
-    color: #f3f4f6; font-size: 1rem; margin-bottom: 16px;
-    box-sizing: border-box; outline: none;
+    color: #f3f4f6; font-size: 0.95rem; margin-bottom: 16px;
+    box-sizing: border-box; outline: none; min-height: 80px;
+    font-family: 'Consolas', 'Monaco', monospace;
     transition: border-color 0.2s;
+    resize: vertical;
   }}
-  input[type=text]:focus {{ border-color: #7dd3fc; }}
+  textarea:focus {{ border-color: #7dd3fc; }}
   button {{
     width: 100%; padding: 12px; border-radius: 8px;
     background: linear-gradient(135deg, #6366f1, #8b5cf6);
@@ -221,48 +282,64 @@ def _run_browser_key_capture(account_id: int = 0, timeout: int = 300) -> Optiona
   a:hover {{ text-decoration: underline; }}
   .success {{ display: none; text-align: center; }}
   .success h2 {{ color: #4ade80; }}
+  .divider {{ border-top: 1px solid rgba(255,255,255,0.1); margin: 20px 0; }}
 </style>
 </head>
 <body>
 <div class="card" id="form-card">
-  <h1>🔐 AuthZA Key Capture{acct_label}</h1>
+  <h1>🔐 AuthZA — Z.AI Login{acct_label}</h1>
   <p>
-    <span class="step">Step 1:</span> Copy your API key from the
-    <a href="{ZA_KEY_PAGE}" target="_blank">Z.AI API Keys page</a>
-    (should have opened in another tab).<br><br>
-    <span class="step">Step 2:</span> Paste the key below and click <b>Save</b>.
+    <span class="step">Step 1:</span> Log in to Z.AI at
+    <a href="{ZA_LOGIN_URL}" target="_blank">chat.z.ai</a>
+    using <b>Continue with Google</b>
+    (should have opened in another tab).
   </p>
-  <input type="text" id="key-input" placeholder="Paste your Z.AI API key here…" autofocus>
-  <button onclick="submitKey()">Save Key</button>
+  <p>
+    <span class="step">Step 2:</span> After logging in, open your browser's
+    <b>Developer Console</b> (press <code>F12</code> → Console tab) and run:
+  </p>
+  <div class="code-block" onclick="navigator.clipboard.writeText(this.textContent.trim())" title="Click to copy">
+    copy(localStorage.getItem('token'))
+  </div>
+  <p style="font-size:0.85rem; color:#9ca3af; margin-top:-8px;">
+    (Click the box above to copy the command)
+  </p>
+  <p>
+    <span class="step">Step 3:</span> Paste the token below and click <b>Save</b>.
+  </p>
+  <textarea id="jwt-input" placeholder="Paste your JWT token here…" rows="3"></textarea>
+  <button onclick="submitToken()">Save Token</button>
   <div class="info">
-    Your key is stored locally in <code>~/.glossarion/</code> and never sent anywhere
-    except to the Z.AI API.
+    Your token is stored locally in <code>~/.glossarion/</code> and sent only
+    to <code>chat.z.ai</code>. It typically expires after 24-48 hours.
   </div>
 </div>
 <div class="card success" id="success-card">
-  <h2>✅ Key Saved!</h2>
-  <p>You can close this tab. Glossarion will use the key automatically.</p>
+  <h2>✅ Token Saved!</h2>
+  <p>You can close this tab. Glossarion will use the token automatically.<br>
+  When it expires, you'll be prompted to log in again.</p>
 </div>
 <script>
-function submitKey() {{
-  const key = document.getElementById('key-input').value.trim();
-  if (!key) {{ alert('Please paste a valid API key.'); return; }}
+function submitToken() {{
+  const jwt = document.getElementById('jwt-input').value.trim();
+  if (!jwt) {{ alert('Please paste a valid JWT token.'); return; }}
+  if (jwt.length < 20) {{ alert('That doesn\\'t look like a valid JWT. It should be a long string.'); return; }}
   fetch('/capture', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{key: key}})
+    body: JSON.stringify({{jwt: jwt}})
   }}).then(r => {{
     if (r.ok) {{
       document.getElementById('form-card').style.display = 'none';
       document.getElementById('success-card').style.display = 'block';
     }} else {{
-      alert('Error saving key. Please try again.');
+      alert('Error saving token. Please try again.');
     }}
   }}).catch(e => alert('Connection error: ' + e));
 }}
 // Auto-submit on paste (UX optimization)
-document.getElementById('key-input').addEventListener('paste', function() {{
-  setTimeout(() => submitKey(), 100);
+document.getElementById('jwt-input').addEventListener('paste', function() {{
+  setTimeout(() => submitToken(), 150);
 }});
 </script>
 </body>
@@ -281,18 +358,27 @@ document.getElementById('key-input').addEventListener('paste', function() {{
                 body = self.rfile.read(length)
                 try:
                     data = json.loads(body)
-                    captured["key"] = data.get("key", "").strip()
+                    captured["jwt"] = data.get("jwt", "").strip()
                 except Exception:
                     pass
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                self.wfile.write(b'{"ok":true}')
+                self.wfile.write(b'{{"ok":true}}')
                 # Schedule server shutdown after response is sent
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                threading.Thread(target=server_ref["server"].shutdown, daemon=True).start()
             else:
                 self.send_response(404)
                 self.end_headers()
+
+        def do_OPTIONS(self):
+            """Handle CORS preflight."""
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
 
         def log_message(self, format, *args):
             pass  # suppress request logs
@@ -300,6 +386,7 @@ document.getElementById('key-input').addEventListener('paste', function() {{
     def _serve():
         server = HTTPServer(("localhost", port), _Handler)
         server.timeout = timeout
+        server_ref["server"] = server
         server_ready.set()
         server.serve_forever()
 
@@ -307,20 +394,20 @@ document.getElementById('key-input').addEventListener('paste', function() {{
     thread.start()
     server_ready.wait(5)
 
-    # Open both the Z.AI key page and our local capture page
+    # Open Z.AI login page and our local capture page
     try:
-        webbrowser.open(ZA_KEY_PAGE)
-        time.sleep(0.3)
+        webbrowser.open(ZA_LOGIN_URL)
+        time.sleep(0.5)
         webbrowser.open(f"http://localhost:{port}/")
     except Exception as exc:
         print(f"⚠️ AuthZA: Could not open browser: {exc}")
         print(f"   Open these URLs manually:")
-        print(f"   1. {ZA_KEY_PAGE}")
-        print(f"   2. http://localhost:{port}/")
+        print(f"   1. {ZA_LOGIN_URL}  (log in with Google)")
+        print(f"   2. http://localhost:{port}/  (paste your JWT)")
 
     thread.join(timeout=timeout)
 
-    return captured.get("key")
+    return captured.get("jwt")
 
 
 # ---------------------------------------------------------------------------
@@ -369,13 +456,13 @@ def get_store(account_id: Optional[int] = None) -> AuthZATokenStore:
 
 
 # ---------------------------------------------------------------------------
-# SSE streaming helpers (OpenAI-compatible format)
+# SSE streaming helpers (OpenAI-compatible format from Open WebUI)
 # ---------------------------------------------------------------------------
 
 def _process_sse_line(line: str, state: dict, log_fn, log_stream: bool):
     """Process a single SSE data line and accumulate content.
 
-    SSE format from Z.AI (OpenAI-compatible):
+    Open WebUI uses standard OpenAI SSE format:
     ```
     data: {"id":"...","choices":[{"delta":{"content":"Hello"}}]}
     data: [DONE]
@@ -463,6 +550,12 @@ def _stream_with_httpx(
 
     with _httpx.Client(timeout=_timeout) as client:
         with client.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code == 401 or resp.status_code == 403:
+                resp.read()
+                raise RuntimeError(
+                    f"AuthZA: HTTP {resp.status_code} — JWT expired or invalid. "
+                    f"Please re-login via 'authza/' prefix."
+                )
             if resp.status_code != 200:
                 resp.read()
                 raise RuntimeError(
@@ -493,6 +586,11 @@ def _stream_with_requests(
     state = {"content_parts": [], "finish_reason": None, "usage": None, "done": False}
 
     resp = _requests.post(url, json=body, headers=headers, stream=True, timeout=timeout)
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"AuthZA: HTTP {resp.status_code} — JWT expired or invalid. "
+            f"Please re-login via 'authza/' prefix."
+        )
     if resp.status_code != 200:
         raise RuntimeError(
             f"AuthZA: HTTP {resp.status_code} from {url}\n{resp.text}"
@@ -515,7 +613,7 @@ def _stream_with_requests(
 def send_chat_completion(
     access_token: str,
     messages: List[Dict],
-    model: str = "glm-4-plus",
+    model: str = "GLM-4.7-Flash",
     temperature: Optional[float] = 0.7,
     max_tokens: Optional[int] = None,
     timeout: int = 600,
@@ -524,16 +622,16 @@ def send_chat_completion(
     connect_timeout: Optional[float] = None,
     account_id: int = 0,
 ) -> Dict:
-    """Send a chat completion request via Z.AI's OpenAI-compatible endpoint.
+    """Send a chat completion request via Z.AI's Open WebUI backend.
 
     Parameters
     ----------
     access_token : str
-        Z.AI API key (used as Bearer token).
+        JWT obtained from Z.AI Google OAuth login.
     messages : list of dict
         Standard OpenAI-format messages (role + content).
     model : str
-        Model name without the ``authza/`` prefix (e.g. ``glm-4-plus``).
+        Model name without the ``authza/`` prefix.
     temperature : float or None
         Sampling temperature.
     max_tokens : int or None
@@ -541,7 +639,7 @@ def send_chat_completion(
     timeout : int
         Request timeout in seconds.
     base_url : str or None
-        Override the Z.AI base URL.
+        Override the Z.AI chat base URL.
     log_fn : callable or None
         Logging function (defaults to ``print``).
     connect_timeout : float or None
@@ -557,10 +655,10 @@ def send_chat_completion(
     Raises
     ------
     RuntimeError
-        On non-200 responses or stream cancellation.
+        On non-200 responses, expired JWT, or stream cancellation.
     """
-    effective_base = base_url or os.getenv("ZA_BASE_URL", ZA_BASE_URL)
-    url = f"{effective_base.rstrip('/')}/chat/completions"
+    effective_base = base_url or os.getenv("ZA_CHAT_BASE_URL", ZA_CHAT_BASE_URL)
+    url = f"{effective_base.rstrip('/')}{ZA_CHAT_COMPLETIONS}"
 
     body: Dict[str, Any] = {
         "model": model,

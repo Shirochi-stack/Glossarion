@@ -14447,7 +14447,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia']
+                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
@@ -17234,11 +17234,14 @@ class UnifiedClient:
         )
 
     def _send_authza(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request via Z.AI using pseudo-OAuth key capture.
+        """Send request via Z.AI subscription using Google OAuth JWT.
 
-        Uses the authza_auth module to obtain API keys through a browser-based
-        key paste flow.  Model names should be prefixed with 'authza/' or
-        'authzaN/' (e.g. authza/glm-4-plus, authza2/glm-4-plus-0111).
+        Authenticates via Google OAuth on chat.z.ai (Open WebUI backend).
+        The JWT is captured from the browser and used as a Bearer token
+        against chat.z.ai/api/v1/chat/completions.
+
+        Model names should be prefixed with 'authza/' or 'authzaN/'
+        (e.g. authza/GLM-4.7-Flash, authza2/GLM-4-Plus).
         """
         if not AUTHZA_AVAILABLE or _authza_get_store is None or _authza_send is None:
             raise UnifiedClientError(
@@ -17259,28 +17262,27 @@ class UnifiedClient:
 
         # Extract account ID from prefix
         account_id = getattr(self, '_authza_account_id', None) or self._extract_authza_account_id(self.model)
+        acct_label = f" (Account #{account_id})" if account_id else ""
 
-        # Obtain a valid API key (auto-triggers browser flow if needed)
+        # Obtain a valid JWT (auto-triggers browser login if needed)
         try:
             if _authza_get_store_by_id is not None and account_id:
                 store = _authza_get_store_by_id(account_id)
-                acct_label = f" (Account #{account_id})"
             else:
                 store = _authza_get_store()
-                acct_label = ""
-            api_key = store.get_valid_access_token(auto_login=True)
+            jwt_token = store.get_valid_access_token(auto_login=True)
         except Exception as exc:
             raise UnifiedClientError(
-                f"AuthZA{acct_label if 'acct_label' in dir() else ''} authentication failed: {exc}\n"
-                "Make sure you have a Z.AI account and try again.",
+                f"AuthZA{acct_label} authentication failed: {exc}\n"
+                "Make sure you log in with Google at chat.z.ai and try again.",
                 error_type="auth_error"
             )
 
-        # Send the request through Z.AI's OpenAI-compatible endpoint
+        # Send the request through Z.AI's Open WebUI backend
         max_retries = self._get_max_retries()
         last_error = None
-        label = f"AuthZA{acct_label}" if 'acct_label' in dir() and acct_label else "AuthZA"
-        print(f"🔐 {label}: Sending request via Z.AI (model={actual_model})")
+        label = f"AuthZA{acct_label}" if acct_label else "AuthZA"
+        print(f"🔐 {label}: Sending request via Z.AI subscription (model={actual_model})")
         for attempt in range(max_retries):
             # Check stop flag before each attempt
             if self._is_stop_requested():
@@ -17305,7 +17307,7 @@ class UnifiedClient:
                         pass
 
                 result = _authza_send(
-                    access_token=api_key,
+                    access_token=jwt_token,
                     messages=messages,
                     model=actual_model,
                     temperature=temperature,
@@ -17337,6 +17339,20 @@ class UnifiedClient:
                         "AuthZA: Translation stopped by user",
                         error_type="cancelled"
                     )
+
+                # 401/403 — JWT expired or invalid → clear token, re-login
+                if "401" in error_str or "403" in error_str or "jwt expired" in error_str.lower():
+                    print(f"🔄 {label}: JWT expired or invalid — clearing token and re-launching login…")
+                    try:
+                        store.clear_tokens()
+                        jwt_token = store.get_valid_access_token(auto_login=True)
+                        print(f"✅ {label}: Re-login successful, retrying request…")
+                        continue  # retry with fresh JWT
+                    except Exception as relogin_exc:
+                        raise UnifiedClientError(
+                            f"AuthZA{acct_label}: JWT expired and re-login failed: {relogin_exc}",
+                            error_type="auth_error"
+                        )
 
                 # 400 Bad Request: retry with staggered delay
                 if "400" in error_str or "bad request" in error_str.lower():
@@ -17432,7 +17448,7 @@ class UnifiedClient:
             'yi': lambda: os.getenv("YI_API_BASE_URL", "https://api.01.ai/v1"),
             'qwen': "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             'baichuan': "https://api.baichuan-ai.com/v1",
-            'zhipu': "https://open.bigmodel.cn/api/paas/v4",
+            'zhipu': "https://api.z.ai/api/paas/v4",
             'moonshot': "https://api.moonshot.cn/v1",
             'groq': lambda: os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
             'baidu': "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
