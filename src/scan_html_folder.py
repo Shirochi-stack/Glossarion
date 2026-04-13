@@ -5061,8 +5061,8 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             {"role": "user", "content": user_prompt},
         ]
 
-        # Send to AI
-        response = client.send(messages, temperature=0.0, max_tokens=10, context='qa_truncation')
+        # Send to AI (max_tokens=50 gives headroom for YES/NO + minor model preamble)
+        response = client.send(messages, temperature=0.0, max_tokens=50, context='qa_truncation')
 
         # Parse response
         if isinstance(response, tuple):
@@ -7826,6 +7826,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     if not trans_html_content or should_stop():
                         return None
 
+                    _ai_safe_log(f"   🔍 Checking: {filename}")
+
+                    # Set request label so client logs show filename instead of internal counter
+                    try:
+                        tls = _ai_client._get_thread_local_client()
+                        tls.current_request_label = f"{filename} (qa_truncation)"
+                    except Exception:
+                        pass
+
                     ai_result = run_ai_truncation_check(
                         matched_source_html, trans_html_content,
                         client=_ai_client,
@@ -7833,6 +7842,14 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         log=_ai_safe_log,
                         custom_system_prompt=_ai_custom_prompt,
                     )
+
+                    # Log the verdict
+                    verdict = ai_result.get('details', 'unknown') if ai_result else 'error'
+                    if ai_result and ai_result.get('flagged'):
+                        _ai_safe_log(f"   ❌ {filename}: TRUNCATED — {verdict}")
+                    else:
+                        _ai_safe_log(f"   ✅ {filename}: OK — {verdict}")
+
                     return (result_obj, ai_result)
                 except Exception as _e:
                     _ai_safe_log(f"   ⚠️ AI truncation check failed for {result_obj.get('filename', '?')}: {_e}")
