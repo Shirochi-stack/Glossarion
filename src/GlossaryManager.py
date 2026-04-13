@@ -1587,8 +1587,8 @@ def _convert_to_token_efficient_format(csv_lines):
 
             entry_line = f"* {translated_name} ({raw_name})"
 
-            # Gender support (any type that supplies it)
-            if gender_idx != -1 and len(parts) > gender_idx:
+            # Gender support — only for character entries (mirrors extract script's has_gender check)
+            if entry_type_val == 'character' and gender_idx != -1 and len(parts) > gender_idx:
                 gender_val = parts[gender_idx].strip()
                 if gender_val and gender_val != 'Unknown':
                     entry_line += f" [{gender_val}]"
