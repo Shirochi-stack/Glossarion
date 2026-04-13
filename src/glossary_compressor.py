@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Glossary Compressor Module
-Filters glossary entries based on source text to reduce token usage
+Filters glossary entries based on source text to reduce token usage.
+
+Supports:
+  - Token-efficient CSV format (=== SECTION === headers)
+  - Legacy CSV / Unit-Separator-delimited format
+  - JSON dict and list formats
+  - Fallback: any text format (.md, .txt, etc.) via raw-name scanning
 """
 
 import os
@@ -21,14 +27,38 @@ except ImportError:
         return low.startswith('type,raw_name') or low.startswith(f'type{GLOSSARY_SEP}raw_name')
 
 
+# ─── Tokenization regex for fallback candidate extraction ────────────────────
+# Splits on: comma, pipe, parentheses, brackets, braces, colon, semicolon,
+# tab, Unit Separator (U+001F), forward slash,
+# and spaced delimiters: dash, en-dash, em-dash, arrow, double-arrow, equals
+_FALLBACK_SPLIT_RE = re.compile(
+    r'[,|\(\)\[\]\{\}:\t;\x1F/]'    # single-char delimiters
+    r'|(?:\s[-–—→⇒=]\s)'            # spaced delimiters (e.g. " - ", " → ")
+)
+
+# Patterns that mark a line as a self-contained glossary entry
+_ENTRY_DELIMITERS = ['\x1F', '\t', ' = ', ' - ', ' – ', ' — ', ' → ', ' ⇒ ', ' : ']
+_ENTRY_BULLET_RE = re.compile(r'^\s*(?:[*\-•]|\d+[.\)])\s')
+_ENTRY_TABLE_RE = re.compile(r'^\s*\|')
+
+# Section header patterns
+_SECTION_HEADER_RE = re.compile(
+    r'^\s*(?:'
+    r'#{1,6}\s'           # Markdown headers: # ... ## ...
+    r'|===\s.*===\s*$'    # === SECTION ===
+    r'|---\s.*---\s*$'    # --- SECTION ---
+    r')'
+)
+
+
 def compress_glossary(glossary_content, source_text, glossary_format='auto'):
     """
     Compress glossary by excluding entries that don't appear in the source text.
     
     Args:
-        glossary_content: Raw glossary content (CSV string or JSON dict/list)
+        glossary_content: Raw glossary content (CSV string, JSON dict/list, or plain text)
         source_text: The source text to check against
-        glossary_format: 'csv', 'json', or 'auto' (detect from content)
+        glossary_format: 'csv', 'json', 'text', or 'auto' (detect from content)
     
     Returns:
         Compressed glossary in the same format as input
@@ -39,12 +69,23 @@ def compress_glossary(glossary_content, source_text, glossary_format='auto'):
     # Auto-detect format
     if glossary_format == 'auto':
         if isinstance(glossary_content, str):
-            # Check if it looks like JSON
             stripped = glossary_content.strip()
+            # Check if it looks like JSON
             if (stripped.startswith('{') or stripped.startswith('[')) and (stripped.endswith('}') or stripped.endswith(']')):
                 glossary_format = 'json'
             else:
-                glossary_format = 'csv'
+                # Check if it looks like CSV (has header row or Unit Separator)
+                first_lines = stripped.split('\n', 5)
+                has_csv_header = any(_is_glossary_header(l) for l in first_lines[:2])
+                has_unit_sep = GLOSSARY_SEP in stripped[:500]
+                has_section_headers = any(l.strip().startswith('===') for l in first_lines)
+                has_glossary_columns = any(l.strip().lower().startswith('glossary columns:') for l in first_lines[:2])
+                
+                if has_csv_header or has_unit_sep or has_section_headers or has_glossary_columns:
+                    glossary_format = 'csv'
+                else:
+                    # Not recognizable as CSV or JSON → use text fallback
+                    glossary_format = 'text'
         elif isinstance(glossary_content, (dict, list)):
             glossary_format = 'json'
         else:
@@ -54,6 +95,9 @@ def compress_glossary(glossary_content, source_text, glossary_format='auto'):
         return _compress_csv_glossary(glossary_content, source_text)
     elif glossary_format == 'json':
         return _compress_json_glossary(glossary_content, source_text)
+    elif glossary_format == 'text':
+        print("⚠️ Glossary compression: using fallback raw-name scan (unrecognized format)")
+        return _compress_fallback_text(glossary_content, source_text)
     else:
         return glossary_content
 
@@ -62,6 +106,7 @@ def _compress_csv_glossary(csv_content, source_text):
     """
     Compress CSV glossary by excluding entries not found in source text.
     Handles both legacy CSV format and token-efficient format.
+    Falls back to text-based scanning if CSV parsing yields 0 entries.
     """
     if not isinstance(csv_content, str):
         return csv_content
@@ -74,9 +119,29 @@ def _compress_csv_glossary(csv_content, source_text):
     is_token_efficient = any(line.strip().startswith('===') for line in lines)
     
     if is_token_efficient:
-        return _compress_token_efficient_format(lines, source_text)
+        result = _compress_token_efficient_format(lines, source_text)
     else:
-        return _compress_legacy_csv_format(lines, source_text)
+        result = _compress_legacy_csv_format(lines, source_text)
+    
+    # If CSV parsing produced 0 data entries, fall back to text scan
+    if isinstance(result, str):
+        result_data_lines = [l for l in result.split('\n') if l.strip()
+                             and not _is_glossary_header(l)
+                             and not l.strip().startswith('===')
+                             and not l.strip().lower().startswith('glossary columns:')]
+    else:
+        result_data_lines = []
+    
+    original_data_count = sum(1 for l in lines if l.strip()
+                              and not _is_glossary_header(l)
+                              and not l.strip().startswith('===')
+                              and not l.strip().lower().startswith('glossary'))
+    
+    if len(result_data_lines) == 0 and original_data_count > 0:
+        print("⚠️ Glossary compression: CSV produced 0 matching entries, falling back to raw-name scan")
+        return _compress_fallback_text(csv_content, source_text)
+    
+    return result
 
 
 def _compress_token_efficient_format(lines, source_text):
@@ -87,8 +152,8 @@ def _compress_token_efficient_format(lines, source_text):
     for line in lines:
         stripped = line.strip()
         
-        # Keep glossary header
-        if stripped.lower().startswith('glossary:'):
+        # Keep glossary header (e.g. "Glossary Columns: ...")
+        if stripped.lower().startswith('glossary:') or stripped.lower().startswith('glossary columns:'):
             filtered_lines.append(line)
             continue
         
@@ -167,12 +232,14 @@ def _compress_json_glossary(json_data, source_text):
     """
     Compress JSON glossary by excluding entries not found in source text.
     Handles both dict format and list format.
+    Falls back to text-based scanning if JSON parsing fails.
     """
     if isinstance(json_data, str):
         try:
             json_data = json.loads(json_data)
         except json.JSONDecodeError:
-            return json_data
+            print("⚠️ Glossary compression: JSON parsing failed, falling back to raw-name scan")
+            return _compress_fallback_text(json_data, source_text)
     
     if isinstance(json_data, dict):
         # Handle dict with 'entries' key
@@ -209,16 +276,209 @@ def _compress_json_glossary(json_data, source_text):
     return json_data
 
 
+# ─── Format-agnostic fallback ────────────────────────────────────────────────
+
+def _is_section_header(line):
+    """Check if a line is a section header (e.g. # Title, === SECTION ===)."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return bool(_SECTION_HEADER_RE.match(stripped))
+
+
+def _is_entry_line(line):
+    """Check if a line looks like a self-contained glossary entry.
+    
+    Returns True if the line has: a known delimiter between terms,
+    a bullet/list marker, or a table row marker.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    
+    # Starts with bullet marker: * , - , • , 1. , 2)
+    if _ENTRY_BULLET_RE.match(stripped):
+        return True
+    
+    # Starts with table pipe
+    if _ENTRY_TABLE_RE.match(stripped):
+        return True
+    
+    # Contains a known delimiter between terms
+    for delim in _ENTRY_DELIMITERS:
+        if delim in stripped:
+            return True
+    
+    # Comma-separated: only if 3+ fields (to distinguish CSV-like entries
+    # from prose that happens to contain a comma like "The protagonist, male")
+    if ',' in stripped and len([p for p in stripped.split(',') if p.strip()]) >= 3:
+        return True
+    
+    # Contains parenthesized text (common pattern: "word (other_word)")
+    if re.search(r'\S\s*\([^)]+\)', stripped):
+        return True
+    
+    return False
+
+
+def _extract_candidates(text):
+    """Extract candidate terms from text by splitting on common delimiters.
+    
+    Returns a list of candidate strings (stripped, non-empty, >= 2 chars,
+    non-numeric). These are potential raw names to check against source text.
+    """
+    tokens = _FALLBACK_SPLIT_RE.split(text)
+    candidates = []
+    _skip_words = {'type', 'raw_name', 'translated_name', 'gender', 'description',
+                   'raw', 'translation', 'notes', 'name', 'comment', 'context'}
+    for t in tokens:
+        t = t.strip().strip('"\'´`*•')  # strip surrounding quotes/markers
+        # Strip leading bullet markers: "- term" → "term"
+        t = re.sub(r'^[-\-\u2013\u2014]\s*', '', t).strip()
+        # Strip leading numbered list markers: "1. term" → "term"
+        t = re.sub(r'^\d+[.)\]]\s*', '', t).strip()
+        if len(t) >= 2 and not t.isdigit() and t.lower() not in _skip_words:
+            candidates.append(t)
+    return candidates
+
+
+def _compress_fallback_text(content, source_text):
+    """Format-agnostic fallback: scan for raw names in any text format.
+    
+    Algorithm:
+      1. Classify each line as HEADER, ENTRY, CONTINUATION, or BLANK.
+      2. Group lines into entry units (entry line + its continuation lines).
+      3. Extract candidate terms from each entry unit.
+      4. Keep entire entry units whose candidates appear in source text.
+      5. Keep section headers only if at least one child entry survives.
+      6. Always operates on full lines — never cuts mid-line.
+    """
+    if not isinstance(content, str):
+        return content
+    
+    lines = content.split('\n')
+    if not lines:
+        return content
+    
+    # ── Phase 1: Classify each line ──────────────────────────────────────
+    # Types: 'header', 'entry', 'continuation', 'blank', 'meta'
+    classifications = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            classifications.append('blank')
+        elif stripped.lower().startswith('glossary columns:') or stripped.lower().startswith('glossary:'):
+            classifications.append('meta')  # always keep
+        elif _is_section_header(stripped):
+            classifications.append('header')
+        elif _is_entry_line(line):
+            classifications.append('entry')
+        else:
+            classifications.append('continuation')
+    
+    # ── Phase 2: Group lines into entry units ────────────────────────────
+    # An entry unit = an ENTRY line + any following CONTINUATION lines
+    # (until the next ENTRY, HEADER, BLANK, or META line).
+    
+    # Each item: {'type': 'entry'|'header'|'blank'|'meta', 
+    #             'line_indices': [int, ...]}
+    groups = []
+    i = 0
+    while i < len(lines):
+        cls = classifications[i]
+        
+        if cls == 'meta':
+            groups.append({'type': 'meta', 'line_indices': [i]})
+            i += 1
+        elif cls == 'blank':
+            groups.append({'type': 'blank', 'line_indices': [i]})
+            i += 1
+        elif cls == 'header':
+            groups.append({'type': 'header', 'line_indices': [i]})
+            i += 1
+        elif cls == 'entry':
+            # Collect this entry line + any following continuation lines
+            indices = [i]
+            i += 1
+            while i < len(lines) and classifications[i] == 'continuation':
+                indices.append(i)
+                i += 1
+            groups.append({'type': 'entry', 'line_indices': indices})
+        elif cls == 'continuation':
+            # Orphan continuation (no preceding entry) — treat as a standalone entry
+            indices = [i]
+            i += 1
+            while i < len(lines) and classifications[i] == 'continuation':
+                indices.append(i)
+                i += 1
+            groups.append({'type': 'entry', 'line_indices': indices})
+        else:
+            i += 1
+    
+    # ── Phase 3: Match entry groups against source text ──────────────────
+    # For each entry group, extract candidates and check against source.
+    for group in groups:
+        if group['type'] == 'entry':
+            entry_text = '\n'.join(lines[idx] for idx in group['line_indices'])
+            candidates = _extract_candidates(entry_text)
+            group['keep'] = any(_text_contains_term(source_text, c) for c in candidates)
+        elif group['type'] in ('meta', 'blank'):
+            group['keep'] = True  # always keep meta lines and blanks (blanks filtered later)
+        elif group['type'] == 'header':
+            group['keep'] = False  # determined by child entries below
+    
+    # ── Phase 4: Floating header logic ───────────────────────────────────
+    # A header is kept only if at least one entry after it (before the next
+    # header) is kept.
+    for gi, group in enumerate(groups):
+        if group['type'] != 'header':
+            continue
+        # Look forward for kept entries under this header
+        has_kept_child = False
+        for gj in range(gi + 1, len(groups)):
+            if groups[gj]['type'] == 'header':
+                break  # next header reached, stop looking
+            if groups[gj]['type'] == 'entry' and groups[gj].get('keep'):
+                has_kept_child = True
+                break
+        group['keep'] = has_kept_child
+    
+    # ── Phase 5: Reassemble ──────────────────────────────────────────────
+    # Collect kept lines, then strip trailing blank lines from dropped sections.
+    kept_line_set = set()
+    for group in groups:
+        if group.get('keep'):
+            for idx in group['line_indices']:
+                kept_line_set.add(idx)
+    
+    # Build result, preserving original line order
+    result_lines = []
+    for i, line in enumerate(lines):
+        if i in kept_line_set:
+            result_lines.append(line)
+        # For blank lines: include only if adjacent to kept content
+        elif classifications[i] == 'blank':
+            # Check if there's kept content both before and after
+            has_before = any(j in kept_line_set for j in range(max(0, i - 3), i))
+            has_after = any(j in kept_line_set for j in range(i + 1, min(len(lines), i + 4)))
+            if has_before and has_after:
+                result_lines.append(line)
+    
+    # Strip consecutive trailing blank lines
+    while result_lines and not result_lines[-1].strip():
+        result_lines.pop()
+    
+    return '\n'.join(result_lines)
+
+
 def _text_contains_term(text, term):
     """
     Check if term appears in text using simple substring matching.
-    Works well with Korean/CJK text where word boundaries are not clear.
+    Works well with any language — CJK, Latin, Arabic, etc.
     """
     if not term or not text:
         return False
     
-    # For CJK languages (Korean, Chinese, Japanese), simple substring matching works best
-    # Word boundaries don't apply the same way as in English
     return term in text
 
 
@@ -227,7 +487,7 @@ def compress_glossary_file(glossary_path, source_text):
     Load, compress, and return glossary from file path.
     
     Args:
-        glossary_path: Path to glossary file (.csv or .json)
+        glossary_path: Path to glossary file (.csv, .json, .md, .txt, etc.)
         source_text: The source text to check against
     
     Returns:
@@ -241,15 +501,18 @@ def compress_glossary_file(glossary_path, source_text):
             content = f.read()
         
         # Determine format from file extension
-        if glossary_path.lower().endswith('.csv'):
+        ext = os.path.splitext(glossary_path)[1].lower()
+        if ext == '.csv':
             return compress_glossary(content, source_text, glossary_format='csv')
-        elif glossary_path.lower().endswith('.json'):
+        elif ext == '.json':
             json_data = json.loads(content)
             compressed_data = compress_glossary(json_data, source_text, glossary_format='json')
             # Return as JSON string
             return json.dumps(compressed_data, ensure_ascii=False, indent=2)
         else:
-            return content
+            # .md, .txt, or any other extension — use text fallback
+            print(f"⚠️ Glossary compression: using fallback raw-name scan (format: {ext or 'unknown'})")
+            return compress_glossary(content, source_text, glossary_format='text')
     except Exception as e:
         print(f"⚠️ Failed to compress glossary: {e}")
         return None
