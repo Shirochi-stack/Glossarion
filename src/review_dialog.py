@@ -1121,6 +1121,21 @@ class ReviewDialog(QDialog):
             UnifiedClient.set_global_cancellation(False)
         except Exception:
             pass
+        try:
+            import unified_api_client
+            unified_api_client.global_stop_flag = False
+        except Exception:
+            pass
+        try:
+            import extract_glossary_from_epub
+            extract_glossary_from_epub.set_stop_flag(False)
+        except Exception:
+            pass
+        try:
+            import TransateKRtoEN
+            TransateKRtoEN.set_stop_flag(False)
+        except Exception:
+            pass
 
         # ── Hijack translator_gui.append_log ──
         # Save original and replace with a wrapper that also writes to review dialog
@@ -1353,6 +1368,21 @@ class ReviewDialog(QDialog):
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient.set_global_cancellation(False)
+        except Exception:
+            pass
+        try:
+            import unified_api_client
+            unified_api_client.global_stop_flag = False
+        except Exception:
+            pass
+        try:
+            import extract_glossary_from_epub
+            extract_glossary_from_epub.set_stop_flag(False)
+        except Exception:
+            pass
+        try:
+            import TransateKRtoEN
+            TransateKRtoEN.set_stop_flag(False)
         except Exception:
             pass
 

@@ -11261,34 +11261,38 @@ class UnifiedClient:
             except Exception:
                 pass
 
-        # Glossary stop flag (if glossary extraction is running)
-        try:
-            from extract_glossary_from_epub import is_stop_requested as glossary_stop_requested
-            if glossary_stop_requested():
-                self._cancelled = True
-                return True
-        except Exception:
-            pass
+        # Glossary stop flag (only relevant when running glossary extraction)
+        if getattr(self, 'context', None) == 'glossary':
+            try:
+                from extract_glossary_from_epub import is_stop_requested as glossary_stop_requested
+                if glossary_stop_requested():
+                    self._cancelled = True
+                    return True
+            except Exception:
+                pass
 
         # Shared stop file for glossary subprocesses
-        try:
-            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-            if stop_file and os.path.exists(stop_file):
-                self._cancelled = True
-                return True
-        except Exception:
-            pass
+        if getattr(self, 'context', None) == 'glossary':
+            try:
+                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                if stop_file and os.path.exists(stop_file):
+                    self._cancelled = True
+                    return True
+            except Exception:
+                pass
 
-        try:
-            # Import the stop check function from the main translation module
-            from TransateKRtoEN import is_stop_requested
-            stopped = is_stop_requested()
-            if stopped:
-                self._cancelled = True
-            return stopped
-        except ImportError:
-            # Fallback if import fails
-            return False
+        # Translation stop flag (skip for review context to avoid stale flags)
+        if getattr(self, 'context', None) != 'review':
+            try:
+                from TransateKRtoEN import is_stop_requested
+                stopped = is_stop_requested()
+                if stopped:
+                    self._cancelled = True
+                return stopped
+            except ImportError:
+                pass
+
+        return False
     
     def _should_abort_retry(self) -> bool:
         """Check if retry/wait operations should abort.
