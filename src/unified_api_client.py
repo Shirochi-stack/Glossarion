@@ -12931,6 +12931,8 @@ class UnifiedClient:
                                                     
                                                     # Inject newlines after HTML closing tags
                                                     temp_combined = combined
+                                                    # Make Unit Separator visible in log output
+                                                    temp_combined = temp_combined.replace('\x1f', '\\x1F')
                                                     for tag in ['</h1>', '</h2>', '3>', '4>', '5>', '6>', '</p>']:
                                                         if tag in ['3>', '4>', '5>', '6>']:
                                                             tag = '</h' + tag[0] + '>'
@@ -12948,11 +12950,11 @@ class UnifiedClient:
                                                         log_buf.append(frag)
                                                         # Flush if buffer gets too long (fallback)
                                                         if len("".join(log_buf)) > 150:
-                                                            print("".join(log_buf), end="", flush=True)
+                                                            print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
                                                             log_buf = []
                             if log_stream and not self._is_stop_requested():
                                 if log_buf:
-                                    print("".join(log_buf))
+                                    print("".join(log_buf).replace('\x1f', '\\x1F'))
                                 print()
                             text_content = "".join(text_parts)
                             if not self._is_stop_requested():
@@ -13788,6 +13790,8 @@ class UnifiedClient:
                                     if log_stream and not self._is_stop_requested():
                                         combined = "".join(log_buf) + frag
                                         temp_combined = combined
+                                        # Make Unit Separator visible in log output
+                                        temp_combined = temp_combined.replace('\x1f', '\\x1F')
                                         for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                             temp_combined = temp_combined.replace(tag, tag + '\n')
                                         if "\n" in temp_combined:
@@ -13798,7 +13802,7 @@ class UnifiedClient:
                                         else:
                                             log_buf.append(frag)
                                             if len("".join(log_buf)) > 150:
-                                                print("".join(log_buf), end="", flush=True)
+                                                print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
                                                 log_buf = []
                         elif delta_type == "thinking_delta":
                             thinking_tokens_seen += 1
@@ -13875,7 +13879,7 @@ class UnifiedClient:
                 if log_stream and log_buf and not self._is_stop_requested():
                     remaining = "".join(log_buf)
                     if remaining:
-                        print(remaining)
+                        print(remaining.replace('\x1f', '\\x1F'))
 
             finally:
                 # Cleanup
@@ -15367,6 +15371,8 @@ class UnifiedClient:
                                                         
                                                         # Inject newlines after HTML closing tags
                                                         temp_combined = combined
+                                                        # Make Unit Separator visible in log output
+                                                        temp_combined = temp_combined.replace('\x1f', '\\x1F')
                                                         for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                                             temp_combined = temp_combined.replace(tag, tag + '\n')
                                                         
@@ -15381,7 +15387,7 @@ class UnifiedClient:
                                                             log_buf.append(frag)
                                                             # Optional: flush if buffer gets too long without newline
                                                             if len("".join(log_buf)) > 150:
-                                                                print("".join(log_buf), end="", flush=True)
+                                                                print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
                                                                 log_buf = []
 
                                         elif delta_content:
@@ -15394,6 +15400,8 @@ class UnifiedClient:
                                                 
                                                 # Inject newlines after HTML closing tags
                                                 temp_combined = combined
+                                                # Make Unit Separator visible in log output
+                                                temp_combined = temp_combined.replace('\x1f', '\\x1F')
                                                 for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                                     temp_combined = temp_combined.replace(tag, tag + '\n')
                                                 
@@ -15408,7 +15416,7 @@ class UnifiedClient:
                                                     log_buf.append(frag)
                                                     # Flush if buffer is getting long to show progress
                                                     if len("".join(log_buf)) > 150:
-                                                        print("".join(log_buf), end="", flush=True)
+                                                        print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
                                                         log_buf = []
 
                                     if getattr(ch, "finish_reason", None):
@@ -15429,6 +15437,8 @@ class UnifiedClient:
                                             
                                             # Inject newlines after HTML closing tags
                                             temp_combined = combined
+                                            # Make Unit Separator visible in log output
+                                            temp_combined = temp_combined.replace('\x1f', '\\x1F')
                                             for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                                 temp_combined = temp_combined.replace(tag, tag + '\n')
                                             
@@ -15440,14 +15450,14 @@ class UnifiedClient:
                                             else:
                                                 log_buf.append(alt_frag)
                                                 if len("".join(log_buf)) > 150:
-                                                    print("".join(log_buf), end="", flush=True)
+                                                    print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
                                                     log_buf = []
                             except Exception:
                                 continue
                         
                         # Print any remaining buffer content at the end
                         if log_buf and log_stream and not self._is_stop_requested():
-                            print("".join(log_buf))
+                            print("".join(log_buf).replace('\x1f', '\\x1F'))
                         
                         if log_stream and not self._is_stop_requested():
                             print()  # final newline
