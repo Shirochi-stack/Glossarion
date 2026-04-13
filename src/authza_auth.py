@@ -656,6 +656,11 @@ class _BrowserManager:
                         log_fn("🔄 Z.AI: Error detected, retrying…", flush=True)
                     thinking_shown = False
                     continue
+                if chunk == '__STATUS:reload__':
+                    if log_fn:
+                        log_fn("🔃 Z.AI: Reloading page and starting fresh chat…", flush=True)
+                    thinking_shown = False
+                    continue
                 if log_stream and log_fn:
                     log_fn(chunk, end="", flush=True)
             except queue.Empty:
