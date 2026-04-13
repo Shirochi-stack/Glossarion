@@ -42,6 +42,20 @@ class GlossaryManagerMixin:
     def _disable_combobox_mousewheel(combobox):
         """Disable mousewheel scrolling on a combobox"""
         combobox.wheelEvent = lambda event: None
+
+    @staticmethod
+    def _sep_for_display(text):
+        """Replace raw Unit Separator (\x1F) with visible literal '\x1F' for QTextEdit display."""
+        if not text:
+            return text
+        return text.replace('\x1f', '\\x1F')
+
+    @staticmethod
+    def _sep_from_display(text):
+        """Convert visible literal '\x1F' back to raw Unit Separator (\x1F) for storage."""
+        if not text:
+            return text
+        return text.replace('\\x1F', '\x1f')
     
     @staticmethod
     def _add_combobox_arrow(combobox):
@@ -1585,7 +1599,7 @@ class GlossaryManagerMixin:
         prompt_frame_layout.addWidget(label1)
 
         # Copyable placeholder helper (matches auto glossary tab style)
-        placeholders_line = QLineEdit("Available placeholders: {fields}, {language}, {entries}")
+        placeholders_line = QLineEdit("Available placeholders: {fields}, {language}, {entries},  Separator: \\x1F")
         placeholders_line.setReadOnly(True)
         placeholders_line.setFrame(False)
         placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
@@ -1606,10 +1620,10 @@ class GlossaryManagerMixin:
         _orig_focus_out = self.manual_prompt_text.focusOutEvent
         def _manual_prompt_focus_out(event):
             try:
-                if not self.manual_prompt_text.toPlainText().strip():
+                if not self._sep_from_display(self.manual_prompt_text.toPlainText()).strip():
                     default_manual = getattr(self, 'default_manual_glossary_prompt', None)
                     if default_manual:
-                        self.manual_prompt_text.setPlainText(default_manual)
+                        self.manual_prompt_text.setPlainText(self._sep_for_display(default_manual))
             except Exception:
                 pass
             return _orig_focus_out(event)
@@ -1653,7 +1667,7 @@ CRITICAL EXTRACTION RULES:
         else:
             self.manual_glossary_prompt = manual_prompt_from_config
 
-        self.manual_prompt_text.setPlainText(self.manual_glossary_prompt)
+        self.manual_prompt_text.setPlainText(self._sep_for_display(self.manual_glossary_prompt))
         
         prompt_controls_widget = QWidget()
         prompt_controls_layout = QHBoxLayout(prompt_controls_widget)
@@ -1664,7 +1678,7 @@ CRITICAL EXTRACTION RULES:
             reply = QMessageBox.question(parent, "Reset Prompt", "Reset manual glossary prompt to default?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.manual_prompt_text.setPlainText(getattr(self, 'default_manual_glossary_prompt', self.manual_prompt_text.toPlainText()))
+                self.manual_prompt_text.setPlainText(self._sep_for_display(getattr(self, 'default_manual_glossary_prompt', self._sep_from_display(self.manual_prompt_text.toPlainText()))))
         
         reset_btn = QPushButton("Reset to Default")
         reset_btn.clicked.connect(reset_manual_prompt)
@@ -1887,7 +1901,7 @@ CRITICAL EXTRACTION RULES:
             debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
             
             if hasattr(self, 'manual_prompt_text'):
-                manual_text = self.manual_prompt_text.toPlainText()
+                manual_text = self._sep_from_display(self.manual_prompt_text.toPlainText())
                 self.manual_glossary_prompt = manual_text.strip()
 
                 # If the prompt was cleared, restore the default so we never persist an empty template.
@@ -1898,7 +1912,7 @@ CRITICAL EXTRACTION RULES:
                         # Update the UI to reflect the restored default
                         try:
                             self.manual_prompt_text.blockSignals(True)
-                            self.manual_prompt_text.setPlainText(default_manual)
+                            self.manual_prompt_text.setPlainText(self._sep_for_display(default_manual))
                         finally:
                             self.manual_prompt_text.blockSignals(False)
 
@@ -1909,13 +1923,13 @@ CRITICAL EXTRACTION RULES:
                     print(f"🔍 [UPDATE] manual_glossary_prompt3: {len(self.manual_glossary_prompt)} chars")
             
             if hasattr(self, 'auto_prompt_text'):
-                self.unified_auto_glosary_prompt3 = self.auto_prompt_text.toPlainText().strip()
+                self.unified_auto_glosary_prompt3 = self._sep_from_display(self.auto_prompt_text.toPlainText()).strip()
                 if debug_enabled:
                     print(f"🔍 [UPDATE] unified_auto_glosary_prompt3: {len(self.unified_auto_glosary_prompt3)} chars")
             
             if hasattr(self, 'append_prompt_text'):
                 old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
-                self.append_glossary_prompt = self.append_prompt_text.toPlainText().strip()
+                self.append_glossary_prompt = self._sep_from_display(self.append_prompt_text.toPlainText()).strip()
                 self.config['append_glossary_prompt'] = self.append_glossary_prompt
                 if debug_enabled:
                     print(f"🔍 [UPDATE] append_glossary_prompt: OLD='{old_value[:50]}...' NEW='{self.append_glossary_prompt[:50]}...' ({len(self.append_glossary_prompt)} chars)")
@@ -2555,7 +2569,7 @@ CRITICAL EXTRACTION RULES:
         else:
             self.append_glossary_prompt = append_prompt_from_config
         
-        self.append_prompt_text.setPlainText(self.append_glossary_prompt)
+        self.append_prompt_text.setPlainText(self._sep_for_display(self.append_glossary_prompt))
         
         append_prompt_controls_widget = QWidget()
         append_prompt_controls_layout = QHBoxLayout(append_prompt_controls_widget)
@@ -3071,7 +3085,7 @@ CRITICAL EXTRACTION RULES:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_line = QLineEdit("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}, {marker}")
+        placeholder_line = QLineEdit("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}, {marker},  Separator: \\x1F")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
@@ -3118,7 +3132,7 @@ CRITICAL EXTRACTION RULES:
         self.unified_auto_glosary_prompt3 = self.config.get('unified_auto_glosary_prompt3', default_unified_prompt)
         if not self.unified_auto_glosary_prompt3 or not self.unified_auto_glosary_prompt3.strip():
             self.unified_auto_glosary_prompt3 = default_unified_prompt
-        self.auto_prompt_text.setPlainText(self.unified_auto_glosary_prompt3)
+        self.auto_prompt_text.setPlainText(self._sep_for_display(self.unified_auto_glosary_prompt3))
         
         glossary_prompt_controls_widget = QWidget()
         glossary_prompt_controls_layout = QHBoxLayout(glossary_prompt_controls_widget)
@@ -3129,7 +3143,7 @@ CRITICAL EXTRACTION RULES:
             reply = QMessageBox.question(parent, "Reset Prompt", "Reset glossary prompt to default?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.auto_prompt_text.setPlainText(default_unified_prompt)
+                self.auto_prompt_text.setPlainText(self._sep_for_display(default_unified_prompt))
         
         reset_glossary_btn = QPushButton("Reset to Default")
         reset_glossary_btn.clicked.connect(reset_glossary_prompt)

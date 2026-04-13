@@ -1533,13 +1533,14 @@ def _convert_to_token_efficient_format(csv_lines):
         header_parts = _gsplit(header, sep) if header else []
     if 'gender' in header_parts:
         columns.append('gender')
-    if 'description' in header_parts:
-        columns.append('description')
-    # Add any other custom fields (exclude type, raw_name, translated_name, gender, description)
+    # Add custom fields first (exclude type, raw_name, translated_name, gender, description)
     standard_cols = {'type', 'raw_name', 'translated_name', 'gender', 'description'}
     for col in header_parts:
         if col.lower() not in standard_cols and col:
             columns.append(col)
+    # Description goes last since the token-efficient format renders it at the end
+    if 'description' in header_parts:
+        columns.append('description')
     result.append(f"Glossary Columns: {', '.join(columns)}\n")
     
     # Process in order: character first, then term, then others
