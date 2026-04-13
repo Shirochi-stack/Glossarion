@@ -2061,9 +2061,6 @@ def _process_gemini_sse_line(
                     state["log_buf"] = [parts[-1]]
                 else:
                     log_buf.append(text)
-                    if len("".join(log_buf)) > 150:
-                        print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
-                        state["log_buf"] = []
 
     # Update usage metadata if present
     usage = data.get("usageMetadata", {})
