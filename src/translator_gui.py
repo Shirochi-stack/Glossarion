@@ -4524,7 +4524,6 @@ Recent translations to summarize:
         dialog = QDialog(self)
         dialog.setWindowTitle("Model Provider Information")
         dialog.setModal(False)
-        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
 
         # Size: moderate width, shorter height
         from PySide6.QtWidgets import QApplication, QScrollArea
