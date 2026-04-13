@@ -12931,20 +12931,13 @@ class UnifiedClient:
                                                     
                                                     # Inject newlines after HTML closing tags
                                                     temp_combined = combined
-                                                    # Make Unit Separator visible in log output
-                                                    temp_combined = temp_combined.replace('\x1f', '\\x1F')
-                                                    for tag in ['</h1>', '</h2>', '3>', '4>', '5>', '6>', '</p>']:
-                                                        if tag in ['3>', '4>', '5>', '6>']:
-                                                            tag = '</h' + tag[0] + '>'
-                                                            if tag not in combined: continue
-                                                    
                                                     for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                                         temp_combined = temp_combined.replace(tag, tag + '\n')
                                                     
                                                     if "\n" in temp_combined:
                                                         parts = temp_combined.split("\n")
                                                         for p in parts[:-1]:
-                                                            print(p)
+                                                            print(p.replace('\x1f', '\\x1F'))
                                                         log_buf = [parts[-1]]
                                                     else:
                                                         log_buf.append(frag)
@@ -13790,14 +13783,12 @@ class UnifiedClient:
                                     if log_stream and not self._is_stop_requested():
                                         combined = "".join(log_buf) + frag
                                         temp_combined = combined
-                                        # Make Unit Separator visible in log output
-                                        temp_combined = temp_combined.replace('\x1f', '\\x1F')
                                         for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                             temp_combined = temp_combined.replace(tag, tag + '\n')
                                         if "\n" in temp_combined:
                                             parts = temp_combined.split("\n")
                                             for p in parts[:-1]:
-                                                print(p, flush=True)
+                                                print(p.replace('\x1f', '\\x1F'), flush=True)
                                             log_buf = [parts[-1]]
                                         else:
                                             log_buf.append(frag)

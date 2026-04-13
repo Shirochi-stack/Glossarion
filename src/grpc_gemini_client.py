@@ -471,13 +471,10 @@ class GrpcGeminiClient:
                                     for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
                                         temp_combined = temp_combined.replace(tag, tag + '\n')
                                     
-                                    # Make Unit Separator visible in log output
-                                    temp_combined = temp_combined.replace('\x1f', '\\x1F')
-                                    
                                     if "\n" in temp_combined:
                                         parts_split = temp_combined.split("\n")
                                         for ln in parts_split[:-1]:
-                                            print(ln)
+                                            print(ln.replace('\x1f', '\\x1F'))
                                         log_buf = [parts_split[-1]]
                                     else:
                                         log_buf.append(frag)

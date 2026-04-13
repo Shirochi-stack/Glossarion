@@ -869,12 +869,10 @@ def _process_sse_line(
                 combined = "".join(log_buf) + delta_text
                 for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
                     combined = combined.replace(tag, tag + '\n')
-                # Make Unit Separator visible in log output
-                combined = combined.replace('\x1f', '\\x1F')
                 if "\n" in combined:
                     parts = combined.split("\n")
                     for part in parts[:-1]:
-                        _log(part)
+                        _log(part.replace('\x1f', '\\x1F'))
                     state["log_buf"] = [parts[-1]]
                 else:
                     log_buf.append(delta_text)
