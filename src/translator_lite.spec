@@ -192,6 +192,7 @@ app_files = [
 	# AuthGPT - ChatGPT subscription OAuth
 	('authgpt_auth.py', '.'),
 	('authgem_auth.py', '.'),
+	('authza_auth.py', '.'),
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -269,6 +270,7 @@ app_modules = [
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
+	'authza_auth',  # Azure/Additional auth
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
