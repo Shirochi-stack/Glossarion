@@ -4489,6 +4489,17 @@ Recent translations to summarize:
             Glossarion will auto-launch it if Node.js is installed.
         </p>
 
+        <h4>Z.AI Subscription (za/)</h4>
+        <p>Use your Z.AI subscription via browser automation &mdash; no API key needed</p>
+        <ul>
+            <li><b>za/glm-4-plus</b> - GLM-4 Plus via Z.AI</li>
+            <li><b>za/glm-4</b> - GLM-4 via Z.AI</li>
+        </ul>
+        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+            <b>&#x2139;&#xfe0f; Tip:</b> A browser window will open for login on first use.
+            The browser stays minimized to maintain the session.
+        </p>
+
         <h4>POE (poe/)</h4>
         <p>Access models through Poe platform <span style="color: #d9534f;">(likely not functional)</span></p>
         <ul>
@@ -17370,6 +17381,7 @@ Important rules:
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#142840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
+                ("🇨🇳", "za/", "Z.AI", "Z.AI subscription (browser)", "#1e2030", "#60c0e0"),
             ]
             
             pfx_w = QWidget()
