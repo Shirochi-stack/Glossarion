@@ -5300,19 +5300,21 @@ class GlossarionWeb:
                                         value=self.get_config_value('manual_glossary_prompt3',
                                             """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns and entry types in this exact order provided:
 
 {fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
@@ -5342,14 +5344,14 @@ CRITICAL EXTRACTION RULES:
                                         label="Format Instructions (Use placeholder: {text_sample})",
                                         lines=10,
                                         value=self.get_config_value('glossary_format_instructions',
-                                            "Return the results in EXACT CSV format with this header:\n"
-                                            "type,raw_name,translated_name\n\n"
+                                            "Return the results in CSV format with columns separated by the Unit Separator character (U+001F) and this header:\n"
+                                            "type\x1fraw_name\x1ftranslated_name\n\n"
                                             "For example:\n"
-                                            "character,김상현,Kim Sang-hyun\n"
-                                            "character,갈편제,Gale Hardest\n"
-                                            "terms,마법사,Mage\\n\\n"
+                                            "character\x1f\uae40\uc0c1\ud604\x1fKim Sang-hyun\n"
+                                            "character\x1f\uac08\ud3b8\uc81c\x1fGale Hardest\n"
+                                            "terms\x1f\ub9c8\ubc95\uc0ac\x1fMage\\n\\n"
                                             "Only include terms that actually appear in the text.\n"
-                                            "Do not use quotes around values unless they contain commas.\n\n"
+                                            "Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F).\n\n"
                                             "Text to analyze:\n{text_sample}")
                                     )
                                     

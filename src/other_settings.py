@@ -6772,13 +6772,21 @@ def _create_processing_options_section(self, parent):
                         # Token-efficient: === TYPE === (keep as-is, e.g. "characters", "terms")
                         for m in _re.finditer(r'^=== (\w+) ===$', content, _re.MULTILINE):
                             discovered_types.add(m.group(1).lower())
-                        # CSV: type,raw_name,...
+                        # CSV: type{sep}raw_name,...
+                        _GSEP = '\x1F'
                         for line in content.split('\n'):
                             line = line.strip()
-                            if line and ',' in line and not line.lower().startswith('type,') and not line.startswith('=') and not line.startswith('*') and not line.startswith('Glossary'):
+                            if not line or line.startswith('=') or line.startswith('*') or line.startswith('Glossary'):
+                                continue
+                            # Detect separator for this line
+                            if _GSEP in line:
+                                parts = line.split(_GSEP)
+                            elif ',' in line:
                                 parts = line.split(',')
-                                if len(parts) >= 3 and _re.match(r'^[a-z_]+$', parts[0].strip()):
-                                    discovered_types.add(parts[0].strip().lower())
+                            else:
+                                continue
+                            if len(parts) >= 3 and not parts[0].strip().lower().startswith('type') and _re.match(r'^[a-z_]+$', parts[0].strip()):
+                                discovered_types.add(parts[0].strip().lower())
             except Exception:
                 pass
             

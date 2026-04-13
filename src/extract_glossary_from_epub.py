@@ -1961,20 +1961,22 @@ def build_prompt(chapter_text: str) -> tuple:
         # If no custom prompt, create a default
         custom_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns and entry types in this exact order provided:
 
 {fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
-term,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
+character\x1fᫀ이히리ᄐ 나애\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character\x1fᫀ뢔사난\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+term\x1fᫀ간편헤\x1fGale Hardest\x1f\x1fA legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
@@ -2012,7 +2014,7 @@ CRITICAL EXTRACTION RULES:
             header_parts = ['type', 'raw_name', 'translated_name', 'gender']
             if custom_fields:
                 header_parts.extend(custom_fields)
-            fields_spec.append(f"Columns:\n{','.join(header_parts)}")
+            fields_spec.append(f"Columns (separated by Unit Separator U+001F):\n{'\x1F'.join(header_parts)}")
             
             # List valid entry types
             type_names = [t[0] for t in enabled_types]
