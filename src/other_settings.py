@@ -8279,7 +8279,7 @@ def _create_processing_options_section(self, parent):
         self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', True)
     
     if not hasattr(self, 'gemini_safety_threshold_var'):
-        self.gemini_safety_threshold_var = self.config.get('gemini_safety_threshold', 'OFF')
+        self.gemini_safety_threshold_var = self.config.get('gemini_safety_threshold', 'BLOCK_NONE')
     
     # Row with checkbox + dropdown
     safety_row = QWidget()
