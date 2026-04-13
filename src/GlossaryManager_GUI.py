@@ -4300,8 +4300,21 @@ CRITICAL EXTRACTION RULES:
                    else:
                        import csv
                        entries = []
+                       _GSEP = '\x1F'
                        with open(path, 'r', encoding='utf-8') as f:
-                           reader = csv.reader(f)
+                           raw_content = f.read()
+                       
+                       if _GSEP in raw_content:
+                           # New Unit Separator format
+                           rows = []
+                           for _line in raw_content.split('\n'):
+                               _line = _line.strip()
+                               if _line:
+                                   rows.append([p.strip() for p in _line.split(_GSEP)])
+                       else:
+                           # Legacy comma-separated format
+                           from io import StringIO
+                           reader = csv.reader(StringIO(raw_content))
                            rows = list(reader)
 
                        # Detect header row: first row whose first cell is 'type'

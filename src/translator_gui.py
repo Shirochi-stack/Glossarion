@@ -1547,19 +1547,21 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.manual_glossary_prompt = self.config.get('manual_glossary_prompt3', 
             """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types in this exact order provided
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns and entry types in this exact order provided:
 
 {fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
  
 
 CRITICAL EXTRACTION RULES:
@@ -1578,23 +1580,24 @@ CRITICAL EXTRACTION RULES:
         unified_prompt_from_config = self.config.get('unified_auto_glosary_prompt3',
             """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns in this exact order: type\x1fraw_name\x1ftranslated_name\x1fgender\x1fdescription
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
-tion)
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
@@ -1628,16 +1631,16 @@ Terms to translate:
 Provide translations in the same numbered format.""")
         self.glossary_format_instructions = self.config.get('glossary_format_instructions', 
             """
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name
+Return the results in CSV format with columns separated by the Unit Separator character (U+001F) and this header:
+type\x1fraw_name\x1ftranslated_name
 
 For example:
-character,김상현,Kim Sang-hyu
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
+character\x1f김상현\x1fKim Sang-hyu
+character\x1f갈편제\x1fGale Hardest  
+character\x1f디히릿 아데\x1fDihirit Ade
 
 Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
+Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F).
 
 Text to analyze:
 {text_sample}""")  
@@ -2432,7 +2435,7 @@ Text to analyze:
 # Removed old _show_update_loading_and_check method to prevent conflicts
 # Now using the consolidated update checking system in UpdateManager
                                
-    # Logging handler to forward client logs into GUI
+    # Logging handler to forward client logs into the GUI
     class GuiLogHandler(logging.Handler):
         def __init__(self, outer, level=logging.INFO):
             super().__init__(level)
@@ -2744,19 +2747,21 @@ Text to analyze:
         """Initialize all default prompt templates"""
         self.default_manual_glossary_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns and entry types in this exact order provided:
 
 {fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
  
 
 CRITICAL EXTRACTION RULES:
@@ -2771,22 +2776,24 @@ CRITICAL EXTRACTION RULES:
         
         self.default_unified_auto_glosary_prompt3 = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns in this exact order: type\x1fraw_name\x1ftranslated_name\x1fgender\x1fdescription
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
+- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation

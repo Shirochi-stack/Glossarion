@@ -1783,17 +1783,24 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 continue
 
             # Detect and store header to preserve every returned column
+            _GSEP = '\x1F'
             if 'type' in line.lower() and 'raw_name' in line.lower():
-                try:
-                    header_fields = [c.strip() for c in next(csv.reader([line])) if c.strip()]
-                except Exception:
-                    header_fields = [c.strip() for c in line.split(',') if c.strip()]
+                if _GSEP in line:
+                    header_fields = [c.strip() for c in line.split(_GSEP) if c.strip()]
+                else:
+                    try:
+                        header_fields = [c.strip() for c in next(csv.reader([line])) if c.strip()]
+                    except Exception:
+                        header_fields = [c.strip() for c in line.split(',') if c.strip()]
                 continue
 
-            try:
-                row = next(csv.reader([line]))
-            except Exception:
-                row = [p.strip() for p in line.split(',')]
+            if _GSEP in line:
+                row = [p.strip() for p in line.split(_GSEP)]
+            else:
+                try:
+                    row = next(csv.reader([line]))
+                except Exception:
+                    row = [p.strip() for p in line.split(',')]
 
             # --- NEW CLEANUP LOGIC ---
             if len(row) >= 3:

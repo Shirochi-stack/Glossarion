@@ -6732,22 +6732,43 @@ def apply_emergency_glossary_compliance(content, output_dir):
                     if raw_name and translated:
                         entries.append((current_type, raw_name, translated))
     else:
-        # Raw CSV format: type,raw_name,translated_name[,gender[,description]]
-        import csv as _csv
-        import io as _io
-        reader = _csv.reader(_io.StringIO(raw))
-        header_skipped = False
-        for row in reader:
-            if not row or len(row) < 3:
-                continue
-            if not header_skipped and row[0].strip().lower() == "type":
-                header_skipped = True
-                continue
-            entry_type = row[0].strip().lower()
-            raw_name = row[1].strip()
-            translated = row[2].strip()
-            if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
-                entries.append((entry_type, raw_name, translated))
+        # Raw CSV format: type{sep}raw_name{sep}translated_name[{sep}gender[{sep}description]]
+        # Auto-detect separator: Unit Separator (\x1F) or comma
+        _GLOSSARY_SEP = '\x1F'
+        if _GLOSSARY_SEP in raw:
+            # New Unit Separator format - simple split
+            header_skipped = False
+            for line in raw.strip().split('\n'):
+                if not line.strip():
+                    continue
+                row = [p.strip() for p in line.split(_GLOSSARY_SEP)]
+                if len(row) < 3:
+                    continue
+                if not header_skipped and row[0].strip().lower() == "type":
+                    header_skipped = True
+                    continue
+                entry_type = row[0].strip().lower()
+                raw_name = row[1].strip()
+                translated = row[2].strip()
+                if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                    entries.append((entry_type, raw_name, translated))
+        else:
+            # Legacy comma-separated format
+            import csv as _csv
+            import io as _io
+            reader = _csv.reader(_io.StringIO(raw))
+            header_skipped = False
+            for row in reader:
+                if not row or len(row) < 3:
+                    continue
+                if not header_skipped and row[0].strip().lower() == "type":
+                    header_skipped = True
+                    continue
+                entry_type = row[0].strip().lower()
+                raw_name = row[1].strip()
+                translated = row[2].strip()
+                if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                    entries.append((entry_type, raw_name, translated))
     
     if not entries:
         print("⚠️ Emergency Glossary Compliance: No entries parsed from glossary")

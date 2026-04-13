@@ -10,6 +10,16 @@ import json
 import csv
 from io import StringIO
 
+try:
+    from GlossaryManager import GLOSSARY_SEP, _gsep, _is_glossary_header
+except ImportError:
+    GLOSSARY_SEP = '\x1F'
+    def _gsep(text):
+        return GLOSSARY_SEP if GLOSSARY_SEP in text else ','
+    def _is_glossary_header(line):
+        low = line.strip().lower()
+        return low.startswith('type,raw_name') or low.startswith(f'type{GLOSSARY_SEP}raw_name')
+
 
 def compress_glossary(glossary_content, source_text, glossary_format='auto'):
     """
@@ -115,7 +125,7 @@ def _compress_legacy_csv_format(lines, source_text):
     
     # Check if first line is a header
     first_line = lines[0].strip().lower()
-    has_header = first_line.startswith('type,') or 'raw_name' in first_line
+    has_header = _is_glossary_header(lines[0]) or first_line.startswith('type,') or 'raw_name' in first_line
     
     filtered_lines = []
     
@@ -126,14 +136,18 @@ def _compress_legacy_csv_format(lines, source_text):
     else:
         data_lines = lines
     
+    # Auto-detect separator from content
+    sample = '\n'.join(lines[:5])
+    sep = _gsep(sample)
+    
     # Process each CSV row
     for line in data_lines:
         if not line.strip():
             continue
         
         try:
-            # Parse CSV line
-            parts = list(csv.reader(StringIO(line)))[0]
+            # Parse CSV line using detected separator
+            parts = [p.strip() for p in line.split(sep)]
             if len(parts) >= 3:
                 entry_type = parts[0].strip()
                 raw_name = parts[1].strip()

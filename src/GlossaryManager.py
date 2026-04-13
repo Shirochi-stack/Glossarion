@@ -15,20 +15,56 @@ import PatternManager as PM
 import duplicate_detection_config as ddc
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
+# ---------------------------------------------------------------------------
+# Glossary CSV separator – Unit Separator (ASCII 31) replaces comma for
+# robust field delimiting.  Commas in descriptions no longer break parsing.
+# ---------------------------------------------------------------------------
+GLOSSARY_SEP = '\x1F'
+
+def _gsep(text):
+    """Auto-detect glossary separator: Unit Separator if present, else comma."""
+    if GLOSSARY_SEP in text:
+        return GLOSSARY_SEP
+    return ','
+
+def _gjoin(parts):
+    """Join glossary fields with the standard Unit Separator."""
+    return GLOSSARY_SEP.join(str(p) for p in parts)
+
+def _gsplit(line, sep=None):
+    """Split a glossary line using the given or auto-detected separator."""
+    if sep is None:
+        sep = _gsep(line)
+    return [p.strip() for p in line.split(sep)]
+
+def _is_glossary_header(line):
+    """Check if a line is a glossary CSV header, regardless of separator."""
+    low = line.strip().lower()
+    return low.startswith('type,raw_name') or low.startswith(f'type{GLOSSARY_SEP}raw_name')
+
+def _build_header(*extra_cols):
+    """Build a glossary header with standard columns plus optional extras."""
+    cols = ['type', 'raw_name', 'translated_name']
+    cols.extend(extra_cols)
+    return GLOSSARY_SEP.join(cols)
+
 # Default unified auto-glossary prompt (used when AUTO_GLOSSARY_PROMPT is unset/empty).
 # NOTE: This matches the GUI's default_unified_prompt in GlossaryManager_GUI.py.
-DEFAULT_AUTO_GLOSARY_PROMPT3 = """You are a novel glossary extraction assistant.
+# IMPORTANT: Examples use the Unit Separator character (\x1F) between fields.
+DEFAULT_AUTO_GLOSARY_PROMPT3 = f"""You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+Columns in this exact order: type{GLOSSARY_SEP}raw_name{GLOSSARY_SEP}translated_name{GLOSSARY_SEP}gender{GLOSSARY_SEP}description
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
+IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
-Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
+Critical Requirement: The translated name and description column must be in {{language}}, While the raw name column must the same as the source language.
 
 For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character{GLOSSARY_SEP}ᫀ이히리ᐐ 나애{GLOSSARY_SEP}Dihirit Ade{GLOSSARY_SEP}female{GLOSSARY_SEP}The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character{GLOSSARY_SEP}ᫀ뢤사난{GLOSSARY_SEP}Kim Sang-hyu{GLOSSARY_SEP}male{GLOSSARY_SEP}A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
@@ -39,7 +75,7 @@ CRITICAL EXTRACTION RULES:
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
-- You must create {marker} glossary entries (one or more per window; do not invent placeholders).
+- You must create {{marker}} glossary entries (one or more per window; do not invent placeholders).
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
 
@@ -200,8 +236,9 @@ def _ensure_book_title_csv_lines(csv_lines):
     
     # Skip if already present
     header = csv_lines[0]
+    sep = _gsep(header)
     for line in csv_lines[1:]:
-        parts = [p.strip() for p in line.split(",")]
+        parts = [p.strip() for p in line.split(sep)]
         if len(parts) >= 3:
             # Check if this line is already the book title
             p_raw = parts[1].lower()
@@ -211,7 +248,7 @@ def _ensure_book_title_csv_lines(csv_lines):
             if (raw_title and p_raw == norm_raw) or (trans_title and p_trans == norm_trans):
                 return csv_lines
 
-    fields = [f.strip() for f in header.split(",")]
+    fields = [f.strip() for f in header.split(sep)]
     row = []
     for field in fields:
         key = field.lower()
@@ -223,13 +260,14 @@ def _ensure_book_title_csv_lines(csv_lines):
             row.append(trans_title if trans_title else (raw_title if raw_title else ""))
         else:
             row.append("")
-    book_line = ",".join(row)
+    book_line = GLOSSARY_SEP.join(row)
     return [header, book_line] + csv_lines[1:]
 
 def _csv_sort_key(line: str):
     """Sort book first, then characters, then others by raw name."""
     try:
-        parts = line.split(",")
+        sep = _gsep(line)
+        parts = line.split(sep)
         entry_type = parts[0].strip().lower()
         name = parts[1].lower() if len(parts) > 1 else line.lower()
     except Exception:
@@ -1052,11 +1090,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
             include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
             if include_description:
-                all_csv_lines.insert(0, "type,raw_name,translated_name,gender,description")
+                all_csv_lines.insert(0, _build_header('gender', 'description'))
             elif include_gender_context:
-                all_csv_lines.insert(0, "type,raw_name,translated_name,gender")
+                all_csv_lines.insert(0, _build_header('gender'))
             else:
-                all_csv_lines.insert(0, "type,raw_name,translated_name")
+                all_csv_lines.insert(0, _build_header())
             
             # Merge with any on-disk glossary first (to avoid overwriting user edits)
             on_disk_path = os.path.join(output_dir, "glossary.csv")
@@ -1179,7 +1217,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     else:
                         for raw_name, translated_name in chunk_glossary.items():
                             entry_type = "character" if _has_honorific(raw_name) else "term"
-                            line = f"{entry_type},{raw_name},{translated_name}"
+                            line = _gjoin([entry_type, raw_name, translated_name])
                             all_glossary_entries.append(line)
                             chunk_lines.append(line)
                     
@@ -1237,17 +1275,17 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
         
         if include_description:
-            csv_lines = ["type,raw_name,translated_name,gender,description"] + base_entries
+            csv_lines = [_build_header('gender', 'description')] + base_entries
         elif include_gender_context:
-            csv_lines = ["type,raw_name,translated_name,gender"] + base_entries
+            csv_lines = [_build_header('gender')] + base_entries
         else:
-            csv_lines = ["type,raw_name,translated_name"] + base_entries
+            csv_lines = [_build_header()] + base_entries
             
         # If we used incremental as base, we must merge MEMORY into it (to capture the last chunk if it wasn't in incremental yet)
         if using_incremental_as_base and all_glossary_entries:
              print("📑 Merging memory entries into incremental base...")
              # Create a mini-CSV for memory entries
-             mem_csv = ["type,raw_name,translated_name"] + all_glossary_entries
+             mem_csv = [_build_header()] + all_glossary_entries
              csv_lines = _merge_csv_entries(csv_lines, '\n'.join(mem_csv), strip_honorifics, language)
 
         # Merge with any provided existing glossary AND on-disk glossary to avoid overwriting
@@ -1346,7 +1384,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                         with open(additional_glossary_path, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                             # Add CSV header
-                            converted_lines.append("type,raw_name,translated_name")
+                            converted_lines.append(_build_header())
                             # Convert JSON to CSV format
                             if isinstance(data, dict):
                                 for key, value in data.items():
@@ -1354,9 +1392,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                                         raw = value.get('raw', key)
                                         translated = value.get('translated', value.get('translation', key))
                                         entry_type = value.get('type', 'term')
-                                        converted_lines.append(f"{entry_type},{raw},{translated}")
+                                        converted_lines.append(_gjoin([entry_type, raw, translated]))
                                     else:
-                                        converted_lines.append(f"term,{key},{value}")
+                                        converted_lines.append(_gjoin(['term', key, value]))
                             elif isinstance(data, list):
                                 for entry in data:
                                     if isinstance(entry, dict):
@@ -1364,7 +1402,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                                         raw = entry.get('raw_name', entry.get('raw', ''))
                                         translated = entry.get('translated_name', entry.get('translated', ''))
                                         if raw and translated:
-                                            converted_lines.append(f"{entry_type},{raw},{translated}")
+                                            converted_lines.append(_gjoin([entry_type, raw, translated]))
                     
                     elif file_ext == '.pdf':
                         # Try to extract text from PDF and save as CSV
@@ -1469,11 +1507,12 @@ def _convert_to_token_efficient_format(csv_lines):
     import re as _re
     import csv as _csv
     grouped = {}
+    sep = _gsep(csv_lines[0]) if csv_lines else GLOSSARY_SEP
     for line in entries:
         if not line.strip():
             continue
         # Only accept proper CSV rows: at least 3 fields and a sane type token
-        parts_full = [p.strip() for p in line.split(',')]
+        parts_full = _gsplit(line, sep)
         if len(parts_full) < 3:
             continue
         entry_type = parts_full[0].lower()
@@ -1489,9 +1528,9 @@ def _convert_to_token_efficient_format(csv_lines):
     columns = ['translated_name', 'raw_name']
     # Check for gender and description columns
     try:
-        header_parts = [p.strip() for p in next(_csv.reader([header]))] if header else []
+        header_parts = _gsplit(header, sep) if header else []
     except Exception:
-        header_parts = [p.strip() for p in header.split(',')] if header else []
+        header_parts = _gsplit(header, sep) if header else []
     if 'gender' in header_parts:
         columns.append('gender')
     if 'description' in header_parts:
@@ -1527,10 +1566,7 @@ def _convert_to_token_efficient_format(csv_lines):
         
         # Add entries in new format
         for line in entries:
-            try:
-                parts = next(_csv.reader([line]))
-            except Exception:
-                parts = [p.strip() for p in line.split(',')]
+            parts = _gsplit(line, sep)
 
             if header_parts and len(parts) < len(header_parts):
                 parts += [''] * (len(header_parts) - len(parts))
@@ -1597,10 +1633,11 @@ def _count_glossary_entries(lines, use_legacy_format=False):
     if not lines:
         return 0, 0, 0
     if use_legacy_format:
-        data = lines[1:] if lines and lines[0].lower().startswith('type,raw_name') else lines
-        char_count = sum(1 for ln in data if ln.startswith('character,'))
-        term_count = sum(1 for ln in data if ln.startswith('term,'))
-        total = sum(1 for ln in data if ln and ',' in ln)
+        data = lines[1:] if lines and _is_glossary_header(lines[0]) else lines
+        char_count = sum(1 for ln in data if ln.startswith('character,') or ln.startswith(f'character{GLOSSARY_SEP}'))
+        term_count = sum(1 for ln in data if ln.startswith('term,') or ln.startswith(f'term{GLOSSARY_SEP}'))
+        sep = _gsep('\n'.join(lines[:2])) if lines else ','
+        total = sum(1 for ln in data if ln and sep in ln)
         return char_count, term_count, total
     # token-efficient
     current = None
@@ -1626,7 +1663,7 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
     - In legacy CSV mode, ensure exactly one header at the very top.
     - In token-efficient mode, remove any CSV header lines entirely.
     """
-    header_norm = "type,raw_name,translated_name"
+    header_norm = _build_header()
     if not lines:
         return lines
     
@@ -1635,7 +1672,7 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
         header_seen = False
         for ln in lines:
             txt = ln.strip()
-            if txt.lower().startswith("type,raw_name"):
+            if _is_glossary_header(txt):
                 if not header_seen:
                     sanitized.append(header_norm)
                     header_seen = True
@@ -1643,7 +1680,7 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
             else:
                 sanitized.append(ln)
         # ensure header at top
-        if sanitized and not sanitized[0].strip().lower().startswith("type,raw_name"):
+        if sanitized and not _is_glossary_header(sanitized[0]):
             sanitized.insert(0, header_norm)
         return sanitized
     else:
@@ -1654,7 +1691,7 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
             txt = ln.strip()
             low = txt.lower()
             # Drop CSV headers
-            if low.startswith("type,raw_name"):
+            if _is_glossary_header(txt):
                 continue
             # Keep only the first main glossary header
             if low.startswith("glossary:"):
@@ -1934,10 +1971,10 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                     if isinstance(chunk_glossary, dict):
                         for raw_name, translated_name in chunk_glossary.items():
                             entry_type = "character" if _has_honorific(raw_name) else "term"
-                            chunk_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                            chunk_lines.append(_gjoin([entry_type, raw_name, translated_name]))
                     elif isinstance(chunk_glossary, list):
                         for line in chunk_glossary:
-                            if line and not line.startswith('type,'):
+                            if line and not _is_glossary_header(line):
                                 chunk_lines.append(line)
 
                     # Aggregate for end-of-run
@@ -2048,11 +2085,12 @@ def _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honor
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
     include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
     
-    header = "type,raw_name,translated_name"
     if include_description:
-        header += ",gender,description"
+        header = _build_header('gender', 'description')
     elif include_gender_context:
-        header += ",gender"
+        header = _build_header('gender')
+    else:
+        header = _build_header()
     
     new_csv_lines = [header] + chunk_lines
 
@@ -2269,11 +2307,11 @@ def _strip_all_honorifics(term, language='korean'):
 
 def _convert_to_csv_format(data):
     """Convert various glossary formats to CSV string format with enforced 3 columns"""
-    csv_lines = ["type,raw_name,translated_name"]
+    csv_lines = [_build_header()]
     
     if isinstance(data, str):
         # Already CSV string
-        if data.strip().startswith('type,raw_name'):
+        if _is_glossary_header(data.strip().split('\n')[0]) if data.strip() else False:
             return data
         # Try to parse as JSON
         try:
@@ -2286,7 +2324,7 @@ def _convert_to_csv_format(data):
             if isinstance(item, dict):
                 if 'type' in item and 'raw_name' in item:
                     # Already in correct format
-                    line = f"{item['type']},{item['raw_name']},{item.get('translated_name', item['raw_name'])}"
+                    line = _gjoin([item['type'], item['raw_name'], item.get('translated_name', item['raw_name'])])
                     csv_lines.append(line)
                 else:
                     # Old format - default to 'term' type
@@ -2294,17 +2332,17 @@ def _convert_to_csv_format(data):
                     raw_name = item.get('original_name', '')
                     translated_name = item.get('name', raw_name)
                     if raw_name and translated_name:
-                        csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                        csv_lines.append(_gjoin([entry_type, raw_name, translated_name]))
                         
     elif isinstance(data, dict):
         if 'entries' in data:
             # Has metadata wrapper, extract entries
             for original, translated in data['entries'].items():
-                csv_lines.append(f"term,{original},{translated}")
+                csv_lines.append(_gjoin(['term', original, translated]))
         else:
             # Plain dictionary - default to 'term' type
             for original, translated in data.items():
-                csv_lines.append(f"term,{original},{translated}")
+                csv_lines.append(_gjoin(['term', original, translated]))
     
     return '\n'.join(csv_lines)
 
@@ -2312,11 +2350,12 @@ def _parse_csv_to_dict(csv_content):
     """Parse CSV content to dictionary for backward compatibility"""
     result = {}
     lines = csv_content.strip().split('\n')
+    sep = _gsep(csv_content)
     
     for line in lines[1:]:  # Skip header
         if not line.strip():
             continue
-        parts = [p.strip() for p in line.split(',')]
+        parts = [p.strip() for p in line.split(sep)]
         if len(parts) >= 3:
             result[parts[1]] = parts[2]  # raw_name -> translated_name
     
@@ -4737,7 +4776,8 @@ def _filter_csv_by_mode(csv_lines, filter_mode):
         if not line.strip():
             continue
         
-        parts = [p.strip() for p in line.split(',')]
+        sep = _gsep(line)
+        parts = [p.strip() for p in line.split(sep)]
         if len(parts) < 3:
             continue
         
@@ -4796,7 +4836,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'csv' in part[:10].lower():
                 response_text = part[part.find('\n')+1:]
                 break
-            elif part.strip() and ('type,raw_name' in part or 'character,' in part or 'term,' in part):
+            elif part.strip() and (_is_glossary_header(part) or 'character,' in part or 'term,' in part or f'character{GLOSSARY_SEP}' in part or f'term{GLOSSARY_SEP}' in part):
                 response_text = part
                 break
     
@@ -4809,31 +4849,26 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # --- Dynamic header capture: accept every column the AI returns ---
     dynamic_header = None
     dynamic_rows = []
+    ai_sep = _gsep(response_text)  # Auto-detect if AI used \x1F or comma
     for ln in lines:
         low = ln.lower()
         if 'type' in low and 'raw_name' in low:
-            try:
-                dynamic_header = [c.strip() for c in next(csv.reader([ln])) if c.strip()]
-            except Exception:
-                dynamic_header = [c.strip() for c in ln.split(',') if c.strip()]
+            dynamic_header = [c.strip() for c in ln.split(ai_sep) if c.strip()]
             continue
         if dynamic_header:
-            try:
-                dynamic_rows.append(next(csv.reader([ln])))
-            except Exception:
-                dynamic_rows.append([c.strip() for c in ln.split(',')])
+            dynamic_rows.append([c.strip() for c in ln.split(ai_sep)])
 
     if dynamic_header:
         required = {h.lower(): i for i, h in enumerate(dynamic_header)}
         if all(k in required for k in ('type', 'raw_name', 'translated_name')):
-            csv_lines = [','.join(dynamic_header)]
+            csv_lines = [GLOSSARY_SEP.join(dynamic_header)]
             for row in dynamic_rows:
                 if len(row) < len(dynamic_header):
                     row += [''] * (len(dynamic_header) - len(row))
                 elif len(row) > len(dynamic_header):
                     desc_idx = required.get('description')
                     if desc_idx is not None and desc_idx < len(dynamic_header):
-                        row = row[:desc_idx] + [','.join(row[desc_idx:])]
+                        row = row[:desc_idx] + [ai_sep.join(row[desc_idx:])]
                     else:
                         row = row[:len(dynamic_header)]
                 # Clean stop tokens
@@ -4843,7 +4878,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 translated_name = row[required['translated_name']].strip() if len(row) > required['translated_name'] else ''
                 if not raw_name or not translated_name:
                     continue
-                csv_lines.append(','.join(row[:len(dynamic_header)]))
+                csv_lines.append(GLOSSARY_SEP.join(row[:len(dynamic_header)]))
             if csv_lines:
                 print(f"📑 Dynamic header detected from AI: {dynamic_header}")
                 return csv_lines
@@ -4863,12 +4898,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
         
         # Use appropriate header based on gender and description settings
         if include_description:
-            csv_lines.append("type,raw_name,translated_name,gender,description")
+            csv_lines.append(_build_header('gender', 'description'))
         elif include_gender_context:
-            csv_lines.append("type,raw_name,translated_name,gender")
+            csv_lines.append(_build_header('gender'))
             # print("📑 Fast mode: Using 4-column format with gender")
         else:
-            csv_lines.append("type,raw_name,translated_name")
+            csv_lines.append(_build_header())
         
         # Process the AI response
         for line in lines:
@@ -4876,8 +4911,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue
                 
-            # Parse CSV line
-            parts = [p.strip() for p in line.split(',')]
+            # Parse CSV line (auto-detect separator from AI output)
+            parts = [p.strip() for p in line.split(ai_sep)]
             
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
@@ -4894,7 +4929,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 if (raw_name and translated_name and 
                     not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
                     not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
-                    csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
+                    csv_lines.append(_gjoin([entry_type, raw_name, translated_name, gender, description]))
             elif include_gender_context and len(parts) >= 4:
                 # Has all 4 columns (with gender)
                 entry_type = parts[0]
@@ -4906,7 +4941,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 if (raw_name and translated_name and 
                     not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
                     not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
-                    csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
+                    csv_lines.append(_gjoin([entry_type, raw_name, translated_name, gender]))
             elif len(parts) >= 3:
                 # Has at least 3 columns
                 entry_type = parts[0]
@@ -4920,13 +4955,13 @@ def _process_ai_response(response_text, all_text, min_frequency,
                         # Add empty gender and description columns when 5 columns expected
                         gender = parts[3] if len(parts) > 3 else ''
                         description = parts[4] if len(parts) > 4 else ''
-                        csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
+                        csv_lines.append(_gjoin([entry_type, raw_name, translated_name, gender, description]))
                     elif include_gender_context:
                         # Add empty gender column for 3-column entries when 4 columns expected
                         gender = parts[3] if len(parts) > 3 else ''
-                        csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
+                        csv_lines.append(_gjoin([entry_type, raw_name, translated_name, gender]))
                     else:
-                        csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                        csv_lines.append(_gjoin([entry_type, raw_name, translated_name]))
             elif len(parts) == 2:
                 # Missing type, default to 'term'
                 raw_name = parts[0]
@@ -4936,11 +4971,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
                     not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
                     not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
                     if include_description:
-                        csv_lines.append(f"term,{raw_name},{translated_name},,")
+                        csv_lines.append(_gjoin(['term', raw_name, translated_name, '', '']))
                     elif include_gender_context:
-                        csv_lines.append(f"term,{raw_name},{translated_name},")
+                        csv_lines.append(_gjoin(['term', raw_name, translated_name, '']))
                     else:
-                        csv_lines.append(f"term,{raw_name},{translated_name}")
+                        csv_lines.append(_gjoin(['term', raw_name, translated_name]))
         
         # print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
         return csv_lines
@@ -4965,7 +5000,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue  # Skip header
             
-            parts = [p.strip() for p in line.split(',')]
+            parts = [p.strip() for p in line.split(ai_sep)]
             
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
@@ -5028,17 +5063,17 @@ def _process_ai_response(response_text, all_text, min_frequency,
     if filter_mode == "only_with_honorifics" or skip_frequency_check:
         # For these modes, accept all entries
         if include_description:
-            csv_lines.append("type,raw_name,translated_name,gender,description")  # Header with description
+            csv_lines.append(_build_header('gender', 'description'))  # Header with description
         elif include_gender_context:
-            csv_lines.append("type,raw_name,translated_name,gender")  # Header with gender
+            csv_lines.append(_build_header('gender'))  # Header with gender
         else:
-            csv_lines.append("type,raw_name,translated_name")  # Header
+            csv_lines.append(_build_header())  # Header
         
         for line in lines:
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue  # Skip header
             
-            parts = [p.strip() for p in line.split(',')]
+            parts = [p.strip() for p in line.split(ai_sep)]
             
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
@@ -5071,11 +5106,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
             
             if raw_name and translated_name:
                 if include_description:
-                    csv_line = f"{entry_type},{raw_name},{translated_name},{gender},{description}"
+                    csv_line = _gjoin([entry_type, raw_name, translated_name, gender, description])
                 elif include_gender_context:
-                    csv_line = f"{entry_type},{raw_name},{translated_name},{gender}"
+                    csv_line = _gjoin([entry_type, raw_name, translated_name, gender])
                 else:
-                    csv_line = f"{entry_type},{raw_name},{translated_name}"
+                    csv_line = _gjoin([entry_type, raw_name, translated_name])
                 csv_lines.append(csv_line)
                 entries_accepted += 1
         
@@ -5084,11 +5119,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
     else:
         # Use pre-computed frequencies
         if include_description:
-            csv_lines.append("type,raw_name,translated_name,gender,description")  # Header with description
+            csv_lines.append(_build_header('gender', 'description'))  # Header with description
         elif include_gender_context:
-            csv_lines.append("type,raw_name,translated_name,gender")  # Header with gender
+            csv_lines.append(_build_header('gender'))  # Header with gender
         else:
-            csv_lines.append("type,raw_name,translated_name")  # Header
+            csv_lines.append(_build_header())  # Header
         
         for term, info in term_info_map.items():
             count = term_frequencies.get(term, 0)
@@ -5099,11 +5134,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
             
             if count >= min_frequency:
                 if include_description:
-                    csv_line = f"{info['entry_type']},{term},{info['translated_name']},{info['gender']},{info['description']}"
+                    csv_line = _gjoin([info['entry_type'], term, info['translated_name'], info['gender'], info['description']])
                 elif include_gender_context:
-                    csv_line = f"{info['entry_type']},{term},{info['translated_name']},{info['gender']}"
+                    csv_line = _gjoin([info['entry_type'], term, info['translated_name'], info['gender']])
                 else:
-                    csv_line = f"{info['entry_type']},{term},{info['translated_name']}"
+                    csv_line = _gjoin([info['entry_type'], term, info['translated_name']])
                 csv_lines.append(csv_line)
                 entries_accepted += 1
                 
@@ -5116,11 +5151,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # Ensure we have at least the header
     if len(csv_lines) == 0:
         if include_description:
-            csv_lines.append("type,raw_name,translated_name,gender,description")
+            csv_lines.append(_build_header('gender', 'description'))
         elif include_gender_context:
-            csv_lines.append("type,raw_name,translated_name,gender")
+            csv_lines.append(_build_header('gender'))
         else:
-            csv_lines.append("type,raw_name,translated_name")
+            csv_lines.append(_build_header())
     
     # Print final summary
     print(f"📑 Processing complete: {entries_accepted} terms accepted")
@@ -5245,7 +5280,8 @@ def _deduplicate_pass1_raw_names(entry_lines, fuzzy_threshold, use_rapidfuzz, us
         if not line.strip():
             continue
             
-        parts = [p.strip() for p in line.split(',')]
+        sep = _gsep(line)
+        parts = [p.strip() for p in line.split(sep)]
         if len(parts) < 3:
             continue
             
@@ -5339,7 +5375,8 @@ def _deduplicate_pass2_translated_names(entry_lines):
         if not line.strip():
             continue
             
-        parts = [p.strip() for p in line.split(',')]
+        sep = _gsep(line)
+        parts = [p.strip() for p in line.split(sep)]
         if len(parts) < 3:
             continue
             
@@ -5357,7 +5394,7 @@ def _deduplicate_pass2_translated_names(entry_lines):
         if translated_lower in seen_translations:
             existing_raw, existing_line = seen_translations[translated_lower]
             # Get the existing translated name from the line
-            existing_parts = existing_line.split(',')
+            existing_parts = existing_line.split(_gsep(existing_line))
             existing_translated = existing_parts[2] if len(existing_parts) >= 3 else translated_name
             
             # Count fields in both entries (more fields = higher priority)
@@ -5416,7 +5453,7 @@ def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, langu
                     progress = (idx / total_lines) * 100
                     print(f"📑 Processing existing glossary: {progress:.1f}%")
             
-            if 'type,raw_name' in line.lower():
+            if _is_glossary_header(line):
                 continue  # Skip header
             
             line_stripped = line.strip()
@@ -5424,7 +5461,8 @@ def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, langu
             if not line_stripped or line_stripped.startswith('===') or line_stripped.startswith('*') or line_stripped.lower().startswith('glossary:'):
                 continue
             
-            parts = [p.strip() for p in line.split(',')]
+            sep = _gsep(line)
+            parts = [p.strip() for p in line.split(sep)]
             # Require at least 3 fields (type, raw_name, translated_name)
             if len(parts) < 3:
                 continue
@@ -5440,7 +5478,7 @@ def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, langu
                 raw_name = _strip_honorific(raw_name, language)
                 parts[1] = raw_name
             if raw_name not in existing_names:
-                existing_lines.append(','.join(parts))
+                existing_lines.append(GLOSSARY_SEP.join(parts))
                 existing_names.add(raw_name)
     
     # Check stop flag before processing new names
@@ -5459,10 +5497,11 @@ def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, langu
                 print(f"📑 ❌ Merge stopped while processing new entries at line {idx}")
                 return final_lines if final_lines else new_csv_lines
         
-        if 'type,raw_name' in line.lower():
+        if _is_glossary_header(line):
             final_lines.append(line)  # Keep header
             continue
-        parts = [p.strip() for p in line.split(',')]
+        sep_line = _gsep(line)
+        parts = [p.strip() for p in line.split(sep_line)]
         if len(parts) >= 2:
             new_names.add(parts[1])
             final_lines.append(line)
@@ -5481,7 +5520,8 @@ def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, langu
                 print(f"📑 ❌ Merge stopped while adding existing entries ({added_count} added)")
                 return final_lines
         
-        parts = [p.strip() for p in line.split(',')]
+        sep_line = _gsep(line)
+        parts = [p.strip() for p in line.split(sep_line)]
         if len(parts) >= 2 and parts[1] not in new_names:
             final_lines.append(line)
             added_count += 1
@@ -5844,15 +5884,15 @@ def _extract_with_patterns(all_text, language, min_frequency,
         return translations  # Return partial results
     
     # Build CSV lines
-    csv_lines = ["type,raw_name,translated_name"]
+    csv_lines = [_build_header()]
     
     for name, _ in sorted_names:
         if name in translations:
-            csv_lines.append(f"character,{name},{translations[name]}")
+            csv_lines.append(_gjoin(['character', name, translations[name]]))
     
     for title, _ in sorted_titles:
         if title in translations:
-            csv_lines.append(f"term,{title},{translations[title]}")
+            csv_lines.append(_gjoin(['term', title, translations[title]]))
     
     # Check stop flag before merging
     if is_stop_requested():
