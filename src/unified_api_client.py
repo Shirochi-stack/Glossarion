@@ -16935,7 +16935,7 @@ class UnifiedClient:
                 pass
 
         label = f"AuthGem{acct_label}" if 'acct_label' in dir() and acct_label else "AuthGem"
-        print(f"\U0001f510 {label}: Sending request to AI Studio (model={actual_model})")
+        print(f"\U0001f510 {label}: Sending request via Gemini CLI (model={actual_model})")
 
         # Mutable token holder so retry loop can refresh it
         token = [access_token]
