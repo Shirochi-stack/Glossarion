@@ -5226,267 +5226,97 @@ def _process_ai_response(response_text, all_text, min_frequency,
     return csv_lines
 
 def _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold):
-    """Apply advanced fuzzy matching to remove duplicate entries from the glossary with stop flag checks
+    """Apply deduplication to glossary CSV lines using the shared 2-pass engine.
     
-    Uses a 2-pass approach:
-    Pass 1: Remove entries with similar raw names (existing logic)
-    Pass 2: Remove entries with identical translated names (new logic)
+    Converts CSV lines → dicts, delegates to skip_duplicate_entries() for
+    config-driven fuzzy matching (Pass 1) and translated-name exact matching
+    (Pass 2), then converts back to CSV lines.
+    
+    This ensures consistent algorithm selection, partial_ratio weighting,
+    Unicode normalization, and field-counting semantics across all pipelines.
     """
-    from difflib import SequenceMatcher
-    
-    # Try to import advanced libraries
-    try:
-        from rapidfuzz import fuzz as rfuzz
-        use_rapidfuzz = True
-    except ImportError:
-        use_rapidfuzz = False
-    
-    try:
-        import jellyfish
-        use_jellyfish = True
-    except ImportError:
-        use_jellyfish = False
-    
-    algo_info = []
-    if use_rapidfuzz:
-        algo_info.append("RapidFuzz")
-    if use_jellyfish:
-        algo_info.append("Jaro-Winkler")
-    if not algo_info:
-        algo_info.append("difflib")
-    
-    # Check if translated name deduplication is enabled
-    # GLOSSARY_DEDUPE_TRANSLATIONS: "1" = enable Pass 2 (remove entries with identical translations)
-    #                              : "0" = disable Pass 2 (only remove entries with similar raw names)
-    dedupe_translations = os.getenv("GLOSSARY_DEDUPE_TRANSLATIONS", "1") == "1"
-    
-    print(f"📋 Applying 2-pass fuzzy deduplication (threshold: {fuzzy_threshold})...")
-    print(f"📋 Pass 1: Raw name deduplication (fuzzy matching)")
-    if dedupe_translations:
-        print(f"📋 Pass 2: Translated name deduplication (exact matching)")
-    else:
-        print(f"📋 Pass 2: DISABLED (GLOSSARY_DEDUPE_TRANSLATIONS=0)")
-    print(f"📋 Using algorithms: {', '.join(algo_info)}")
-    
     # Check stop flag at start
     if is_stop_requested():
         print(f"📑 ❌ Deduplication stopped by user")
         return csv_lines
     
-    header_line = csv_lines[0]  # Keep header
-    entry_lines = csv_lines[1:]  # Data lines
-    original_count = len(entry_lines)
+    if len(csv_lines) <= 1:
+        return csv_lines
     
-    print(f"📑 Starting deduplication with {original_count} entries...")
+    header_line = csv_lines[0]
+    entry_lines = csv_lines[1:]
     
-    # PASS 1: Raw name deduplication (existing fuzzy matching logic)
-    print(f"📑 🔄 PASS 1: Raw name deduplication...")
-    pass1_results = _deduplicate_pass1_raw_names(
-        entry_lines, fuzzy_threshold, use_rapidfuzz, use_jellyfish
-    )
+    # Determine which columns are present from the header
+    header_sep = _gsep(header_line)
+    header_parts = [p.strip().lower() for p in header_line.split(header_sep)]
     
-    pass1_count = len(pass1_results)
-    pass1_removed = original_count - pass1_count
-    print(f"📑 ✅ PASS 1 complete: {pass1_removed} duplicates removed ({pass1_count} remaining)")
+    # Build a mapping of column index → key name
+    # Standard columns: type, raw_name, translated_name, gender, description, ...
+    known_cols = ['type', 'raw_name', 'translated_name', 'gender', 'description']
+    col_keys = []
+    for i, part in enumerate(header_parts):
+        if i < len(known_cols):
+            col_keys.append(known_cols[i])
+        else:
+            col_keys.append(part or f"field_{i}")
     
-    # PASS 2: Translated name deduplication (if enabled)
-    if dedupe_translations:
-        print(f"📑 🔄 PASS 2: Translated name deduplication...")
-        final_results, replaced_count = _deduplicate_pass2_translated_names(pass1_results)
-        pass2_removed = pass1_count - len(final_results)
-        
-        replaced_msg = f" ({replaced_count} replaced with more complete entries)" if replaced_count > 0 else ""
-        print(f"📑 ✅ PASS 2 complete: {pass2_removed} duplicates removed{replaced_msg} ({len(final_results)} remaining)")
-        total_removed = pass1_removed + pass2_removed
-    else:
-        final_results = pass1_results
-        total_removed = pass1_removed
-        print(f"📑 ⏭️ PASS 2 skipped (translation deduplication disabled)")
-    
-    # Rebuild CSV with header
-    deduplicated = [header_line] + final_results
-    
-    print(f"📑 ✅ Total deduplication complete: {total_removed} duplicates removed")
-    print(f"📑 Final glossary size: {len(final_results)} unique entries")
-    
-    return deduplicated
-
-
-def _deduplicate_pass1_raw_names(entry_lines, fuzzy_threshold, use_rapidfuzz, use_jellyfish):
-    """Pass 1: Remove entries with similar raw names using fuzzy matching"""
-    from difflib import SequenceMatcher
-    
-    if use_rapidfuzz:
-        from rapidfuzz import fuzz as rfuzz
-    
-    if use_jellyfish:
-        import jellyfish
-    
-    deduplicated = []
-    seen_entries = {}  # raw_name -> (entry_type, translated_name)
-    seen_names_lower = set()  # Quick exact match check
-    removed_count = 0
-    total_entries = len(entry_lines)
-    
-    for idx, line in enumerate(entry_lines):
-        # Check stop flag every 100 entries
-        if idx > 0 and idx % 100 == 0:
-            if is_stop_requested():
-                print(f"📑 ❌ Pass 1 stopped at entry {idx}/{total_entries}")
-                break
-        
-        # Show progress for large glossaries
-        if total_entries > 500 and idx % 200 == 0:
-            progress = (idx / total_entries) * 100
-            print(f"📑 Pass 1 progress: {progress:.1f}% ({idx}/{total_entries})")
-        
-        if not line.strip():
-            continue
-            
-        sep = _gsep(line)
-        parts = [p.strip() for p in line.split(sep)]
-        if len(parts) < 3:
-            continue
-            
-        entry_type = parts[0]
-        raw_name = parts[1]
-        translated_name = parts[2]
-        raw_name_lower = raw_name.lower()
-        
-        # Fast exact duplicate check first
-        if raw_name_lower in seen_names_lower:
-            removed_count += 1
-            if removed_count <= 10:  # Only log first few
-                print(f"📋   Pass 1: Removing exact duplicate: '{raw_name}'")
-            continue
-        
-        # For fuzzy matching, only check if threshold is less than 1.0
-        is_duplicate = False
-        if fuzzy_threshold < 1.0:
-            # Use a more efficient approach: only check similar length strings
-            name_len = len(raw_name)
-            min_len = int(name_len * 0.7)
-            max_len = int(name_len * 1.3)
-            
-            # Only compare with entries of similar length
-            candidates = []
-            for seen_name, (seen_type, seen_trans) in seen_entries.items():
-                if min_len <= len(seen_name) <= max_len:
-                    candidates.append(seen_name)
-            
-            # Check fuzzy similarity with candidates using multiple algorithms
-            for seen_name in candidates:
-                # Quick character overlap check before expensive comparison
-                char_overlap = len(set(raw_name_lower) & set(seen_name.lower()))
-                if char_overlap < len(raw_name_lower) * 0.5:
-                    continue  # Too different, skip
-                
-                # Try multiple algorithms and take the best score
-                scores = []
-                
-                if use_rapidfuzz:
-                    # RapidFuzz basic ratio
-                    scores.append(rfuzz.ratio(raw_name_lower, seen_name.lower()) / 100.0)
-                    # Token sort (handles word order)
-                    try:
-                        scores.append(rfuzz.token_sort_ratio(raw_name_lower, seen_name.lower()) / 100.0)
-                    except:
-                        pass
-                    # Partial ratio (substring)
-                    try:
-                        scores.append(rfuzz.partial_ratio(raw_name_lower, seen_name.lower()) / 100.0)
-                    except:
-                        pass
-                else:
-                    # Fallback to difflib
-                    scores.append(SequenceMatcher(None, raw_name_lower, seen_name.lower()).ratio())
-                
-                # Try Jaro-Winkler (better for names)
-                if use_jellyfish:
-                    try:
-                        jaro = jellyfish.jaro_winkler_similarity(raw_name, seen_name)
-                        scores.append(jaro)
-                    except:
-                        pass
-                
-                # Take best score
-                best_similarity = max(scores) if scores else 0.0
-                
-                if best_similarity >= fuzzy_threshold:
-                    if removed_count < 10:  # Only log first few
-                        print(f"📋   Pass 1: Removing fuzzy duplicate: '{raw_name}' ~= '{seen_name}' (score: {best_similarity:.2%})")
-                    removed_count += 1
-                    is_duplicate = True
-                    break
-        
-        if not is_duplicate:
-            seen_entries[raw_name] = (entry_type, translated_name)
-            seen_names_lower.add(raw_name_lower)
-            deduplicated.append(line)
-    
-    return deduplicated
-
-
-def _deduplicate_pass2_translated_names(entry_lines):
-    """Pass 2: Remove entries with identical translated names"""
-    deduplicated = []
-    seen_translations = {}  # translated_name.lower() -> (raw_name, line)
-    removed_count = 0
-    replaced_count = 0
-    
+    # Parse CSV lines → dicts
+    entries = []
     for line in entry_lines:
         if not line.strip():
             continue
-            
         sep = _gsep(line)
         parts = [p.strip() for p in line.split(sep)]
         if len(parts) < 3:
             continue
-            
-        entry_type = parts[0]
-        raw_name = parts[1]
-        translated_name = parts[2]
-        translated_lower = translated_name.lower().strip()
         
-        # Skip empty translations
-        if not translated_lower:
-            deduplicated.append(line)
-            continue
-        
-        # Check if we've seen this translation before
-        if translated_lower in seen_translations:
-            existing_raw, existing_line = seen_translations[translated_lower]
-            # Get the existing translated name from the line
-            existing_parts = existing_line.split(_gsep(existing_line))
-            existing_translated = existing_parts[2] if len(existing_parts) >= 3 else translated_name
-            
-            # Count fields in both entries (more fields = higher priority)
-            current_field_count = len([f.strip() for f in parts if f.strip()])
-            existing_field_count = len([f.strip() for f in existing_parts if f.strip()])
-            
-            # If current entry has more fields, replace the existing one
-            if current_field_count > existing_field_count:
-                # Remove existing entry from deduplicated list
-                deduplicated = [l for l in deduplicated if l != existing_line]
-                # Replace with current entry
-                seen_translations[translated_lower] = (raw_name, line)
-                deduplicated.append(line)
-                removed_count += 1
-                replaced_count += 1
-                if removed_count <= 10:  # Only log first few
-                    print(f"📋   Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields) - more detailed entry")
-            else:
-                # Keep existing entry (has same or more fields)
-                removed_count += 1
-                if removed_count <= 10:  # Only log first few
-                    extra_info = f" ({current_field_count} vs {existing_field_count} fields)" if current_field_count != existing_field_count else ""
-                    print(f"📋   Pass 2: Removing '{raw_name}' -> '{translated_name}' (duplicate translation of '{existing_raw}' -> '{existing_translated}'){extra_info}")
-        else:
-            # New translation, keep it
-            seen_translations[translated_lower] = (raw_name, line)
-            deduplicated.append(line)
+        entry = {}
+        for i, val in enumerate(parts):
+            key = col_keys[i] if i < len(col_keys) else f"field_{i}"
+            entry[key] = val
+        entries.append(entry)
     
-    return deduplicated, replaced_count
+    if not entries:
+        return csv_lines
+    
+    original_count = len(entries)
+    print(f"📑 Starting unified deduplication with {original_count} entries (threshold: {fuzzy_threshold})...")
+    
+    # Set threshold in environment for the shared engine to pick up
+    old_threshold = os.environ.get('GLOSSARY_FUZZY_THRESHOLD')
+    os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(fuzzy_threshold)
+    
+    try:
+        from extract_glossary_from_epub import skip_duplicate_entries
+        deduplicated = skip_duplicate_entries(entries)
+    except ImportError:
+        # Fallback: if extract_glossary_from_epub is not importable, return as-is
+        print(f"⚠️ Could not import shared dedup engine — skipping deduplication")
+        deduplicated = entries
+    finally:
+        # Restore original threshold
+        if old_threshold is not None:
+            os.environ['GLOSSARY_FUZZY_THRESHOLD'] = old_threshold
+        elif 'GLOSSARY_FUZZY_THRESHOLD' in os.environ:
+            # Don't delete if it was set before us
+            pass
+    
+    # Convert dicts back to CSV lines
+    result_lines = [header_line]
+    for entry in deduplicated:
+        parts = []
+        for key in col_keys:
+            parts.append(entry.get(key, ''))
+        # Include any extra keys not in col_keys
+        for key, val in entry.items():
+            if key not in col_keys:
+                parts.append(str(val))
+        result_lines.append(GLOSSARY_SEP.join(parts))
+    
+    total_removed = original_count - len(deduplicated)
+    print(f"📑 ✅ Deduplication complete: {total_removed} duplicates removed, {len(deduplicated)} entries remaining")
+    
+    return result_lines
 
 def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, language):
     """Merge CSV entries with existing glossary with stop flag checks"""

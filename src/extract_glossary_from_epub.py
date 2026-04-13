@@ -6,6 +6,7 @@ import argparse
 import zipfile
 import time
 import sys
+import unicodedata
 import tiktoken
 import threading
 import queue
@@ -913,7 +914,14 @@ def remove_honorifics(name):
     
     for honorific in sorted_honorifics:
         if name_cleaned.endswith(honorific):
-            name_cleaned = name_cleaned[:-len(honorific)].strip()
+            remainder = name_cleaned[:-len(honorific)].strip()
+            # Guard: for single-character honorifics (子, 公, 王, 君, etc.),
+            # require the remaining name to be at least 2 characters.
+            # This prevents mangling real CJK names like 花子 → 花, 公子 → 公.
+            # Multi-character honorifics (선생님, さん, etc.) are unambiguous.
+            if len(honorific) == 1 and len(remainder) < 2:
+                continue
+            name_cleaned = remainder
             # Only remove one honorific per pass
             break
     
@@ -2132,14 +2140,21 @@ CRITICAL EXTRACTION RULES:
     return (system_prompt, user_prompt)
 
 
-def skip_duplicate_entries(glossary):
+def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
     
     Pass 1: Remove entries with similar raw names (fuzzy matching)
     Pass 2: Remove entries with identical translated names (exact matching)
     
-    Returns deduplicated list maintaining first occurrence of each unique entry.
+    Args:
+        glossary: List of entry dicts with 'raw_name', 'translated_name', etc.
+        dry_run: If True, return (original_entries, dedup_report) without modifying the list.
+        output_dir: If provided, write dedup_report.json to this directory.
+    
+    Returns:
+        list: Deduplicated entries (when dry_run=False)
+        tuple: (original_entries, dedup_report) when dry_run=True
     """
     # Try to use RapidFuzz for speed, fallback to difflib
     try:
@@ -2154,6 +2169,9 @@ def skip_duplicate_entries(glossary):
     # GLOSSARY_DEDUPE_TRANSLATIONS: "1" = enable Pass 2 (remove entries with identical translations)
     #                              : "0" = disable Pass 2 (only remove entries with similar raw names)
     dedupe_translations = os.getenv('GLOSSARY_DEDUPE_TRANSLATIONS', '1') == '1'
+    
+    # Structured dedup log — records all decisions for auditing
+    dedup_log = []
     
     original_count = len(glossary)
     print(f"[Dedup] Starting 2-pass deduplication with {original_count} entries...")
@@ -2179,14 +2197,14 @@ def skip_duplicate_entries(glossary):
     
     # PASS 1: Raw name deduplication
     print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
-    pass1_results = _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz)
+    pass1_results = _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log)
     pass1_removed = original_count - len(pass1_results)
     print(f"[Dedup] ✅ PASS 1 complete: {pass1_removed} duplicates removed ({len(pass1_results)} remaining)")
     
     # PASS 2: Translated name deduplication (if enabled)
     if dedupe_translations:
         print(f"[Dedup] 🔄 PASS 2: Translated name deduplication...")
-        final_results = _skip_translated_name_duplicates(pass1_results)
+        final_results = _skip_translated_name_duplicates(pass1_results, dedup_log)
     else:
         final_results = pass1_results
         print(f"[Dedup] ⏭️ PASS 2 skipped (translation deduplication disabled)")
@@ -2194,10 +2212,33 @@ def skip_duplicate_entries(glossary):
     total_removed = original_count - len(final_results)
     print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
     
+    # Write structured dedup report if output_dir provided
+    if output_dir and dedup_log:
+        try:
+            report_path = os.path.join(output_dir, "dedup_report.json")
+            report = {
+                "original_count": original_count,
+                "final_count": len(final_results),
+                "total_removed": total_removed,
+                "pass1_removed": pass1_removed,
+                "pass2_removed": total_removed - pass1_removed,
+                "threshold": fuzzy_threshold,
+                "algorithm_mode": algo_mode,
+                "decisions": dedup_log,
+            }
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            print(f"[Dedup] 📄 Dedup report written to {report_path}")
+        except Exception as e:
+            print(f"[Dedup] ⚠️ Could not write dedup report: {e}")
+    
+    if dry_run:
+        return glossary, dedup_log
+    
     return final_results
 
 
-def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
+def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log=None):
     """Pass 1: Remove entries with similar raw names using optimized serial processing"""
     # Note: Parallel processing doesn't work well for deduplication because:
     # 1. Order matters - can't determine if A is duplicate of B until we've processed A
@@ -2205,21 +2246,26 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
     # 3. The serial version with RapidFuzz batch processing is already very fast
     
     # Use optimized serial version for all sizes
-    return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz)
+    return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log)
 
 
 def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
-    """Ultra-fast matrix-based deduplication for large datasets with RapidFuzz"""
-    from rapidfuzz import fuzz
+    """Ultra-fast matrix-based deduplication for large datasets.
+    
+    Uses config-driven similarity scoring and compares entries within
+    adjacent length buckets to avoid missing near-boundary pairs.
+    """
+    from duplicate_detection_config import calculate_similarity_with_config, get_duplicate_detection_config
+    config = get_duplicate_detection_config()
     
     print(f"[Dedup] Using matrix-based deduplication (optimized for {len(glossary)} entries)")
     
-    # Pre-process all entries
+    # Pre-process all entries with Unicode normalization
     processed = []
     for entry in glossary:
         raw_name = entry.get('raw_name', '')
         if raw_name:
-            cleaned_name = remove_honorifics(raw_name)
+            cleaned_name = unicodedata.normalize('NFC', remove_honorifics(raw_name))
             processed.append((entry, raw_name, cleaned_name))
     
     if not processed:
@@ -2245,32 +2291,63 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
     
     total_comparisons = 0
     
-    # Process each bucket independently
-    for bucket, indices in length_buckets.items():
-        if len(indices) < 2:
-            continue
-        
-        # Get names for this bucket
-        bucket_names = [cleaned_names[i] for i in indices]
-        
-        # Use RapidFuzz to find all similar pairs in this bucket
-        for i, idx1 in enumerate(indices):
-            if is_duplicate[idx1]:  # Skip if already marked as duplicate
+    # Build unique bucket pairs to compare: each bucket with itself AND adjacent buckets (±1).
+    # This catches near-boundary misses (e.g., 11-char vs 12-char names in different buckets).
+    sorted_buckets = sorted(length_buckets.keys())
+    bucket_pairs_done = set()
+    
+    for bucket in sorted_buckets:
+        for neighbor in (bucket, bucket + 1):
+            if neighbor not in length_buckets:
                 continue
-                
-            for j in range(i + 1, len(indices)):
-                idx2 = indices[j]
-                if is_duplicate[idx2]:  # Skip if already marked as duplicate
-                    continue
-                
-                # Compare
-                score = fuzz.ratio(bucket_names[i], bucket_names[j]) / 100.0
-                total_comparisons += 1
-                
-                if score >= fuzzy_threshold:
-                    # Mark idx2 as duplicate of idx1
-                    is_duplicate[idx2] = True
-                    duplicate_of[idx2] = idx1
+            pair_key = (min(bucket, neighbor), max(bucket, neighbor))
+            if pair_key in bucket_pairs_done:
+                continue
+            bucket_pairs_done.add(pair_key)
+            
+            indices_a = length_buckets[bucket]
+            indices_b = length_buckets[neighbor]
+            
+            if bucket == neighbor:
+                # Intra-bucket: compare all pairs within same bucket
+                for i, idx1 in enumerate(indices_a):
+                    if is_duplicate[idx1]:
+                        continue
+                    for j in range(i + 1, len(indices_a)):
+                        idx2 = indices_a[j]
+                        if is_duplicate[idx2]:
+                            continue
+                        
+                        score = calculate_similarity_with_config(
+                            cleaned_names[idx1], cleaned_names[idx2], config
+                        )
+                        total_comparisons += 1
+                        
+                        if score >= fuzzy_threshold:
+                            is_duplicate[idx2] = True
+                            duplicate_of[idx2] = idx1
+            else:
+                # Cross-bucket: compare entries from adjacent buckets
+                for idx1 in indices_a:
+                    if is_duplicate[idx1]:
+                        continue
+                    for idx2 in indices_b:
+                        if is_duplicate[idx2]:
+                            continue
+                        
+                        score = calculate_similarity_with_config(
+                            cleaned_names[idx1], cleaned_names[idx2], config
+                        )
+                        total_comparisons += 1
+                        
+                        if score >= fuzzy_threshold:
+                            # Mark the later entry as duplicate
+                            if idx2 > idx1:
+                                is_duplicate[idx2] = True
+                                duplicate_of[idx2] = idx1
+                            else:
+                                is_duplicate[idx1] = True
+                                duplicate_of[idx1] = idx2
         
         if total_comparisons % 1000 == 0 and total_comparisons > 0:
             print(f"[Dedup] Processed {total_comparisons} comparisons...")
@@ -2533,15 +2610,24 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
         return (best_score >= fuzzy_threshold, best_score, best_match)
 
 
-def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
-    """Serial version of Pass 1 for small datasets"""
+def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log=None):
+    """Serial version of Pass 1: raw name fuzzy deduplication.
+    
+    Fixes:
+    - Stale seen_raw_names: when replacing an entry, update the seen list so
+      future fuzzy comparisons use the current cleaned name.
+    - Unicode normalization: NFC-normalizes cleaned names before comparison.
+    - Structured logging: appends decisions to dedup_log list.
+    """
     if use_rapidfuzz:
         from rapidfuzz import fuzz
     else:
         import difflib
     
-    seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
+    seen_raw_names = []  # List of (cleaned_name, original_raw_name) tuples
     raw_name_to_idx = {}  # raw_name -> index in deduplicated (O(1) lookup)
+    # Reverse map: for a given index in deduplicated, which index in seen_raw_names?
+    dedup_idx_to_seen_idx = {}
     deduplicated = []
     skipped_count = 0
     
@@ -2551,8 +2637,8 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
         if not raw_name:
             continue
             
-        # Remove honorifics for comparison (unless disabled)
-        cleaned_name = remove_honorifics(raw_name)
+        # Remove honorifics + NFC normalize for comparison (unless disabled)
+        cleaned_name = unicodedata.normalize('NFC', remove_honorifics(raw_name))
         
         # Check for fuzzy matches with seen names
         is_duplicate, best_score, best_match = _find_best_duplicate_match(
@@ -2565,36 +2651,65 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
             
             if existing_index is not None:
                 existing_entry = deduplicated[existing_index]
-                # Count fields in both entries
+                # Count non-empty fields (excluding internal keys starting with _)
                 current_field_count = len([v for v in entry.values() if v and str(v).strip()])
                 existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
                 
                 # If current entry has more fields, replace the existing one
                 if current_field_count > existing_field_count:
-                    # Replace existing entry
+                    # Replace existing entry in deduplicated list
                     deduplicated[existing_index] = entry
-                    # Update mappings
+                    # Update raw_name_to_idx: add new key, remove old key
                     raw_name_to_idx[raw_name] = existing_index
                     del raw_name_to_idx[best_match]
+                    # FIX: Update seen_raw_names at the correct index so future
+                    # fuzzy comparisons use the new entry's cleaned name / raw name.
+                    seen_idx = dedup_idx_to_seen_idx.get(existing_index)
+                    if seen_idx is not None:
+                        seen_raw_names[seen_idx] = (cleaned_name, raw_name)
                     skipped_count += 1
                     if skipped_count <= 10:
                         print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match, more detailed entry")
+                    if dedup_log is not None:
+                        dedup_log.append({
+                            "pass": 1, "action": "replaced",
+                            "kept": raw_name, "dropped": best_match,
+                            "score": round(best_score, 4),
+                            "reason": f"richer entry ({current_field_count} vs {existing_field_count} fields)"
+                        })
                 else:
                     # Keep existing entry
                     skipped_count += 1
+                    if dedup_log is not None:
+                        dedup_log.append({
+                            "pass": 1, "action": "dropped",
+                            "kept": best_match, "dropped": raw_name,
+                            "score": round(best_score, 4),
+                            "reason": "duplicate"
+                        })
             else:
-                # Fallback if we can't find the existing entry
+                # Fallback if we can't find the existing entry in the index
                 skipped_count += 1
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 1, "action": "dropped",
+                        "kept": best_match or "?", "dropped": raw_name,
+                        "score": round(best_score, 4),
+                        "reason": "duplicate (index miss)"
+                    })
         else:
             # Add to seen list and keep the entry
-            seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
-            raw_name_to_idx[raw_name] = len(deduplicated)
+            seen_idx = len(seen_raw_names)
+            seen_raw_names.append((cleaned_name, raw_name))
+            dedup_idx = len(deduplicated)
+            raw_name_to_idx[raw_name] = dedup_idx
+            dedup_idx_to_seen_idx[dedup_idx] = seen_idx
             deduplicated.append(entry)
     
     return deduplicated
 
 
-def _skip_translated_name_duplicates(glossary):
+def _skip_translated_name_duplicates(glossary, dedup_log=None):
     """Pass 2: Remove entries with identical translated names (optimized with indexing)"""
     seen_translations = {}  # translated_name.lower() -> (raw_name, entry, index_in_deduplicated)
     deduplicated = []
@@ -2632,11 +2747,25 @@ def _skip_translated_name_duplicates(glossary):
                 skipped_count += 1
                 if skipped_count <= 10:
                     print(f"[Skip] Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields)")
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 2, "action": "replaced",
+                        "kept": raw_name, "dropped": existing_raw,
+                        "translation": translated_name,
+                        "reason": f"richer entry ({current_field_count} vs {existing_field_count} fields)"
+                    })
             else:
                 # Keep existing entry (has same or more fields)
                 skipped_count += 1
                 if skipped_count <= 10:
                     print(f"[Skip] Pass 2: '{raw_name}' -> '{translated_name}' (duplicate of '{existing_raw}' -> '{existing_translated}')")
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 2, "action": "dropped",
+                        "kept": existing_raw, "dropped": raw_name,
+                        "translation": translated_name,
+                        "reason": "duplicate translation"
+                    })
         else:
             # New translation, keep it
             deduplicated.append(entry)

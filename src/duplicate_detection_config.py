@@ -8,6 +8,7 @@ This module is used in tight loops during glossary deduplication. Optional depen
 are imported once at module import time to avoid repeated ImportError exceptions.
 """
 import os
+import unicodedata
 
 # Optional dependencies (imported once to avoid per-comparison ImportError overhead)
 try:
@@ -110,9 +111,10 @@ def calculate_similarity_with_config(name1, name2, config=None):
     if not name1 or not name2:
         return 0.0
 
-    # Normalize once (hot path)
-    n1 = str(name1)
-    n2 = str(name2)
+    # Normalize once (hot path) — NFC ensures precomposed vs decomposed
+    # forms match, and handles full-width vs half-width differences.
+    n1 = unicodedata.normalize('NFC', str(name1))
+    n2 = unicodedata.normalize('NFC', str(name2))
     n1_lower = n1.lower()
     n2_lower = n2.lower()
 

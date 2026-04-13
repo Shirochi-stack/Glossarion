@@ -428,7 +428,6 @@ try:
     import google_free_translate
     
     # Duplicate detection
-    import advanced_duplicate_detection
     import duplicate_detection_config
     
     # Image translation (may not be used in Discord but import for completeness)

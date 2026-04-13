@@ -185,7 +185,6 @@ app_files = [
 	
 	# Duplicate detection
 	('duplicate_detection_config.py', '.'),
-	('advanced_duplicate_detection.py', '.'),
 
 	# Environment variable size limit workaround
 	('large_env.py', '.'),
@@ -267,7 +266,6 @@ app_modules = [
 	'model_options',
 	'hyphen_textwrap',
 	'duplicate_detection_config',
-	'advanced_duplicate_detection',
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
