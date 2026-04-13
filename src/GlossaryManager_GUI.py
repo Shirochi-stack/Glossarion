@@ -3085,12 +3085,12 @@ CRITICAL EXTRACTION RULES:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_line = QLineEdit("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}, {marker},  Separator: \\x1F")
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker},  Separator: \\x1F")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
         placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
-        placeholder_line.setToolTip("{language} -> target language\n{min_frequency} -> minimum term frequency\n{max_names} -> max character names\n{max_titles} -> max titles\n{marker} -> context window marker count")
+        placeholder_line.setToolTip("{fields} -> comma-separated columns/entry types list\n{fields1} -> \\x1F-separated columns/entry types list (recommended)\n{language} -> target language\n{entries} -> enabled custom entry types (comma list with ampersand)\n{min_frequency} -> minimum term frequency\n{max_names} -> max character names\n{max_titles} -> max titles\n{marker} -> context window marker count")
         glossary_prompt_frame_layout.addWidget(placeholder_line)
         
         self.auto_prompt_text = QTextEdit()
