@@ -260,6 +260,12 @@ def _get_screen_resolution():
     # ── macOS ──────────────────────────────────────────────────────────────
     elif sys.platform == "darwin":
         width, height = _mac_get_screen_resolution()
+        # CGDisplayPixelsWide/High returns logical points on Retina;
+        # multiply by backing scale factor to get physical pixel count
+        # so the auto-scaler correctly recognises high-DPI displays.
+        backing = _mac_get_backing_scale_factor()
+        width = int(width * backing)
+        height = int(height * backing)
 
     # ── Linux / X11 ────────────────────────────────────────────────────────
     else:
@@ -363,7 +369,13 @@ def configure():
     # out the system scale to keep the total correct.
     factor = _read_scale_factor()
     system_scale = _get_system_dpi_scale()
-    qt_scale = factor / system_scale if system_scale > 0.5 else factor
+    if sys.platform == "darwin":
+        # Qt 6 handles Retina 2.0x scaling natively via
+        # QT_ENABLE_HIGHDPI_SCALING; dividing by the backing factor
+        # would double-downscale the UI, making it unreadably small.
+        qt_scale = factor
+    else:
+        qt_scale = factor / system_scale if system_scale > 0.5 else factor
     qt_scale = max(0.25, min(4.0, qt_scale))
     os.environ["QT_SCALE_FACTOR"] = str(round(qt_scale, 4))
 
