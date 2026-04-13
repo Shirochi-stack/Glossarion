@@ -53,7 +53,7 @@ def is_cancelled() -> bool:
 # ---------------------------------------------------------------------------
 ZA_CHAT_BASE_URL = "https://chat.z.ai"
 ZA_LOGIN_URL = "https://chat.z.ai"
-ZA_CHAT_COMPLETIONS = "/openai/v1/chat/completions"
+ZA_CHAT_COMPLETIONS = "/api/v4/chat/completions"
 ZA_MODELS_ENDPOINT = "/api/models"
 # The OAuth callback seen in the site's login flow
 ZA_OAUTH_CALLBACK_PATH = "/login/callback"
