@@ -3263,7 +3263,7 @@ CRITICAL EXTRACTION RULES:
                 # Block label click when locked
                 if _auto_load_desc_label:
                     _auto_load_desc_label.mousePressEvent = lambda _: None
-            elif hasattr(self, 'append_glossary_auto_load_checkbox'):
+            elif mode not in ('off_no_automap', 'minimal', 'no_glossary') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 _unlock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
                 # Restore label click
                 if _auto_load_desc_label:
