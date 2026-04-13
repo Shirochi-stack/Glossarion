@@ -5303,7 +5303,7 @@ class GlossarionWeb:
 You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
 Columns and entry types in this exact order provided:
 
-{fields}
+{fields1}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.

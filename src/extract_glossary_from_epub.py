@@ -1994,7 +1994,7 @@ def build_prompt(chapter_text: str) -> tuple:
 You must strictly return ONLY CSV format with columns separated by the Unit Separator character (written as \\x1F).
 Columns and entry types in this exact order provided:
 
-{fields}
+{fields1}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
@@ -2022,8 +2022,10 @@ CRITICAL EXTRACTION RULES:
     custom_prompt = custom_prompt.replace('{entries}', entries_str)
     custom_prompt = custom_prompt.replace('{{entries}}', entries_str)
 
-    # Check if the prompt contains {fields} placeholder
-    if '{fields}' in custom_prompt:
+    # Check if the prompt contains {fields} or {fields1} placeholders
+    has_fields = '{fields}' in custom_prompt
+    has_fields1 = '{fields1}' in custom_prompt
+    if has_fields or has_fields1:
         # Get enabled types
         enabled_types = [(t, cfg) for t, cfg in custom_types.items() if cfg.get('enabled', True)]
         
@@ -2034,73 +2036,82 @@ CRITICAL EXTRACTION RULES:
         except:
             custom_fields = []
         
-        # Build fields specification based on what the prompt expects
-        # We now assume CSV format for the default prompt, but keep JSON fallback if custom prompt requests it
-        if 'CSV' in custom_prompt.upper() or 'COMMA' in custom_prompt.upper():
-            # CSV format
-            fields_spec = []
-            
-            # Show the header format
-            header_parts = ['type', 'raw_name', 'translated_name', 'gender']
-            if custom_fields:
-                header_parts.extend(custom_fields)
-            fields_spec.append(f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(header_parts)}")
-            
-            # List valid entry types
-            type_names = [t[0] for t in enabled_types]
-            if type_names:
-                fields_spec.append(f"Entry Types:\n{', '.join(type_names)}")
-            
-            fields_str = '\\n'.join(fields_spec)
-        else:
-            # JSON format (default)
-            fields_spec = []
-            fields_spec.append("Extract entities and return as a JSON array.")
-            fields_spec.append("Each entry must be a JSON object with these exact fields:")
-            fields_spec.append("")
-            
-            for type_name, type_config in enabled_types:
-                fields_spec.append(f"For {type_name}s:")
-                fields_spec.append(f'  "type": "{type_name}" (required)')
-                fields_spec.append('  "raw_name": the name in original language/script (required)')
-                fields_spec.append('  "translated_name": English translation or romanization (required)')
-                if type_config.get('has_gender', False):
-                    fields_spec.append('  "gender": "Male", "Female", or "Unknown" (required for characters)')
-                fields_spec.append("")
-            
-            # Add custom fields info
-            if custom_fields:
-                fields_spec.append("Additional custom fields to include:")
-                for field in custom_fields:
-                    fields_spec.append(f'  "{field}": appropriate value')
-                fields_spec.append("")
-            
-            # Add example
-            if enabled_types:
-                fields_spec.append("Example output format:")
-                fields_spec.append('[')
-                examples = []
-                if 'character' in [t[0] for t in enabled_types]:
-                    example = '  {"type": "character", "raw_name": "田中太郎", "translated_name": "Tanaka Taro", "gender": "Male"'
-                    for field in custom_fields:
-                        example += f', "{field}": "example value"'
-                    example += '}'
-                    examples.append(example)
-                if 'term' in [t[0] for t in enabled_types]:
-                    example = '  {"type": "term", "raw_name": "東京駅", "translated_name": "Tokyo Station"'
-                    for field in custom_fields:
-                        example += f', "{field}": "example value"'
-                    example += '}'
-                    examples.append(example)
-                fields_spec.append(',\n'.join(examples))
-                fields_spec.append(']')
-            
-            fields_str = '\n'.join(fields_spec)
+        # Build header parts (shared between {fields} and {fields1})
+        header_parts = ['type', 'raw_name', 'translated_name', 'gender']
+        if custom_fields:
+            header_parts.extend(custom_fields)
         
-        # Replace {fields} placeholder
-        system_prompt = custom_prompt.replace('{fields}', fields_str)
+        # List valid entry types
+        type_names = [t[0] for t in enabled_types]
+
+        # {fields1} → Unit Separator (\x1F) separated columns (new default)
+        if has_fields1:
+            fields1_spec = []
+            fields1_spec.append(f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(header_parts)}")
+            if type_names:
+                fields1_spec.append(f"Entry Types:\n{', '.join(type_names)}")
+            fields1_str = '\\n'.join(fields1_spec)
+            custom_prompt = custom_prompt.replace('{fields1}', fields1_str)
+
+        # {fields} → comma-separated columns (legacy/backward compatible)
+        if has_fields:
+            if 'CSV' in custom_prompt.upper() or 'COMMA' in custom_prompt.upper() or 'SEPARATOR' in custom_prompt.upper():
+                # CSV-style comma-separated list
+                fields_spec = []
+                fields_spec.append(f"Columns:\n{', '.join(header_parts)}")
+                if type_names:
+                    fields_spec.append(f"Entry Types:\n{', '.join(type_names)}")
+                fields_str = '\\n'.join(fields_spec)
+            else:
+                # JSON format (fallback for prompts that don't mention CSV)
+                fields_spec = []
+                fields_spec.append("Extract entities and return as a JSON array.")
+                fields_spec.append("Each entry must be a JSON object with these exact fields:")
+                fields_spec.append("")
+                
+                for type_name, type_config in enabled_types:
+                    fields_spec.append(f"For {type_name}s:")
+                    fields_spec.append(f'  "type": "{type_name}" (required)')
+                    fields_spec.append('  "raw_name": the name in original language/script (required)')
+                    fields_spec.append('  "translated_name": English translation or romanization (required)')
+                    if type_config.get('has_gender', False):
+                        fields_spec.append('  "gender": "Male", "Female", or "Unknown" (required for characters)')
+                    fields_spec.append("")
+                
+                # Add custom fields info
+                if custom_fields:
+                    fields_spec.append("Additional custom fields to include:")
+                    for field in custom_fields:
+                        fields_spec.append(f'  "{field}": appropriate value')
+                    fields_spec.append("")
+                
+                # Add example
+                if enabled_types:
+                    fields_spec.append("Example output format:")
+                    fields_spec.append('[')
+                    examples = []
+                    if 'character' in [t[0] for t in enabled_types]:
+                        example = '  {"type": "character", "raw_name": "田中太郎", "translated_name": "Tanaka Taro", "gender": "Male"'
+                        for field in custom_fields:
+                            example += f', "{field}": "example value"'
+                        example += '}'
+                        examples.append(example)
+                    if 'term' in [t[0] for t in enabled_types]:
+                        example = '  {"type": "term", "raw_name": "東京駅", "translated_name": "Tokyo Station"'
+                        for field in custom_fields:
+                            example += f', "{field}": "example value"'
+                        example += '}'
+                        examples.append(example)
+                    fields_spec.append(',\n'.join(examples))
+                    fields_spec.append(']')
+                
+                fields_str = '\n'.join(fields_spec)
+            
+            custom_prompt = custom_prompt.replace('{fields}', fields_str)
+        
+        system_prompt = custom_prompt
     else:
-        # No {fields} placeholder - use the prompt as-is
+        # No {fields} or {fields1} placeholder - use the prompt as-is
         system_prompt = custom_prompt
     
     # Remove any {chapter_text} placeholders from system prompt

@@ -1550,7 +1550,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
 Columns and entry types in this exact order provided:
 
-{fields}
+{fields1}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
@@ -2750,7 +2750,7 @@ Text to analyze:
 You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
 Columns and entry types in this exact order provided:
 
-{fields}
+{fields1}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
@@ -12596,8 +12596,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                 return f"{items[0]} & {items[1]} entries"
                             return ", ".join(items[:-1]) + f", & {items[-1]} entries"
 
+                        # Build fields1 description (\\x1F separated for CSV output)
+                        header_parts = ['type', 'raw_name', 'translated_name', 'gender']
+                        if custom_fields:
+                            header_parts.extend(custom_fields)
+                        fields1_str = f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(header_parts)}"
+                        
                         entries_str = _entries_phrase(getattr(self, 'custom_entry_types', {}))
                         # Replace placeholders
+                        prompt = prompt.replace('{fields1}', fields1_str)
+                        prompt = prompt.replace('{{fields1}}', fields1_str)
                         prompt = prompt.replace('{fields}', fields_str)
                         prompt = prompt.replace('{{fields}}', fields_str)
                         prompt = prompt.replace('{entries}', entries_str)

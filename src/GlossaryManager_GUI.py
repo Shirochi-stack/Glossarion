@@ -1599,12 +1599,12 @@ class GlossaryManagerMixin:
         prompt_frame_layout.addWidget(label1)
 
         # Copyable placeholder helper (matches auto glossary tab style)
-        placeholders_line = QLineEdit("Available placeholders: {fields}, {language}, {entries},  Separator: \\x1F")
+        placeholders_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries},  Separator: \\x1F")
         placeholders_line.setReadOnly(True)
         placeholders_line.setFrame(False)
         placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         placeholders_line.setCursorPosition(0)
-        placeholders_line.setToolTip("{fields} -> columns/entry types list\n{language} -> target language\n{entries} -> enabled custom entry types (comma list with ampersand)")
+        placeholders_line.setToolTip("{fields} -> comma-separated columns/entry types list\n{fields1} -> \\x1F-separated columns/entry types list (recommended)\n{language} -> target language\n{entries} -> enabled custom entry types (comma list with ampersand)")
         prompt_frame_layout.addWidget(placeholders_line)
         
         self.manual_prompt_text = QTextEdit()
@@ -1636,7 +1636,7 @@ class GlossaryManagerMixin:
 You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
 Columns and entry types in this exact order provided:
 
-{fields}
+{fields1}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
