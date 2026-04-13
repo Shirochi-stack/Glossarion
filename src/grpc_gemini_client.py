@@ -478,6 +478,9 @@ class GrpcGeminiClient:
                                         log_buf = [parts_split[-1]]
                                     else:
                                         log_buf.append(frag)
+                                        if len("".join(log_buf)) > 150:
+                                            print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                            log_buf = []
                 
                 # Extract thinking tokens from usage metadata
                 if chunk.usage_metadata:

@@ -12941,6 +12941,9 @@ class UnifiedClient:
                                                         log_buf = [parts[-1]]
                                                     else:
                                                         log_buf.append(frag)
+                                                        if len("".join(log_buf)) > 150:
+                                                            print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                                            log_buf = []
                             if log_stream and not self._is_stop_requested():
                                 if log_buf:
                                     print("".join(log_buf).replace('\x1f', '\\x1F'))
@@ -13788,6 +13791,9 @@ class UnifiedClient:
                                             log_buf = [parts[-1]]
                                         else:
                                             log_buf.append(frag)
+                                            if len("".join(log_buf)) > 150:
+                                                print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                                log_buf = []
                         elif delta_type == "thinking_delta":
                             thinking_tokens_seen += 1
                             if first_thinking_ts is None:
@@ -15369,6 +15375,9 @@ class UnifiedClient:
                                                             log_buf = [parts[-1]]
                                                         else:
                                                             log_buf.append(frag)
+                                                            if len("".join(log_buf)) > 150:
+                                                                print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                                                log_buf = []
 
                                         elif delta_content:
                                             frag = str(delta_content)
@@ -15392,6 +15401,9 @@ class UnifiedClient:
                                                     log_buf = [parts[-1]]
                                                 else:
                                                     log_buf.append(frag)
+                                                    if len("".join(log_buf)) > 150:
+                                                        print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                                        log_buf = []
 
                                     if getattr(ch, "finish_reason", None):
                                         finish_reason = ch.finish_reason
@@ -15421,6 +15433,9 @@ class UnifiedClient:
                                                 log_buf = [parts[-1]]
                                             else:
                                                 log_buf.append(alt_frag)
+                                                if len("".join(log_buf)) > 150:
+                                                    print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                                    log_buf = []
                             except Exception:
                                 continue
                         
