@@ -4990,6 +4990,117 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
     return result
 
 
+# ---------- AI Hunter Truncation Detection ----------
+
+def run_ai_truncation_check(source_html, trans_html, client, tail_chars=800, log=print,
+                            custom_system_prompt=None):
+    """Check if translated content appears truncated by asking an AI model.
+
+    Sends the last `tail_chars` characters of both the source and translated
+    text to the configured LLM with a simple prompt:
+      "Does the translated text appear to be truncated? Answer YES or NO."
+
+    Args:
+        source_html: Raw source HTML content
+        trans_html:  Translated HTML content
+        client:      A UnifiedClient instance (supports single & multi-key)
+        tail_chars:  Number of characters from the end to send (default 800)
+        log:         Logging callback
+        custom_system_prompt: Optional custom system prompt to override the default
+
+    Returns:
+        dict with keys:
+            'flagged'  (bool)  – True when AI says YES (truncated)
+            'answer'   (str)   – raw AI answer
+            'details'  (str)   – human-readable explanation
+    """
+    result = {'flagged': False, 'answer': '', 'details': ''}
+
+    try:
+        # Extract plain text from HTML
+        source_paras = _extract_paragraphs(source_html)
+        trans_paras = _extract_paragraphs(trans_html)
+
+        if not source_paras or not trans_paras:
+            result['details'] = 'insufficient_text'
+            return result
+
+        source_text = "\n".join(source_paras)
+        trans_text = "\n".join(trans_paras)
+
+        # Take the tail of each
+        source_tail = source_text[-tail_chars:] if len(source_text) > tail_chars else source_text
+        trans_tail = trans_text[-tail_chars:] if len(trans_text) > tail_chars else trans_text
+
+        if len(trans_tail.strip()) < 20:
+            result['flagged'] = True
+            result['details'] = 'translated_tail_too_short'
+            return result
+
+        # Build messages for the AI
+        if custom_system_prompt and custom_system_prompt.strip():
+            system_prompt = custom_system_prompt.strip()
+        else:
+            system_prompt = (
+                "You are a translation quality analyst. Your ONLY job is to determine if "
+                "a translated text appears to be truncated (cut off prematurely, missing content "
+                "from the end of the source). You will be given the TAIL (ending portion) of the "
+                "original source text and the TAIL of its translation. Compare them and determine "
+                "if the translation appears to stop too early, omitting content that exists in the "
+                "source. Respond with ONLY the word YES or NO. Do not explain."
+            )
+
+        user_prompt = (
+            "=== SOURCE TEXT (last portion) ===\n"
+            f"{source_tail}\n\n"
+            "=== TRANSLATED TEXT (last portion) ===\n"
+            f"{trans_tail}\n\n"
+            "Does the translated text appear to be truncated (missing content from the end "
+            "of the source)? Answer YES or NO only."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Send to AI
+        response = client.send(messages, temperature=0.0, max_tokens=10, context='qa_truncation')
+
+        # Parse response
+        if isinstance(response, tuple):
+            answer_text = response[0] if response[0] else ''
+        else:
+            answer_text = response if response else ''
+
+        answer_text = answer_text.strip()
+        result['answer'] = answer_text
+
+        # Check if answer is YES
+        answer_upper = answer_text.upper().strip().rstrip('.')
+        if answer_upper == 'YES' or answer_upper.startswith('YES'):
+            result['flagged'] = True
+            result['details'] = f'ai_verdict=YES (raw: {answer_text[:50]})'
+        elif answer_upper == 'NO' or answer_upper.startswith('NO'):
+            result['details'] = f'ai_verdict=NO (raw: {answer_text[:50]})'
+        else:
+            # Ambiguous answer — check for YES/NO keywords
+            if 'YES' in answer_upper and 'NO' not in answer_upper:
+                result['flagged'] = True
+                result['details'] = f'ai_verdict=YES_inferred (raw: {answer_text[:80]})'
+            elif 'NO' in answer_upper:
+                result['details'] = f'ai_verdict=NO_inferred (raw: {answer_text[:80]})'
+            else:
+                # Unable to parse — treat as uncertain, don't flag
+                result['details'] = f'ai_verdict=UNCLEAR (raw: {answer_text[:80]})'
+
+    except Exception as e:
+        log(f"      ⚠️ AI truncation check error: {e}")
+        result['details'] = f'error: {e}'
+
+    return result
+
+
 def detect_multiple_headers(html_content):
     """Detect if HTML content has 2 or more header tags"""
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -6616,6 +6727,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
+            'check_ai_truncation_detection': False,
+            'ai_truncation_tail_chars': 800,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
@@ -6730,9 +6843,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             else:
                 log(f"   No ?! punctuation found in EPUB (or unable to extract)")
     
-    # Extract HTML content from EPUB if silent truncation check is enabled
+    # Extract HTML content from EPUB if silent truncation check OR AI truncation is enabled
     check_truncation = qa_settings.get('check_silent_truncation', False)
-    if check_truncation:
+    check_ai_truncation = qa_settings.get('check_ai_truncation_detection', False)
+    _need_source_html = check_truncation or check_ai_truncation
+    if _need_source_html:
         if text_file_mode:
             # For text file mode, extract from word_count folder
             word_count_folder = os.path.join(folder_path, 'word_count')
@@ -6757,8 +6872,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(epub_path)}")
             original_html_content = extract_epub_html_content(epub_path, log)
         else:
-            log("⚠️ Silent truncation check enabled but no source file provided - skipping")
+            log("⚠️ Truncation check(s) enabled but no source file provided - skipping")
             check_truncation = False
+            check_ai_truncation = False
 
     if check_word_count:
         if text_file_mode:
@@ -6956,6 +7072,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
+    log(f"   ✓ AI truncation detection: {'ENABLED' if qa_settings.get('check_ai_truncation_detection', False) else 'DISABLED'}")
     log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")
     # Log counting mode
     if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
@@ -7632,6 +7749,121 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             log(f"   ⚠️ {r_obj['filename']}: Silent truncation suspected - {tr['details']}")
                 except Exception:
                     pass
+
+    # ---- AI Hunter Truncation Detection (uses API, threaded) ----
+    if check_ai_truncation and original_html_content and not should_stop():
+        import threading as _threading_ai
+        from concurrent.futures import ThreadPoolExecutor as _AIThreadPool, as_completed as _ai_as_completed
+
+        _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 800))
+        _ai_custom_prompt = qa_settings.get('ai_truncation_prompt', None)
+
+        # Create a UnifiedClient shared across threads (thread-safe via internal locking)
+        _ai_client = None
+        try:
+            from unified_api_client import UnifiedClient
+            from extract_glossary_from_epub import create_client_with_multi_key_support
+
+            # Load the config from file for multi-key support
+            _config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            _ai_config = {}
+            if os.path.exists(_config_path):
+                try:
+                    with open(_config_path, 'r', encoding='utf-8') as _cf:
+                        _ai_config = json.load(_cf)
+                except Exception:
+                    pass
+
+            _api_key = _ai_config.get('api_key', os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', '')))
+            _model = _ai_config.get('model', os.getenv('MODEL', 'gemini-2.0-flash'))
+            _output_dir = folder_path
+
+            _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
+            _ai_client.context = 'qa_truncation'
+        except Exception as _client_err:
+            log(f"   ⚠️ Could not create API client for AI truncation detection: {_client_err}")
+            _ai_client = None
+
+        if _ai_client is not None:
+            _ai_log_lock = _threading_ai.Lock()
+
+            def _ai_safe_log(msg):
+                with _ai_log_lock:
+                    log(msg)
+
+            def _ai_check_one(result_obj):
+                """Run AI truncation check for a single file."""
+                if should_stop():
+                    return None
+                try:
+                    filename = result_obj['filename']
+                    matched_source_html = None
+                    search_basename = os.path.splitext(filename.lower())[0]
+                    if search_basename.startswith('response_'):
+                        search_basename = search_basename[9:]
+
+                    for key, info in original_html_content.items():
+                        if isinstance(info, dict):
+                            orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
+                            if orig_basename == search_basename:
+                                matched_source_html = info['html']
+                                break
+                        elif isinstance(key, int):
+                            # EPUB mode: key is spine index, info is dict
+                            if isinstance(info, dict):
+                                orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
+                                if orig_basename == search_basename:
+                                    matched_source_html = info['html']
+                                    break
+
+                    if not matched_source_html or should_stop():
+                        return None
+
+                    trans_file_path = os.path.join(folder_path, filename)
+                    if not os.path.exists(trans_file_path):
+                        return None
+                    with open(trans_file_path, 'r', encoding='utf-8') as _tf:
+                        trans_html_content = _tf.read()
+                    if not trans_html_content or should_stop():
+                        return None
+
+                    ai_result = run_ai_truncation_check(
+                        matched_source_html, trans_html_content,
+                        client=_ai_client,
+                        tail_chars=_ai_tail_chars,
+                        log=_ai_safe_log,
+                        custom_system_prompt=_ai_custom_prompt,
+                    )
+                    return (result_obj, ai_result)
+                except Exception as _e:
+                    _ai_safe_log(f"   ⚠️ AI truncation check failed for {result_obj.get('filename', '?')}: {_e}")
+                    return None
+
+            # Use 2 threads — API calls are I/O bound but we don't want to overwhelm rate limits
+            _ai_max_workers = min(2, len(results))
+            log(f"\n🤖 Running AI Hunter truncation detection ({_ai_max_workers} threads, {_ai_tail_chars} tail chars)...")
+
+            _ai_checked = 0
+            _ai_flagged = 0
+            with _AIThreadPool(max_workers=_ai_max_workers) as _ai_pool:
+                _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
+                for _ai_future in _ai_as_completed(_ai_futures):
+                    if should_stop():
+                        break
+                    try:
+                        _ai_pair = _ai_future.result()
+                        if _ai_pair:
+                            _ai_r_obj, _ai_tr = _ai_pair
+                            _ai_checked += 1
+                            if _ai_tr['flagged']:
+                                _ai_flagged += 1
+                                _ai_r_obj['issues'].append(f"ai_truncation_detected ({_ai_tr['details']})")
+                                _ai_r_obj['score'] = len(_ai_r_obj['issues'])
+                                log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
+                    except Exception:
+                        pass
+
+            log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
     
     # Clean up to save memory
     for result in results:

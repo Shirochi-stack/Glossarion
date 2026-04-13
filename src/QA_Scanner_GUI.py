@@ -335,6 +335,8 @@ class QAScannerMixin:
             'truncation_borderline_score': 40,
             'truncation_length_threshold': 30,
             'truncation_embed_threshold': 30,
+            'check_ai_truncation_detection': False,
+            'ai_truncation_tail_chars': 800,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
@@ -3013,6 +3015,183 @@ class QAScannerMixin:
         # Set initial state
         _toggle_truncation_sliders(check_truncation_checkbox.isChecked())
 
+        additional_layout.addSpacing(10)
+
+        # ---- AI Hunter Truncation Detection (no heavy deps needed) ----
+        check_ai_truncation_checkbox = self._create_styled_checkbox(
+            "Truncation detection AI Hunter (uses your API to detect truncated chapters)"
+        )
+        check_ai_truncation_checkbox.setChecked(qa_settings.get('check_ai_truncation_detection', False))
+        additional_layout.addWidget(check_ai_truncation_checkbox)
+
+        ai_truncation_desc = QLabel(
+            "Sends the tail of source and translated text to your configured AI model and asks whether\n"
+            "the translation appears truncated. Much more reliable than heuristic detection.\n"
+            "Uses your active API key(s) — works with single and multi-key modes. No extra dependencies."
+        )
+        ai_truncation_desc.setFont(QFont('Arial', 9))
+        ai_truncation_desc.setStyleSheet("color: gray;")
+        ai_truncation_desc.setWordWrap(True)
+        ai_truncation_desc.setMaximumWidth(700)
+        ai_truncation_desc.setContentsMargins(20, 0, 0, 0)
+        additional_layout.addWidget(ai_truncation_desc)
+
+        # Tail character count spinbox
+        ai_trunc_tail_widget = QWidget()
+        ai_trunc_tail_layout = QHBoxLayout(ai_trunc_tail_widget)
+        ai_trunc_tail_layout.setContentsMargins(20, 5, 0, 0)
+        ai_trunc_tail_layout.setSpacing(8)
+
+        ai_trunc_tail_label = QLabel("Tail characters to send:")
+        ai_trunc_tail_label.setFont(QFont('Arial', 9))
+        ai_trunc_tail_layout.addWidget(ai_trunc_tail_label)
+
+        ai_truncation_tail_spinbox = QSpinBox()
+        ai_truncation_tail_spinbox.setMinimum(200)
+        ai_truncation_tail_spinbox.setMaximum(5000)
+        ai_truncation_tail_spinbox.setSingleStep(100)
+        ai_truncation_tail_spinbox.setValue(int(qa_settings.get('ai_truncation_tail_chars', 800)))
+        ai_truncation_tail_spinbox.setFixedWidth(100)
+        disable_wheel_event(ai_truncation_tail_spinbox)
+        ai_trunc_tail_layout.addWidget(ai_truncation_tail_spinbox)
+
+        ai_trunc_tail_hint = QLabel("chars from end of source and translated text")
+        ai_trunc_tail_hint.setFont(QFont('Arial', 9))
+        ai_trunc_tail_hint.setStyleSheet("color: #9ca3af;")
+        ai_trunc_tail_layout.addWidget(ai_trunc_tail_hint)
+        ai_trunc_tail_layout.addStretch()
+
+        additional_layout.addWidget(ai_trunc_tail_widget)
+
+        # "Edit Prompt" button
+        _ai_trunc_default_prompt = (
+            "You are a translation quality analyst. Your ONLY job is to determine if "
+            "a translated text appears to be truncated (cut off prematurely, missing content "
+            "from the end of the source). You will be given the TAIL (ending portion) of the "
+            "original source text and the TAIL of its translation. Compare them and determine "
+            "if the translation appears to stop too early, omitting content that exists in the "
+            "source. Respond with ONLY the word YES or NO. Do not explain."
+        )
+        # Store current custom prompt (or default) in a mutable container for the closure
+        _ai_trunc_prompt_holder = [qa_settings.get('ai_truncation_prompt', _ai_trunc_default_prompt)]
+
+        ai_trunc_btn_row = QWidget()
+        ai_trunc_btn_layout = QHBoxLayout(ai_trunc_btn_row)
+        ai_trunc_btn_layout.setContentsMargins(20, 2, 0, 0)
+        ai_trunc_btn_layout.setSpacing(8)
+
+        edit_prompt_btn = QPushButton("✏️  Edit Prompt")
+        edit_prompt_btn.setFixedWidth(130)
+        edit_prompt_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a5568;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 4px 10px;
+                border-radius: 3px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #5a6778;
+                border-color: #6b7a8d;
+            }
+            QPushButton:disabled {
+                background-color: #2a2a2a;
+                color: #666666;
+                border-color: #3a3a3a;
+            }
+        """)
+
+        def _open_prompt_editor():
+            prompt_dlg = QDialog(dialog)
+            prompt_dlg.setWindowTitle("AI Truncation Detection — Edit System Prompt")
+            prompt_dlg.resize(620, 350)
+            prompt_dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
+            playout = QVBoxLayout(prompt_dlg)
+            playout.setContentsMargins(12, 12, 12, 12)
+
+            plabel = QLabel("System prompt sent to your AI model for each chapter check:")
+            plabel.setFont(QFont('Arial', 9))
+            plabel.setStyleSheet("color: #9ca3af;")
+            playout.addWidget(plabel)
+
+            p_edit = QTextEdit()
+            p_edit.setPlainText(_ai_trunc_prompt_holder[0])
+            p_edit.setFont(QFont('Consolas', 10))
+            p_edit.setStyleSheet("""
+                QTextEdit {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    border: 1px solid #4a5568;
+                    border-radius: 3px;
+                    padding: 6px;
+                }
+            """)
+            playout.addWidget(p_edit)
+
+            btn_row = QHBoxLayout()
+            reset_btn = QPushButton("🔄 Reset to Default")
+            reset_btn.setStyleSheet(
+                "QPushButton { background-color: #ffc107; color: black; padding: 6px 14px; "
+                "border-radius: 3px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #e0a800; }"
+            )
+            reset_btn.clicked.connect(lambda: p_edit.setPlainText(_ai_trunc_default_prompt))
+            btn_row.addWidget(reset_btn)
+            btn_row.addStretch()
+
+            save_btn = QPushButton("💾 Save")
+            save_btn.setStyleSheet(
+                "QPushButton { background-color: #28a745; color: white; padding: 6px 14px; "
+                "border-radius: 3px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #218838; }"
+            )
+            def _save_prompt():
+                _ai_trunc_prompt_holder[0] = p_edit.toPlainText().strip()
+                prompt_dlg.accept()
+            save_btn.clicked.connect(_save_prompt)
+            btn_row.addWidget(save_btn)
+
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setStyleSheet(
+                "QPushButton { background-color: #6c757d; color: white; padding: 6px 14px; "
+                "border-radius: 3px; } "
+                "QPushButton:hover { background-color: #5a6268; }"
+            )
+            cancel_btn.clicked.connect(prompt_dlg.reject)
+            btn_row.addWidget(cancel_btn)
+
+            playout.addLayout(btn_row)
+            prompt_dlg.exec()
+
+        edit_prompt_btn.clicked.connect(_open_prompt_editor)
+        ai_trunc_btn_layout.addWidget(edit_prompt_btn)
+
+        prompt_status_label = QLabel("(using default prompt)")
+        prompt_status_label.setFont(QFont('Arial', 9))
+        prompt_status_label.setStyleSheet("color: #808080;")
+        if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt:
+            prompt_status_label.setText("(using custom prompt)")
+            prompt_status_label.setStyleSheet("color: #f0ad4e;")
+        ai_trunc_btn_layout.addWidget(prompt_status_label)
+        ai_trunc_btn_layout.addStretch()
+
+        additional_layout.addWidget(ai_trunc_btn_row)
+
+        # Toggle spinbox and button enabled state
+        def _toggle_ai_truncation(checked):
+            ai_truncation_tail_spinbox.setEnabled(checked)
+            edit_prompt_btn.setEnabled(checked)
+            if checked:
+                ai_trunc_tail_label.setStyleSheet("color: white;")
+                ai_trunc_tail_hint.setStyleSheet("color: #9ca3af;")
+            else:
+                ai_trunc_tail_label.setStyleSheet("color: #808080;")
+                ai_trunc_tail_hint.setStyleSheet("color: #606060;")
+
+        check_ai_truncation_checkbox.toggled.connect(_toggle_ai_truncation)
+        _toggle_ai_truncation(check_ai_truncation_checkbox.isChecked())
+
         additional_layout.addSpacing(15)
         
         # NEW: Paragraph Structure Check
@@ -3486,6 +3665,9 @@ class QAScannerMixin:
                     'truncation_borderline_score': (truncation_borderline_slider, lambda x: x.value()),
                     'truncation_length_threshold': (truncation_length_slider, lambda x: x.value()),
                     'truncation_embed_threshold': (truncation_embed_slider, lambda x: x.value()),
+                    'check_ai_truncation_detection': (check_ai_truncation_checkbox, lambda x: x.isChecked()),
+                    'ai_truncation_tail_chars': (ai_truncation_tail_spinbox, lambda x: x.value()),
+                    'ai_truncation_prompt': (_ai_trunc_prompt_holder, lambda x: x[0]),
                     'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
                     'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
                 }
