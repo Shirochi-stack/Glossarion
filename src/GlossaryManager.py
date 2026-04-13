@@ -4536,6 +4536,36 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             system_prompt = system_prompt.replace('{max_names}', str(max_names))
             system_prompt = system_prompt.replace('{max_titles}', str(max_titles))
             system_prompt = system_prompt.replace('{marker}', str(marker_count))
+
+            # --- {fields1}, {fields}, {entries} placeholder replacement ---
+            _has_fields1 = '{fields1}' in system_prompt
+            _has_fields = '{fields}' in system_prompt
+            _has_entries = '{entries}' in system_prompt
+            if _has_fields1 or _has_fields or _has_entries:
+                # Build header parts
+                _custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                try:
+                    _custom_fields = json.loads(_custom_fields_json)
+                except Exception:
+                    _custom_fields = []
+                _header_parts = ['type', 'raw_name', 'translated_name', 'gender']
+                if _custom_fields:
+                    _header_parts.extend(_custom_fields)
+
+                if _has_fields1:
+                    _f1_str = f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(_header_parts)}"
+                    system_prompt = system_prompt.replace('{fields1}', _f1_str)
+
+                if _has_fields:
+                    _f_str = f"Columns:\n{', '.join(_header_parts)}"
+                    system_prompt = system_prompt.replace('{fields}', _f_str)
+
+                if _has_entries:
+                    # Build entries phrase from entry types used in the prompt context
+                    _entry_types = ['Character names', 'Terms', 'Location names', 'Ability/Skill names',
+                                    'Item names', 'Organization names', 'Titles/Ranks']
+                    _entries_str = ', '.join(_entry_types[:-1]) + f', & {_entry_types[-1]}'
+                    system_prompt = system_prompt.replace('{entries}', _entries_str)
             
             # Send system prompt and text as separate messages
             messages = [
