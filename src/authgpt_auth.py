@@ -869,6 +869,8 @@ def _process_sse_line(
                 combined = "".join(log_buf) + delta_text
                 for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
                     combined = combined.replace(tag, tag + '\n')
+                # Make Unit Separator visible in log output
+                combined = combined.replace('\x1f', '\\x1F')
                 if "\n" in combined:
                     parts = combined.split("\n")
                     for part in parts[:-1]:
@@ -877,7 +879,7 @@ def _process_sse_line(
                 else:
                     log_buf.append(delta_text)
                     if len("".join(log_buf)) > 150:
-                        _log("".join(log_buf))
+                        _log("".join(log_buf).replace('\x1f', '\\x1F'))
                         state["log_buf"] = []
         except (json.JSONDecodeError, KeyError):
             pass
@@ -895,7 +897,7 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
     if log_stream and state["log_buf"]:
         remainder = "".join(state["log_buf"]).strip()
         if remainder:
-            _log(remainder)
+            _log(remainder.replace('\x1f', '\\x1F'))
     raw_text = "\n".join(state["raw_lines"])
     t_total = time.time() - t_start
     _log(f"📡 AuthGPT: Stream finished in {t_total:.1f}s")

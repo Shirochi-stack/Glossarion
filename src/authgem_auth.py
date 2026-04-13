@@ -2054,6 +2054,8 @@ def _process_gemini_sse_line(
                 # Insert newlines after HTML closing tags for readability
                 for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
                     combined = combined.replace(tag, tag + '\n')
+                # Make Unit Separator visible in log output
+                combined = combined.replace('\x1f', '\\x1F')
                 if "\n" in combined:
                     parts = combined.split("\n")
                     for p in parts[:-1]:
@@ -2062,7 +2064,7 @@ def _process_gemini_sse_line(
                 else:
                     log_buf.append(text)
                     if len("".join(log_buf)) > 150:
-                        _log("".join(log_buf))
+                        _log("".join(log_buf).replace('\x1f', '\\x1F'))
                         state["log_buf"] = []
 
     # Update usage metadata if present
@@ -2092,7 +2094,7 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
     if log_stream and state["log_buf"]:
         remainder = "".join(state["log_buf"]).strip()
         if remainder:
-            _log(remainder)
+            _log(remainder.replace('\x1f', '\\x1F'))
 
     t_total = time.time() - t_start
 
