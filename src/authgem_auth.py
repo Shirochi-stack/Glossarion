@@ -1882,15 +1882,13 @@ def _stream_gemini_common(
             summary += f" | 🧠 {thinking_tokens} thinking tokens used"
         _log(summary)
 
-        # Fallback: if text content is empty but thoughts contain text,
-        # the API returned everything as thought-annotated parts.
-        # Use the thought content as the main content — but ONLY when
-        # finish_reason is STOP (normal completion).  If the model was
-        # blocked (SAFETY, PROHIBITED_CONTENT, etc.) we must NOT leak
-        # thinking output into the content field.
-        if not final_content and thought_text and finish_reason == "STOP":
-            final_content = thought_text
-            thought_text = None
+        # Log when text is empty but thoughts exist — do NOT promote
+        # thought content to output, as it's typically internal reasoning
+        # (not structured data).  Let downstream handle the empty response.
+        if not final_content and thought_text:
+            _log("⚠️ AuthGem: Text empty — response contained only thinking/reasoning, no output text.")
+        elif not final_content:
+            _log("⚠️ AuthGem: Empty response — no text received.")
 
         return {
             "content": final_content,
@@ -2130,17 +2128,12 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
     content = "".join(state["text_parts"])
     thought_content = "".join(state["thought_parts"]) if state["thought_parts"] else None
 
-    # Fallback: if text is empty but thoughts exist and finish_reason is STOP,
-    # the API returned everything as thought-annotated parts.
-    # Use thought content as main content (safe — blocked responses have non-STOP finish).
-    raw_fr = state["finish_reason"]
-    if not content and thought_content and raw_fr == "STOP":
-        _log("⚠️ AuthGem: Text empty but thoughts present — using thought content as output")
-        content = thought_content
-        thought_content = None
-    elif not content and thought_content:
-        _log("⚠️ AuthGem: Response contained only thinking/reasoning — no output text.")
-    elif not content and not thought_content:
+    # Log when text is empty — do NOT promote thought content to output,
+    # as it's typically internal reasoning (not structured data).
+    # Let downstream handle the empty response (retry / error).
+    if not content and thought_content:
+        _log("⚠️ AuthGem: Text empty — response contained only thinking/reasoning, no output text.")
+    elif not content:
         _log("⚠️ AuthGem: Empty response — no text received.")
 
     # Map Gemini finish reasons to OpenAI-style

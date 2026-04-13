@@ -538,6 +538,30 @@ _glossary_json_lock = threading.Lock()
 _glossary_csv_lock = threading.Lock()
 _progress_lock = threading.Lock()
 _history_lock = threading.Lock()  # For thread-safe history access in batch mode
+
+def _atomic_replace_file(temp_path: str, target_path: str, max_retries: int = 3, delay: float = 0.5):
+    """Atomically replace target_path with temp_path, retrying on Windows lock errors.
+    
+    Uses os.replace() which is atomic on Windows (unlike os.remove+os.rename).
+    Retries with a short delay to handle transient file locks from antivirus,
+    editors, or other processes that briefly hold the file open.
+    """
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            os.replace(temp_path, target_path)
+            return  # Success
+        except (PermissionError, OSError) as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+    # All retries exhausted — clean up temp file and raise
+    if os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+    raise last_err
 # Global book title cache (set in main)
 BOOK_TITLE_RAW = None
 BOOK_TITLE_TRANSLATED = None
@@ -1008,19 +1032,8 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
                 temp_f.flush()
                 os.fsync(temp_f.fileno())  # Force immediate disk write
             
-            # Atomic rename
-            try:
-                if os.path.exists(output_path):
-                    os.remove(output_path)
-                os.rename(temp_path, output_path)
-            except Exception as e:
-                # If rename fails, try to clean up temp file
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except:
-                        pass
-                raise
+            # Atomic replace with retry for Windows file locks
+            _atomic_replace_file(temp_path, output_path)
         except Exception as e:
             print(f"[Warning] Atomic write failed for JSON: {e}. Attempting direct write...")
             try:
@@ -1099,17 +1112,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     temp_f.flush()
                     os.fsync(temp_f.fileno())  # Force immediate disk write
                 
-                try:
-                    if os.path.exists(csv_path):
-                        os.remove(csv_path)
-                    os.rename(temp_path, csv_path)
-                except Exception as e:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except:
-                            pass
-                    raise
+                _atomic_replace_file(temp_path, csv_path)
                 print(f"✅ Saved legacy CSV format: {csv_path}")
             
             else:
@@ -1192,17 +1195,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     temp_f.flush()
                     os.fsync(temp_f.fileno())  # Force immediate disk write
                 
-                try:
-                    if os.path.exists(csv_path):
-                        os.remove(csv_path)
-                    os.rename(temp_path, csv_path)
-                except Exception as e:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except:
-                            pass
-                    raise
+                _atomic_replace_file(temp_path, csv_path)
                 print(f"✅ Saved token-efficient glossary: {csv_path}")
                 type_counts = {}
                 for entry_type in grouped_entries:
