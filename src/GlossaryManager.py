@@ -4553,7 +4553,8 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     _header_parts.extend(_custom_fields)
 
                 if _has_fields1:
-                    _f1_str = f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(_header_parts)}"
+                    _sep_joined = '\\x1F'.join(_header_parts)
+                    _f1_str = f"Columns (separated by Unit Separator character \\x1F):\n{_sep_joined}"
                     system_prompt = system_prompt.replace('{fields1}', _f1_str)
 
                 if _has_fields:
