@@ -313,80 +313,15 @@ class _BrowserManager:
             except queue.Empty:
                 break
 
-        # JavaScript: select model, type into chat, send, poll DOM for response
+        # JavaScript: type into chat, send, poll DOM for response
+        # (Model selection is done via Playwright API before this runs)
+        max_retries = int(os.getenv('MAX_RETRIES', '7'))
+
         js_chat = """
-        async ({prompt, model}) => {
+        async ({prompt, maxRetries}) => {
             const wait = ms => new Promise(r => setTimeout(r, ms));
 
-            // 1. Click "New Chat" to start fresh
-            const newBtn = document.querySelector(
-                'button[aria-label="New Chat"], [id="new-chat-button"]'
-            ) || document.querySelector('nav a[href="/"]');
-            if (newBtn) {
-                newBtn.click();
-                await wait(1500);
-            }
-
-            // 2. Select the model if specified
-            if (model) {
-                // Click the model selector button (shows current model name)
-                const modelBtn = document.querySelector(
-                    'button[aria-label="Models"] , button.model-selector, ' +
-                    '[class*="model"] button, button:has(> span + svg)'
-                );
-                // Try finding by text content - the model name is displayed
-                let selectorBtn = modelBtn;
-                if (!selectorBtn) {
-                    const allBtns = document.querySelectorAll('button');
-                    for (const b of allBtns) {
-                        const txt = (b.textContent || '').toLowerCase();
-                        if (txt.includes('glm') || txt.includes('model')) {
-                            selectorBtn = b;
-                            break;
-                        }
-                    }
-                }
-                if (selectorBtn) {
-                    selectorBtn.click();
-                    await wait(800);
-
-                    // Search for the model in the dropdown
-                    const searchInput = document.querySelector(
-                        'input[placeholder*="model" i], input[placeholder*="search" i], ' +
-                        'input[placeholder*="Model" i]'
-                    );
-                    if (searchInput) {
-                        searchInput.focus();
-                        const setter = Object.getOwnPropertyDescriptor(
-                            HTMLInputElement.prototype, 'value'
-                        ).set;
-                        setter.call(searchInput, model);
-                        searchInput.dispatchEvent(new Event('input', {bubbles: true}));
-                        await wait(500);
-                    }
-
-                    // Click the matching model option
-                    const options = document.querySelectorAll(
-                        '[class*="option"], [class*="item"], [role="option"], ' +
-                        'li, button[class*="model"]'
-                    );
-                    const modelLower = model.toLowerCase();
-                    for (const opt of options) {
-                        const text = (opt.textContent || '').toLowerCase();
-                        if (text.includes(modelLower) || modelLower.includes(text.trim())) {
-                            opt.click();
-                            await wait(500);
-                            break;
-                        }
-                    }
-
-                    // Close dropdown if still open (click elsewhere)
-                    document.body.click();
-                    await wait(300);
-                }
-            }
-
-            // 3. Find textarea
+            // 1. Find textarea
             let textarea = document.querySelector('textarea');
             if (!textarea) textarea = document.querySelector('[contenteditable="true"]');
             if (!textarea) {
@@ -442,15 +377,61 @@ class _BrowserManager:
             let stableCount = 0;
             let bestContent = '';
             let firstContent = false;
+            let retryCount = 0;
+            // maxRetries is passed from Python (from MAX_RETRIES env var / settings)
 
             for (let i = 0; i < 1200; i++) {
                 await wait(500);
 
+                // Check for error banners (red/pink error messages)
+                const errorEl = document.querySelector(
+                    '[class*="error"], [class*="Error"], .bg-red-100, ' +
+                    '[style*="background"][style*="red"], .text-red-500'
+                );
+                const errorText = errorEl ? (errorEl.innerText || '').trim() : '';
+                if (errorText && (
+                    errorText.includes('TypeError') ||
+                    errorText.includes('Failed to fetch') ||
+                    errorText.includes('Error') ||
+                    errorText.includes('error')
+                )) {
+                    if (retryCount >= maxRetries) {
+                        return {error: true, message: 'Error after ' + maxRetries + ' retries: ' + errorText};
+                    }
+                    retryCount++;
+                    try { await window._authza_emit('__STATUS:retry__'); } catch(e) {}
+
+                    // Click the retry/regenerate button (🔄 icon next to the error)
+                    const retryBtn = document.querySelector(
+                        'button[aria-label*="Regenerate" i], button[aria-label*="Retry" i]'
+                    );
+                    if (retryBtn) {
+                        retryBtn.click();
+                    } else {
+                        // Fallback: find button with refresh/retry SVG near the error
+                        const btns = errorEl?.parentElement?.querySelectorAll('button') ||
+                                     errorEl?.closest('div')?.querySelectorAll('button') || [];
+                        for (const b of btns) {
+                            if (b.querySelector('svg')) {
+                                b.click();
+                                break;
+                            }
+                        }
+                    }
+
+                    // Reset content tracking for the retry
+                    prevLen = 0;
+                    bestContent = '';
+                    firstContent = false;
+                    stableCount = 0;
+                    await wait(3000);
+                    continue;
+                }
+
                 // Check for "Thinking..." indicator
                 const thinkingEl = document.querySelector('[class*="thinking"], [class*="Thinking"]');
                 if (thinkingEl && !firstContent) {
-                    // Still thinking, emit periodic status
-                    if (i % 6 === 0) {  // every 3 seconds
+                    if (i % 6 === 0) {
                         try { await window._authza_emit('__STATUS:thinking__'); } catch(e) {}
                     }
                 }
@@ -459,12 +440,57 @@ class _BrowserManager:
                 const allBlocks = document.querySelectorAll('.prose');
                 if (allBlocks.length <= existingBlocks) continue;
 
-                // The NEW block(s) are after the existing ones
-                // The last one is the assistant response
                 const lastBlock = allBlocks[allBlocks.length - 1];
                 const content = (lastBlock.innerText || '').trim();
 
                 if (content.length === 0) continue;
+
+                // Check if the response content IS an error message
+                const contentLower = content.toLowerCase();
+                const isErrorContent = (
+                    contentLower.includes('no response') ||
+                    contentLower.includes('try again later') ||
+                    contentLower.includes('failed to fetch') ||
+                    contentLower.includes('syntaxerror') ||
+                    contentLower.includes('not valid json') ||
+                    contentLower.includes('something went wrong') ||
+                    contentLower.includes('service unavailable') ||
+                    contentLower.includes('internal server error')
+                );
+
+                if (isErrorContent && content.length < 200) {
+                    // This is an error response, not real content
+                    if (retryCount >= maxRetries) {
+                        return {error: true, message: 'Error after ' + maxRetries + ' retries: ' + content};
+                    }
+                    retryCount++;
+                    try { await window._authza_emit('__STATUS:retry__'); } catch(e) {}
+
+                    // Find and click ANY retry/regenerate button on the page
+                    const retryBtns = document.querySelectorAll('button');
+                    for (const b of retryBtns) {
+                        const ariaLabel = (b.getAttribute('aria-label') || '').toLowerCase();
+                        const title = (b.getAttribute('title') || '').toLowerCase();
+                        if (ariaLabel.includes('regenerat') || ariaLabel.includes('retry') ||
+                            title.includes('regenerat') || title.includes('retry')) {
+                            b.click();
+                            break;
+                        }
+                        // Also try the reload/refresh SVG icon near the response
+                        const svg = b.querySelector('svg');
+                        if (svg && b.closest('[class*="message"], [class*="chat"]')) {
+                            b.click();
+                            break;
+                        }
+                    }
+
+                    prevLen = 0;
+                    bestContent = '';
+                    firstContent = false;
+                    stableCount = 0;
+                    await wait(3000);
+                    continue;
+                }
 
                 if (content.length > prevLen) {
                     if (!firstContent) {
@@ -479,7 +505,7 @@ class _BrowserManager:
                 } else if (content.length === prevLen) {
                     stableCount++;
                     bestContent = content;
-                    if (stableCount >= 6) {  // 3 seconds stable
+                    if (stableCount >= 6) {
                         return {content: bestContent, finish_reason: 'stop'};
                     }
                 }
@@ -491,6 +517,42 @@ class _BrowserManager:
             return {error: true, message: 'Timed out waiting for response'};
         }
         """
+
+        def _select_model_impl(page, target_model):
+            """Select model via Playwright locators — runs on _pw_thread."""
+            try:
+                # Click the model selector (the button showing current model name)
+                # It's typically the first button in the main area with a chevron
+                model_btn = page.locator('button:has(svg)').filter(
+                    has_text=page.locator('text=/GLM|gpt|model/i')
+                ).first
+                if not model_btn.is_visible(timeout=2000):
+                    # Fallback: look for any button containing a model-like name
+                    model_btn = page.locator('button').filter(has_text='GLM').first
+                model_btn.click(timeout=3000)
+                import time as _t; _t.sleep(0.8)
+
+                # Type in the search field if present
+                search = page.locator('input[placeholder]').filter(
+                    has_text=page.locator('text=/search|model|filter/i')
+                ).first
+                try:
+                    if search.is_visible(timeout=1000):
+                        search.fill(target_model)
+                        _t.sleep(0.5)
+                except Exception:
+                    pass
+
+                # Click the matching model option
+                option = page.locator(f'text=/{target_model}/i').first
+                try:
+                    option.click(timeout=3000)
+                    _t.sleep(0.5)
+                except Exception:
+                    # Close dropdown
+                    page.keyboard.press('Escape')
+            except Exception as e:
+                logger.debug("AuthZA: Model selection failed: %s", e)
 
         def _do_send():
             page = self._page
@@ -510,10 +572,20 @@ class _BrowserManager:
                 except Exception:
                     self._chunk_fn_exposed = True
 
-            return page.evaluate(
-                js_chat,
-                {"prompt": combined_prompt, "model": model},
-            )
+            # Start new chat first
+            try:
+                new_chat = page.locator('button[aria-label="New Chat"]').or_(
+                    page.locator('nav a[href="/"]')
+                ).first
+                new_chat.click(timeout=3000)
+                import time as _t; _t.sleep(1.5)
+            except Exception:
+                pass
+
+            # Select the model
+            _select_model_impl(page, model)
+
+            return page.evaluate(js_chat, {"prompt": combined_prompt, "maxRetries": max_retries})
 
         result_holder = {"result": None, "error": None}
         eval_done = threading.Event()
@@ -545,6 +617,11 @@ class _BrowserManager:
                 if chunk == '__STATUS:streaming__':
                     if log_fn:
                         log_fn("📝 Z.AI: Streaming response…", flush=True)
+                    continue
+                if chunk == '__STATUS:retry__':
+                    if log_fn:
+                        log_fn("🔄 Z.AI: Error detected, retrying…", flush=True)
+                    thinking_shown = False
                     continue
                 if log_stream and log_fn:
                     log_fn(chunk, end="", flush=True)
