@@ -16399,6 +16399,14 @@ Important rules:
                         source_type = "manually loaded" if was_manual else "auto-loaded"
                         self.append_log(f"📑 Keeping {source_type} glossary: {glossary_name}")
 
+        # If the Glossary Settings dialog is initialized, automatically refresh the editor tab combobox 
+        # so it switches to the glossary of the newly selected input file
+        try:
+            if hasattr(self, '_refresh_glossary_editor'):
+                self._refresh_glossary_editor()
+        except Exception:
+            pass
+
     def _convert_json_to_txt(self, json_path):
         """Convert a JSON file to TXT format for translation."""
         try:
