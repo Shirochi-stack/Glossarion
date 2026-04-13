@@ -1211,7 +1211,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 total = sum(type_counts.values())
                 print(f"   Total entries: {total}")
                 for entry_type, count in type_counts.items():
-                    print(f"   - {entry_type.replace(chr(0x1f), '\\x1F')}: {count} entries")
+                    safe_entry_type = entry_type.replace(chr(0x1f), '\\x1F')
+                    print(f"   - {safe_entry_type}: {count} entries")
         
         except Exception as e:
             print(f"[Warning] Atomic write failed for CSV: {e}. Attempting direct write...")
