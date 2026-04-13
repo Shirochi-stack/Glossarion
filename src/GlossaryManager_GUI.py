@@ -6592,7 +6592,7 @@ CRITICAL EXTRACTION RULES:
            edit_dialog.exec()
 
     def convert_glossary_format(self, reload_callback):
-        """Export glossary to CSV format"""
+        """Export glossary to CSV format (token-efficient or legacy based on config)"""
         if not self.current_glossary_data:
             QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
             return
@@ -6621,7 +6621,8 @@ CRITICAL EXTRACTION RULES:
             return
         
         try:
-            import csv
+            # Check whether to use legacy CSV or token-efficient format
+            use_legacy = self.config.get('glossary_use_legacy_csv', False)
             
             # Get custom types for gender info
             custom_types = self.config.get('custom_entry_types', {
@@ -6631,77 +6632,163 @@ CRITICAL EXTRACTION RULES:
             
             # Get custom fields
             custom_fields = self.config.get('custom_glossary_fields', [])
-            
-            with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.writer(f)
-                
-                # Build header row
-                header = ['type', 'raw_name', 'translated_name', 'gender']
-                if custom_fields:
-                    header.extend(custom_fields)
-                
-                # Write header row
-                writer.writerow(header)
-                
-                # Process based on format
-                if isinstance(self.current_glossary_data, list) and self.current_glossary_data:
-                    if 'type' in self.current_glossary_data[0]:
-                        # New format - direct export
-                        for entry in self.current_glossary_data:
-                            entry_type = entry.get('type', 'terms')
-                            type_config = custom_types.get(entry_type, {})
-                            
-                            row = [
-                                entry_type,
-                                entry.get('raw_name', ''),
-                                entry.get('translated_name', '')
-                            ]
-                            
-                            # Add gender
-                            if type_config.get('has_gender', False):
-                                row.append(entry.get('gender', ''))
-                            else:
-                                row.append('')
-                            
-                            # Add custom field values
-                            for field in custom_fields:
-                                row.append(entry.get(field, ''))
-                            
-                            writer.writerow(row)
-                    else:
-                        # Old format - convert then export
-                        for entry in self.current_glossary_data:
-                            # Determine type
-                            is_location = False
-                            if 'locations' in entry and entry['locations']:
-                                is_location = True
-                            elif 'title' in entry and any(term in str(entry.get('title', '')).lower() 
-                                                         for term in ['location', 'place', 'city', 'region']):
-                                is_location = True
-                            
-                            entry_type = 'terms' if is_location else 'character'
-                            type_config = custom_types.get(entry_type, {})
-                            
-                            row = [
-                                entry_type,
-                                entry.get('original_name', entry.get('original', '')),
-                                entry.get('name', entry.get('translated', ''))
-                            ]
-                            
-                            # Add gender
-                            if type_config.get('has_gender', False):
-                                row.append(entry.get('gender', 'Unknown'))
-                            else:
-                                row.append('')
-                            
-                            # Add empty custom fields
-                            for field in custom_fields:
-                                row.append('')
-                            
-                            writer.writerow(row)
-            
-            QMessageBox.information(self.dialog, "Success", f"Glossary exported to CSV:\n{csv_path}")
-            self.append_log(f"✅ Exported glossary to: {csv_path}")
+
+            # ── Normalise entries to new-format dicts (type/raw_name/translated_name/gender) ──
+            entries = []
+            if isinstance(self.current_glossary_data, list) and self.current_glossary_data:
+                if 'type' in self.current_glossary_data[0]:
+                    # Already new format
+                    entries = list(self.current_glossary_data)
+                else:
+                    # Old format → convert
+                    for entry in self.current_glossary_data:
+                        is_location = False
+                        if 'locations' in entry and entry['locations']:
+                            is_location = True
+                        elif 'title' in entry and any(term in str(entry.get('title', '')).lower()
+                                                      for term in ['location', 'place', 'city', 'region']):
+                            is_location = True
+                        entry_type = 'terms' if is_location else 'character'
+                        type_config = custom_types.get(entry_type, {})
+                        new_entry = {
+                            'type': entry_type,
+                            'raw_name': entry.get('original_name', entry.get('original', '')),
+                            'translated_name': entry.get('name', entry.get('translated', '')),
+                            'gender': entry.get('gender', 'Unknown') if type_config.get('has_gender', False) else '',
+                        }
+                        desc = entry.get('description', '')
+                        if desc:
+                            new_entry['description'] = desc
+                        entries.append(new_entry)
+            elif isinstance(self.current_glossary_data, dict):
+                # Dict format (key→value pairs)
+                src = self.current_glossary_data.get('entries', self.current_glossary_data)
+                for original, translated in src.items():
+                    entries.append({
+                        'type': 'terms',
+                        'raw_name': original,
+                        'translated_name': translated,
+                        'gender': '',
+                    })
+
+            if not entries:
+                QMessageBox.critical(self.dialog, "Error", "No entries to export")
+                return
+
+            if use_legacy:
+                # ── Legacy CSV format ────────────────────────────────────────
+                import csv
+                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                    writer = csv.writer(f)
+                    header = ['type', 'raw_name', 'translated_name', 'gender']
+                    if custom_fields:
+                        header.extend(custom_fields)
+                    writer.writerow(header)
+                    for entry in entries:
+                        entry_type = entry.get('type', 'terms')
+                        type_config = custom_types.get(entry_type, {})
+                        row = [
+                            entry_type,
+                            entry.get('raw_name', ''),
+                            entry.get('translated_name', ''),
+                            entry.get('gender', '') if type_config.get('has_gender', False) else '',
+                        ]
+                        for field in custom_fields:
+                            row.append(entry.get(field, ''))
+                        writer.writerow(row)
+            else:
+                # ── Token-efficient format (sectioned, bullet-style) ─────────
+                sections = getattr(self, 'current_glossary_sections', []) or []
+                if not sections:
+                    # Build sections from entry types
+                    seen = set()
+                    for e in entries:
+                        sec = e.get('_section')
+                        if not sec:
+                            t = e.get('type', 'terms').upper()
+                            sec = t + 'S' if not t.endswith('S') else t
+                        if sec not in seen:
+                            sections.append(sec)
+                            seen.add(sec)
+
+                grouped = {sec: [] for sec in sections}
+                default_map = {'character': 'CHARACTERS', 'terms': 'TERMS'}
+                for entry in entries:
+                    sec = entry.get('_section')
+                    if not sec:
+                        t = entry.get('type', 'terms')
+                        sec = default_map.get(t)
+                        if not sec:
+                            sec = t.upper() + ('S' if not t.upper().endswith('S') else '')
+                    if sec not in grouped:
+                        grouped[sec] = []
+                        sections.append(sec)
+                    grouped[sec].append(entry)
+
+                # Build header columns
+                standard_cols = ['translated_name', 'raw_name', 'gender', 'description']
+                pattern_fields = []
+                try:
+                    import PatternManager as _pm
+                    pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
+                    if isinstance(pf, (list, tuple)):
+                        pattern_fields = list(pf)
+                except Exception:
+                    pattern_fields = []
+
+                # Include any fields present in data that are not internal/standard
+                data_fields = []
+                for e in entries:
+                    for k in e.keys():
+                        if k.startswith('_') or k in ['type'] + standard_cols:
+                            continue
+                        if k not in custom_fields and k not in pattern_fields and k not in data_fields:
+                            data_fields.append(k)
+                header_cols = standard_cols + pattern_fields + custom_fields + data_fields
+
+                lines = [f"Glossary Columns: {', '.join(header_cols)}", ""]
+                for sec in sections:
+                    sec_entries = grouped.get(sec, [])
+                    if not sec_entries:
+                        continue
+                    lines.append(f"=== {sec} ===")
+                    for e in sec_entries:
+                        translated = e.get('translated_name', '')
+                        raw_name = e.get('raw_name', '')
+                        gender = e.get('gender', '')
+                        desc = e.get('description', '')
+
+                        line = f"* {translated}"
+                        if raw_name:
+                            line += f" ({raw_name})"
+                        if gender:
+                            line += f" [{gender}]"
+                        extra_tail = []
+                        for col in header_cols:
+                            if col in ['translated_name', 'raw_name', 'gender', 'description']:
+                                continue
+                            val = e.get(col, '')
+                            if val:
+                                extra_tail.append(f"{col}: {val}")
+                        if desc:
+                            line += f": {desc}"
+                        if extra_tail:
+                            tail_str = " | ".join(extra_tail)
+                            line += f" | {tail_str}" if desc else f": {tail_str}"
+                        lines.append(line)
+                    lines.append("")
+
+                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                    f.write("\n".join(lines).rstrip() + "\n")
+
+            fmt_label = "legacy CSV" if use_legacy else "token-efficient"
+            QMessageBox.information(self.dialog, "Success", f"Glossary exported to {fmt_label} format:\n{csv_path}")
+            self.append_log(f"✅ Exported glossary to {fmt_label} format: {csv_path}")
+
+            # Reload the editor if the export overwrote the current file
+            current_path = self.editor_file_entry.text()
+            if current_path and os.path.normpath(csv_path) == os.path.normpath(current_path):
+                reload_callback()
             
         except Exception as e:
             QMessageBox.critical(self.dialog, "Export Error", f"Failed to export CSV: {e}")
