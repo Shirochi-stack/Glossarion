@@ -356,6 +356,8 @@ def configure():
     _configured = True
 
     # ── Enable Qt6 native high-DPI scaling (sharp text rendering) ─────────
+    # Use PassThrough to prevent blurry text on fractional scales (e.g. 1.15x)
+    os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 
     # Do NOT set QT_FONT_DPI — let Qt derive font DPI from the device pixel
