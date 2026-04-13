@@ -2054,7 +2054,8 @@ CRITICAL EXTRACTION RULES:
         # {fields1} → Unit Separator (\x1F) separated columns (new default)
         if has_fields1:
             fields1_spec = []
-            fields1_spec.append(f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(header_parts)}")
+            _sep_joined = '\\x1F'.join(header_parts)
+            fields1_spec.append(f"Columns (separated by Unit Separator character \\x1F):\n{_sep_joined}")
             if type_names:
                 fields1_spec.append(f"Entry Types:\n{', '.join(type_names)}")
             fields1_str = '\\n'.join(fields1_spec)

@@ -50,6 +50,8 @@ Supported models and their prefixes (Updated July 2025):
 - AuthGem: authgem/* (e.g., authgem/gemini-2.5-flash) – Gemini via Google OAuth + AI Studio (no API key)
 - AuthGem-Key: authgem-key/* (e.g., authgem-key/gemini-2.5-flash) – Gemini via AI Studio API key
 - AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
+- Z.AI: za/* (e.g., za/glm-4-plus) – Zhipu AI via API key
+- AuthZA: authza/* (e.g., authza/glm-4-plus) – Zhipu AI via pseudo-OAuth key capture
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
@@ -1017,6 +1019,22 @@ except ImportError:
     _antigravity_health_check = None
     _antigravity_ensure_running = None
     ANTIGRAVITY_AVAILABLE = False
+
+# AuthZA - Z.AI (Zhipu AI) via pseudo-OAuth key capture (optional)
+try:
+    from authza_auth import get_default_store as _authza_get_store
+    from authza_auth import get_store as _authza_get_store_by_id
+    from authza_auth import send_chat_completion as _authza_send
+    from authza_auth import cancel_stream as _authza_cancel_stream
+    from authza_auth import reset_cancel as _authza_reset_cancel
+    AUTHZA_AVAILABLE = True
+except ImportError:
+    _authza_get_store = None
+    _authza_get_store_by_id = None
+    _authza_send = None
+    _authza_cancel_stream = None
+    _authza_reset_cancel = None
+    AUTHZA_AVAILABLE = False
     
 from functools import lru_cache
 from datetime import datetime, timedelta
@@ -1769,6 +1787,9 @@ class UnifiedClient:
         'authgem': 'authgem',
         'antigravity/': 'antigravity',
         'antigravity': 'antigravity',
+        'za/': 'za',
+        'authza/': 'authza',
+        'authza': 'authza',
     }
     
     # Model-specific constraints
@@ -1793,7 +1814,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -4677,6 +4698,14 @@ class UnifiedClient:
             if _m:
                 self.client_type = 'authgpt'
                 self._authgpt_account_id = int(_m.group(1))
+
+        # Dynamic fallback: match numbered authza variants (authza1/, authza2/, etc.)
+        if self.client_type is None:
+            import re as _re
+            _m = _re.match(r'^authza(\d{1,4})(?:/|$)', model_lower)
+            if _m:
+                self.client_type = 'authza'
+                self._authza_account_id = int(_m.group(1))
         
         # Check if we're using a custom OpenAI base URL
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
@@ -5069,12 +5098,22 @@ class UnifiedClient:
                 )
             logger.info("Antigravity will use local proxy (antigravity-claude-proxy)")
 
+        elif self.client_type == 'authza':
+            # AuthZA uses Z.AI API via pseudo-OAuth key capture – no persistent SDK client
+            if not AUTHZA_AVAILABLE:
+                raise ImportError(
+                    "AuthZA package not found. Make sure 'authza_auth.py' exists under src/."
+                )
+            account_id = getattr(self, '_authza_account_id', None)
+            if account_id:
+                print(f"🔐 AuthZA: Using account slot #{account_id}")
+
         elif self.client_type in ['yi', 'qwen', 'baichuan', 'zhipu', 'moonshot', 'baidu', 
                                   'tencent', 'iflytek', 'bytedance', 'minimax', 
                                   'sensenova', 'internlm', 'tii', 'microsoft', 
                                   'azure', 'google', 'alephalpha', 'databricks', 
                                   'huggingface', 'salesforce', 'bigscience', 'meta',
-                                  'electronhub', 'poe', 'openrouter', 'chutes']:
+                                  'electronhub', 'poe', 'openrouter', 'chutes', 'za']:
             # These providers will use HTTP API or OpenAI-compatible endpoints
             # No client initialization needed here
             logger.info(f"{self.client_type} will use HTTP API or compatible endpoint")
@@ -11012,6 +11051,8 @@ class UnifiedClient:
             'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
             'authgem_vertex': self._send_authgem_vertex,  # Gemini via Google OAuth + Vertex AI
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
+            'za': self._send_openai_provider_router,  # Z.AI via API key
+            'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
         }
         
         # IMPORTANT: Use actual_provider for routing, not client_type
@@ -14212,6 +14253,9 @@ class UnifiedClient:
         elif provider == 'nvidia':
             if effective_model.startswith('nd/'):
                 effective_model = effective_model[3:]
+        elif provider == 'za':
+            if effective_model.startswith('za/'):
+                effective_model = effective_model[3:]
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
@@ -17189,6 +17233,176 @@ class UnifiedClient:
             error_type="api_error"
         )
 
+    def _send_authza(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via Z.AI using pseudo-OAuth key capture.
+
+        Uses the authza_auth module to obtain API keys through a browser-based
+        key paste flow.  Model names should be prefixed with 'authza/' or
+        'authzaN/' (e.g. authza/glm-4-plus, authza2/glm-4-plus-0111).
+        """
+        if not AUTHZA_AVAILABLE or _authza_get_store is None or _authza_send is None:
+            raise UnifiedClientError(
+                "AuthZA is not available. Ensure 'authza_auth.py' exists under src/.",
+                error_type="config_error"
+            )
+
+        # Strip the authza/ or authzaN/ prefix to get the actual model name
+        actual_model = self.model
+        import re as _re
+        _m = _re.match(r'^authza\d{0,4}/', actual_model)
+        if _m:
+            actual_model = actual_model[_m.end():]
+        elif actual_model.startswith('authza'):
+            actual_model = actual_model[len('authza'):].lstrip('/')
+        if not actual_model:
+            actual_model = 'glm-4-plus'  # sensible default
+
+        # Extract account ID from prefix
+        account_id = getattr(self, '_authza_account_id', None) or self._extract_authza_account_id(self.model)
+
+        # Obtain a valid API key (auto-triggers browser flow if needed)
+        try:
+            if _authza_get_store_by_id is not None and account_id:
+                store = _authza_get_store_by_id(account_id)
+                acct_label = f" (Account #{account_id})"
+            else:
+                store = _authza_get_store()
+                acct_label = ""
+            api_key = store.get_valid_access_token(auto_login=True)
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"AuthZA{acct_label if 'acct_label' in dir() else ''} authentication failed: {exc}\n"
+                "Make sure you have a Z.AI account and try again.",
+                error_type="auth_error"
+            )
+
+        # Send the request through Z.AI's OpenAI-compatible endpoint
+        max_retries = self._get_max_retries()
+        last_error = None
+        label = f"AuthZA{acct_label}" if 'acct_label' in dir() and acct_label else "AuthZA"
+        print(f"🔐 {label}: Sending request via Z.AI (model={actual_model})")
+        for attempt in range(max_retries):
+            # Check stop flag before each attempt
+            if self._is_stop_requested():
+                raise UnifiedClientError(
+                    "AuthZA: Translation stopped by user",
+                    error_type="cancelled"
+                )
+
+            try:
+                # Reset AuthZA cancel flag before each attempt
+                if _authza_reset_cancel is not None:
+                    _authza_reset_cancel()
+
+                # Determine connect/read timeout
+                _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+                _read_timeout = self.request_timeout
+                if _http_tuning_on:
+                    try:
+                        _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+                    except (ValueError, TypeError):
+                        pass
+
+                result = _authza_send(
+                    access_token=api_key,
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=_read_timeout,
+                    log_fn=print,
+                    connect_timeout=_connect_timeout,
+                    account_id=account_id or 0,
+                )
+
+                content = result.get("content", "")
+                finish_reason = result.get("finish_reason", "stop")
+                usage = result.get("usage")
+
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+
+                # Stream cancelled by force-stop
+                if "stream cancelled" in error_str.lower():
+                    self._log_once("⏹️ AuthZA: Stream cancelled by user")
+                    raise UnifiedClientError(
+                        "AuthZA: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                # 400 Bad Request: retry with staggered delay
+                if "400" in error_str or "bad request" in error_str.lower():
+                    if attempt < max_retries - 1:
+                        interval = self._get_send_interval()
+                        delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))
+                        print(f"🔄 AuthZA 400 Bad Request – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
+                        if not self._sleep_with_cancel(delay, 0.5):
+                            raise UnifiedClientError("AuthZA: Translation stopped by user", error_type="cancelled")
+                        continue
+                    raise UnifiedClientError(
+                        f"AuthZA: {error_str}",
+                        error_type="validation"
+                    )
+
+                # Bail out on stop request
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "AuthZA: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                # 429 rate limit
+                if "429" in error_str:
+                    raise UnifiedClientError(
+                        f"⏳ Z.AI rate limit reached: {error_str}",
+                        error_type="rate_limit"
+                    )
+
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+            except Exception as exc:
+                error_str = str(exc)
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "AuthZA: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"⚠️ AuthZA error (attempt {attempt+1}/{max_retries}): {error_str}")
+                    time.sleep(self._get_send_interval())
+                    continue
+
+        raise UnifiedClientError(
+            f"AuthZA request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
+        )
+
+    @staticmethod
+    def _extract_authza_account_id(model: str) -> Optional[int]:
+        """Extract the numeric account ID from a numbered authza prefix.
+
+        Examples:
+            'authza2/glm-4-plus' → 2
+            'authza/glm-4-plus' → None (default account)
+        """
+        import re
+        m = re.match(r'^authza(\d{1,4})(?:/|$)', model, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
         # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
@@ -17241,7 +17455,8 @@ class UnifiedClient:
             'nvidia': lambda: os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1"),
             'salesforce': lambda: os.getenv("SALESFORCE_API_URL", "https://api.salesforce.com/v1"),
             'bigscience': "https://api.together.xyz/v1",  # Together AI fallback
-            'meta': "https://api.together.xyz/v1"  # Together AI fallback
+            'meta': "https://api.together.xyz/v1",  # Together AI fallback
+            'za': lambda: os.getenv("ZA_API_URL", "https://api.z.ai/api/paas/v4"),
         }
         
         # Get base URL from mapping

@@ -12600,7 +12600,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         header_parts = ['type', 'raw_name', 'translated_name', 'gender']
                         if custom_fields:
                             header_parts.extend(custom_fields)
-                        fields1_str = f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(header_parts)}"
+                        sep_joined = '\\x1F'.join(header_parts)
+                        fields1_str = f"Columns (separated by Unit Separator character \\x1F):\n{sep_joined}"
                         
                         entries_str = _entries_phrase(getattr(self, 'custom_entry_types', {}))
                         # Replace placeholders
