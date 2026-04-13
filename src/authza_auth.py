@@ -466,21 +466,54 @@ class _BrowserManager:
                     retryCount++;
                     try { await window._authza_emit('__STATUS:retry__'); } catch(e) {}
 
-                    // Find and click ANY retry/regenerate button on the page
-                    const retryBtns = document.querySelectorAll('button');
-                    for (const b of retryBtns) {
-                        const ariaLabel = (b.getAttribute('aria-label') || '').toLowerCase();
-                        const title = (b.getAttribute('title') || '').toLowerCase();
-                        if (ariaLabel.includes('regenerat') || ariaLabel.includes('retry') ||
-                            title.includes('regenerat') || title.includes('retry')) {
-                            b.click();
-                            break;
+                    if (retryCount >= 2) {
+                        // After 2 failures, do a full page reload + fresh chat
+                        try { await window._authza_emit('__STATUS:reload__'); } catch(e) {}
+                        location.reload();
+                        await wait(5000);
+
+                        // Re-enter the prompt in the fresh chat
+                        let ta2 = document.querySelector('textarea');
+                        if (!ta2) ta2 = document.querySelector('[contenteditable="true"]');
+                        if (ta2) {
+                            ta2.focus();
+                            if (ta2.tagName === 'TEXTAREA') {
+                                const s2 = Object.getOwnPropertyDescriptor(
+                                    HTMLTextAreaElement.prototype, 'value'
+                                ).set;
+                                s2.call(ta2, prompt);
+                            } else {
+                                ta2.innerText = prompt;
+                            }
+                            ta2.dispatchEvent(new Event('input', {bubbles: true}));
+                            await wait(500);
+                            // Click send
+                            const sb2 = ta2.closest('form')?.querySelector('button[type="submit"]');
+                            if (sb2) sb2.click();
+                            else {
+                                const c2 = ta2.closest('div.relative, div.flex, form') || ta2.parentElement;
+                                const bs2 = c2?.querySelectorAll('button') || [];
+                                for (const b of bs2) { if (b.querySelector('svg') && !b.disabled) { b.click(); break; } }
+                            }
                         }
-                        // Also try the reload/refresh SVG icon near the response
-                        const svg = b.querySelector('svg');
-                        if (svg && b.closest('[class*="message"], [class*="chat"]')) {
-                            b.click();
-                            break;
+                        // Reset tracking for fresh chat
+                        existingBlocks = 0;
+                    } else {
+                        // First failure: try the in-page retry button
+                        const retryBtns = document.querySelectorAll('button');
+                        for (const b of retryBtns) {
+                            const ariaLabel = (b.getAttribute('aria-label') || '').toLowerCase();
+                            const title = (b.getAttribute('title') || '').toLowerCase();
+                            if (ariaLabel.includes('regenerat') || ariaLabel.includes('retry') ||
+                                title.includes('regenerat') || title.includes('retry')) {
+                                b.click();
+                                break;
+                            }
+                            const svg = b.querySelector('svg');
+                            if (svg && b.closest('[class*="message"], [class*="chat"]')) {
+                                b.click();
+                                break;
+                            }
                         }
                     }
 
