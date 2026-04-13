@@ -1142,10 +1142,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                     if has_gender:
                         column_headers.append('gender')
-                    if include_description and 'description' not in [f.lower() for f in custom_fields]:
+                    # Description always comes right after gender (rendered as main body text)
+                    has_desc_in_custom = 'description' in [f.lower() for f in custom_fields]
+                    if include_description or has_desc_in_custom:
                         column_headers.append('description')
-                    if custom_fields:
-                        column_headers.extend(custom_fields)
+                    # Then remaining custom fields (rendered in parentheses)
+                    for f in custom_fields:
+                        if f.lower() != 'description':
+                            column_headers.append(f)
                     temp_f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
                     for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                         entries = grouped_entries[entry_type]
@@ -1160,25 +1164,28 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                 gender = entry.get('gender', '')
                                 if gender and gender != 'Unknown':
                                     line += f" [{gender}]"
-                            # Write description directly from entry dict (not just custom_fields)
-                            desc_written = False
-                            if include_description:
-                                desc_value = entry.get('description', '').strip()
-                                if desc_value:
-                                    line += f": {desc_value}"
-                                    desc_written = True
+                            # Gather custom field values
                             custom_field_parts = []
                             for field in custom_fields:
-                                # Skip description if already written above
-                                if field.lower() == 'description' and desc_written:
+                                # Skip description — it's handled separately below
+                                if field.lower() == 'description':
                                     continue
                                 value = entry.get(field, '').strip()
                                 if value:
-                                    if field.lower() in ['description', 'notes', 'details']:
-                                        line += f": {value}"
+                                    if field.lower() in ['notes', 'details']:
+                                        custom_field_parts.append(f"{field}: {value}")
                                     else:
                                         custom_field_parts.append(f"{field}: {value}")
-                            if custom_field_parts:
+                            # Write description (main body text after colon)
+                            desc_value = ''
+                            if include_description:
+                                desc_value = entry.get('description', '').strip()
+                            if desc_value:
+                                if custom_field_parts:
+                                    line += f": {desc_value} ({', '.join(custom_field_parts)})"
+                                else:
+                                    line += f": {desc_value}"
+                            elif custom_field_parts:
                                 line += f" ({', '.join(custom_field_parts)})"
                             temp_f.write(line + "\n")
                         temp_f.write("\n")
@@ -1256,8 +1263,18 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                         if has_gender:
                             column_headers.append('gender')
-                        if custom_fields_list:
-                            column_headers.extend(custom_fields_list)
+                        # Description always comes right after gender (rendered as main body text)
+                        include_desc_fallback = (
+                            os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
+                            any(entry.get('description', '').strip() for entry in sorted_glossary)
+                        )
+                        has_desc_in_custom = 'description' in [f.lower() for f in custom_fields_list]
+                        if include_desc_fallback or has_desc_in_custom:
+                            column_headers.append('description')
+                        # Then remaining custom fields (rendered in parentheses)
+                        for f in custom_fields_list:
+                            if f.lower() != 'description':
+                                column_headers.append(f)
                         f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
                         for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                             entries = grouped_entries[entry_type]
@@ -1274,13 +1291,18 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                         line += f" [{gender}]"
                                 custom_field_parts = []
                                 for field in custom_fields:
+                                    if field.lower() == 'description':
+                                        continue
                                     value = entry.get(field, '').strip()
                                     if value:
-                                        if field.lower() in ['description', 'notes', 'details']:
-                                            line += f": {value}"
-                                        else:
-                                            custom_field_parts.append(f"{field}: {value}")
-                                if custom_field_parts:
+                                        custom_field_parts.append(f"{field}: {value}")
+                                desc_value = entry.get('description', '').strip() if include_desc_fallback else ''
+                                if desc_value:
+                                    if custom_field_parts:
+                                        line += f": {desc_value} ({', '.join(custom_field_parts)})"
+                                    else:
+                                        line += f": {desc_value}"
+                                elif custom_field_parts:
                                     line += f" ({', '.join(custom_field_parts)})"
                                 f.write(line + "\n")
                             f.write("\n")

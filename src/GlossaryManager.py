@@ -1533,14 +1533,14 @@ def _convert_to_token_efficient_format(csv_lines):
         header_parts = _gsplit(header, sep) if header else []
     if 'gender' in header_parts:
         columns.append('gender')
-    # Add custom fields first (exclude type, raw_name, translated_name, gender, description)
+    # Description comes right after gender (rendered as main body text after colon)
+    if 'description' in header_parts:
+        columns.append('description')
+    # Then custom fields (rendered in parentheses)
     standard_cols = {'type', 'raw_name', 'translated_name', 'gender', 'description'}
     for col in header_parts:
         if col.lower() not in standard_cols and col:
             columns.append(col)
-    # Description goes last since the token-efficient format renders it at the end
-    if 'description' in header_parts:
-        columns.append('description')
     result.append(f"Glossary Columns: {', '.join(columns)}\n")
     
     # Process in order: character first, then term, then others
@@ -1613,15 +1613,16 @@ def _convert_to_token_efficient_format(csv_lines):
                     if val:
                         extra_segments.append(f"{col}: {val}")
 
-            base_desc = desc_val
-            if not base_desc and extra_segments:
-                base_desc = extra_segments[0]
-                extra_segments = extra_segments[1:]
-
-            if base_desc:
-                entry_line += f": {base_desc}"
-            for seg in extra_segments:
-                entry_line += f" | {seg}"
+            # Render: description last (matches header order: custom fields, then description)
+            if desc_val:
+                if extra_segments:
+                    entry_line += f": {desc_val} ({', '.join(extra_segments)})"
+                else:
+                    entry_line += f": {desc_val}"
+            elif extra_segments:
+                entry_line += f": {extra_segments[0]}"
+                for seg in extra_segments[1:]:
+                    entry_line += f", {seg}"
 
             result.append(entry_line)
         

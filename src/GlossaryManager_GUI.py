@@ -4201,16 +4201,25 @@ CRITICAL EXTRACTION RULES:
 
                        # Pattern: * translated (raw) [gender]: description
                        import re
-                       m = re.match(r'^\*\s+(.*?)\s*(?:\((.*?)\))?\s*(?:\[(.*?)\])?\s*(?::\s*(.*))?$', line)
+                       m = re.match(r'^\*\s+(.*?)\s*\(([^)]*)\)\s*((?:\([^)]+\)\s*)*)\s*(?:\[(.*?)\])?\s*((?:\([^)]+\)\s*)*)\s*(?::\s*(.*))?$', line)
                        if not m:
                            continue
                        translated = (m.group(1) or '').strip()
                        raw_name = (m.group(2) or '').strip()
-                       bracket = (m.group(3) or '').strip()
-                       desc = (m.group(4) or '').strip()
+                       pre_extras_raw = (m.group(3) or '').strip()
+                       bracket = (m.group(4) or '').strip()
+                       post_extras_raw = (m.group(5) or '').strip()
+                       desc = (m.group(6) or '').strip()
 
-                       # Split out extra column values encoded as " | key: val"
+                       # Parse parenthetical extras like "(item_detail: value)" into extra_values
                        extra_values = {}
+                       paren_extras_raw = f"{pre_extras_raw} {post_extras_raw}".strip()
+                       if paren_extras_raw:
+                           for paren_m in re.finditer(r'\(([^)]+)\)', paren_extras_raw):
+                               content = paren_m.group(1).strip()
+                               if ':' in content:
+                                   k, v = content.split(':', 1)
+                                   extra_values[k.strip()] = v.strip()
                        if desc and ' | ' in desc:
                            parts = desc.split(' | ')
                            desc = parts[0].strip()
