@@ -313,10 +313,9 @@ class _BrowserManager:
             except queue.Empty:
                 break
 
-        # JavaScript: type into chat, send, poll DOM for response
+        # JavaScript: select model, type into chat, send, poll DOM for response
         js_chat = """
-        async (prompt) => {
-            // Helper: wait ms
+        async ({prompt, model}) => {
             const wait = ms => new Promise(r => setTimeout(r, ms));
 
             // 1. Click "New Chat" to start fresh
@@ -328,17 +327,76 @@ class _BrowserManager:
                 await wait(1500);
             }
 
-            // 2. Find textarea
-            let textarea = document.querySelector('textarea');
-            if (!textarea) {
-                // Try contenteditable
-                textarea = document.querySelector('[contenteditable="true"]');
-            }
-            if (!textarea) {
-                return {error: true, message: 'No chat input found. Title: ' + document.title + ' URL: ' + location.href};
+            // 2. Select the model if specified
+            if (model) {
+                // Click the model selector button (shows current model name)
+                const modelBtn = document.querySelector(
+                    'button[aria-label="Models"] , button.model-selector, ' +
+                    '[class*="model"] button, button:has(> span + svg)'
+                );
+                // Try finding by text content - the model name is displayed
+                let selectorBtn = modelBtn;
+                if (!selectorBtn) {
+                    const allBtns = document.querySelectorAll('button');
+                    for (const b of allBtns) {
+                        const txt = (b.textContent || '').toLowerCase();
+                        if (txt.includes('glm') || txt.includes('model')) {
+                            selectorBtn = b;
+                            break;
+                        }
+                    }
+                }
+                if (selectorBtn) {
+                    selectorBtn.click();
+                    await wait(800);
+
+                    // Search for the model in the dropdown
+                    const searchInput = document.querySelector(
+                        'input[placeholder*="model" i], input[placeholder*="search" i], ' +
+                        'input[placeholder*="Model" i]'
+                    );
+                    if (searchInput) {
+                        searchInput.focus();
+                        const setter = Object.getOwnPropertyDescriptor(
+                            HTMLInputElement.prototype, 'value'
+                        ).set;
+                        setter.call(searchInput, model);
+                        searchInput.dispatchEvent(new Event('input', {bubbles: true}));
+                        await wait(500);
+                    }
+
+                    // Click the matching model option
+                    const options = document.querySelectorAll(
+                        '[class*="option"], [class*="item"], [role="option"], ' +
+                        'li, button[class*="model"]'
+                    );
+                    const modelLower = model.toLowerCase();
+                    for (const opt of options) {
+                        const text = (opt.textContent || '').toLowerCase();
+                        if (text.includes(modelLower) || modelLower.includes(text.trim())) {
+                            opt.click();
+                            await wait(500);
+                            break;
+                        }
+                    }
+
+                    // Close dropdown if still open (click elsewhere)
+                    document.body.click();
+                    await wait(300);
+                }
             }
 
-            // 3. Set value using Playwright-compatible method
+            // 3. Find textarea
+            let textarea = document.querySelector('textarea');
+            if (!textarea) textarea = document.querySelector('[contenteditable="true"]');
+            if (!textarea) {
+                return {error: true, message: 'No chat input found'};
+            }
+
+            // 4. Count existing message blocks BEFORE sending
+            const existingBlocks = document.querySelectorAll('.prose').length;
+
+            // 5. Type the prompt
             textarea.focus();
             if (textarea.tagName === 'TEXTAREA') {
                 const setter = Object.getOwnPropertyDescriptor(
@@ -352,16 +410,14 @@ class _BrowserManager:
             textarea.dispatchEvent(new Event('change', {bubbles: true}));
             await wait(500);
 
-            // 4. Send — find the send/submit button
+            // 6. Click send
             let sent = false;
-            // Try form submit button
             const submitBtn = textarea.closest('form')?.querySelector('button[type="submit"]');
             if (submitBtn && !submitBtn.disabled) {
                 submitBtn.click();
                 sent = true;
             }
             if (!sent) {
-                // Try any nearby button with an SVG (icon button = send)
                 const container = textarea.closest('div.relative, div.flex, form') || textarea.parentElement;
                 const btns = container?.querySelectorAll('button') || [];
                 for (const b of btns) {
@@ -373,46 +429,57 @@ class _BrowserManager:
                 }
             }
             if (!sent) {
-                // Last resort: Enter key
                 textarea.dispatchEvent(new KeyboardEvent('keydown', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true
+                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
                 }));
             }
 
-            // 5. Wait for response — poll DOM
-            await wait(3000);
+            // 7. Poll for assistant response (look for NEW .prose blocks)
+            await wait(2000);
+            try { await window._authza_emit('__STATUS:thinking__'); } catch(e) {}
 
             let prevLen = 0;
             let stableCount = 0;
             let bestContent = '';
+            let firstContent = false;
 
-            for (let i = 0; i < 1200; i++) {  // max ~10 min
+            for (let i = 0; i < 1200; i++) {
                 await wait(500);
 
-                // Find all rendered message blocks
-                // Open WebUI uses .prose for markdown-rendered content
-                const blocks = document.querySelectorAll('.prose');
-                if (blocks.length < 2) continue;  // need at least user + assistant
+                // Check for "Thinking..." indicator
+                const thinkingEl = document.querySelector('[class*="thinking"], [class*="Thinking"]');
+                if (thinkingEl && !firstContent) {
+                    // Still thinking, emit periodic status
+                    if (i % 6 === 0) {  // every 3 seconds
+                        try { await window._authza_emit('__STATUS:thinking__'); } catch(e) {}
+                    }
+                }
 
-                // Last .prose block is the assistant response
-                const lastBlock = blocks[blocks.length - 1];
+                // Get ALL .prose blocks and find new ones
+                const allBlocks = document.querySelectorAll('.prose');
+                if (allBlocks.length <= existingBlocks) continue;
+
+                // The NEW block(s) are after the existing ones
+                // The last one is the assistant response
+                const lastBlock = allBlocks[allBlocks.length - 1];
                 const content = (lastBlock.innerText || '').trim();
 
                 if (content.length === 0) continue;
 
-                // Check if content is growing
                 if (content.length > prevLen) {
-                    // Emit the new portion
+                    if (!firstContent) {
+                        firstContent = true;
+                        try { await window._authza_emit('__STATUS:streaming__'); } catch(e) {}
+                    }
                     const delta = content.substring(prevLen);
                     try { await window._authza_emit(delta); } catch(e) {}
                     prevLen = content.length;
                     bestContent = content;
                     stableCount = 0;
-                } else if (content.length === prevLen && content.length > 0) {
+                } else if (content.length === prevLen) {
                     stableCount++;
                     bestContent = content;
-                    // After 3 seconds of no change, consider it done
-                    if (stableCount >= 6) {
+                    if (stableCount >= 6) {  // 3 seconds stable
                         return {content: bestContent, finish_reason: 'stop'};
                     }
                 }
@@ -443,7 +510,10 @@ class _BrowserManager:
                 except Exception:
                     self._chunk_fn_exposed = True
 
-            return page.evaluate(js_chat, combined_prompt)
+            return page.evaluate(
+                js_chat,
+                {"prompt": combined_prompt, "model": model},
+            )
 
         result_holder = {"result": None, "error": None}
         eval_done = threading.Event()
@@ -461,11 +531,21 @@ class _BrowserManager:
         _pw_thread._work_q.put((_run, rq))
 
         # Stream chunks while waiting
+        thinking_shown = False
         while not eval_done.is_set():
             if is_cancelled():
                 break
             try:
                 chunk = chunk_q.get(timeout=0.5)
+                if chunk == '__STATUS:thinking__':
+                    if not thinking_shown and log_fn:
+                        log_fn("🤔 Z.AI: Model is thinking…", flush=True)
+                        thinking_shown = True
+                    continue
+                if chunk == '__STATUS:streaming__':
+                    if log_fn:
+                        log_fn("📝 Z.AI: Streaming response…", flush=True)
+                    continue
                 if log_stream and log_fn:
                     log_fn(chunk, end="", flush=True)
             except queue.Empty:
@@ -475,6 +555,8 @@ class _BrowserManager:
         while not chunk_q.empty():
             try:
                 chunk = chunk_q.get_nowait()
+                if chunk.startswith('__STATUS:'):
+                    continue
                 if log_stream and log_fn:
                     log_fn(chunk, end="", flush=True)
             except queue.Empty:
