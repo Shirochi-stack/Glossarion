@@ -4992,7 +4992,7 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
 
 # ---------- AI Hunter Truncation Detection ----------
 
-def run_ai_truncation_check(source_html, trans_html, client, tail_chars=800, log=print,
+def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
                             custom_system_prompt=None):
     """Check if translated content appears truncated by asking an AI model.
 
@@ -6728,7 +6728,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
             'check_ai_truncation_detection': False,
-            'ai_truncation_tail_chars': 800,
+            'ai_truncation_tail_chars': 400,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
@@ -7755,7 +7755,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         import threading as _threading_ai
         from concurrent.futures import ThreadPoolExecutor as _AIThreadPool, as_completed as _ai_as_completed
 
-        _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 800))
+        _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))
         _ai_custom_prompt = qa_settings.get('ai_truncation_prompt', None)
 
         # Create a UnifiedClient shared across threads (thread-safe via internal locking)

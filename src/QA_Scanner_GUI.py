@@ -336,7 +336,7 @@ class QAScannerMixin:
             'truncation_length_threshold': 30,
             'truncation_embed_threshold': 30,
             'check_ai_truncation_detection': False,
-            'ai_truncation_tail_chars': 800,
+            'ai_truncation_tail_chars': 400,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
@@ -3050,7 +3050,7 @@ class QAScannerMixin:
         ai_truncation_tail_spinbox.setMinimum(200)
         ai_truncation_tail_spinbox.setMaximum(5000)
         ai_truncation_tail_spinbox.setSingleStep(100)
-        ai_truncation_tail_spinbox.setValue(int(qa_settings.get('ai_truncation_tail_chars', 800)))
+        ai_truncation_tail_spinbox.setValue(int(qa_settings.get('ai_truncation_tail_chars', 400)))
         ai_truncation_tail_spinbox.setFixedWidth(100)
         disable_wheel_event(ai_truncation_tail_spinbox)
         ai_trunc_tail_layout.addWidget(ai_truncation_tail_spinbox)
@@ -3162,7 +3162,7 @@ class QAScannerMixin:
             btn_row.addWidget(cancel_btn)
 
             playout.addLayout(btn_row)
-            prompt_dlg.exec()
+            prompt_dlg.show()
 
         edit_prompt_btn.clicked.connect(_open_prompt_editor)
         ai_trunc_btn_layout.addWidget(edit_prompt_btn)
