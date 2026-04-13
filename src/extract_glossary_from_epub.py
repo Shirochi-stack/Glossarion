@@ -1806,6 +1806,12 @@ def parse_api_response(response_text: str) -> List[Dict]:
 
             # Detect and store header to preserve every returned column
             _GSEP = '\x1F'
+            # Normalize literal \x1F text to the actual byte (models may output the escape as text)
+            if '\\x1F' in line or '\\x1f' in line:
+                line = line.replace('\\x1F', _GSEP).replace('\\x1f', _GSEP)
+            # Normalize tab-separated output to \x1F (some models use tabs when they can't produce the control char)
+            if _GSEP not in line and '\t' in line and line.count('\t') >= 2:
+                line = line.replace('\t', _GSEP)
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 if _GSEP in line:
                     header_fields = [c.strip() for c in line.split(_GSEP) if c.strip()]
@@ -1985,7 +1991,7 @@ def build_prompt(chapter_text: str) -> tuple:
         # If no custom prompt, create a default
         custom_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (written as \\x1F).
 Columns and entry types in this exact order provided:
 
 {fields}
@@ -1993,7 +1999,7 @@ Columns and entry types in this exact order provided:
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
-IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
+IMPORTANT: Do NOT use commas, tabs, or pipes as field separators. Use ONLY the Unit Separator character \\x1F between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
@@ -2038,7 +2044,7 @@ CRITICAL EXTRACTION RULES:
             header_parts = ['type', 'raw_name', 'translated_name', 'gender']
             if custom_fields:
                 header_parts.extend(custom_fields)
-            fields_spec.append(f"Columns (separated by Unit Separator U+001F):\n{'\x1F'.join(header_parts)}")
+            fields_spec.append(f"Columns (separated by Unit Separator character \\x1F):\n{'\\x1F'.join(header_parts)}")
             
             # List valid entry types
             type_names = [t[0] for t in enabled_types]

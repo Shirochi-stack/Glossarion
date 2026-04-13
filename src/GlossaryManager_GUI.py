@@ -3101,12 +3101,12 @@ CRITICAL EXTRACTION RULES:
         # Default unified prompt (combines system + extraction instructions)
         default_unified_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+You must strictly return ONLY CSV format with columns separated by the Unit Separator character (written as \x1F).
 Columns in this exact order: type\x1fraw_name\x1ftranslated_name\x1fgender\x1fdescription
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
+IMPORTANT: Do NOT use commas, tabs, or pipes as field separators. Use ONLY the Unit Separator character \x1F between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 
