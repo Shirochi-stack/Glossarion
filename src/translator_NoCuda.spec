@@ -1139,7 +1139,6 @@ excludes = [
     # CUDA-specific ONNX
     'onnxruntime-gpu',
     'onnxruntime_gpu',
-	'scipy',
     
     # Paddle GPU
     'paddle.fluid.core_avx',
