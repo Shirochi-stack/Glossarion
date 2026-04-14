@@ -6976,12 +6976,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         log(f"📚 Source file: {os.path.basename(epub_path)} | Mode: {'TEXT' if text_file_mode else 'EPUB/HTML'}")
     
     # Create a combined stop check function
+    _stop_logged = [False]  # mutable so inner fn can flip it once
+
     def should_stop():
         if stop_flag and stop_flag():
-            log("⛔ Stop requested via GUI stop button")
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Stop requested via GUI stop button")
             return True
         if _stop_flag:
-            log("⛔ Stop requested via global stop_scan() function")
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Stop requested via global stop_scan() function")
             return True
         return False
     
@@ -7519,6 +7525,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 
                 # Log individual file progress like original
                 for result in batch_results:
+                    if should_stop():
+                        break
                     processed_count += 1
                     idx = result['file_index']
                     filename = result['filename']
@@ -7642,6 +7650,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     log("\n✅ Initial scan complete.")
     
+    # Bail out early if stop was requested during file processing
+    if should_stop():
+        log("⛔ QA scan stopped after initial file processing.")
+        return
+
     # Time the duplicate detection phase
     dup_start_time = time.time()
     
@@ -7696,6 +7709,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Check each file for all issues (this part is fast, no need to parallelize)
     for idx, result in enumerate(results):
+        if should_stop():
+            log("⛔ QA scan stopped during issue processing.")
+            break
         issues = result.get('issues', [])
         
         # Check duplicates
@@ -8283,6 +8299,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         result.pop('structural_sig', None)
         result.pop('normalized_text', None)
     
+    if should_stop():
+        log("⛔ QA scan stopped before report generation.")
+        return
+
     # Generate reports
     generate_reports(results, folder_path, duplicate_confidence, log, qa_settings)
     
