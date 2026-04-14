@@ -3413,7 +3413,7 @@ class QAScannerMixin:
         from PySide6.QtWidgets import QDoubleSpinBox
         ai_temp_spin = QDoubleSpinBox()
         ai_temp_spin.setMinimum(-1.0)
-        ai_temp_spin.setMaximum(2.0)
+        ai_temp_spin.setMaximum(1.0)
         ai_temp_spin.setSingleStep(0.1)
         ai_temp_spin.setDecimals(2)
         ai_temp_spin.setValue(float(qa_settings.get('ai_truncation_temperature', 0.0)))
@@ -3421,6 +3421,23 @@ class QAScannerMixin:
         ai_temp_spin.setToolTip("-1 = use global temperature")
         disable_wheel_event(ai_temp_spin)
         ai_params_h.addWidget(ai_temp_spin)
+        
+        # Snap negative values in-between 0 and -1 directly
+        ai_temp_spin.setProperty("last_val", ai_temp_spin.value())
+        def enforce_temp_snap(val):
+            last_val = ai_temp_spin.property("last_val")
+            ai_temp_spin.blockSignals(True)
+            if -1.0 < val < 0.0:
+                if last_val >= 0.0:
+                    val = -1.0
+                elif last_val <= -1.0:
+                    val = 0.0
+                else:
+                    val = -1.0
+                ai_temp_spin.setValue(val)
+            ai_temp_spin.setProperty("last_val", val)
+            ai_temp_spin.blockSignals(False)
+        ai_temp_spin.valueChanged.connect(enforce_temp_snap)
 
         ai_temp_hint = QLabel("(-1 = global)")
         ai_temp_hint.setFont(QFont('Arial', 8))
@@ -3472,6 +3489,23 @@ class QAScannerMixin:
         ai_delay_spin.setToolTip("-1 = use global API call delay")
         disable_wheel_event(ai_delay_spin)
         ai_delay_h.addWidget(ai_delay_spin)
+        
+        # Snap negative values in-between 0 and -1 directly
+        ai_delay_spin.setProperty("last_val", ai_delay_spin.value())
+        def enforce_delay_snap(val):
+            last_val = ai_delay_spin.property("last_val")
+            ai_delay_spin.blockSignals(True)
+            if -1.0 < val < 0.0:
+                if last_val >= 0.0:
+                    val = -1.0
+                elif last_val <= -1.0:
+                    val = 0.0
+                else:
+                    val = -1.0
+                ai_delay_spin.setValue(val)
+            ai_delay_spin.setProperty("last_val", val)
+            ai_delay_spin.blockSignals(False)
+        ai_delay_spin.valueChanged.connect(enforce_delay_snap)
 
         ai_delay_hint = QLabel("sec  (-1 = global)")
         ai_delay_hint.setFont(QFont('Arial', 8))
