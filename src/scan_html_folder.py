@@ -8130,6 +8130,20 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _model = _dedicated_model or qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
             _output_dir = folder_path
 
+            # Apply QA scan key environment variables if enabled in config
+            if _ai_config.get('use_qa_scan_keys', False):
+                os.environ['USE_QA_SCAN_KEYS'] = '1'
+                qa_keys = _ai_config.get('qa_scan_keys', [])
+                if qa_keys:
+                    os.environ['QA_SCAN_API_KEYS'] = json.dumps(qa_keys)
+                    UnifiedClient.set_in_memory_qa_scan_keys(
+                        qa_keys,
+                        force_rotation=_ai_config.get('force_key_rotation', True),
+                        rotation_frequency=_ai_config.get('rotation_frequency', 1)
+                    )
+            else:
+                os.environ['USE_QA_SCAN_KEYS'] = '0'
+
             # Apply custom endpoint URL override for local LLM support
             if _dedicated_url:
                 _ai_config = dict(_ai_config)  # Don't mutate the original
@@ -8142,7 +8156,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             # Wire QA scanner's stop flag into the client so in-flight API
             # calls abort immediately when the user presses Stop.
             # Force-stop only — no graceful stop needed for simple QA queries.
-            _ai_client._stop_callback = lambda: _stop_flag
+            _ai_client._stop_callback = should_stop
         except Exception as _client_err:
             log(f"   ⚠️ Could not create API client for AI truncation detection: {_client_err}")
             _ai_client = None
