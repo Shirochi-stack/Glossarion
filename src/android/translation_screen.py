@@ -654,18 +654,31 @@ class TranslationScreen(MDScreen):
 
     # ── Glossary File Picker ──
 
+    def _init_file_manager_glossary(self):
+        if not hasattr(self, 'file_manager_glossary'):
+            from kivymd.uix.filemanager import MDFileManager
+            self.file_manager_glossary = MDFileManager(
+                exit_manager=self._exit_fm_glossary,
+                select_path=self._on_fm_glossary_selected,
+                ext=['.csv']
+            )
+
     def _pick_glossary(self):
         """Open a file picker to select a glossary CSV file."""
         try:
-            from plyer import filechooser
-            filechooser.open_file(
-                title="Select Glossary CSV",
-                filters=[("CSV files", "*.csv")],
-                on_selection=self._on_glossary_selected,
-                multiple=False,
-            )
+            self._init_file_manager_glossary()
+            from android_file_utils import is_android, get_documents_dir
+            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
+            self.file_manager_glossary.show(start_path)
         except Exception as e:
             logger.error(f"Glossary file picker error: {e}")
+
+    def _exit_fm_glossary(self, *args):
+        self.file_manager_glossary.close()
+
+    def _on_fm_glossary_selected(self, path):
+        self._exit_fm_glossary()
+        self._on_glossary_selected([path])
 
     def _on_glossary_selected(self, selection):
         """Handle glossary file selection."""
@@ -680,32 +693,44 @@ class TranslationScreen(MDScreen):
                 except Exception:
                     pass
 
-    # ── AuthGPT OAuth ──
+    # ── AuthGPT / AuthGem OAuth ──
+
+    def _get_auth_system_name(self):
+        if self.model_name.lower().startswith('authgem'):
+            return "AuthGem"
+        return "AuthGPT"
+
+    def _update_auth_btn_label(self):
+        sys_name = self._get_auth_system_name()
+        if self.authgpt_logged_in:
+            from android_oauth import get_account_email
+            email = get_account_email()
+            self.authgpt_status_text = f"{sys_name}: {email}" if email else f"{sys_name}: Logged In"
+        else:
+            self.authgpt_status_text = f"{sys_name}: Login"
 
     def _check_authgpt_status(self):
-        """Check if AuthGPT token exists and update UI accordingly."""
+        """Check if Auth token exists and update UI accordingly."""
         try:
-            from android_oauth import has_valid_token, get_account_email
+            from android_oauth import has_valid_token
             if has_valid_token():
-                email = get_account_email()
                 self.authgpt_logged_in = True
-                self.authgpt_status_text = f"AuthGPT: {email}" if email else "AuthGPT: Logged In"
             else:
                 self.authgpt_logged_in = False
-                self.authgpt_status_text = "AuthGPT: Login"
+            self._update_auth_btn_label()
         except Exception:
             self.authgpt_logged_in = False
-            self.authgpt_status_text = "AuthGPT: Login"
+            self._update_auth_btn_label()
 
     def authgpt_login_toggle(self):
-        """Start the AuthGPT OAuth flow."""
+        """Start the OAuth flow."""
+        sys_name = self._get_auth_system_name()
         if self.authgpt_logged_in:
-            # Already logged in — show account info
             from kivymd.toast import toast
             toast(f"Already logged in: {self.authgpt_status_text}")
             return
 
-        self.authgpt_status_text = "AuthGPT: Logging in..."
+        self.authgpt_status_text = f"{sys_name}: Logging in..."
         try:
             from android_oauth import start_oauth_flow
             start_oauth_flow(
@@ -713,54 +738,61 @@ class TranslationScreen(MDScreen):
                 on_error=self._on_authgpt_error,
             )
         except Exception as e:
-            self.authgpt_status_text = "AuthGPT: Login"
-            self._append_log(f"[ERR] AuthGPT login failed: {e}")
+            self._update_auth_btn_label()
+            self._append_log(f"[ERR] {sys_name} login failed: {e}")
 
     def _on_authgpt_success(self, tokens):
         self.authgpt_logged_in = True
-        email = ""
-        try:
-            from android_oauth import get_account_email
-            email = get_account_email()
-        except Exception:
-            pass
-        self.authgpt_status_text = f"AuthGPT: {email}" if email else "AuthGPT: Logged In"
-        self._append_log("[OK] AuthGPT login successful!")
+        self._update_auth_btn_label()
+        self._append_log(f"[OK] {self._get_auth_system_name()} login successful!")
         from kivymd.toast import toast
-        toast("AuthGPT: Logged in!")
+        toast(f"{self._get_auth_system_name()}: Logged in!")
 
     def _on_authgpt_error(self, message):
         self.authgpt_logged_in = False
-        self.authgpt_status_text = "AuthGPT: Login"
-        self._append_log(f"[ERR] AuthGPT: {message}")
+        self._update_auth_btn_label()
+        self._append_log(f"[ERR] {self._get_auth_system_name()}: {message}")
         from kivymd.toast import toast
-        toast(f"AuthGPT login failed")
+        toast(f"{self._get_auth_system_name()} login failed")
 
     def authgpt_logout(self):
-        """Clear stored AuthGPT tokens."""
+        """Clear stored OAuth tokens."""
         try:
             from android_oauth import logout
             logout()
         except Exception:
             pass
         self.authgpt_logged_in = False
-        self.authgpt_status_text = "AuthGPT: Login"
+        self._update_auth_btn_label()
         from kivymd.toast import toast
-        toast("AuthGPT: Logged out")
+        toast(f"{self._get_auth_system_name()}: Logged out")
 
     # ── UI ──
 
+    def _init_file_manager_main(self):
+        if not hasattr(self, 'file_manager_main'):
+            from kivymd.uix.filemanager import MDFileManager
+            self.file_manager_main = MDFileManager(
+                exit_manager=self._exit_fm_main,
+                select_path=self._on_fm_main_selected,
+                ext=['.epub', '.txt']
+            )
+
     def pick_file(self):
         try:
-            from plyer import filechooser
-            filechooser.open_file(
-                title="Select EPUB or TXT",
-                filters=[("Books", "*.epub", "*.txt")],
-                on_selection=self._on_file_selected,
-                multiple=False,
-            )
+            self._init_file_manager_main()
+            from android_file_utils import is_android, get_documents_dir
+            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
+            self.file_manager_main.show(start_path)
         except Exception as e:
             self._append_log(f"[WARN] File picker error: {e}")
+
+    def _exit_fm_main(self, *args):
+        self.file_manager_main.close()
+
+    def _on_fm_main_selected(self, path):
+        self._exit_fm_main()
+        self._on_file_selected([path])
 
     def _on_file_selected(self, selection):
         if selection:
@@ -770,33 +802,31 @@ class TranslationScreen(MDScreen):
 
     def show_model_menu(self, caller):
         items = [{"text": m, "viewclass": "OneLineListItem",
-                  "on_release": lambda x=m: self._select_model(x)} for m in DEFAULT_MODELS]
-        self._model_menu = MDDropdownMenu(caller=caller, items=items, width_mult=5)
+                  "height": dp(48), "on_release": lambda x=m: self._select_model(x)} for m in DEFAULT_MODELS]
+        self._model_menu = MDDropdownMenu(caller=caller, items=items, width_mult=5, position="center", max_height=dp(240))
         self._model_menu.open()
 
     def _select_model(self, model):
         self.model_name = model
+        self._update_auth_btn_label()
         if self._model_menu:
             self._model_menu.dismiss()
 
     def show_profile_menu(self, caller):
-        # Start with built-in profiles (full names)
         profiles = list(DEFAULT_PROFILE_NAMES)
-        # Add custom profiles from config
         if self.app:
             for p in self.app.config_data.get('prompt_profiles', {}).keys():
                 if p not in profiles:
                     profiles.append(p)
         items = [{"text": p, "viewclass": "OneLineListItem",
-                  "on_release": lambda x=p: self._select_profile(x)} for p in profiles]
-        self._profile_menu = MDDropdownMenu(caller=caller, items=items, width_mult=5)
+                  "height": dp(48), "on_release": lambda x=p: self._select_profile(x)} for p in profiles]
+        self._profile_menu = MDDropdownMenu(caller=caller, items=items, width_mult=5, position="center", max_height=dp(240))
         self._profile_menu.open()
 
     def _select_profile(self, profile):
         self.active_profile = profile
         if self._profile_menu:
             self._profile_menu.dismiss()
-        # Load the system prompt for this profile
         self.system_prompt = self._get_prompt_for_profile(profile)
 
     def toggle_prompt(self):
@@ -804,13 +834,12 @@ class TranslationScreen(MDScreen):
 
     def show_glossary_menu(self, caller):
         items = [{"text": m, "viewclass": "OneLineListItem",
-                  "on_release": lambda x=m: self._select_glossary_mode(x)} for m in GLOSSARY_MODES]
-        self._glossary_menu = MDDropdownMenu(caller=caller, items=items, width_mult=4)
+                  "height": dp(48), "on_release": lambda x=m: self._select_glossary_mode(x)} for m in GLOSSARY_MODES]
+        self._glossary_menu = MDDropdownMenu(caller=caller, items=items, width_mult=4, position="center", max_height=dp(200))
         self._glossary_menu.open()
 
     def _select_glossary_mode(self, mode):
         self.glossary_mode = mode
-        # Update legacy compat
         self.auto_glossary = mode.lower() not in ('off', 'no_glossary', 'no glossary')
         if self._glossary_menu:
             self._glossary_menu.dismiss()

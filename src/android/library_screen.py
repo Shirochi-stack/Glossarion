@@ -227,18 +227,57 @@ class LibraryScreen(MDScreen):
         if self.app:
             self.app.open_reader(book['path'])
 
-    def pick_file(self):
-        """Open file chooser."""
-        try:
-            from plyer import filechooser
-            filechooser.open_file(
-                title="Select EPUB or TXT file",
-                filters=[("Books", "*.epub", "*.txt")],
-                on_selection=self._on_file_selected,
-                multiple=False,
+    def _init_file_manager(self):
+        if not hasattr(self, 'file_manager'):
+            from kivymd.uix.filemanager import MDFileManager
+            from android_file_utils import is_android, get_documents_dir
+            self._fm_mode = 'file'  # 'file' or 'dir'
+            self.file_manager = MDFileManager(
+                exit_manager=self.exit_manager,
+                select_path=self._on_fm_selected,
+                ext=['.epub', '.txt']
             )
+
+    def pick_file(self):
+        """Open MDFileManager for file selection."""
+        try:
+            self._init_file_manager()
+            self._fm_mode = 'file'
+            from android_file_utils import is_android, get_documents_dir
+            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
+            self.file_manager.show(start_path)
         except Exception as e:
             logger.error(f"File picker error: {e}")
+
+    def browse_folder(self):
+        """Open MDFileManager for folder selection."""
+        try:
+            from kivymd.uix.filemanager import MDFileManager
+            from android_file_utils import is_android, get_documents_dir
+            if not hasattr(self, 'dir_manager'):
+                self.dir_manager = MDFileManager(
+                    exit_manager=self.exit_dir_manager,
+                    select_path=self._on_dir_selected,
+                    search='dirs'
+                )
+            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
+            self.dir_manager.show(start_path)
+        except Exception as e:
+            logger.error(f"Folder picker error: {e}")
+
+    def exit_manager(self, *args):
+        self.file_manager.close()
+
+    def exit_dir_manager(self, *args):
+        self.dir_manager.close()
+
+    def _on_fm_selected(self, path):
+        self.exit_manager()
+        self._on_file_selected([path])
+
+    def _on_dir_selected(self, path):
+        self.exit_dir_manager()
+        self._on_folder_selected([path])
 
     def _on_file_selected(self, selection):
         if selection:
@@ -249,16 +288,6 @@ class LibraryScreen(MDScreen):
                 self.load_books()
                 if self.app:
                     self.app.open_reader(copied)
-
-    def browse_folder(self):
-        try:
-            from plyer import filechooser
-            filechooser.choose_dir(
-                title="Select folder to scan",
-                on_selection=self._on_folder_selected,
-            )
-        except Exception as e:
-            logger.error(f"Folder picker error: {e}")
 
     def _on_folder_selected(self, selection):
         if selection:
@@ -271,3 +300,4 @@ class LibraryScreen(MDScreen):
                     from android_config import save_config
                     save_config(self.app.config_data)
                 self.load_books()
+

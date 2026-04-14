@@ -198,9 +198,11 @@ class GlossarionApp(MDApp):
         self.title = 'Glossarion'
 
     def build(self):
-        # Set dark theme
+        # Set dark theme with more vibrant premium colors
         self.theme_cls.theme_style = "Dark"
-        self.theme_cls.primary_palette = "Blue"
+        self.theme_cls.primary_palette = "DeepPurple"
+        self.theme_cls.accent_palette = "Teal"
+        self.theme_cls.primary_hue = "500"
         self.theme_cls.material_style = "M3"
 
         # Set window background for desktop testing
