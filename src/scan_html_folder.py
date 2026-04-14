@@ -4990,7 +4990,8 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
 # ---------- AI Truncation Detection ----------
 
 def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
-                            custom_system_prompt=None, temperature=None, max_tokens=None):
+                            custom_system_prompt=None, temperature=None, max_tokens=None,
+                            prompt_role='system'):
     """Check if translated content appears truncated by asking an AI model.
 
     Sends the last `tail_chars` characters of both the source and translated
@@ -5056,10 +5057,19 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             "of the source)? Answer YES or NO only."
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        # Build messages based on the configured role
+        if prompt_role == 'user':
+            # Combine system prompt + data into a single user message
+            combined_user = f"{system_prompt}\n\n{user_prompt}"
+            messages = [
+                {"role": "user", "content": combined_user},
+            ]
+        else:
+            # Default: system + user messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
 
         # Send to AI
         # Use the user's configured temperature if provided, otherwise default to 0.0
@@ -7885,6 +7895,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         custom_system_prompt=_ai_custom_prompt,
                         temperature=_ai_temperature,
                         max_tokens=_ai_max_tokens,
+                        prompt_role=qa_settings.get('ai_truncation_prompt_role', 'system'),
                     )
 
                     # Log the verdict

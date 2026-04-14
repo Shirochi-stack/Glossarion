@@ -3083,6 +3083,8 @@ class QAScannerMixin:
         )
         # Store current custom prompt (or default) in a mutable container for the closure
         _ai_trunc_prompt_holder = [qa_settings.get('ai_truncation_prompt', _ai_trunc_default_prompt)]
+        # Store prompt role: 'system' or 'user' (default: system)
+        _ai_trunc_prompt_role_holder = [qa_settings.get('ai_truncation_prompt_role', 'system')]
 
         ai_trunc_btn_row = QWidget()
         ai_trunc_btn_layout = QHBoxLayout(ai_trunc_btn_row)
@@ -3113,13 +3115,72 @@ class QAScannerMixin:
 
         def _open_prompt_editor():
             prompt_dlg = QDialog(dialog)
-            prompt_dlg.setWindowTitle("AI Truncation Detection — Edit System Prompt")
-            prompt_dlg.resize(620, 350)
+            prompt_dlg.setWindowTitle("AI Truncation Detection — Edit Prompt")
+            prompt_dlg.resize(620, 400)
             prompt_dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
             playout = QVBoxLayout(prompt_dlg)
             playout.setContentsMargins(12, 12, 12, 12)
 
-            plabel = QLabel("System prompt sent to your AI model for each chapter check:")
+            # ─── Prompt role toggle (System / User) ───
+            role_row = QWidget()
+            role_h = QHBoxLayout(role_row)
+            role_h.setContentsMargins(0, 0, 0, 6)
+            role_h.setSpacing(12)
+
+            role_label = QLabel("Send prompt as:")
+            role_label.setFont(QFont('Arial', 9))
+            role_label.setStyleSheet("color: #9ca3af;")
+            role_h.addWidget(role_label)
+
+            _radio_style = """
+                QRadioButton {
+                    color: #e0e0e0;
+                    font-size: 9pt;
+                    spacing: 4px;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #4a90d9;
+                    border: 2px solid #6bade0;
+                    border-radius: 7px;
+                }
+                QRadioButton::indicator:unchecked {
+                    background-color: #353535;
+                    border: 2px solid #555;
+                    border-radius: 7px;
+                }
+            """
+
+            system_radio = QRadioButton("System prompt")
+            system_radio.setStyleSheet(_radio_style)
+            system_radio.setToolTip(
+                "The prompt is sent as a system message (role='system').\n"
+                "Best for models that support system instructions."
+            )
+            user_radio = QRadioButton("User prompt")
+            user_radio.setStyleSheet(_radio_style)
+            user_radio.setToolTip(
+                "The prompt is prepended to the user message (role='user').\n"
+                "Use this for models that ignore or don't support system prompts."
+            )
+
+            if _ai_trunc_prompt_role_holder[0] == 'user':
+                user_radio.setChecked(True)
+            else:
+                system_radio.setChecked(True)
+
+            role_group = QButtonGroup(prompt_dlg)
+            role_group.addButton(system_radio, 0)
+            role_group.addButton(user_radio, 1)
+            role_h.addWidget(system_radio)
+            role_h.addWidget(user_radio)
+            role_h.addStretch()
+            playout.addWidget(role_row)
+
+            plabel = QLabel("Prompt sent to your AI model for each chapter check:")
             plabel.setFont(QFont('Arial', 9))
             plabel.setStyleSheet("color: #9ca3af;")
             playout.addWidget(plabel)
@@ -3147,6 +3208,7 @@ class QAScannerMixin:
             )
             def _reset_all_defaults():
                 p_edit.setPlainText(_ai_trunc_default_prompt)
+                system_radio.setChecked(True)
                 check_ai_truncation_checkbox.setChecked(False)
                 ai_truncation_tail_spinbox.setValue(400)
             reset_btn.clicked.connect(_reset_all_defaults)
@@ -3161,6 +3223,14 @@ class QAScannerMixin:
             )
             def _save_prompt():
                 _ai_trunc_prompt_holder[0] = p_edit.toPlainText().strip()
+                _ai_trunc_prompt_role_holder[0] = 'user' if user_radio.isChecked() else 'system'
+                # Update status label
+                if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt or _ai_trunc_prompt_role_holder[0] != 'system':
+                    prompt_status_label.setText(f"(custom prompt, {_ai_trunc_prompt_role_holder[0]} role)")
+                    prompt_status_label.setStyleSheet("color: #f0ad4e;")
+                else:
+                    prompt_status_label.setText("(using default prompt)")
+                    prompt_status_label.setStyleSheet("color: #808080;")
                 prompt_dlg.accept()
             save_btn.clicked.connect(_save_prompt)
             btn_row.addWidget(save_btn)
@@ -3183,8 +3253,8 @@ class QAScannerMixin:
         prompt_status_label = QLabel("(using default prompt)")
         prompt_status_label.setFont(QFont('Arial', 9))
         prompt_status_label.setStyleSheet("color: #808080;")
-        if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt:
-            prompt_status_label.setText("(using custom prompt)")
+        if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt or _ai_trunc_prompt_role_holder[0] != 'system':
+            prompt_status_label.setText(f"(custom prompt, {_ai_trunc_prompt_role_holder[0]} role)")
             prompt_status_label.setStyleSheet("color: #f0ad4e;")
         ai_trunc_btn_layout.addWidget(prompt_status_label)
         ai_trunc_btn_layout.addStretch()
@@ -3951,6 +4021,7 @@ class QAScannerMixin:
                     'check_ai_truncation_detection': (check_ai_truncation_checkbox, lambda x: x.isChecked()),
                     'ai_truncation_tail_chars': (ai_truncation_tail_spinbox, lambda x: x.value()),
                     'ai_truncation_prompt': (_ai_trunc_prompt_holder, lambda x: x[0]),
+                    'ai_truncation_prompt_role': (_ai_trunc_prompt_role_holder, lambda x: x[0]),
                     'ai_truncation_api_key': (ai_key_entry, lambda x: x.text().strip()),
                     'ai_truncation_model': (ai_model_combo, lambda x: x.currentText().strip()),
                     'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
@@ -4300,6 +4371,7 @@ class QAScannerMixin:
                 check_ai_truncation_checkbox.setChecked(False)
                 ai_truncation_tail_spinbox.setValue(400)
                 _ai_trunc_prompt_holder[0] = _ai_trunc_default_prompt
+                _ai_trunc_prompt_role_holder[0] = 'system'
                 ai_key_entry.setText('')
                 ai_model_combo.setCurrentText('')
                 ai_temp_spin.setValue(0.0)
