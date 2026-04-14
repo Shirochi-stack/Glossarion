@@ -82,6 +82,81 @@ except ImportError as e:
 # Default endpoint
 DEFAULT_GRPC_ENDPOINT = "generativelanguage.googleapis.com"
 
+# ── Finish reason mapping ────────────────────────────────────────────────────
+# Proto enum FinishReason integers (google.ai.generativelanguage_v1beta):
+#   0 = FINISH_REASON_UNSPECIFIED, 1 = STOP, 2 = MAX_TOKENS,
+#   3 = SAFETY, 4 = RECITATION, 5 = LANGUAGE, 6 = OTHER,
+#   7 = BLOCKLIST, 8 = PROHIBITED_CONTENT, 9 = SPII
+_FINISH_REASON_INT_MAP = {
+    1: "stop",
+    2: "length",         # MAX_TOKENS → "length" (OpenAI convention)
+    3: "safety",
+    4: "recitation",
+    5: "language",
+    6: "other",
+    7: "safety",         # BLOCKLIST → treat as safety
+    8: "prohibited_content",
+    9: "safety",         # SPII → treat as safety
+}
+
+def _parse_finish_reason(fr_val) -> str:
+    """Robustly convert a protobuf FinishReason enum (or int) to a string.
+    
+    Proto-plus may return the enum name or the raw int depending on the
+    library version and how the field was accessed.  We handle all cases:
+      - int (e.g. 2) → lookup in _FINISH_REASON_INT_MAP
+      - enum with .value (proto-plus) → same lookup
+      - enum with .name (e.g. 'MAX_TOKENS') → substring match
+      - str fallback → substring match on the repr
+    """
+    if fr_val is None or fr_val == 0:
+        return "stop"  # UNSPECIFIED → default to stop
+    
+    # 1) Direct int
+    if isinstance(fr_val, int):
+        return _FINISH_REASON_INT_MAP.get(fr_val, "stop")
+    
+    # 2) Proto-plus enum with .value (int) — most reliable
+    raw_int = getattr(fr_val, 'value', None)
+    if raw_int is not None and isinstance(raw_int, int):
+        mapped = _FINISH_REASON_INT_MAP.get(raw_int)
+        if mapped:
+            return mapped
+    
+    # 3) Proto-plus enum with .name (str like "MAX_TOKENS")
+    name = getattr(fr_val, 'name', None)
+    if name and isinstance(name, str):
+        name_upper = name.upper()
+        if "MAX_TOKENS" in name_upper:
+            return "length"
+        if name_upper == "STOP":
+            return "stop"
+        if "SAFETY" in name_upper or "BLOCKLIST" in name_upper or "SPII" in name_upper:
+            return "safety"
+        if "PROHIBITED" in name_upper:
+            return "prohibited_content"
+        if "RECITATION" in name_upper:
+            return "recitation"
+    
+    # 4) Fallback: str() representation (e.g. "FinishReason.MAX_TOKENS")
+    fr_str = str(fr_val).upper()
+    if "MAX_TOKENS" in fr_str:
+        return "length"
+    if "STOP" in fr_str:
+        return "stop"
+    if "PROHIBITED" in fr_str:
+        return "prohibited_content"
+    if "SAFETY" in fr_str or "BLOCKLIST" in fr_str or "SPII" in fr_str:
+        return "safety"
+    
+    # 5) Last resort: try int() conversion (some wrappers are int-castable)
+    try:
+        return _FINISH_REASON_INT_MAP.get(int(fr_val), "stop")
+    except (ValueError, TypeError):
+        pass
+    
+    return "stop"
+
 
 class GrpcGeminiError(Exception):
     """Error from gRPC Gemini client"""
@@ -407,19 +482,9 @@ class GrpcGeminiClient:
                 if chunk.candidates:
                     candidate = chunk.candidates[0]
                     
-                    # Check finish reason
+                    # Check finish reason (robust: handles int, proto-plus enum, or string)
                     if candidate.finish_reason:
-                        fr_val = candidate.finish_reason
-                        # Convert enum to string
-                        fr_str = str(fr_val)
-                        if "STOP" in fr_str:
-                            finish_reason = "stop"
-                        elif "MAX_TOKENS" in fr_str:
-                            finish_reason = "length"
-                        elif "SAFETY" in fr_str:
-                            finish_reason = "safety"
-                        elif "PROHIBITED" in fr_str:
-                            finish_reason = "prohibited_content"
+                        finish_reason = _parse_finish_reason(candidate.finish_reason)
                     
                     # Extract text from parts
                     if candidate.content and candidate.content.parts:
@@ -727,17 +792,9 @@ class GrpcGeminiClient:
         if response.candidates:
             candidate = response.candidates[0]
             
-            # Check finish reason
+            # Check finish reason (robust: handles int, proto-plus enum, or string)
             if candidate.finish_reason:
-                fr_str = str(candidate.finish_reason)
-                if "STOP" in fr_str:
-                    finish_reason = "stop"
-                elif "MAX_TOKENS" in fr_str:
-                    finish_reason = "length"
-                elif "SAFETY" in fr_str:
-                    finish_reason = "safety"
-                elif "PROHIBITED" in fr_str:
-                    finish_reason = "prohibited_content"
+                finish_reason = _parse_finish_reason(candidate.finish_reason)
             
             # Extract text from content parts (filter out thought parts)
             if candidate.content:
