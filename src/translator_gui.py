@@ -1407,6 +1407,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         print(f"🔧 Initial Azure API Version set: {azure_version}")
         self.use_fallback_keys_var = self.config.get('use_fallback_keys', False)
         self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
+        self.use_qa_scan_keys_var = self.config.get('use_qa_scan_keys', False)
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
@@ -19041,6 +19042,7 @@ Important rules:
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
+                ('use_qa_scan_keys', ['use_qa_scan_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('auto_dpi_scale', ['auto_dpi_scale_var'], True, bool),
                 ('gui_scale_factor', ['gui_scale_factor_var'], 1.0, lambda v: safe_float(v, 1.0)),
