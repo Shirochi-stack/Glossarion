@@ -5150,7 +5150,7 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
         
         with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay):
-            response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
+            response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='Truncation')
 
         # Parse response
         if isinstance(response, tuple):
