@@ -323,6 +323,7 @@ class QAScannerMixin:
             'flag_excess_punctuation': False,
             'excess_punctuation_threshold': 49,
             'check_glossary_leakage': True,
+            'check_potential_truncation': True,
             'check_missing_images': True,
             'min_file_length': 0,
             'report_format': 'detailed',
@@ -2494,6 +2495,10 @@ class QAScannerMixin:
         check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
         detection_layout.addWidget(check_glossary_checkbox)
         
+        check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential truncation (last sentence missing ending punctuation)")
+        check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', True))
+        detection_layout.addWidget(check_potential_truncation_checkbox)
+        
         scroll_layout.addSpacing(20)
         
         # File Processing Section
@@ -4038,6 +4043,7 @@ class QAScannerMixin:
                     'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
                     'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
+                    'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
                     'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),
                     'min_duplicate_word_count': (min_dup_words_spinbox, lambda x: x.value()),

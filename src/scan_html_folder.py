@@ -4839,6 +4839,111 @@ def _extract_paragraphs(html):
     return paragraphs
 
 
+def check_potential_truncation(raw_text):
+    """Check if the last sentence in the chapter ends without proper punctuation.
+
+    Expects plain text (already stripped of HTML by extract_text_from_html).
+    Returns a dict with 'flagged' (bool), 'last_sentence' (str), and 'details' (str).
+
+    This is a cheap heuristic: if the very last real sentence doesn't end with
+    a period, exclamation mark, question mark, ellipsis, quotation marks preceded
+    by punctuation, or other common sentence-ending punctuation, we flag it as a
+    potential truncation.
+    """
+    result = {'flagged': False, 'last_sentence': '', 'details': ''}
+
+    if not raw_text or not isinstance(raw_text, str):
+        return result
+
+    import re as _re
+    # raw_text is already plain text (BeautifulSoup get_text), but defensively
+    # decode any leftover HTML entities and collapse whitespace
+    cleaned = raw_text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    cleaned = ' '.join(cleaned.split())
+
+    if not cleaned or len(cleaned) < 10:
+        return result
+
+    # Find the last non-empty "sentence" by splitting on common sentence terminators
+    # then taking whatever comes after the last terminator.
+    # We want to find the last substantial text segment.
+
+    # Strategy: walk backwards from the end of the string, skip trailing whitespace
+    # and any trailing closing markers like quotes/brackets, then check if
+    # there's a sentence-ending punctuation mark.
+
+    # Sentence-ending punctuation (covers Latin, CJK, and common Unicode)
+    _ending_punct = set('.!?…。！？‥⋯')
+    # Characters that can follow ending punctuation (closing quotes, brackets, etc.)
+    _trailing_wrappers = set('"' + "'" + '「」『』【】)]〕〗〙〛»›' + chr(0x201c) + chr(0x201d) + chr(0x2018) + chr(0x2019))
+    # Decorative / emote characters that are intentional stylistic endings (not truncation)
+    _decorative_chars = set('♥♡❤❤️💕☆★♪♫♬~〜♠♣♦○●◇◆△▽▲▼')
+
+    # Walk backwards past trailing wrappers to find the core ending character
+    text = cleaned.rstrip()
+    if not text:
+        return result
+
+    # Store the last ~120 chars for context in the report
+    last_fragment = text[-120:] if len(text) > 120 else text
+
+    # If text ends with a closing quote, it's a completed dialogue — not truncation
+    if text[-1] in _trailing_wrappers:
+        result['details'] = 'ends_with_closing_quote'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # Peel off trailing decorative/emote characters
+    idx = len(text) - 1
+    peeled_decorative = False
+    while idx >= 0 and text[idx] in _decorative_chars:
+        idx -= 1
+        peeled_decorative = True
+
+    if peeled_decorative:
+        # Decorative chars are intentional stylistic endings (e.g. "I love you♥")
+        result['details'] = 'ends_with_decorative'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # Now peel off any trailing wrappers after the decorative chars
+    while idx >= 0 and text[idx] in _trailing_wrappers:
+        idx -= 1
+
+    if idx < 0:
+        result['flagged'] = True
+        result['last_sentence'] = last_fragment
+        result['details'] = 'text_ends_with_only_wrappers'
+        return result
+
+    core_ending_char = text[idx]
+
+    if core_ending_char in _ending_punct:
+        # Ends with proper punctuation — OK
+        result['details'] = 'ends_with_punctuation'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # Also allow a few edge cases that aren't truncation:
+    # 1. Text ending with "---" or "***" (scene breaks / separators)
+    if _re.search(r'[-—–]{3,}\s*$', text) or _re.search(r'[*]{3,}\s*$', text):
+        result['details'] = 'ends_with_separator'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # 2. Text ending with a pure number (e.g. footnotes, chapter numbers)
+    if _re.search(r'\d\s*$', text):
+        result['details'] = 'ends_with_number'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # If we reach here, the text doesn't end with sentence-ending punctuation
+    result['flagged'] = True
+    result['last_sentence'] = last_fragment
+    result['details'] = f"missing_ending_punctuation (last char: '{core_ending_char}')"
+    return result
+
+
 def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', target_lang='en', log=print,
                                  tail_paragraphs=3, sleep_time=2,
                                  cheap_threshold=0.12, borderline_score=0.40,
@@ -6812,6 +6917,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
+            'check_potential_truncation': True,
             'check_ai_truncation_detection': False,
             'ai_truncation_tail_chars': 400,
             'paragraph_threshold': 0.3,
@@ -7157,6 +7263,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
+    log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")
     log(f"   ✓ AI truncation detection: {'ENABLED' if qa_settings.get('check_ai_truncation_detection', False) else 'DISABLED'}")
     log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")
     # Log counting mode
@@ -7746,6 +7853,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             issues.append(f"{artifact['type']}_{artifact['count']}_found")
                 
         
+        # Potential truncation check (last sentence ending punctuation)
+        if qa_settings.get('check_potential_truncation', False):
+            trunc_check = check_potential_truncation(raw_text)
+            if trunc_check['flagged']:
+                last_frag = trunc_check['last_sentence']
+                display_frag = last_frag[-60:] if len(last_frag) > 60 else last_frag
+                issues.append(f"potential_truncation: '...{display_frag}'")
+                log(f"   ✂️ {result['filename']}: Potential truncation — {trunc_check['details']}")
+
         result['issues'] = issues
         result['score'] = len(issues)
         
