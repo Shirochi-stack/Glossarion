@@ -1890,9 +1890,24 @@ def _stream_gemini_common(
         elif not final_content:
             _log("⚠️ AuthGem: Empty response — no text received.")
 
+        # Map Gemini finish reasons to OpenAI-style (same mapping as streaming path)
+        _ns_finish_reason_map = {
+            "STOP": "stop",
+            "MAX_TOKENS": "length",
+            "SAFETY": "content_filter",
+            "RECITATION": "content_filter",
+            "FINISH_REASON_UNSPECIFIED": "stop",
+            "BLOCKLIST": "safety",
+            "PROHIBITED_CONTENT": "prohibited_content",
+            "SPII": "safety",
+            "LANGUAGE": "other",
+            "OTHER": "other",
+        }
+        mapped_finish_reason = _ns_finish_reason_map.get(finish_reason, finish_reason.lower() if finish_reason else "stop")
+
         return {
             "content": final_content,
-            "finish_reason": finish_reason,
+            "finish_reason": mapped_finish_reason,
             "thought_content": thought_text,
             "usage_metadata": usage,
         }
