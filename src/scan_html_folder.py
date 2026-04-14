@@ -8235,6 +8235,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     else:
                         _ai_max_tokens = _dedicated_tokens if _dedicated_tokens > 0 else 2000
 
+                    # Read delay: dedicated setting (-1 = global, else use value)
+                    _dedicated_delay = float(qa_settings.get('ai_truncation_api_call_delay', -1.0))
+                    if _dedicated_delay < 0:
+                        # -1 means use global API call delay from translator config
+                        try:
+                            _ai_delay = float(_ai_config.get('delay', 2))
+                        except (ValueError, TypeError):
+                            _ai_delay = 2.0
+                    else:
+                        _ai_delay = _dedicated_delay
+
                     ai_result = run_ai_truncation_check(
                         matched_source_html, trans_html_content,
                         client=_ai_client,
@@ -8245,7 +8256,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         max_tokens=_ai_max_tokens,
                         prompt_role=qa_settings.get('ai_truncation_prompt_role', 'system'),
                         disable_thinking=qa_settings.get('ai_truncation_disable_thinking', False),
-                        api_call_delay=float(qa_settings.get('ai_truncation_api_call_delay', -1.0)),
+                        api_call_delay=_ai_delay,
                     )
 
                     # Log the verdict
