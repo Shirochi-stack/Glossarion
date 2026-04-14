@@ -12247,6 +12247,10 @@ class UnifiedClient:
         # Get thinking budget from environment
         thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
         
+        # Check if thinking is explicitly disabled
+        if os.getenv("ENABLE_GEMINI_THINKING", "1") == "0":
+            thinking_budget = 0
+        
         # Get thinking level for Gemini 3 (minimal/low/medium/high)
         thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
         model_lower = self.model.lower() if self.model else ""
