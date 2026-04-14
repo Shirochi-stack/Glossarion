@@ -12663,7 +12663,7 @@ class UnifiedClient:
                     # Call OpenAI-compatible endpoint
                     import threading as _thr
                     if not self._is_stop_requested():
-                        print(f"📤 [{_thr.current_thread().name}] API call in progress")
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model})")
 
                     response = self._send_openai_compatible(
                         messages=messages,
@@ -12802,7 +12802,7 @@ class UnifiedClient:
                     if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
                         import threading as _thr
-                        print(f"📤 [{_thr.current_thread().name}] API call in progress")
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model})")
 
                     
                     try:
@@ -12874,7 +12874,7 @@ class UnifiedClient:
                     # Native Gemini API call
                     import threading as _thr
                     if not self._is_stop_requested():
-                        print(f"📤 [{_thr.current_thread().name}] API call in progress")
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model})")
 
                     # Prepare content based on whether we have images
                     contents = []
