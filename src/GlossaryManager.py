@@ -61,6 +61,7 @@ The description column is optional and can contain brief context (role, location
 IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
 Critical Requirement: The translated name and description column must be in {{language}}, While the raw name column must the same as the source language.
+The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
 character{GLOSSARY_SEP}ᫀ이히리ᐐ 나애{GLOSSARY_SEP}Dihirit Ade{GLOSSARY_SEP}female{GLOSSARY_SEP}The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
@@ -70,7 +71,8 @@ CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
+- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
+- Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
