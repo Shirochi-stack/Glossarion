@@ -3212,15 +3212,12 @@ class QAScannerMixin:
             def _reset_all_defaults():
                 reply = QMessageBox.question(
                     prompt_dlg, "Confirm Reset", 
-                    "Are you sure you want to reset the prompt and truncation settings to their defaults?\nThis action cannot be undone.",
+                    "Are you sure you want to reset the prompt to its default?\nThis action cannot be undone.",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No
                 )
                 if reply == QMessageBox.Yes:
                     p_edit.setPlainText(_ai_trunc_default_prompt)
                     system_radio.setChecked(True)
-                    check_ai_truncation_checkbox.setChecked(False)
-                    ai_truncation_tail_spinbox.setValue(400)
-                    ai_disable_thinking_check.setChecked(True)
             reset_btn.clicked.connect(_reset_all_defaults)
             btn_row.addWidget(reset_btn)
             btn_row.addStretch()
