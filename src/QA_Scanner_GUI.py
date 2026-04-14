@@ -3211,6 +3211,7 @@ class QAScannerMixin:
                 system_radio.setChecked(True)
                 check_ai_truncation_checkbox.setChecked(False)
                 ai_truncation_tail_spinbox.setValue(400)
+                ai_disable_thinking_check.setChecked(False)
             reset_btn.clicked.connect(_reset_all_defaults)
             btn_row.addWidget(reset_btn)
             btn_row.addStretch()
@@ -3458,6 +3459,18 @@ class QAScannerMixin:
         ai_url_entry.setText(qa_settings.get('ai_truncation_endpoint_url', ''))
         ai_url_h.addWidget(ai_url_entry)
         ai_api_layout.addWidget(ai_url_row)
+        
+        # ─── Row 5: Disable Thinking Toggle ───
+        ai_thinking_row = QWidget()
+        ai_thinking_h = QHBoxLayout(ai_thinking_row)
+        ai_thinking_h.setContentsMargins(0, 5, 0, 0)
+        ai_thinking_h.setSpacing(8)
+        
+        ai_disable_thinking_check = QCheckBox("Disable all thinking (removes thinking params for fast checks)")
+        ai_disable_thinking_check.setChecked(qa_settings.get('ai_truncation_disable_thinking', False))
+        ai_thinking_h.addWidget(ai_disable_thinking_check)
+        ai_thinking_h.addStretch()
+        ai_api_layout.addWidget(ai_thinking_row)
 
         # Toggle entire API settings group enabled state with the main checkbox
         def _toggle_ai_api_section(checked):
@@ -3484,6 +3497,8 @@ class QAScannerMixin:
             
             ai_url_label.setStyleSheet(f"color: {label_color};")
             ai_url_entry.setStyleSheet(f"color: {color};")
+            
+            ai_disable_thinking_check.setStyleSheet(f"color: {color};" if checked else "color: #909090;")
         check_ai_truncation_checkbox.toggled.connect(_toggle_ai_api_section)
         _toggle_ai_api_section(check_ai_truncation_checkbox.isChecked())
 
@@ -3973,6 +3988,7 @@ class QAScannerMixin:
                     'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
                     'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),
                     'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),
+                    'ai_truncation_disable_thinking': (ai_disable_thinking_check, lambda x: x.isChecked()),
                     'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
                     'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
                 }

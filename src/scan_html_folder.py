@@ -4989,9 +4989,49 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
 
 # ---------- AI Truncation Detection ----------
 
+from contextlib import contextmanager
+import os
+
+@contextmanager
+def _disable_all_thinking_env():
+    """Temporarily disables all framework-level thinking parameters (Anthropic, Gemini, DeepSeek)."""
+    orig_anthropic = os.environ.get('ENABLE_ANTHROPIC_THINKING')
+    orig_gemini = os.environ.get('ENABLE_GEMINI_THINKING')
+    orig_g_level = os.environ.get('GEMINI_THINKING_LEVEL')
+    orig_budget = os.environ.get('THINKING_BUDGET')
+    orig_ds = os.environ.get('ENABLE_DEEPSEEK_THINKING')
+    
+    os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+    os.environ['ENABLE_GEMINI_THINKING'] = '0'
+    os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+    os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+    
+    try:
+        if 'THINKING_BUDGET' in os.environ:
+            del os.environ['THINKING_BUDGET']
+    except Exception:
+        pass
+        
+    try:
+        yield
+    finally:
+        if orig_anthropic is not None: os.environ['ENABLE_ANTHROPIC_THINKING'] = orig_anthropic
+        else: os.environ.pop('ENABLE_ANTHROPIC_THINKING', None)
+        
+        if orig_gemini is not None: os.environ['ENABLE_GEMINI_THINKING'] = orig_gemini
+        else: os.environ.pop('ENABLE_GEMINI_THINKING', None)
+        
+        if orig_ds is not None: os.environ['ENABLE_DEEPSEEK_THINKING'] = orig_ds
+        else: os.environ.pop('ENABLE_DEEPSEEK_THINKING', None)
+        
+        if orig_g_level is not None: os.environ['GEMINI_THINKING_LEVEL'] = orig_g_level
+        else: os.environ.pop('GEMINI_THINKING_LEVEL', None)
+        
+        if orig_budget is not None: os.environ['THINKING_BUDGET'] = orig_budget
+
 def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
                             custom_system_prompt=None, temperature=None, max_tokens=None,
-                            prompt_role='system'):
+                            prompt_role='system', disable_thinking=False):
     """Check if translated content appears truncated by asking an AI model.
 
     Sends the last `tail_chars` characters of both the source and translated
@@ -5075,7 +5115,12 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         # Use the user's configured temperature if provided, otherwise default to 0.0
         _temp = float(temperature) if temperature is not None else 0.0
         _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
-        response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
+        
+        if disable_thinking:
+            with _disable_all_thinking_env():
+                response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
+        else:
+            response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
 
         # Parse response
         if isinstance(response, tuple):
@@ -7896,6 +7941,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         temperature=_ai_temperature,
                         max_tokens=_ai_max_tokens,
                         prompt_role=qa_settings.get('ai_truncation_prompt_role', 'system'),
+                        disable_thinking=qa_settings.get('ai_truncation_disable_thinking', False),
                     )
 
                     # Log the verdict
