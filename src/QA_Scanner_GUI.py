@@ -3208,11 +3208,17 @@ class QAScannerMixin:
                 "QPushButton:hover { background-color: #e0a800; }"
             )
             def _reset_all_defaults():
-                p_edit.setPlainText(_ai_trunc_default_prompt)
-                system_radio.setChecked(True)
-                check_ai_truncation_checkbox.setChecked(False)
-                ai_truncation_tail_spinbox.setValue(400)
-                ai_disable_thinking_check.setChecked(True)
+                reply = QMessageBox.question(
+                    pdialog, "Confirm Reset", 
+                    "Are you sure you want to reset the prompt and truncation settings to their defaults?\nThis action cannot be undone.",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    p_edit.setPlainText(_ai_trunc_default_prompt)
+                    system_radio.setChecked(True)
+                    check_ai_truncation_checkbox.setChecked(False)
+                    ai_truncation_tail_spinbox.setValue(400)
+                    ai_disable_thinking_check.setChecked(True)
             reset_btn.clicked.connect(_reset_all_defaults)
             btn_row.addWidget(reset_btn)
             btn_row.addStretch()
@@ -3467,7 +3473,7 @@ class QAScannerMixin:
         ai_thinking_h.setContentsMargins(0, 5, 0, 0)
         ai_thinking_h.setSpacing(8)
         
-        ai_disable_thinking_check = QCheckBox("Disable all thinking (removes thinking params for fast checks)")
+        ai_disable_thinking_check = self._create_styled_checkbox("Disable all thinking (removes thinking params for fast checks)")
         ai_disable_thinking_check.setChecked(qa_settings.get('ai_truncation_disable_thinking', True))
         ai_thinking_h.addWidget(ai_disable_thinking_check)
         ai_thinking_h.addStretch()
