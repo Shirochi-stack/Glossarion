@@ -3078,6 +3078,8 @@ class QAScannerMixin:
             "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
             "or completely missing the final paragraphs/sentences present in the source).\n"
             "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
+            "Only evaluate the final sentences of the provided texts. Ignore mismatches occurring at the beginning "
+            "of the provided tail segment, as it may have been cleanly cut from a larger document.\n"
             "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
             "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
             "Respond with ONLY the word YES or NO. Do not explain."
@@ -3450,6 +3452,35 @@ class QAScannerMixin:
         ai_params_h.addStretch()
         ai_api_layout.addWidget(ai_params_row)
 
+        # ─── Row 4: API Call Delay ───
+        ai_delay_row = QWidget()
+        ai_delay_h = QHBoxLayout(ai_delay_row)
+        ai_delay_h.setContentsMargins(0, 0, 0, 0)
+        ai_delay_h.setSpacing(8)
+
+        ai_delay_label = QLabel("API Call Delay:")
+        ai_delay_label.setFont(QFont('Arial', 9))
+        ai_delay_label.setFixedWidth(100)
+        ai_delay_h.addWidget(ai_delay_label)
+
+        ai_delay_spin = QDoubleSpinBox()
+        ai_delay_spin.setMinimum(-1.0)
+        ai_delay_spin.setMaximum(60.0)
+        ai_delay_spin.setSingleStep(0.5)
+        ai_delay_spin.setValue(float(qa_settings.get('ai_truncation_api_call_delay', -1.0)))
+        ai_delay_spin.setFixedWidth(100)
+        ai_delay_spin.setToolTip("-1 = use global API call delay")
+        disable_wheel_event(ai_delay_spin)
+        ai_delay_h.addWidget(ai_delay_spin)
+
+        ai_delay_hint = QLabel("sec  (-1 = global)")
+        ai_delay_hint.setFont(QFont('Arial', 8))
+        ai_delay_hint.setStyleSheet("color: #707070;")
+        ai_delay_h.addWidget(ai_delay_hint)
+        
+        ai_delay_h.addStretch()
+        ai_api_layout.addWidget(ai_delay_row)
+
         # ─── Row 4: Custom URL endpoint override ───
         ai_url_row = QWidget()
         ai_url_h = QHBoxLayout(ai_url_row)
@@ -3501,6 +3532,10 @@ class QAScannerMixin:
             ai_tokens_label.setStyleSheet(f"color: {label_color};")
             ai_tokens_spin.setStyleSheet(f"color: {color};")
             ai_tokens_hint.setStyleSheet(f"color: {hint_color};")
+            
+            ai_delay_label.setStyleSheet(f"color: {label_color};")
+            ai_delay_spin.setStyleSheet(f"color: {color};")
+            ai_delay_hint.setStyleSheet(f"color: {hint_color};")
             
             ai_url_label.setStyleSheet(f"color: {label_color};")
             ai_url_entry.setStyleSheet(f"color: {color};")
@@ -3992,6 +4027,7 @@ class QAScannerMixin:
                     'ai_truncation_model': (ai_model_combo, lambda x: x.currentText().strip()),
                     'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
                     'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),
+                    'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: x.value()),
                     'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),
                     'ai_truncation_disable_thinking': (ai_disable_thinking_check, lambda x: x.isChecked()),
                     'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
