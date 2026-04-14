@@ -5019,8 +5019,8 @@ def check_potential_truncation(raw_text):
         return result
 
     # Also allow a few edge cases that aren't truncation:
-    # 1. Text ending with "---" or "***" (scene breaks / separators)
-    if _re.search(r'[-—–]{3,}\s*$', text) or _re.search(r'[*]{3,}\s*$', text):
+    # 1. Text ending with "---", "***", or "===" (scene breaks / separators)
+    if _re.search(r'[-—–]{3,}\s*$', text) or _re.search(r'[*]{3,}\s*$', text) or _re.search(r'[=]{3,}\s*$', text):
         result['details'] = 'ends_with_separator'
         result['last_sentence'] = last_fragment
         return result
