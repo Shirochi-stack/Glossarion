@@ -3325,19 +3325,6 @@ class QAScannerMixin:
         ai_key_entry.setEchoMode(_QLE.Password)
         ai_key_entry.setPlaceholderText("(blank = use main API key)")
         ai_key_entry.setText(qa_settings.get('ai_truncation_api_key', ''))
-        ai_key_entry.setStyleSheet("""
-            QLineEdit {
-                background-color: #353535;
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 9pt;
-            }
-            QLineEdit:focus {
-                border-color: #6b7a8d;
-            }
-        """)
         ai_key_h.addWidget(ai_key_entry)
 
         # Toggle visibility button
@@ -3398,32 +3385,6 @@ class QAScannerMixin:
         else:
             ai_model_combo.setCurrentText('')
         ai_model_combo.lineEdit().setPlaceholderText("(blank = use main model)")
-
-        ai_model_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #353535;
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 9pt;
-            }
-            QComboBox:focus {
-                border-color: #6b7a8d;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 24px;
-                border-left: 1px solid #4a5568;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #353535;
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                selection-background-color: #505050;
-            }
-        """)
         ai_model_h.addWidget(ai_model_combo)
 
         ai_api_layout.addWidget(ai_model_row)
@@ -3448,16 +3409,6 @@ class QAScannerMixin:
         ai_temp_spin.setValue(float(qa_settings.get('ai_truncation_temperature', 0.0)))
         ai_temp_spin.setFixedWidth(80)
         ai_temp_spin.setToolTip("-1 = use global temperature")
-        ai_temp_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                background-color: #353535;
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                border-radius: 3px;
-                padding: 3px 6px;
-                font-size: 9pt;
-            }
-        """)
         disable_wheel_event(ai_temp_spin)
         ai_params_h.addWidget(ai_temp_spin)
 
@@ -3480,16 +3431,6 @@ class QAScannerMixin:
         ai_tokens_spin.setValue(int(qa_settings.get('ai_truncation_max_tokens', 2000)))
         ai_tokens_spin.setFixedWidth(100)
         ai_tokens_spin.setToolTip("-1 = use global output token limit")
-        ai_tokens_spin.setStyleSheet("""
-            QSpinBox {
-                background-color: #353535;
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                border-radius: 3px;
-                padding: 3px 6px;
-                font-size: 9pt;
-            }
-        """)
         disable_wheel_event(ai_tokens_spin)
         ai_params_h.addWidget(ai_tokens_spin)
 
@@ -3515,29 +3456,34 @@ class QAScannerMixin:
         ai_url_entry = _QLE()
         ai_url_entry.setPlaceholderText("(blank = use default endpoint, e.g. http://localhost:1234/v1)")
         ai_url_entry.setText(qa_settings.get('ai_truncation_endpoint_url', ''))
-        ai_url_entry.setStyleSheet("""
-            QLineEdit {
-                background-color: #353535;
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 9pt;
-            }
-            QLineEdit:focus {
-                border-color: #6b7a8d;
-            }
-        """)
         ai_url_h.addWidget(ai_url_entry)
         ai_api_layout.addWidget(ai_url_row)
 
         # Toggle entire API settings group enabled state with the main checkbox
         def _toggle_ai_api_section(checked):
             ai_api_group.setEnabled(checked)
-            if checked:
-                ai_api_group.setStyleSheet(ai_api_group.styleSheet().replace("color: #555;", "color: #9ca3af;"))
-            else:
-                ai_api_group.setStyleSheet(ai_api_group.styleSheet())
+            color = "white" if checked else "#909090"
+            label_color = "white" if checked else "#606060"
+            hint_color = "gray" if checked else "#404040"
+
+            ai_api_desc.setStyleSheet(f"color: {hint_color};")
+            
+            ai_key_label.setStyleSheet(f"color: {label_color};")
+            ai_key_entry.setStyleSheet(f"color: {color};")
+            
+            ai_model_label.setStyleSheet(f"color: {label_color};")
+            ai_model_combo.setStyleSheet(f"color: {color};")
+            
+            ai_temp_label.setStyleSheet(f"color: {label_color};")
+            ai_temp_spin.setStyleSheet(f"color: {color};")
+            ai_temp_hint.setStyleSheet(f"color: {hint_color};")
+            
+            ai_tokens_label.setStyleSheet(f"color: {label_color};")
+            ai_tokens_spin.setStyleSheet(f"color: {color};")
+            ai_tokens_hint.setStyleSheet(f"color: {hint_color};")
+            
+            ai_url_label.setStyleSheet(f"color: {label_color};")
+            ai_url_entry.setStyleSheet(f"color: {color};")
         check_ai_truncation_checkbox.toggled.connect(_toggle_ai_api_section)
         _toggle_ai_api_section(check_ai_truncation_checkbox.isChecked())
 
