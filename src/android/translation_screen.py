@@ -695,25 +695,40 @@ class TranslationScreen(MDScreen):
 
     # ── AuthGPT / AuthGem OAuth ──
 
+    def _get_auth_account_id(self):
+        """Extract multi-account ID from model (e.g. authgpt2/ -> 2)"""
+        import re
+        m = re.match(r'^authgpt(\d{1,4})/', self.model_name.lower())
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        return 0
+
     def _get_auth_system_name(self):
-        if self.model_name.lower().startswith('authgem'):
+        lower = self.model_name.lower()
+        if lower.startswith('authgem'):
             return "AuthGem"
-        return "AuthGPT"
+        acct_id = self._get_auth_account_id()
+        if acct_id > 0:
+            return f"ChatGPT {acct_id}"
+        return "ChatGPT"
 
     def _update_auth_btn_label(self):
         sys_name = self._get_auth_system_name()
         if self.authgpt_logged_in:
             from android_oauth import get_account_email
-            email = get_account_email()
-            self.authgpt_status_text = f"{sys_name}: {email}" if email else f"{sys_name}: Logged In"
+            email = get_account_email(self._get_auth_account_id())
+            self.authgpt_status_text = f"🔓 {sys_name}: {email}" if email else f"🔓 {sys_name}: Logged In"
         else:
-            self.authgpt_status_text = f"{sys_name}: Login"
+            self.authgpt_status_text = f"🔒 {sys_name}: Login"
 
     def _check_authgpt_status(self):
         """Check if Auth token exists and update UI accordingly."""
         try:
             from android_oauth import has_valid_token
-            if has_valid_token():
+            if has_valid_token(self._get_auth_account_id()):
                 self.authgpt_logged_in = True
             else:
                 self.authgpt_logged_in = False
@@ -727,15 +742,16 @@ class TranslationScreen(MDScreen):
         sys_name = self._get_auth_system_name()
         if self.authgpt_logged_in:
             from kivymd.toast import toast
-            toast(f"Already logged in: {self.authgpt_status_text}")
+            toast(f"Already logged in as {self.authgpt_status_text.replace('🔓 ', '')}")
             return
 
-        self.authgpt_status_text = f"{sys_name}: Logging in..."
+        self.authgpt_status_text = f"⏳ {sys_name}: Logging in..."
         try:
             from android_oauth import start_oauth_flow
             start_oauth_flow(
                 on_success=self._on_authgpt_success,
                 on_error=self._on_authgpt_error,
+                account_id=self._get_auth_account_id()
             )
         except Exception as e:
             self._update_auth_btn_label()
@@ -759,7 +775,7 @@ class TranslationScreen(MDScreen):
         """Clear stored OAuth tokens."""
         try:
             from android_oauth import logout
-            logout()
+            logout(self._get_auth_account_id())
         except Exception:
             pass
         self.authgpt_logged_in = False

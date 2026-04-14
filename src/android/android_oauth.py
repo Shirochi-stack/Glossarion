@@ -53,6 +53,7 @@ def start_oauth_flow(
     on_success=None,
     on_error=None,
     timeout: int = 300,
+    account_id: int = 0,
 ):
     """
     Start the AuthGPT OAuth flow on Android.
@@ -71,12 +72,14 @@ def start_oauth_flow(
         Called on the main thread when authentication fails.
     timeout : int
         Maximum seconds to wait for the user to complete login.
+    account_id : int
+        The multi-account ID slot (e.g., 2 for authgpt2).
     """
     def _worker():
         try:
             from authgpt_auth import (
                 generate_pkce, build_auth_url, exchange_code_for_tokens,
-                get_default_store, CALLBACK_HOST, CALLBACK_PORT, CALLBACK_PATH,
+                get_store, CALLBACK_HOST, CALLBACK_PORT, CALLBACK_PATH,
                 _OAuthCallbackHandler,
             )
             from http.server import HTTPServer
@@ -108,7 +111,7 @@ def start_oauth_flow(
             server.timeout = timeout
 
             # Open browser
-            logger.info("Opening browser for AuthGPT login...")
+            logger.info(f"Opening browser for ChatGPT Account {account_id} login...")
             if not _open_browser_android(auth_url):
                 _dispatch_error(on_error, "Could not open browser for login.")
                 server.server_close()
@@ -138,7 +141,7 @@ def start_oauth_flow(
             )
 
             # Save tokens
-            store = get_default_store()
+            store = get_store(account_id)
             store.save_tokens(tokens)
             logger.info("AuthGPT tokens saved successfully.")
 
@@ -171,11 +174,11 @@ def _dispatch_error(on_error, message):
             on_error(message)
 
 
-def has_valid_token() -> bool:
+def has_valid_token(account_id: int = 0) -> bool:
     """Check if we have a valid (non-expired) AuthGPT token."""
     try:
-        from authgpt_auth import get_default_store
-        store = get_default_store()
+        from authgpt_auth import get_store
+        store = get_store(account_id)
         tokens = store.load_tokens()
         if not tokens or not tokens.get("access_token"):
             return False
@@ -186,20 +189,20 @@ def has_valid_token() -> bool:
         return False
 
 
-def get_account_email() -> str:
+def get_account_email(account_id: int = 0) -> str:
     """Return the logged-in email, or empty string."""
     try:
-        from authgpt_auth import get_default_store
-        info = get_default_store().account_info
+        from authgpt_auth import get_store
+        info = get_store(account_id).account_info
         return info.get("email", "")
     except Exception:
         return ""
 
 
-def logout():
+def logout(account_id: int = 0):
     """Clear stored AuthGPT tokens."""
     try:
-        from authgpt_auth import get_default_store
-        get_default_store().clear_tokens()
+        from authgpt_auth import get_store
+        get_store(account_id).clear_tokens()
     except Exception:
         pass
