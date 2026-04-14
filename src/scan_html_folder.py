@@ -1155,11 +1155,74 @@ def detect_ai_artifacts(text):
     except Exception:
         pass
 
+    # Leaked translation rules block — "Rules:" followed by numbered
+    # instructions containing translation-specific keywords.
+    # Only triggers when the rules lines mention translation concepts,
+    # NOT on in-world rules (game rules, guild rules, etc.).
+    _translation_keywords = (
+        'translat', 'glossary', 'korean', 'chinese', 'japanese',
+        'romaniz', 'honorific', 'localize', 'profanity', 'onomatop',
+        'quotation', 'markdown', 'source text', 'target lang',
+        'pronoun', 'romanji', 'romaji', 'hangul', 'kanji',
+    )
+    rules_match = re.search(
+        r'Rules:\s*\n((?:\s*\d+\.\s*.+\n){3,})',
+        text, re.IGNORECASE
+    )
+    if rules_match:
+        rules_block_lower = rules_match.group(1).lower()
+        kw_hits = sum(1 for kw in _translation_keywords if kw in rules_block_lower)
+        if kw_hits >= 2:
+            artifacts_found.append({
+                'type': 'ai_leaked_translation_rules',
+                'count': kw_hits,
+                'examples': [rules_match.group(0)[:200]],
+                'severity': 'critical'
+            })
+
+    # Leaked AI thinking preamble (chain-of-thought leaked into output)
+    _thinking_patterns = [
+        r'(?:^|\n)\s*(?:thought|thinking)\s*\n',
+        r'The user wants (?:a |me to )',
+        r'(?:I need to|Let me) (?:translate|check|analyze|verify)',
+    ]
+    _thinking_hits = []
+    for tp in _thinking_patterns:
+        m = re.search(tp, text, re.IGNORECASE)
+        if m:
+            _thinking_hits.append(m.group(0).strip()[:80])
+    if _thinking_hits:
+        artifacts_found.append({
+            'type': 'ai_thinking_preamble',
+            'count': len(_thinking_hits),
+            'examples': _thinking_hits[:3],
+            'severity': 'high'
+        })
+
+    # Leaked prompt section headers (translation system prompt leaked into output)
+    _prompt_section_headers = [
+        'Glossary Check:',
+        'Glossary:',
+        'Text Analysis:',
+        'Specific Character Conversions',
+        'Character Conversions',
+        'Translation Notes:',
+        'Translation Rules:',
+    ]
+    _found_headers = [h for h in _prompt_section_headers if h.lower() in text.lower()]
+    if len(_found_headers) >= 2:
+        artifacts_found.append({
+            'type': 'ai_prompt_section_headers',
+            'count': len(_found_headers),
+            'examples': _found_headers[:4],
+            'severity': 'critical'
+        })
+
     return artifacts_found
     
 def detect_glossary_leakage(text, threshold=2):
     """
-    Detect if translated text contains raw glossary entries.
+    Detect if translated text contains raw glossary entries or leaked prompts/thinking.
     
     Args:
         text: The translated text to check
@@ -1189,9 +1252,9 @@ def detect_glossary_leakage(text, threshold=2):
         # JSON-like entries
         (r'\{\s*"type"\s*:\s*"[^"]+"\s*,\s*"raw_name"\s*:\s*"[^"]+"\s*,', 'json_entry'),
         # CSV-like entries with Korean/Chinese characters
-        (r'(?:character|term)\s*,\s*[가-힣\u4e00-\u9fff]+\s*,\s*[A-Za-z\s]+\s*,', 'csv_entry'),
+        (r'(?:character|term)\s*,\s*[' + chr(0xAC00) + '-' + chr(0xD7A3) + chr(0x4e00) + '-' + chr(0x9fff) + r']+\s*,\s*[A-Za-z\s]+\s*,', 'csv_entry'),
         # Tab-separated entries
-        (r'(?:character|term)\t[가-힣\u4e00-\u9fff]+\t[A-Za-z\s]+\t', 'tsv_entry'),
+        (r'(?:character|term)\t[' + chr(0xAC00) + '-' + chr(0xD7A3) + chr(0x4e00) + '-' + chr(0x9fff) + r']+\t[A-Za-z\s]+\t', 'tsv_entry'),
     ]
     
     for pattern_str, pattern_type in entry_patterns:
@@ -1230,6 +1293,26 @@ def detect_glossary_leakage(text, threshold=2):
             'examples': char_matches[:2],
             'description': f'Found {len(char_matches)} character/term definitions'
         })
+    
+    
+    # Detect bullet-pointed glossary entries: "- Name (Korean/CJK)" pattern
+    # e.g., "- Pope (교황)", "- Lucas Argent (루카스 아르겐트)"
+    # Build pattern with chr() to avoid escape issues
+    bullet_glossary_pattern = re.compile(
+        r'(?:^|\n)\s*[-*]\s*[A-Za-z][\w\s]*\([' + chr(0xAC00) + '-' + chr(0xD7A3) + chr(0x4e00) + '-' + chr(0x9fff) + chr(0x3040) + '-' + chr(0x309F) + chr(0x30A0) + '-' + chr(0x30FF) + r'\s]+\)',
+        re.MULTILINE
+    )
+    bullet_matches = bullet_glossary_pattern.findall(text)
+    if len(bullet_matches) >= 3:
+        issues_found.append({
+            'type': 'bullet_glossary_entries',
+            'severity': 'critical',
+            'count': len(bullet_matches),
+            'examples': [m.strip() for m in bullet_matches[:3]],
+            'description': f'Found {len(bullet_matches)} bullet-pointed glossary entries with CJK in parentheses'
+        })
+    
+
     
     has_leakage = len(issues_found) > 0
     

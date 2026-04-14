@@ -4399,6 +4399,7 @@ class QAScannerMixin:
                         widget.setValue(int(default_val * 100))
 
                 check_glossary_checkbox.setChecked(True)
+                check_potential_truncation_checkbox.setChecked(True)
                 check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)
                 # Set 'detailed' radio button as checked
