@@ -2,9 +2,6 @@ name: Build Android APK
 
 on:
   workflow_dispatch:  # Manual trigger
-  push:
-    tags:
-      - 'v*'  # Also trigger on version tags
 
 jobs:
   build-android:
