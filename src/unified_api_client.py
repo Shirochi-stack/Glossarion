@@ -6808,7 +6808,11 @@ class UnifiedClient:
                     error_str_lower = str(e).lower()
                     # For transient / deterministic errors, show the message but skip the noisy traceback.
                     _transient_codes = ('400', '429', '500', '502', '503', '504')
-                    if http_status in (400, 429, 500, 502, 503, 504) or any(c in error_str_lower for c in _transient_codes) or ('resource' in error_str_lower and 'exhausted' in error_str_lower):
+                    if (http_status in (400, 429, 500, 502, 503, 504) or 
+                        any(c in error_str_lower for c in _transient_codes) or 
+                        ('resource' in error_str_lower and 'exhausted' in error_str_lower) or 
+                        getattr(e, 'error_type', None) in ("rate_limit", "timeout") or 
+                        "rate limit" in error_str_lower):
                         print(f"{log_prefix} ❌ UnifiedClientError: {e}")
                         continue
                     tb = traceback.format_exc()
