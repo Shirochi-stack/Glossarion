@@ -1835,7 +1835,15 @@ class QAScannerMixin:
                     try:
                         current_qa_settings['_live_api_key'] = self.api_key_entry.text().strip() if hasattr(self, 'api_key_entry') else ''
                         current_qa_settings['_live_model'] = getattr(self, 'model_var', self.config.get('model', ''))
-                        current_qa_settings['_live_config'] = self.config  # Decrypted in-memory config
+                        live_cfg = dict(self.config)
+                        if hasattr(self, 'batch_translation_var'):
+                            live_cfg['batch_translation'] = self.batch_translation_var
+                        if hasattr(self, 'batch_size_entry'):
+                            try:
+                                live_cfg['batch_size'] = int(self.batch_size_entry.text() or 3)
+                            except ValueError:
+                                pass
+                        current_qa_settings['_live_config'] = live_cfg  # Decrypted in-memory config + live UI state
                     except Exception:
                         pass
                     
