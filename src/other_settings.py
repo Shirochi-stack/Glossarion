@@ -5680,6 +5680,12 @@ def _create_prompt_management_section(self, parent):
                 toc_batch_label.setEnabled(enabled)
                 toc_batch_entry.setEnabled(enabled)
             else:
+                # When use_toc_ncx is OFF, also force translate_toc_ncx OFF
+                # and uncheck the translate checkbox so the state is consistent
+                translate_toc_cb.setChecked(False)
+                self.translate_toc_ncx_var = False
+                self.config['translate_toc_ncx'] = False
+                os.environ['TRANSLATE_TOC_NCX'] = '0'
                 skip_dup_toc_cb.setEnabled(False)
                 toc_batch_label.setEnabled(False)
                 toc_batch_entry.setEnabled(False)
@@ -5689,8 +5695,8 @@ def _create_prompt_management_section(self, parent):
                 dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
             else:
                 dedup_toc_translated_cb.setEnabled(False)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ _on_use_toc_ncx_toggle error: {e}")
 
     def _on_translate_toc_ncx_toggle(checked):
         try:
@@ -5702,8 +5708,8 @@ def _create_prompt_management_section(self, parent):
             skip_dup_toc_cb.setEnabled(bool(checked))
             toc_batch_label.setEnabled(bool(checked))
             toc_batch_entry.setEnabled(bool(checked))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ _on_translate_toc_ncx_toggle error: {e}")
 
     use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
     translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)

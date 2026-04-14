@@ -18999,6 +18999,8 @@ Important rules:
                 ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
+                ('use_toc_ncx', ['use_toc_ncx_var'], False, bool),
+                ('translate_toc_ncx', ['translate_toc_ncx_var'], False, bool),
                 ('use_p_tag_toc_fallback', ['use_p_tag_toc_fallback_var'], False, bool),
                 ('deduplicate_toc', ['deduplicate_toc_var'], False, bool),
                 ('deduplicate_toc_use_translated', ['deduplicate_toc_use_translated_var'], False, bool),
