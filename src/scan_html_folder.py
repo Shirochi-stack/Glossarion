@@ -8209,7 +8209,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     # Set request label so client logs show filename instead of internal counter
                     try:
                         tls = _ai_client._get_thread_local_client()
-                        tls.current_request_label = f"{filename} (qa_truncation)"
+                        tls.current_request_label = filename
                     except Exception:
                         pass
 
