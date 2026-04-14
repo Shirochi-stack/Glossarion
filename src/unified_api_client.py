@@ -12267,6 +12267,12 @@ class UnifiedClient:
                     print("   ⚠️ Gemini 3 Pro does not support disabled thinking; using low instead of 0")
             thinking_budget = -1  # avoid sending 0 budget for Gemini 3
 
+        # Gemini 2.5 Pro cannot disable thinking. A budget of 0 leads to API errors.
+        # Fallback to the minimum functional budget.
+        if "gemini-2.5-pro" in model_lower and thinking_budget == 0:
+            thinking_budget = 128
+            if not self._is_stop_requested():
+                print("   ⚠️ Gemini 2.5 Pro does not support disabled thinking; using minimal budget of 128 instead of 0")
         # Gemini 3.x Pro (non-flash) does not support thinking_level=minimal; coerce to low.
         if "gemini-3" in model_lower and "pro" in model_lower and "flash" not in model_lower:
             if thinking_level == "minimal":
