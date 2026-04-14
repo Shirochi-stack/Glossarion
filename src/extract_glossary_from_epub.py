@@ -2025,6 +2025,7 @@ CRITICAL EXTRACTION RULES:
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
 - Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
+- REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
