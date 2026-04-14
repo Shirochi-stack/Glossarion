@@ -8123,6 +8123,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
             _ai_client.context = 'qa_truncation'
+            # Wire QA scanner's stop flag into the client so in-flight API
+            # calls abort immediately when the user presses Stop.
+            # Force-stop only — no graceful stop needed for simple QA queries.
+            _ai_client._stop_callback = lambda: _stop_flag
         except Exception as _client_err:
             log(f"   ⚠️ Could not create API client for AI truncation detection: {_client_err}")
             _ai_client = None
