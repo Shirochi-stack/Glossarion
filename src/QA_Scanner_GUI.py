@@ -1830,6 +1830,15 @@ class QAScannerMixin:
                     current_epub_path = epub_path
                     current_qa_settings = qa_settings.copy()
                     
+                    # Inject live API credentials for AI truncation detection
+                    # (config.json on disk is encrypted, so we pass the decrypted values)
+                    try:
+                        current_qa_settings['_live_api_key'] = self.api_key_entry.text().strip() if hasattr(self, 'api_key_entry') else ''
+                        current_qa_settings['_live_model'] = getattr(self, 'model_var', self.config.get('model', ''))
+                        current_qa_settings['_live_config'] = self.config  # Decrypted in-memory config
+                    except Exception:
+                        pass
+                    
                     # For bulk scanning, try to find a matching EPUB for each folder
                     if len(folders_to_scan) > 1 and current_qa_settings.get('check_word_count_ratio', False):
                         # Try to find EPUB file matching this specific folder

@@ -4990,7 +4990,7 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
 # ---------- AI Truncation Detection ----------
 
 def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
-                            custom_system_prompt=None):
+                            custom_system_prompt=None, temperature=None):
     """Check if translated content appears truncated by asking an AI model.
 
     Sends the last `tail_chars` characters of both the source and translated
@@ -5062,7 +5062,9 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         ]
 
         # Send to AI (max_tokens=50 gives headroom for YES/NO + minor model preamble)
-        response = client.send(messages, temperature=0.0, max_tokens=50, context='qa_truncation')
+        # Use the user's configured temperature if provided, otherwise default to 0.0
+        _temp = float(temperature) if temperature is not None else 0.0
+        response = client.send(messages, temperature=_temp, max_tokens=50, context='qa_truncation')
 
         # Parse response
         if isinstance(response, tuple):
@@ -7763,18 +7765,23 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             from unified_api_client import UnifiedClient
             from extract_glossary_from_epub import create_client_with_multi_key_support
 
-            # Load the config from file for multi-key support
-            _config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-            _ai_config = {}
-            if os.path.exists(_config_path):
-                try:
-                    with open(_config_path, 'r', encoding='utf-8') as _cf:
-                        _ai_config = json.load(_cf)
-                except Exception:
-                    pass
+            # Use the live decrypted config injected by QA_Scanner_GUI
+            # (config.json on disk is encrypted, so we MUST use the injected values)
+            _ai_config = qa_settings.get('_live_config', {})
+            if not _ai_config:
+                # Fallback: try to load and decrypt config from file
+                _config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+                if os.path.exists(_config_path):
+                    try:
+                        from api_key_encryption import decrypt_config
+                        with open(_config_path, 'r', encoding='utf-8') as _cf:
+                            _ai_config = decrypt_config(json.load(_cf))
+                    except Exception:
+                        _ai_config = {}
 
-            _api_key = _ai_config.get('api_key', os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', '')))
-            _model = _ai_config.get('model', os.getenv('MODEL', 'gemini-2.0-flash'))
+            # Prefer live API key from QA_Scanner_GUI, then config, then env
+            _api_key = qa_settings.get('_live_api_key', '') or _ai_config.get('api_key', '') or os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', ''))
+            _model = qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
             _output_dir = folder_path
 
             _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
@@ -7835,12 +7842,20 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     except Exception:
                         pass
 
+                    # Read user's temperature from live config
+                    _ai_temperature = None
+                    try:
+                        _ai_temperature = float(_ai_config.get('translation_temperature', 0.3))
+                    except (ValueError, TypeError):
+                        _ai_temperature = 0.3
+
                     ai_result = run_ai_truncation_check(
                         matched_source_html, trans_html_content,
                         client=_ai_client,
                         tail_chars=_ai_tail_chars,
                         log=_ai_safe_log,
                         custom_system_prompt=_ai_custom_prompt,
+                        temperature=_ai_temperature,
                     )
 
                     # Log the verdict
