@@ -299,6 +299,19 @@ class QAScannerMixin:
             
             if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
                 self.stop_requested = True
+                
+                # Instantly kill in-flight API requests
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'hard_cancel_all'):
+                        unified_api_client.hard_cancel_all()
+                        
+                    # Stop multi-account key generation logic immediately as well
+                    if hasattr(unified_api_client, 'UnifiedClient'):
+                        unified_api_client.UnifiedClient._global_cancelled = True
+                except Exception:
+                    pass
+                    
                 self.append_log("⛔ QA scan stop requested.")
                 return
             
