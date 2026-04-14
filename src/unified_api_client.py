@@ -12468,12 +12468,14 @@ class UnifiedClient:
         if self._is_gemini_3_model() and thinking_budget == 0:
             if "flash" in model_lower:
                 thinking_level = "minimal"
-                if not self._is_stop_requested():
+                if not getattr(self.__class__, '_gemini3_flash_thinking_alert_shown', False) and not self._is_stop_requested():
                     print("   ⚠️ Gemini 3 Flash does not support disabled thinking; using minimal instead of 0")
+                    self.__class__._gemini3_flash_thinking_alert_shown = True
             else:
                 thinking_level = "low"
-                if not self._is_stop_requested():
+                if not getattr(self.__class__, '_gemini3_pro_thinking_alert_shown', False) and not self._is_stop_requested():
                     print("   ⚠️ Gemini 3 Pro does not support disabled thinking; using low instead of 0")
+                    self.__class__._gemini3_pro_thinking_alert_shown = True
             thinking_budget = -1  # avoid sending 0 budget for Gemini 3
 
         # Gemini 2.5 Pro cannot disable thinking. A budget of 0 leads to API errors.
@@ -12487,8 +12489,9 @@ class UnifiedClient:
         if "gemini-3" in model_lower and "pro" in model_lower and "flash" not in model_lower:
             if thinking_level == "minimal":
                 thinking_level = "low"
-                if not self._is_stop_requested():
+                if not getattr(self.__class__, '_gemini3_pro_minimal_alert_shown', False) and not self._is_stop_requested():
                     print("   ⚠️ Gemini 3 Pro does not support thinking_level=minimal; falling back to low")
+                    self.__class__._gemini3_pro_minimal_alert_shown = True
         
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
