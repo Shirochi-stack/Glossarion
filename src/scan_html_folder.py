@@ -8000,23 +8000,35 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             _ai_checked = 0
             _ai_flagged = 0
-            with _AIThreadPool(max_workers=_ai_max_workers) as _ai_pool:
-                _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
-                for _ai_future in _ai_as_completed(_ai_futures):
-                    if should_stop():
-                        break
-                    try:
-                        _ai_pair = _ai_future.result()
-                        if _ai_pair:
-                            _ai_r_obj, _ai_tr = _ai_pair
-                            _ai_checked += 1
-                            if _ai_tr['flagged']:
-                                _ai_flagged += 1
-                                _ai_r_obj['issues'].append(f"ai_truncation_detected ({_ai_tr['details']})")
-                                _ai_r_obj['score'] = len(_ai_r_obj['issues'])
-                                log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
-                    except Exception:
-                        pass
+            # Set BATCH_TRANSLATION env var so _send_core in unified_api_client
+            # skips the _sequential_send_lock, allowing true parallel API calls.
+            _orig_batch_env = os.environ.get('BATCH_TRANSLATION')
+            if _batch_enabled:
+                os.environ['BATCH_TRANSLATION'] = '1'
+            try:
+                with _AIThreadPool(max_workers=_ai_max_workers) as _ai_pool:
+                    _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
+                    for _ai_future in _ai_as_completed(_ai_futures):
+                        if should_stop():
+                            break
+                        try:
+                            _ai_pair = _ai_future.result()
+                            if _ai_pair:
+                                _ai_r_obj, _ai_tr = _ai_pair
+                                _ai_checked += 1
+                                if _ai_tr['flagged']:
+                                    _ai_flagged += 1
+                                    _ai_r_obj['issues'].append(f"ai_truncation_detected ({_ai_tr['details']})")
+                                    _ai_r_obj['score'] = len(_ai_r_obj['issues'])
+                                    log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
+                        except Exception:
+                            pass
+            finally:
+                # Restore original BATCH_TRANSLATION env var
+                if _orig_batch_env is not None:
+                    os.environ['BATCH_TRANSLATION'] = _orig_batch_env
+                elif _batch_enabled:
+                    os.environ.pop('BATCH_TRANSLATION', None)
 
             log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
     
