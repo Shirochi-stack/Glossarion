@@ -3207,6 +3207,274 @@ class QAScannerMixin:
         check_ai_truncation_checkbox.toggled.connect(_toggle_ai_truncation)
         _toggle_ai_truncation(check_ai_truncation_checkbox.isChecked())
 
+        # ── AI Truncation Detector — Dedicated API Settings ──────────────
+        ai_api_group = QGroupBox("AI Truncation Detector — API Settings")
+        ai_api_group.setFont(QFont('Arial', 10, QFont.Bold))
+        ai_api_group.setCheckable(False)
+        ai_api_group.setStyleSheet("""
+            QGroupBox {
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                margin-top: 8px;
+                padding-top: 18px;
+                border-radius: 4px;
+            }
+            QGroupBox::title {
+                color: #9ca3af;
+                left: 12px;
+                padding: 0 6px;
+                font-size: 10pt;
+            }
+        """)
+        ai_api_layout = QVBoxLayout(ai_api_group)
+        ai_api_layout.setContentsMargins(20, 10, 20, 10)
+        ai_api_layout.setSpacing(8)
+
+        ai_api_desc = QLabel(
+            "Override the global API settings for AI truncation detection only.\n"
+            "Leave API key blank to use your main key. Set temperature or output tokens to -1 to use global defaults."
+        )
+        ai_api_desc.setFont(QFont('Arial', 9))
+        ai_api_desc.setStyleSheet("color: #808080;")
+        ai_api_desc.setWordWrap(True)
+        ai_api_layout.addWidget(ai_api_desc)
+
+        # ─── Row 1: API Key ───
+        ai_key_row = QWidget()
+        ai_key_h = QHBoxLayout(ai_key_row)
+        ai_key_h.setContentsMargins(0, 0, 0, 0)
+        ai_key_h.setSpacing(8)
+
+        ai_key_label = QLabel("API Key:")
+        ai_key_label.setFont(QFont('Arial', 9))
+        ai_key_label.setFixedWidth(100)
+        ai_key_h.addWidget(ai_key_label)
+
+        from PySide6.QtWidgets import QLineEdit as _QLE
+        ai_key_entry = _QLE()
+        ai_key_entry.setEchoMode(_QLE.Password)
+        ai_key_entry.setPlaceholderText("(blank = use main API key)")
+        ai_key_entry.setText(qa_settings.get('ai_truncation_api_key', ''))
+        ai_key_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #353535;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 9pt;
+            }
+            QLineEdit:focus {
+                border-color: #6b7a8d;
+            }
+        """)
+        ai_key_h.addWidget(ai_key_entry)
+
+        # Toggle visibility button
+        ai_key_show_btn = QPushButton("👁")
+        ai_key_show_btn.setFixedWidth(32)
+        ai_key_show_btn.setToolTip("Toggle API key visibility")
+        ai_key_show_btn.setStyleSheet("""
+            QPushButton { background-color: #404040; color: white; border: 1px solid #555;
+                          padding: 3px; border-radius: 3px; font-size: 10pt; }
+            QPushButton:hover { background-color: #505050; }
+        """)
+        def _toggle_key_vis():
+            if ai_key_entry.echoMode() == _QLE.Password:
+                ai_key_entry.setEchoMode(_QLE.Normal)
+                ai_key_show_btn.setText("🔒")
+            else:
+                ai_key_entry.setEchoMode(_QLE.Password)
+                ai_key_show_btn.setText("👁")
+        ai_key_show_btn.clicked.connect(_toggle_key_vis)
+        ai_key_h.addWidget(ai_key_show_btn)
+
+        ai_api_layout.addWidget(ai_key_row)
+
+        # ─── Row 2: Model selector (searchable combobox) ───
+        ai_model_row = QWidget()
+        ai_model_h = QHBoxLayout(ai_model_row)
+        ai_model_h.setContentsMargins(0, 0, 0, 0)
+        ai_model_h.setSpacing(8)
+
+        ai_model_label = QLabel("Model:")
+        ai_model_label.setFont(QFont('Arial', 9))
+        ai_model_label.setFixedWidth(100)
+        ai_model_h.addWidget(ai_model_label)
+
+        ai_model_combo = QComboBox()
+        ai_model_combo.setEditable(True)
+        ai_model_combo.setInsertPolicy(QComboBox.NoInsert)
+        # Load model catalog
+        try:
+            from model_options import get_model_options
+            _ai_model_list = get_model_options()
+        except Exception:
+            _ai_model_list = ["gemini-2.5-flash", "gemini-2.0-flash", "gpt-5-mini", "gpt-5-nano"]
+        ai_model_combo.addItems(_ai_model_list)
+        # Set completer for search
+        from PySide6.QtWidgets import QCompleter
+        ai_model_completer = QCompleter(_ai_model_list)
+        ai_model_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        ai_model_completer.setFilterMode(Qt.MatchContains)
+        ai_model_completer.setMaxVisibleItems(15)
+        ai_model_combo.setCompleter(ai_model_completer)
+        disable_wheel_event(ai_model_combo)
+
+        # Restore saved value or default to blank (= use main model)
+        _saved_ai_model = qa_settings.get('ai_truncation_model', '')
+        if _saved_ai_model:
+            ai_model_combo.setCurrentText(_saved_ai_model)
+        else:
+            ai_model_combo.setCurrentText('')
+        ai_model_combo.lineEdit().setPlaceholderText("(blank = use main model)")
+
+        ai_model_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #353535;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 9pt;
+            }
+            QComboBox:focus {
+                border-color: #6b7a8d;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #4a5568;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #353535;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                selection-background-color: #505050;
+            }
+        """)
+        ai_model_h.addWidget(ai_model_combo)
+
+        ai_api_layout.addWidget(ai_model_row)
+
+        # ─── Row 3: Temperature + Output Tokens ───
+        ai_params_row = QWidget()
+        ai_params_h = QHBoxLayout(ai_params_row)
+        ai_params_h.setContentsMargins(0, 0, 0, 0)
+        ai_params_h.setSpacing(16)
+
+        # Temperature
+        ai_temp_label = QLabel("Temperature:")
+        ai_temp_label.setFont(QFont('Arial', 9))
+        ai_params_h.addWidget(ai_temp_label)
+
+        from PySide6.QtWidgets import QDoubleSpinBox
+        ai_temp_spin = QDoubleSpinBox()
+        ai_temp_spin.setMinimum(-1.0)
+        ai_temp_spin.setMaximum(2.0)
+        ai_temp_spin.setSingleStep(0.1)
+        ai_temp_spin.setDecimals(2)
+        ai_temp_spin.setValue(float(qa_settings.get('ai_truncation_temperature', 0.0)))
+        ai_temp_spin.setFixedWidth(80)
+        ai_temp_spin.setToolTip("-1 = use global temperature")
+        ai_temp_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #353535;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 3px 6px;
+                font-size: 9pt;
+            }
+        """)
+        disable_wheel_event(ai_temp_spin)
+        ai_params_h.addWidget(ai_temp_spin)
+
+        ai_temp_hint = QLabel("(-1 = global)")
+        ai_temp_hint.setFont(QFont('Arial', 8))
+        ai_temp_hint.setStyleSheet("color: #707070;")
+        ai_params_h.addWidget(ai_temp_hint)
+
+        ai_params_h.addSpacing(20)
+
+        # Output Tokens
+        ai_tokens_label = QLabel("Output Tokens:")
+        ai_tokens_label.setFont(QFont('Arial', 9))
+        ai_params_h.addWidget(ai_tokens_label)
+
+        ai_tokens_spin = QSpinBox()
+        ai_tokens_spin.setMinimum(-1)
+        ai_tokens_spin.setMaximum(1000000)
+        ai_tokens_spin.setSingleStep(100)
+        ai_tokens_spin.setValue(int(qa_settings.get('ai_truncation_max_tokens', 2000)))
+        ai_tokens_spin.setFixedWidth(100)
+        ai_tokens_spin.setToolTip("-1 = use global output token limit")
+        ai_tokens_spin.setStyleSheet("""
+            QSpinBox {
+                background-color: #353535;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 3px 6px;
+                font-size: 9pt;
+            }
+        """)
+        disable_wheel_event(ai_tokens_spin)
+        ai_params_h.addWidget(ai_tokens_spin)
+
+        ai_tokens_hint = QLabel("(-1 = global)")
+        ai_tokens_hint.setFont(QFont('Arial', 8))
+        ai_tokens_hint.setStyleSheet("color: #707070;")
+        ai_params_h.addWidget(ai_tokens_hint)
+
+        ai_params_h.addStretch()
+        ai_api_layout.addWidget(ai_params_row)
+
+        # ─── Row 4: Custom URL endpoint override ───
+        ai_url_row = QWidget()
+        ai_url_h = QHBoxLayout(ai_url_row)
+        ai_url_h.setContentsMargins(0, 0, 0, 0)
+        ai_url_h.setSpacing(8)
+
+        ai_url_label = QLabel("Endpoint URL:")
+        ai_url_label.setFont(QFont('Arial', 9))
+        ai_url_label.setFixedWidth(100)
+        ai_url_h.addWidget(ai_url_label)
+
+        ai_url_entry = _QLE()
+        ai_url_entry.setPlaceholderText("(blank = use default endpoint, e.g. http://localhost:1234/v1)")
+        ai_url_entry.setText(qa_settings.get('ai_truncation_endpoint_url', ''))
+        ai_url_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #353535;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 9pt;
+            }
+            QLineEdit:focus {
+                border-color: #6b7a8d;
+            }
+        """)
+        ai_url_h.addWidget(ai_url_entry)
+        ai_api_layout.addWidget(ai_url_row)
+
+        # Toggle entire API settings group enabled state with the main checkbox
+        def _toggle_ai_api_section(checked):
+            ai_api_group.setEnabled(checked)
+            if checked:
+                ai_api_group.setStyleSheet(ai_api_group.styleSheet().replace("color: #555;", "color: #9ca3af;"))
+            else:
+                ai_api_group.setStyleSheet(ai_api_group.styleSheet())
+        check_ai_truncation_checkbox.toggled.connect(_toggle_ai_api_section)
+        _toggle_ai_api_section(check_ai_truncation_checkbox.isChecked())
+
+        # Indent this group under the main checkbox
+        ai_api_group.setContentsMargins(20, 0, 0, 0)
+        additional_layout.addWidget(ai_api_group)
+
         additional_layout.addSpacing(15)
         
         # NEW: Paragraph Structure Check
@@ -3683,6 +3951,11 @@ class QAScannerMixin:
                     'check_ai_truncation_detection': (check_ai_truncation_checkbox, lambda x: x.isChecked()),
                     'ai_truncation_tail_chars': (ai_truncation_tail_spinbox, lambda x: x.value()),
                     'ai_truncation_prompt': (_ai_trunc_prompt_holder, lambda x: x[0]),
+                    'ai_truncation_api_key': (ai_key_entry, lambda x: x.text().strip()),
+                    'ai_truncation_model': (ai_model_combo, lambda x: x.currentText().strip()),
+                    'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
+                    'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),
+                    'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),
                     'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
                     'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
                 }
@@ -4027,6 +4300,11 @@ class QAScannerMixin:
                 check_ai_truncation_checkbox.setChecked(False)
                 ai_truncation_tail_spinbox.setValue(400)
                 _ai_trunc_prompt_holder[0] = _ai_trunc_default_prompt
+                ai_key_entry.setText('')
+                ai_model_combo.setCurrentText('')
+                ai_temp_spin.setValue(0.0)
+                ai_tokens_spin.setValue(2000)
+                ai_url_entry.setText('')
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
 
                 # Reset cache settings

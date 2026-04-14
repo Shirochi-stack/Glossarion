@@ -4990,7 +4990,7 @@ def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', targe
 # ---------- AI Truncation Detection ----------
 
 def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
-                            custom_system_prompt=None, temperature=None):
+                            custom_system_prompt=None, temperature=None, max_tokens=None):
     """Check if translated content appears truncated by asking an AI model.
 
     Sends the last `tail_chars` characters of both the source and translated
@@ -5061,10 +5061,11 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             {"role": "user", "content": user_prompt},
         ]
 
-        # Send to AI (max_tokens=50 gives headroom for YES/NO + minor model preamble)
+        # Send to AI
         # Use the user's configured temperature if provided, otherwise default to 0.0
         _temp = float(temperature) if temperature is not None else 0.0
-        response = client.send(messages, temperature=_temp, max_tokens=50, context='qa_truncation')
+        _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
+        response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
 
         # Parse response
         if isinstance(response, tuple):
@@ -7779,10 +7780,22 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     except Exception:
                         _ai_config = {}
 
-            # Prefer live API key from QA_Scanner_GUI, then config, then env
-            _api_key = qa_settings.get('_live_api_key', '') or _ai_config.get('api_key', '') or os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', ''))
-            _model = qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
+            # Dedicated AI truncation API settings (from QA Scanner settings dialog)
+            _dedicated_key = qa_settings.get('ai_truncation_api_key', '').strip()
+            _dedicated_model = qa_settings.get('ai_truncation_model', '').strip()
+            _dedicated_url = qa_settings.get('ai_truncation_endpoint_url', '').strip()
+
+            # Priority: dedicated key > live main key > config key > env
+            _api_key = _dedicated_key or qa_settings.get('_live_api_key', '') or _ai_config.get('api_key', '') or os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', ''))
+            _model = _dedicated_model or qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
             _output_dir = folder_path
+
+            # Apply custom endpoint URL override for local LLM support
+            if _dedicated_url:
+                _ai_config = dict(_ai_config)  # Don't mutate the original
+                _ai_config['use_custom_openai_endpoint'] = True
+                _ai_config['openai_base_url'] = _dedicated_url
+                log(f"   🔗 Using custom endpoint: {_dedicated_url}")
 
             _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
             _ai_client.context = 'qa_truncation'
@@ -7842,12 +7855,27 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     except Exception:
                         pass
 
-                    # Read user's temperature from live config
-                    _ai_temperature = None
-                    try:
-                        _ai_temperature = float(_ai_config.get('translation_temperature', 0.3))
-                    except (ValueError, TypeError):
-                        _ai_temperature = 0.3
+                    # Read temperature: dedicated setting (-1 = global, else use value)
+                    _dedicated_temp = float(qa_settings.get('ai_truncation_temperature', 0.0))
+                    if _dedicated_temp < 0:
+                        # -1 means use global temperature
+                        try:
+                            _ai_temperature = float(_ai_config.get('translation_temperature', 0.3))
+                        except (ValueError, TypeError):
+                            _ai_temperature = 0.3
+                    else:
+                        _ai_temperature = _dedicated_temp
+
+                    # Read max_tokens: dedicated setting (-1 = global, else use value)
+                    _dedicated_tokens = int(qa_settings.get('ai_truncation_max_tokens', 2000))
+                    if _dedicated_tokens < 0:
+                        # -1 means use global output token limit
+                        try:
+                            _ai_max_tokens = int(_ai_config.get('max_output_tokens', 128000))
+                        except (ValueError, TypeError):
+                            _ai_max_tokens = 128000
+                    else:
+                        _ai_max_tokens = _dedicated_tokens if _dedicated_tokens > 0 else 2000
 
                     ai_result = run_ai_truncation_check(
                         matched_source_html, trans_html_content,
@@ -7856,6 +7884,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         log=_ai_safe_log,
                         custom_system_prompt=_ai_custom_prompt,
                         temperature=_ai_temperature,
+                        max_tokens=_ai_max_tokens,
                     )
 
                     # Log the verdict
