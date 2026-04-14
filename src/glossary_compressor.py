@@ -473,13 +473,28 @@ def _compress_fallback_text(content, source_text):
 
 def _text_contains_term(text, term):
     """
-    Check if term appears in text using simple substring matching.
+    Check if term appears in text using substring matching.
     Works well with any language — CJK, Latin, Arabic, etc.
+    
+    For multi-word terms (e.g. "미샤 랄토스"), also checks if ANY
+    individual word (≥2 chars) appears in the source text, so that
+    a partial name match (family name or given name alone) still
+    keeps the glossary entry.
     """
     if not term or not text:
         return False
     
-    return term in text
+    # Full term match first (fast path)
+    if term in text:
+        return True
+    
+    # Multi-word: check individual tokens (≥ 2 chars each)
+    if ' ' in term:
+        for token in term.split():
+            if len(token) >= 2 and token in text:
+                return True
+    
+    return False
 
 
 def compress_glossary_file(glossary_path, source_text):
