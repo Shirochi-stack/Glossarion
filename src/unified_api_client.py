@@ -1645,6 +1645,10 @@ class UnifiedClient:
     _glossary_key_pool: Optional[APIKeyPool] = None
     _glossary_pool_lock = threading.Lock()
     
+    # QA scan-dedicated key pool (separate from main and glossary pools)
+    _qa_scan_key_pool: Optional[APIKeyPool] = None
+    _qa_scan_pool_lock = threading.Lock()
+    
     # Request tracking
     _global_request_counter = 0
     _counter_lock = threading.Lock()
@@ -2008,6 +2012,85 @@ class UnifiedClient:
                     print(f"🔑 Glossary key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
                 else:
                     print(f"🔑 Glossary key pool: {len(validated_keys)} keys loaded")
+
+            return True
+
+    # In-memory QA scan-key configuration (mirrors glossary-key pattern)
+    _in_memory_qa_scan_keys = None
+    _in_memory_qa_scan_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_qa_scan_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure QA scan-key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_qa_scan_keys_lock:
+                cls._in_memory_qa_scan_keys = keys_list
+        except Exception:
+            pass
+        try:
+            cls.setup_qa_scan_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    def clear_in_memory_qa_scan_keys(cls):
+        """Clear in-memory QA scan-key configuration."""
+        with cls._in_memory_qa_scan_keys_lock:
+            cls._in_memory_qa_scan_keys = None
+        with cls._qa_scan_pool_lock:
+            cls._qa_scan_key_pool = None
+
+    @classmethod
+    def setup_qa_scan_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared QA scan API key pool (mirrors setup_glossary_key_pool)."""
+        with cls._qa_scan_pool_lock:
+            if cls._qa_scan_key_pool is None:
+                cls._qa_scan_key_pool = APIKeyPool()
+            cls._qa_scan_pool_logged = False  # Reset so the one-time log shows once per run
+
+            # Initialize rate limit cache if needed
+            if cls._rate_limit_cache is None:
+                cls._rate_limit_cache = RateLimitCache()
+
+            # Validate and fix encrypted keys
+            validated_keys = []
+            encrypted_keys_fixed = 0
+
+            for i, key_data in enumerate(keys_list):
+                if not isinstance(key_data, dict):
+                    continue
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
+                if not api_key and cls._model_needs_api_key(model):
+                    continue
+                # Fix encrypted keys
+                if api_key and api_key.startswith('ENC:'):
+                    try:
+                        from api_key_encryption import get_handler
+                        handler = get_handler()
+                        decrypted_key = handler.decrypt_value(api_key)
+                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
+                            fixed_key_data = key_data.copy()
+                            fixed_key_data['api_key'] = decrypted_key
+                            validated_keys.append(fixed_key_data)
+                            encrypted_keys_fixed += 1
+                    except Exception:
+                        continue
+                else:
+                    validated_keys.append(key_data)
+
+            if not validated_keys:
+                return False
+
+            cls._qa_scan_key_pool.load_from_list(validated_keys)
+
+            existing_count = len(getattr(cls._qa_scan_key_pool, 'keys', [])) if cls._qa_scan_key_pool else 0
+            if existing_count != len(validated_keys):
+                if encrypted_keys_fixed > 0:
+                    print(f"🔑 QA scan key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                else:
+                    print(f"🔑 QA scan key pool: {len(validated_keys)} keys loaded")
 
             return True
     
@@ -4369,15 +4452,137 @@ class UnifiedClient:
             watchdog_started = True
             
             # Multi-key retry wrapper
-            # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
-            # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
+            # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
+            # use that pool for full multi-key rotation (mirrors main multi-key mode).
             _glossary_overridden = False
+            _qa_scan_overridden = False
             _original_api_key = None
             _original_model = None
             _original_multi_key_mode = None
             _had_instance_pool = False
             _original_instance_pool = None
-            if context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name):
+            
+            # QA SCAN KEY OVERRIDE: When context is 'Truncation' or 'qa_truncation'
+            _is_qa_scan_context = context in ('Truncation', 'qa_truncation') or (not context and 'Truncation' in threading.current_thread().name)
+            if _is_qa_scan_context:
+                try:
+                    use_qa_scan_keys = os.getenv('USE_QA_SCAN_KEYS', '0') == '1'
+                    if use_qa_scan_keys:
+                        qa_scan_pool = self.__class__._qa_scan_key_pool
+                        if not qa_scan_pool or not getattr(qa_scan_pool, 'keys', []):
+                            # Fallback: try loading from env var
+                            qa_scan_keys_json = os.getenv('QA_SCAN_API_KEYS', '[]')
+                            if qa_scan_keys_json != '[]':
+                                try:
+                                    qa_scan_keys_list = json.loads(qa_scan_keys_json)
+                                    if qa_scan_keys_list:
+                                        self.__class__.setup_qa_scan_key_pool(qa_scan_keys_list)
+                                        qa_scan_pool = self.__class__._qa_scan_key_pool
+                                except Exception:
+                                    pass
+                        
+                        if qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
+                            _has_enabled = any(
+                                getattr(k, 'enabled', True) for k in qa_scan_pool.keys
+                            )
+                            if not _has_enabled:
+                                qa_scan_pool = None
+                        
+                        if qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
+                            _original_api_key = self.api_key
+                            _original_model = self.model
+                            _original_multi_key_mode = self._multi_key_mode
+                            _had_instance_pool = '_api_key_pool' in self.__dict__
+                            _original_instance_pool = self.__dict__.get('_api_key_pool', None)
+                            
+                            self._multi_key_mode = True
+                            self._api_key_pool = qa_scan_pool
+                            
+                            try:
+                                qa_scan_pool.release_thread_assignment()
+                            except Exception:
+                                pass
+                            try:
+                                key_info = self._get_next_available_key()
+                                if key_info:
+                                    key_entry, key_idx = key_info
+                                    self.api_key = key_entry.api_key
+                                    self.model = key_entry.model
+                                    self.current_key_index = key_idx
+                                    self.key_identifier = f"QAScanKey#{key_idx+1} ({key_entry.model})"
+                                    # Apply per-key settings
+                                    qk_data = None
+                                    try:
+                                        with self.__class__._in_memory_qa_scan_keys_lock:
+                                            qk_list = self.__class__._in_memory_qa_scan_keys or []
+                                        if key_idx < len(qk_list):
+                                            qk_data = qk_list[key_idx]
+                                    except Exception:
+                                        pass
+                                    if qk_data:
+                                        qk_google_creds = qk_data.get('google_credentials')
+                                        if qk_google_creds:
+                                            self.current_key_google_creds = qk_google_creds
+                                            self.google_creds_path = qk_google_creds
+                                        qk_google_region = qk_data.get('google_region')
+                                        if qk_google_region:
+                                            self.current_key_google_region = qk_google_region
+                                        if qk_data.get('use_individual_endpoint'):
+                                            qk_endpoint = qk_data.get('azure_endpoint')
+                                            if qk_endpoint:
+                                                self.current_key_azure_endpoint = qk_endpoint
+                                                self.current_key_use_individual_endpoint = True
+                                            qk_api_version = qk_data.get('azure_api_version')
+                                            if qk_api_version:
+                                                self.current_key_azure_api_version = qk_api_version
+                                        qk_output_limit = qk_data.get('individual_output_token_limit')
+                                        if qk_output_limit and int(qk_output_limit) > 0:
+                                            try:
+                                                tls = self._get_thread_local_client()
+                                                tls.per_key_max_output_tokens = int(qk_output_limit)
+                                            except Exception:
+                                                pass
+                                        qk_temp = qk_data.get('individual_key_temperature')
+                                        if qk_temp not in (None, ""):
+                                            try:
+                                                tls = self._get_thread_local_client()
+                                                tls.individual_key_temperature = float(qk_temp)
+                                            except Exception:
+                                                pass
+                                    self._setup_client()
+                                    _qa_scan_overridden = True
+                                    try:
+                                        tls = self._get_thread_local_client()
+                                        tls.api_key = key_entry.api_key
+                                        tls.model = key_entry.model
+                                        tls.key_index = key_idx
+                                        tls.key_identifier = self.key_identifier
+                                        tls.google_credentials = getattr(self, 'current_key_google_creds', None)
+                                        tls.azure_endpoint = getattr(self, 'current_key_azure_endpoint', None)
+                                        tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
+                                        tls.google_region = getattr(self, 'current_key_google_region', None)
+                                        tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                                        tls.initialized = True
+                                        tls.last_rotation = time.time()
+                                        tls.request_count = 0
+                                    except Exception:
+                                        pass
+                                    if not getattr(self.__class__, '_qa_scan_pool_logged', False):
+                                        print(f"[QA SCAN KEYS] 🔑 Using QA scan key pool ({len(qa_scan_pool.keys)} keys)")
+                                        self.__class__._qa_scan_pool_logged = True
+                            except Exception as e:
+                                print(f"[QA SCAN KEYS] ⚠️ Failed to get QA scan key from pool: {e}")
+                                if _had_instance_pool:
+                                    self._api_key_pool = _original_instance_pool
+                                elif '_api_key_pool' in self.__dict__:
+                                    del self._api_key_pool
+                                self._multi_key_mode = _original_multi_key_mode
+                except Exception as e:
+                    print(f"[QA SCAN KEYS] ⚠️ Failed to apply QA scan key override: {e}")
+            
+            # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
+            # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
+            if not _qa_scan_overridden and (context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name)):
                 try:
                     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                     if use_glossary_keys:
@@ -4600,8 +4805,8 @@ class UnifiedClient:
                 else:
                     return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
-            # Restore original key/model and pool if we overrode them for glossary context
-            if _glossary_overridden:
+            # Restore original key/model and pool if we overrode them for glossary or QA scan context
+            if _glossary_overridden or _qa_scan_overridden:
                 if _original_api_key is not None:
                     self.api_key = _original_api_key
                     self.model = _original_model

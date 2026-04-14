@@ -11760,6 +11760,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_GLOSSARY_KEYS'] = '1'
             else:
                 os.environ['USE_GLOSSARY_KEYS'] = '0'
+            if self.config.get('use_qa_scan_keys', False):
+                os.environ['USE_QA_SCAN_KEYS'] = '1'
+            else:
+                os.environ['USE_QA_SCAN_KEYS'] = '0'
         except Exception:
             pass
 
@@ -11784,6 +11788,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
             else:
                 UnifiedClient.clear_in_memory_glossary_keys()
+            
+            # Configure QA scan key pool in memory (mirrors glossary-key setup)
+            if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
+                UnifiedClient.set_in_memory_qa_scan_keys(
+                    self.config.get('qa_scan_keys', []),
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+            else:
+                UnifiedClient.clear_in_memory_qa_scan_keys()
         except Exception:
             pass
 
@@ -11913,6 +11927,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
             'USE_GLOSSARY_KEYS': '1' if self.config.get('use_glossary_keys', False) else '0',
             'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
+            'USE_QA_SCAN_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
+            'QA_SCAN_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
 
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,

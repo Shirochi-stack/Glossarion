@@ -1561,6 +1561,10 @@ class MultiAPIKeyDialog(QDialog):
             use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
             self.translator_gui.config['use_glossary_keys'] = use_glossary
             
+            # Save QA scan keys toggle
+            use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
+            self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
+            
             # Save config
             self.translator_gui.save_config(show_message=False)
             
@@ -1875,6 +1879,9 @@ class MultiAPIKeyDialog(QDialog):
         
         # Create glossary keys container (hidden by default)
         self._create_glossary_section(scrollable_layout)
+        
+        # Create QA scan keys container (hidden by default)
+        self._create_qa_scan_section(scrollable_layout)
         
         # Add stretch to fill remaining space in scroll area
         scrollable_layout.addStretch(1)
@@ -5857,6 +5864,1330 @@ class MultiAPIKeyDialog(QDialog):
 
     # ===================================================================
     # END GLOSSARY KEYS SECTION
+    # ===================================================================
+
+    # ===================================================================
+    # QA SCAN KEYS SECTION (For AI Truncation Detection)
+    # ===================================================================
+
+    def _create_qa_scan_section(self, parent_layout):
+        """Create the QA scan keys section below glossary"""
+        # Container that can be hidden
+        self.qa_scan_container = QWidget()
+        qa_scan_container_layout = QVBoxLayout(self.qa_scan_container)
+        qa_scan_container_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # Separator
+        self.qa_scan_separator = QFrame()
+        self.qa_scan_separator.setFrameShape(QFrame.HLine)
+        self.qa_scan_separator.setFrameShadow(QFrame.Sunken)
+        qa_scan_container_layout.addWidget(self.qa_scan_separator)
+        
+        # Main QA scan frame
+        qa_scan_frame = QGroupBox("QA Scan Keys (For AI Truncation Detection)")
+        qa_scan_frame_layout = QVBoxLayout(qa_scan_frame)
+        qa_scan_frame_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Description
+        desc_label = QLabel(
+                "Configure dedicated keys for QA scan / AI truncation detection API calls.\n"
+                "These keys will be used exclusively when the translation context is 'Truncation'.\n"
+                "If no QA scan keys are configured or the pool is disabled, the main key pool is used instead.")
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        qa_scan_frame_layout.addWidget(desc_label)
+        
+        # Enable checkbox with spinning icon
+        qa_scan_checkbox_container = QWidget()
+        qa_scan_checkbox_layout = QHBoxLayout(qa_scan_checkbox_container)
+        qa_scan_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        qa_scan_checkbox_layout.setSpacing(8)
+        
+        self.use_qa_scan_keys_var = self.translator_gui.config.get('use_qa_scan_keys', False)
+        self.use_qa_scan_keys_checkbox = self._create_styled_checkbox("Enable QA Scan Keys")
+        self.use_qa_scan_keys_checkbox.setChecked(self.use_qa_scan_keys_var)
+        self.use_qa_scan_keys_checkbox.toggled.connect(self._toggle_qa_scan_section)
+        
+        # spinning icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.qa_scan_icon = QLabel()
+        self.qa_scan_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.qa_scan_icon.setPixmap(pm)
+        self.qa_scan_icon.setFixedSize(36, 36)
+        self.qa_scan_icon.setAlignment(Qt.AlignCenter)
+        self.use_qa_scan_keys_checkbox.toggled.connect(lambda: animate_icon(self.qa_scan_icon))
+        
+        qa_scan_checkbox_layout.addWidget(self.qa_scan_icon)
+        qa_scan_checkbox_layout.addWidget(self.use_qa_scan_keys_checkbox)
+        qa_scan_checkbox_layout.addStretch()
+        
+        qa_scan_frame_layout.addWidget(qa_scan_checkbox_container)
+        
+        # Add QA scan key section
+        self.add_qa_scan_frame = QWidget()
+        add_qa_scan_grid = QGridLayout(self.add_qa_scan_frame)
+        add_qa_scan_grid.setContentsMargins(0, 0, 0, 10)
+        
+        # Row 0: API Key and Model
+        add_qa_scan_grid.addWidget(QLabel("QA Scan API Key:"), 0, 0, Qt.AlignLeft)
+        self.qa_scan_key_entry = QLineEdit()
+        self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
+        add_qa_scan_grid.addWidget(self.qa_scan_key_entry, 0, 1)
+        
+        # Toggle visibility
+        self.show_qa_scan_btn = QPushButton("👁")
+        self.show_qa_scan_btn.setFixedWidth(40)
+        self.show_qa_scan_btn.clicked.connect(self._toggle_qa_scan_visibility)
+        add_qa_scan_grid.addWidget(self.show_qa_scan_btn, 0, 2)
+        
+        # Model
+        add_qa_scan_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        qa_scan_models = get_model_options()
+        self.qa_scan_model_combo = QComboBox()
+        self.qa_scan_model_combo.addItems(qa_scan_models)
+        self.qa_scan_model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(self.qa_scan_model_combo)
+        add_qa_scan_grid.addWidget(self.qa_scan_model_combo, 0, 4)
+        
+        # Add button
+        add_qa_scan_btn = QPushButton("Add QA Scan Key")
+        add_qa_scan_btn.clicked.connect(self._add_qa_scan_key)
+        add_qa_scan_grid.addWidget(add_qa_scan_btn, 0, 5, Qt.AlignRight)
+        
+        add_qa_scan_grid.setColumnStretch(1, 1)
+        add_qa_scan_grid.setColumnStretch(4, 1)
+        
+        qa_scan_frame_layout.addWidget(self.add_qa_scan_frame)
+        
+        # Row 1: Google Credentials
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
+        add_qa_scan_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
+        self.qa_scan_google_creds_entry = QLineEdit()
+        self.qa_scan_google_creds_entry.setStyleSheet("font-size: 7pt;")
+        add_qa_scan_grid.addWidget(self.qa_scan_google_creds_entry, 1, 1)
+        
+        browse_google_btn = QPushButton("📁")
+        browse_google_btn.setFixedWidth(40)
+        browse_google_btn.clicked.connect(self._browse_qa_scan_google_credentials)
+        add_qa_scan_grid.addWidget(browse_google_btn, 1, 2)
+        
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_qa_scan_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
+        self.qa_scan_google_region_entry = QLineEdit("us-east5")
+        self.qa_scan_google_region_entry.setStyleSheet("font-size: 7pt;")
+        self.qa_scan_google_region_entry.setMaximumWidth(100)
+        add_qa_scan_grid.addWidget(self.qa_scan_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+        
+        # Row 2: Individual Endpoint Toggle
+        self.qa_scan_use_individual_endpoint_var = False
+        self.qa_scan_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        self.qa_scan_individual_endpoint_toggle.setChecked(False)
+        self.qa_scan_individual_endpoint_toggle.toggled.connect(self._toggle_qa_scan_individual_endpoint_fields)
+        add_qa_scan_grid.addWidget(self.qa_scan_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+        
+        # Row 3: Individual Endpoint (initially hidden)
+        self.qa_scan_individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.qa_scan_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_qa_scan_grid.addWidget(self.qa_scan_individual_endpoint_label, 3, 0, Qt.AlignLeft)
+        self.qa_scan_azure_endpoint_entry = QLineEdit()
+        self.qa_scan_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        add_qa_scan_grid.addWidget(self.qa_scan_azure_endpoint_entry, 3, 1, 1, 2)
+        
+        self.qa_scan_individual_api_version_label = QLabel("API Ver:")
+        self.qa_scan_individual_api_version_label.setStyleSheet("color: gray;")
+        add_qa_scan_grid.addWidget(self.qa_scan_individual_api_version_label, 3, 3, Qt.AlignLeft)
+        qa_scan_azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview', 
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.qa_scan_azure_api_version_combo = QComboBox()
+        self.qa_scan_azure_api_version_combo.addItems(qa_scan_azure_versions)
+        self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.qa_scan_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self.qa_scan_azure_api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(self.qa_scan_azure_api_version_combo)
+        add_qa_scan_grid.addWidget(self.qa_scan_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+        
+        # Initially hide endpoint fields
+        self._toggle_qa_scan_individual_endpoint_fields()
+        
+        # QA scan keys list
+        self._create_qa_scan_list(qa_scan_frame_layout)
+        
+        # Add container to parent
+        qa_scan_container_layout.addWidget(qa_scan_frame)
+        parent_layout.addWidget(self.qa_scan_container)
+        
+        # Initially disable if checkbox is unchecked
+        self._toggle_qa_scan_section()
+
+    def _create_qa_scan_list(self, parent_layout):
+        """Create the QA scan keys list"""
+        self.qa_scan_list_label = QLabel("QA Scan Keys (tried in order):")
+        list_label_font = QFont()
+        list_label_font.setBold(True)
+        self.qa_scan_list_label.setFont(list_label_font)
+        parent_layout.addWidget(self.qa_scan_list_label)
+        
+        # Container for tree and buttons
+        self.qa_scan_tree_container = QWidget()
+        container_layout = QHBoxLayout(self.qa_scan_tree_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Left side: Move buttons
+        self.qa_scan_move_frame = QWidget()
+        move_layout = QVBoxLayout(self.qa_scan_move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+        
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+        
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_qa_scan_key('top'))
+        move_layout.addWidget(top_btn)
+        
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        up_btn.clicked.connect(lambda: self._move_qa_scan_key('up'))
+        move_layout.addWidget(up_btn)
+        
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        down_btn.clicked.connect(lambda: self._move_qa_scan_key('down'))
+        move_layout.addWidget(down_btn)
+        
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_qa_scan_key('bottom'))
+        move_layout.addWidget(bottom_btn)
+        
+        move_layout.addStretch()
+        container_layout.addWidget(self.qa_scan_move_frame)
+        
+        # Right side: TreeWidget with drag and drop
+        self.qa_scan_tree = QTreeWidget()
+        self.qa_scan_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.qa_scan_tree.setColumnWidth(0, 125)
+        self.qa_scan_tree.setColumnWidth(1, 220)
+        self.qa_scan_tree.setColumnWidth(2, 105)
+        self.qa_scan_tree.setColumnWidth(3, 100)
+        self.qa_scan_tree.setColumnWidth(4, 100)
+        self.qa_scan_tree.setColumnWidth(5, 75)
+        self.qa_scan_tree.setColumnWidth(6, 55)
+        self.qa_scan_tree.setColumnWidth(7, 80)
+        
+        qs_header = self.qa_scan_tree.header()
+        qs_header_font = QFont()
+        qs_header_font.setBold(True)
+        qs_header_font.setPointSize(11)
+        qs_header.setFont(qs_header_font)
+        
+        self.qa_scan_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.qa_scan_tree.customContextMenuRequested.connect(self._show_qa_scan_context_menu)
+        self.qa_scan_tree.setMinimumHeight(150)
+        
+        self.qa_scan_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.qa_scan_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        
+        self.qa_scan_tree.model().rowsMoved.connect(self._on_qa_scan_rows_moved)
+        self.qa_scan_tree.itemDoubleClicked.connect(self._on_qa_scan_click)
+        
+        container_layout.addWidget(self.qa_scan_tree)
+        parent_layout.addWidget(self.qa_scan_tree_container)
+        
+        # Action buttons
+        self.qa_scan_action_frame = QWidget()
+        qa_scan_action_layout = QHBoxLayout(self.qa_scan_action_frame)
+        qa_scan_action_layout.setContentsMargins(0, 10, 0, 0)
+        
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected_qa_scan)
+        qa_scan_action_layout.addWidget(test_selected_btn)
+
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all_qa_scan)
+        qa_scan_action_layout.addWidget(test_all_btn)
+
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected_qa_scan)
+        qa_scan_action_layout.addWidget(enable_selected_btn)
+
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected_qa_scan)
+        qa_scan_action_layout.addWidget(disable_selected_btn)
+    
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected_qa_scan)
+        qa_scan_action_layout.addWidget(remove_selected_btn)
+        
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_qa_scan)
+        qa_scan_action_layout.addWidget(clear_all_btn)
+        
+        qa_scan_action_layout.addStretch()
+        self.qa_scan_status_label = QLabel()
+        self.qa_scan_status_label.setStyleSheet("color: gray;")
+        qa_scan_action_layout.addWidget(self.qa_scan_status_label)
+        parent_layout.addWidget(self.qa_scan_action_frame)
+        
+        # Load existing QA scan keys
+        self._load_qa_scan_keys()
+
+    def _load_qa_scan_keys(self):
+        """Load QA scan keys from config"""
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        v_scroll = self.qa_scan_tree.verticalScrollBar().value()
+        h_scroll = self.qa_scan_tree.horizontalScrollBar().value()
+        
+        selected_indices = []
+        for item in self.qa_scan_tree.selectedItems():
+            selected_indices.append(self.qa_scan_tree.indexOfTopLevelItem(item))
+        
+        self.qa_scan_tree.clear()
+        
+        for key_data in qa_scan_keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            times_used = int(key_data.get('times_used', 0))
+            
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+            
+            try:
+                raw_limit = key_data.get('individual_output_token_limit')
+                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
+            except Exception:
+                per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+            
+            # Determine per-key temperature display value
+            try:
+                raw_temp = key_data.get('individual_key_temperature')
+                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
+            except Exception:
+                per_key_temp = None
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+            
+            enabled = key_data.get('enabled', True)
+            test_result = key_data.get('last_test_result')
+            if not enabled:
+                status = "Disabled"
+                color = Qt.gray
+            elif test_result == 'passed':
+                status = "✅ Passed"
+                color = Qt.darkGreen
+            elif test_result == 'failed':
+                status = "❌ Failed"
+                color = Qt.red
+            elif test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                color = Qt.darkYellow
+            elif test_result == 'error':
+                status = "❌ Error"
+                color = Qt.darkRed
+            else:
+                status = "Enabled"
+                color = Qt.gray
+            
+            success_count = int(key_data.get('success_count', 0))
+            error_count = int(key_data.get('error_count', 0))
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, status, str(success_count), str(error_count), str(times_used)])
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+            
+            # Tooltip for per-key settings
+            tooltip_parts = []
+            if per_key_limit and per_key_limit > 0:
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
+            else:
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            tooltip = "\n".join(tooltip_parts)
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+            
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self.qa_scan_tree.addTopLevelItem(item)
+            
+        for index in selected_indices:
+            if index < self.qa_scan_tree.topLevelItemCount():
+                item = self.qa_scan_tree.topLevelItem(index)
+                item.setSelected(True)
+        
+        self.qa_scan_tree.verticalScrollBar().setValue(v_scroll)
+        self.qa_scan_tree.horizontalScrollBar().setValue(h_scroll)
+        
+        # Auto-refresh the in-memory pool so changes take effect immediately
+        if not getattr(self, '_initializing', False):
+            self._refresh_qa_scan_pool()
+
+    def _add_qa_scan_key(self):
+        """Add a new QA scan key"""
+        api_key = self.qa_scan_key_entry.text().strip()
+        model = self.qa_scan_model_combo.currentText().strip()
+        google_credentials = self.qa_scan_google_creds_entry.text().strip() or None
+        google_region = self.qa_scan_google_region_entry.text().strip() or None
+        
+        use_individual_endpoint = self.qa_scan_individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.qa_scan_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.qa_scan_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
+        
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+        
+        if not api_key and _model_needs_api_key(model):
+            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, authgem-vertex/, vertex/, google-translate, deepl)")
+            return
+        
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        individual_output_token_limit = None
+        individual_key_temperature = None
+        
+        qa_scan_keys.append({
+            'api_key': api_key,
+            'model': model,
+            'google_credentials': google_credentials,
+            'azure_endpoint': azure_endpoint,
+            'google_region': google_region,
+            'azure_api_version': azure_api_version,
+            'use_individual_endpoint': use_individual_endpoint,
+            'individual_output_token_limit': individual_output_token_limit,
+            'individual_key_temperature': individual_key_temperature,
+            'times_used': 0
+        })
+        
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        
+        # Clear inputs
+        self.qa_scan_key_entry.clear()
+        self.qa_scan_model_combo.setCurrentText("")
+        self.qa_scan_google_creds_entry.clear()
+        self.qa_scan_azure_endpoint_entry.clear()
+        self.qa_scan_google_region_entry.setText("us-east5")
+        self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.qa_scan_individual_endpoint_toggle.setChecked(False)
+
+        self._toggle_qa_scan_individual_endpoint_fields()
+        
+        self._load_qa_scan_keys()
+        
+        extras = []
+        if google_credentials:
+            extras.append(f"Google: {os.path.basename(google_credentials)}")
+        if azure_endpoint:
+            extras.append(f"Azure: {azure_endpoint[:30]}...")
+        extra_info = f" ({', '.join(extras)})" if extras else ""
+        self._show_qa_scan_status(f"Added QA scan key for model: {model}{extra_info}")
+        
+        self._notify_authgpt_visibility()
+
+    def _move_qa_scan_key(self, direction):
+        """Move selected QA scan key up or down"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        item = selected[0]
+        index = self.qa_scan_tree.indexOfTopLevelItem(item)
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        if index >= len(qa_scan_keys):
+            return
+        
+        new_index = index
+        if direction == 'top' and index > 0:
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(qa_scan_keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom' and index < len(qa_scan_keys) - 1:
+            new_index = len(qa_scan_keys) - 1
+        
+        if new_index != index:
+            key = qa_scan_keys.pop(index)
+            qa_scan_keys.insert(new_index, key)
+            
+            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+            self.translator_gui.save_config(show_message=False)
+            
+            self._load_qa_scan_keys()
+            
+            if new_index < self.qa_scan_tree.topLevelItemCount():
+                item = self.qa_scan_tree.topLevelItem(new_index)
+                if item:
+                    self.qa_scan_tree.setCurrentItem(item)
+                    item.setSelected(True)
+
+    def _test_selected_qa_scan(self):
+        """Test selected QA scan key"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select a QA scan key to test")
+            return
+        
+        index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        if index >= len(qa_scan_keys):
+            return
+        
+        if index < self.qa_scan_tree.topLevelItemCount():
+            item = self.qa_scan_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏳ Testing...")
+        
+        key_data = qa_scan_keys[index]
+        
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+        
+        QTimer.singleShot(100, lambda: self._test_single_qa_scan_key(key_data, index))
+
+    def _test_all_qa_scan(self):
+        """Test all QA scan keys in parallel"""
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        if not qa_scan_keys:
+            QMessageBox.warning(self, "Warning", "No QA scan keys to test")
+            return
+        
+        for i in range(self.qa_scan_tree.topLevelItemCount()):
+            item = self.qa_scan_tree.topLevelItem(i)
+            if item:
+                item.setText(3, "⏳ Testing...")
+        
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+        
+        for i, key_data in enumerate(qa_scan_keys):
+            self._test_single_qa_scan_key(key_data, i)
+
+    @Slot(int, bool) if HAS_GUI else lambda x: x
+    def _update_qa_scan_test_result(self, index, success):
+        """Update QA scan tree item with test result"""
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        if index < len(qa_scan_keys):
+            try:
+                qa_scan_keys[index]['times_used'] = int(qa_scan_keys[index].get('times_used', 0)) + 1
+                if success:
+                    qa_scan_keys[index]['success_count'] = int(qa_scan_keys[index].get('success_count', 0)) + 1
+                else:
+                    qa_scan_keys[index]['error_count'] = int(qa_scan_keys[index].get('error_count', 0)) + 1
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+            except Exception:
+                pass
+        
+        if index < self.qa_scan_tree.topLevelItemCount():
+            item = self.qa_scan_tree.topLevelItem(index)
+            if item:
+                if success:
+                    item.setText(3, "✅ Passed")
+                    color = Qt.darkGreen
+                else:
+                    item.setText(3, "❌ Failed")
+                    color = Qt.red
+                for col in range(item.columnCount()):
+                    item.setForeground(col, color)
+                try:
+                    if success:
+                        current = int(item.text(4))
+                        item.setText(4, str(current + 1))
+                    else:
+                        current = int(item.text(5))
+                        item.setText(5, str(current + 1))
+                except Exception:
+                    pass
+                try:
+                    current_times = int(item.text(6))
+                    item.setText(6, str(current_times + 1))
+                except Exception:
+                    item.setText(6, "1")
+
+    @Slot(int) if HAS_GUI else lambda x: x
+    def _update_qa_scan_timeout_status(self, index):
+        """Update QA scan tree item with timeout status"""
+        if index < self.qa_scan_tree.topLevelItemCount():
+            item = self.qa_scan_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏱️ Timed Out")
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+
+    def _test_single_qa_scan_key(self, key_data, index):
+        """Test a single QA scan key — REAL API TEST"""
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+        
+        print(f"[DEBUG] Starting REAL QA scan key test for {model}")
+        
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+        
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+        
+        client_ref = [None]
+        timed_out = [False]
+        
+        def run_api_test():
+            try:
+                client = UnifiedClient(
+                    api_key=api_key,
+                    model=model,
+                    output_dir=None
+                )
+                client_ref[0] = client
+                
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.max_retries_override = 1
+                except Exception:
+                    pass
+                
+                google_credentials = key_data.get('google_credentials')
+                if google_credentials:
+                    client.current_key_google_creds = google_credentials
+                    client.google_creds_path = google_credentials
+                
+                google_region = key_data.get('google_region')
+                if google_region:
+                    client.current_key_google_region = google_region
+                
+                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
+                if use_individual_endpoint:
+                    azure_endpoint = key_data.get('azure_endpoint')
+                    if azure_endpoint:
+                        client.current_key_azure_endpoint = azure_endpoint
+                        client.current_key_use_individual_endpoint = True
+                    azure_api_version = key_data.get('azure_api_version')
+                    if azure_api_version:
+                        client.current_key_azure_api_version = azure_api_version
+                
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                ]
+                
+                response = client.send(messages, temperature=0.7, max_tokens=1000)
+                
+                if response and isinstance(response, tuple):
+                    content, _ = response
+                    if content and "test successful" in content.lower():
+                        print(f"[DEBUG] QA scan key test completed for {model}: PASSED")
+                        if not timed_out[0]:
+                            if HAS_GUI:
+                                QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                            else:
+                                self._update_qa_scan_test_result(index, True)
+                        return
+                
+                print(f"[DEBUG] QA scan key test completed for {model}: FAILED")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_qa_scan_test_result(index, False)
+            except Exception as e:
+                print(f"[DEBUG] QA scan key test error for {model}: {e}")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_qa_scan_test_result(index, False)
+        
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=30)
+                except FuturesTimeout:
+                    timed_out[0] = True
+                    print(f"[DEBUG] QA scan key test TIMED OUT for {model} (30s)")
+                    _client = client_ref[0]
+                    if _client:
+                        try:
+                            _client._cancelled = True
+                            oc = getattr(_client, 'openai_client', None)
+                            if oc and hasattr(oc, 'close'):
+                                oc.close()
+                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                                oc._client.close()
+                        except Exception:
+                            pass
+                    try:
+                        from unified_api_client import _api_watchdog_reset
+                        _api_watchdog_reset()
+                    except Exception:
+                        pass
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_qa_scan_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
+                    else:
+                        self._update_qa_scan_timeout_status(index)
+                except Exception:
+                    pass
+        
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
+            thread.start()
+
+    def _remove_selected_qa_scan(self):
+        """Remove selected QA scan key"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        reply = QMessageBox.question(self, "Confirm", "Remove selected QA scan key?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
+            qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+            
+            if index < len(qa_scan_keys):
+                del qa_scan_keys[index]
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_qa_scan_keys()
+                self._show_qa_scan_status("Removed QA scan key")
+                self._notify_authgpt_visibility()
+
+    def _enable_selected_qa_scan(self):
+        """Enable selected QA scan keys"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        for item in selected:
+            index = self.qa_scan_tree.indexOfTopLevelItem(item)
+            if index < len(qa_scan_keys):
+                qa_scan_keys[index]['enabled'] = True
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Enabled {len(selected)} QA scan key(s)")
+        self._notify_authgpt_visibility()
+
+    def _disable_selected_qa_scan(self):
+        """Disable selected QA scan keys"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        for item in selected:
+            index = self.qa_scan_tree.indexOfTopLevelItem(item)
+            if index < len(qa_scan_keys):
+                qa_scan_keys[index]['enabled'] = False
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Disabled {len(selected)} QA scan key(s)")
+        self._notify_authgpt_visibility()
+
+    def _clear_all_qa_scan(self):
+        """Clear all QA scan keys"""
+        if self.qa_scan_tree.topLevelItemCount() == 0:
+            return
+        
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL QA scan keys?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.translator_gui.config['qa_scan_keys'] = []
+            self.translator_gui.save_config(show_message=False)
+            self._load_qa_scan_keys()
+            self._show_qa_scan_status("Cleared all QA scan keys")
+            self._notify_authgpt_visibility()
+
+    def _toggle_qa_scan_section(self):
+        """Toggle QA scan section visibility"""
+        enabled = self.use_qa_scan_keys_checkbox.isChecked()
+        
+        if hasattr(self, 'add_qa_scan_frame'):
+            self.add_qa_scan_frame.setVisible(enabled)
+        if hasattr(self, 'qa_scan_list_label'):
+            self.qa_scan_list_label.setVisible(enabled)
+        if hasattr(self, 'qa_scan_tree_container'):
+            self.qa_scan_tree_container.setVisible(enabled)
+        if hasattr(self, 'qa_scan_action_frame'):
+            self.qa_scan_action_frame.setVisible(enabled)
+        if hasattr(self, 'qa_scan_tree') and not enabled:
+            self.qa_scan_tree.clearSelection()
+        
+        self._show_qa_scan_status(f"QA Scan Keys {'enabled' if enabled else 'disabled'}")
+        
+        # Update in-memory config immediately
+        self.translator_gui.config['use_qa_scan_keys'] = enabled
+        if hasattr(self.translator_gui, 'use_qa_scan_keys_var'):
+            self.translator_gui.use_qa_scan_keys_var = enabled
+        
+        if not getattr(self, '_initializing', False):
+            qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+            if enabled:
+                msg = f"🔑 QA scan key pool: {len(qa_scan_keys)} keys loaded"
+            else:
+                msg = f"🔑 QA scan key pool: disabled"
+            if hasattr(self.translator_gui, 'append_log'):
+                try:
+                    self.translator_gui.append_log(msg)
+                except Exception:
+                    print(msg)
+            else:
+                print(msg)
+        
+        try:
+            import os as _os
+            _os.environ['USE_QA_SCAN_KEYS'] = '1' if enabled else '0'
+        except Exception:
+            pass
+        
+        if enabled:
+            try:
+                from unified_api_client import UnifiedClient
+                qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
+                if qk_list:
+                    UnifiedClient.set_in_memory_qa_scan_keys(qk_list)
+            except Exception:
+                pass
+        else:
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.clear_in_memory_qa_scan_keys()
+            except Exception:
+                pass
+        
+        self._notify_authgpt_visibility()
+
+    def _refresh_qa_scan_pool(self):
+        """Refresh the in-memory QA scan key pool after any change."""
+        try:
+            use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
+            if not use_qa_scan:
+                return
+            from unified_api_client import UnifiedClient
+            qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
+            if qk_list:
+                UnifiedClient.set_in_memory_qa_scan_keys(qk_list)
+            else:
+                UnifiedClient.clear_in_memory_qa_scan_keys()
+        except Exception:
+            pass
+
+    def _toggle_qa_scan_visibility(self):
+        """Toggle QA scan key field visibility"""
+        if self.qa_scan_key_entry.echoMode() == QLineEdit.Password:
+            self.qa_scan_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_qa_scan_btn.setText('🔒')
+        else:
+            self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_qa_scan_btn.setText('👁')
+    
+    def _toggle_qa_scan_individual_endpoint_fields(self):
+        """Toggle visibility of QA scan individual endpoint fields"""
+        enabled = self.qa_scan_individual_endpoint_toggle.isChecked()
+        
+        self.qa_scan_individual_endpoint_label.setVisible(enabled)
+        self.qa_scan_azure_endpoint_entry.setVisible(enabled)
+        self.qa_scan_individual_api_version_label.setVisible(enabled)
+        self.qa_scan_azure_api_version_combo.setVisible(enabled)
+        
+        self.qa_scan_azure_endpoint_entry.setEnabled(enabled)
+        self.qa_scan_azure_api_version_combo.setEnabled(enabled)
+        
+        if not enabled:
+            self.qa_scan_azure_endpoint_entry.clear()
+            self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+
+    def _show_qa_scan_context_menu(self, position):
+        """Show context menu for QA scan keys"""
+        item = self.qa_scan_tree.itemAt(position)
+        if not item:
+            return
+        
+        if item not in self.qa_scan_tree.selectedItems():
+            self.qa_scan_tree.setCurrentItem(item)
+        
+        menu = QMenu(self)
+        
+        index = self.qa_scan_tree.indexOfTopLevelItem(item)
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        total = len(qa_scan_keys)
+        
+        # Reorder submenu
+        if total > 1:
+            reorder_menu = menu.addMenu("Reorder")
+            if index > 0:
+                up_action = reorder_menu.addAction("Move Up")
+                up_action.triggered.connect(lambda: self._move_qa_scan_key('up'))
+            if index < total - 1:
+                down_action = reorder_menu.addAction("Move Down")
+                down_action.triggered.connect(lambda: self._move_qa_scan_key('down'))
+            menu.addSeparator()
+        
+        # Change Model
+        selected_count = len(self.qa_scan_tree.selectedItems())
+        if selected_count > 1:
+            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
+        else:
+            change_model_action = menu.addAction("Change Model")
+        change_model_action.triggered.connect(self._change_qa_scan_model_for_selected)
+        
+        menu.addSeparator()
+        
+        # Individual Endpoint options
+        if index < len(qa_scan_keys):
+            key_data = qa_scan_keys[index]
+            endpoint_enabled = key_data.get('use_individual_endpoint', False)
+            endpoint_url = key_data.get('azure_endpoint', '')
+            
+            if endpoint_enabled and endpoint_url:
+                config_action = menu.addAction("✅ Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_qa_scan_individual_endpoint(index))
+                disable_action = menu.addAction("Disable Individual Endpoint")
+                disable_action.triggered.connect(lambda: self._toggle_qa_scan_individual_endpoint(index, False))
+            else:
+                config_action = menu.addAction("🔧 Configure Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_qa_scan_individual_endpoint(index))
+        
+        menu.addSeparator()
+        
+        # Per-key output token limit options
+        selected_items = self.qa_scan_tree.selectedItems()
+        selected_count = len(selected_items)
+        if selected_count > 1:
+            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
+        else:
+            set_limit_action = menu.addAction("Set Output Token Limit")
+        set_limit_action.triggered.connect(self._set_qa_scan_output_token_limit_for_selected)
+        clear_limit_action = menu.addAction("Clear Output Token Limit")
+        clear_limit_action.triggered.connect(self._clear_qa_scan_output_token_limit_for_selected)
+        
+        # Per-key temperature options
+        if selected_count > 1:
+            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
+        else:
+            set_temp_action = menu.addAction("Set Key Temperature")
+        set_temp_action.triggered.connect(self._set_qa_scan_key_temperature_for_selected)
+        clear_temp_action = menu.addAction("Clear Key Temperature")
+        clear_temp_action.triggered.connect(self._clear_qa_scan_key_temperature_for_selected)
+        
+        menu.addSeparator()
+        
+        test_action = menu.addAction("Test")
+        test_action.triggered.connect(self._test_selected_qa_scan)
+        enable_action = menu.addAction("Enable")
+        enable_action.triggered.connect(self._enable_selected_qa_scan)
+        disable_action = menu.addAction("Disable")
+        disable_action.triggered.connect(self._disable_selected_qa_scan)
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(self._remove_selected_qa_scan)
+        
+        if total > 1:
+            clear_action = menu.addAction("Clear All")
+            clear_action.triggered.connect(self._clear_all_qa_scan)
+        
+        menu.exec_(self.qa_scan_tree.viewport().mapToGlobal(position))
+
+    def _change_qa_scan_model_for_selected(self):
+        """Change model name for selected QA scan keys"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Change Model for {len(selected)} QA Scan Keys")
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)
+        height = int(screen.height() * 0.13)
+        dialog.resize(width, height)
+        self._set_icon(dialog)
+        
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        label = QLabel("Enter new model name (press Enter to apply):")
+        main_layout.addWidget(label)
+        
+        all_models = get_model_options()
+        model_combo = QComboBox()
+        model_combo.addItems(all_models)
+        model_combo.setEditable(True)
+        main_layout.addWidget(model_combo)
+        
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        if selected_indices and selected_indices[0] < len(qa_scan_keys):
+            current_model = qa_scan_keys[selected_indices[0]].get('model', '')
+            model_combo.setCurrentText(current_model)
+            model_combo.lineEdit().selectAll()
+        
+        def apply_change():
+            new_model = model_combo.currentText().strip()
+            if new_model:
+                for item in selected:
+                    idx = self.qa_scan_tree.indexOfTopLevelItem(item)
+                    if idx < len(qa_scan_keys):
+                        qa_scan_keys[idx]['model'] = new_model
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_qa_scan_keys()
+                self._show_qa_scan_status(f"Changed model to '{new_model}' for {len(selected)} QA scan keys")
+                dialog.accept()
+        
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(apply_change)
+        apply_btn.setDefault(True)
+        button_layout.addWidget(apply_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        main_layout.addLayout(button_layout)
+        
+        model_combo.setFocus()
+        dialog.exec_()
+
+    def _on_qa_scan_rows_moved(self):
+        """Sync qa_scan_keys config with tree order after drag-drop"""
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        
+        new_order = []
+        for i in range(self.qa_scan_tree.topLevelItemCount()):
+            item = self.qa_scan_tree.topLevelItem(i)
+            if item:
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key_data in qa_scan_keys:
+                    api_key = key_data.get('api_key', '')
+                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                        new_order.append(key_data)
+                        break
+        
+        if len(new_order) == len(qa_scan_keys):
+            self.translator_gui.config['qa_scan_keys'] = new_order
+            self.translator_gui.save_config(show_message=False)
+            self._show_qa_scan_status("Reordered QA scan keys")
+
+    def _on_qa_scan_click(self, item, column):
+        """Handle double-click on QA scan tree item for inline editing"""
+        if not item:
+            return
+        
+        index = self.qa_scan_tree.indexOfTopLevelItem(item)
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        if index >= len(qa_scan_keys):
+            return
+        
+        if column == 1:
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                qa_scan_keys[index]['model'] = new_value
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_qa_scan_keys()
+                self._show_qa_scan_status(f"Updated model to: {new_value}")
+        elif column == 2:
+            from PySide6.QtWidgets import QInputDialog
+            current = qa_scan_keys[index].get('individual_output_token_limit') or 0
+            try:
+                current = int(current)
+            except (ValueError, TypeError):
+                current = 0
+            value, ok = QInputDialog.getInt(
+                self, "Edit Output Token Limit",
+                "Output token limit (0 = use global):",
+                current, 0, 1000000, 100
+            )
+            if ok:
+                qa_scan_keys[index]['individual_output_token_limit'] = value if value > 0 else None
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_qa_scan_keys()
+                self._show_qa_scan_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 3:
+            from PySide6.QtWidgets import QInputDialog
+            current = qa_scan_keys[index].get('individual_key_temperature')
+            default = float(current) if current not in (None, "") else -1.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit Key Temperature",
+                "Temperature (-1 = use global, 0.0 - 1.0):",
+                default, -1.0, 1.0, 2
+            )
+            if ok:
+                if value < 0:
+                    if 'individual_key_temperature' in qa_scan_keys[index]:
+                        del qa_scan_keys[index]['individual_key_temperature']
+                else:
+                    qa_scan_keys[index]['individual_key_temperature'] = value
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_qa_scan_keys()
+                self._show_qa_scan_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+
+    def _show_qa_scan_status(self, message: str):
+        """Show status message in the QA scan section."""
+        if hasattr(self, 'qa_scan_status_label'):
+            self.qa_scan_status_label.setText(message)
+
+    def _configure_qa_scan_individual_endpoint(self, qa_scan_index):
+        """Configure individual endpoint for a QA scan key"""
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        if qa_scan_index >= len(qa_scan_keys):
+            return
+        
+        key_data = qa_scan_keys[qa_scan_index]
+        
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+        )
+        
+        def on_endpoint_configured():
+            qa_scan_keys[qa_scan_index]['azure_endpoint'] = temp_key.azure_endpoint
+            qa_scan_keys[qa_scan_index]['azure_api_version'] = temp_key.azure_api_version
+            qa_scan_keys[qa_scan_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_qa_scan_keys()
+            status = "configured" if temp_key.use_individual_endpoint else "disabled"
+            self._show_qa_scan_status(f"Individual endpoint {status} for QA scan key")
+        
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_qa_scan_status)
+        dialog.exec_()
+    
+    def _set_qa_scan_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected QA scan keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+        
+        default_val = None
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(qa_scan_keys):
+            try:
+                raw = qa_scan_keys[first_idx].get('individual_output_token_limit')
+                if raw not in (None, ""):
+                    iv = int(raw)
+                    if iv > 0:
+                        default_val = iv
+            except Exception:
+                default_val = None
+        if default_val is None:
+            try:
+                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+            except Exception:
+                default_val = 8192
+        
+        value, ok = QInputDialog.getInt(
+            self, "Set QA Scan Output Token Limit",
+            "Max output tokens for selected QA scan key(s):",
+            default_val, 1, 2000000, 512,
+        )
+        if not ok or value <= 0:
+            return
+        
+        for idx in selected_indices:
+            if 0 <= idx < len(qa_scan_keys):
+                qa_scan_keys[idx]['individual_output_token_limit'] = int(value)
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Set QA scan output token limit to {value} for {len(selected_indices)} key(s)")
+    
+    def _clear_qa_scan_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected QA scan keys"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(qa_scan_keys):
+                if 'individual_output_token_limit' in qa_scan_keys[idx]:
+                    del qa_scan_keys[idx]['individual_output_token_limit']
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Cleared QA scan output token limit for {len(selected_indices)} key(s)")
+    
+    def _set_qa_scan_key_temperature_for_selected(self):
+        """Set per-key temperature for selected QA scan keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+        
+        default_val = 0.7
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(qa_scan_keys):
+            try:
+                raw = qa_scan_keys[first_idx].get('individual_key_temperature')
+                if raw not in (None, ""):
+                    default_val = float(raw)
+            except Exception:
+                pass
+        
+        value, ok = QInputDialog.getDouble(
+            self,
+            "Set QA Scan Key Temperature",
+            "Temperature for selected QA scan key(s) (0.0 - 1.0):",
+            default_val,
+            0.0,
+            1.0,
+            2,
+        )
+        if not ok:
+            return
+        
+        for idx in selected_indices:
+            if 0 <= idx < len(qa_scan_keys):
+                qa_scan_keys[idx]['individual_key_temperature'] = value
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Set QA scan key temperature to {value} for {len(selected_indices)} key(s)")
+    
+    def _clear_qa_scan_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected QA scan keys"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(qa_scan_keys):
+                if 'individual_key_temperature' in qa_scan_keys[idx]:
+                    del qa_scan_keys[idx]['individual_key_temperature']
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Cleared QA scan key temperature for {len(selected_indices)} key(s)")
+    
+    def _toggle_qa_scan_individual_endpoint(self, qa_scan_index, enabled):
+        """Quick toggle individual endpoint on/off for QA scan key"""
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        if qa_scan_index >= len(qa_scan_keys):
+            return
+        
+        qa_scan_keys[qa_scan_index]['use_individual_endpoint'] = enabled
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        
+        status = "enabled" if enabled else "disabled"
+        model = qa_scan_keys[qa_scan_index].get('model', 'unknown')
+        self._show_qa_scan_status(f"Individual endpoint {status} for QA scan key ({model})")
+
+    def _browse_qa_scan_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file for QA scan keys"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON for QA Scan",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if 'type' in creds_data and 'project_id' in creds_data:
+                        self.qa_scan_google_creds_entry.setText(filename)
+                        self._show_qa_scan_status(f"Selected QA scan Google credentials: {os.path.basename(filename)}")
+                    else:
+                        QMessageBox.critical(
+                            self,
+                            "Error", 
+                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                        )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+    # ===================================================================
+    # END QA SCAN KEYS SECTION
     # ===================================================================
 
     def _manage_refusal_patterns(self):
