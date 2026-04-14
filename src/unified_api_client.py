@@ -5386,11 +5386,11 @@ class UnifiedClient:
             log_model = model_snapshot
 
         try:
-            if getattr(self, '_multi_key_mode', False):
+            if getattr(self, '_multi_key_mode', False) and not self._is_stop_requested():
                 logger.info(f"✅ Initialized {self.client_type} client for model: {log_model} (multi-key)")
-            elif log_model != model_snapshot:
+            elif log_model != model_snapshot and not self._is_stop_requested():
                 logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
-            else:
+            elif not self._is_stop_requested():
                 logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
         except Exception:
             # Last-resort: never fail client init due to logging

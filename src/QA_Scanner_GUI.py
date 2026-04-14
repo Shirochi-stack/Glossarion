@@ -288,6 +288,18 @@ class QAScannerMixin:
             if not self._lazy_load_modules():
                 self.append_log("❌ Failed to load QA scanner modules")
                 return
+                
+            # Reset global cancel flags in case of a previous stop
+            try:
+                import os
+                import unified_api_client
+                os.environ['TRANSLATION_CANCELLED'] = '0'
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = False
+                if hasattr(unified_api_client, '_cancel_event'):
+                    unified_api_client._cancel_event.clear()
+            except Exception:
+                pass
             
             # Check for scan_html_folder in the global scope from translator_gui
             import sys
