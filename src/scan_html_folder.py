@@ -5063,12 +5063,35 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             result['details'] = 'insufficient_text'
             return result
 
-        source_text = "\n".join(source_paras)
-        trans_text = "\n".join(trans_paras)
-
-        # Take the tail of each
-        source_tail = source_text[-tail_chars:] if len(source_text) > tail_chars else source_text
-        trans_tail = trans_text[-tail_chars:] if len(trans_text) > tail_chars else trans_text
+        def _get_clean_tail(paras, target_chars):
+            tail_paras = []
+            curr_len = 0
+            for p in reversed(paras):
+                p_len = len(p)
+                # If adding this paragraph vastly exceeds the limit and we already have some, stop
+                if curr_len > 0 and curr_len + p_len > target_chars * 1.5:
+                    break
+                tail_paras.insert(0, p)
+                curr_len += p_len + 1
+                if curr_len >= target_chars:
+                    break
+            
+            tail_text = "\n".join(tail_paras)
+            
+            # If it's still way too big (e.g. a single giant paragraph exceeded target_chars*1.5)
+            if len(tail_text) > target_chars * 1.5:
+                cut_idx = len(tail_text) - target_chars
+                # Find space to avoid mid-word cuts
+                space_idx = tail_text.find(' ', cut_idx)
+                if space_idx != -1 and space_idx < len(tail_text) - 50:
+                    tail_text = "..." + tail_text[space_idx:]
+                else:
+                    tail_text = "..." + tail_text[cut_idx:]
+            
+            return tail_text
+            
+        source_tail = _get_clean_tail(source_paras, tail_chars)
+        trans_tail = _get_clean_tail(trans_paras, tail_chars)
 
         if len(trans_tail.strip()) < 20:
             result['flagged'] = True
@@ -5080,12 +5103,13 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             system_prompt = custom_system_prompt.strip()
         else:
             system_prompt = (
-                "You are a translation quality analyst. Your ONLY job is to determine if "
-                "a translated text appears to be truncated (cut off prematurely, missing content "
-                "from the end of the source). You will be given the TAIL (ending portion) of the "
-                "original source text and the TAIL of its translation. Compare them and determine "
-                "if the translation appears to stop too early, omitting content that exists in the "
-                "source. Respond with ONLY the word YES or NO. Do not explain."
+                "You are a strict translation quality analyst. Your ONLY job is to determine if "
+                "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
+                "or completely missing the final paragraphs/sentences present in the source).\n"
+                "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
+                "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
+                "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
+                "Respond with ONLY the word YES or NO. Do not explain."
             )
 
         user_prompt = (

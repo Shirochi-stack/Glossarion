@@ -3074,12 +3074,13 @@ class QAScannerMixin:
 
         # "Edit Prompt" button
         _ai_trunc_default_prompt = (
-            "You are a translation quality analyst. Your ONLY job is to determine if "
-            "a translated text appears to be truncated (cut off prematurely, missing content "
-            "from the end of the source). You will be given the TAIL (ending portion) of the "
-            "original source text and the TAIL of its translation. Compare them and determine "
-            "if the translation appears to stop too early, omitting content that exists in the "
-            "source. Respond with ONLY the word YES or NO. Do not explain."
+            "You are a strict translation quality analyst. Your ONLY job is to determine if "
+            "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
+            "or completely missing the final paragraphs/sentences present in the source).\n"
+            "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
+            "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
+            "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
+            "Respond with ONLY the word YES or NO. Do not explain."
         )
         # Store current custom prompt (or default) in a mutable container for the closure
         _ai_trunc_prompt_holder = [qa_settings.get('ai_truncation_prompt', _ai_trunc_default_prompt)]
@@ -3211,7 +3212,7 @@ class QAScannerMixin:
                 system_radio.setChecked(True)
                 check_ai_truncation_checkbox.setChecked(False)
                 ai_truncation_tail_spinbox.setValue(400)
-                ai_disable_thinking_check.setChecked(False)
+                ai_disable_thinking_check.setChecked(True)
             reset_btn.clicked.connect(_reset_all_defaults)
             btn_row.addWidget(reset_btn)
             btn_row.addStretch()
@@ -3467,7 +3468,7 @@ class QAScannerMixin:
         ai_thinking_h.setSpacing(8)
         
         ai_disable_thinking_check = QCheckBox("Disable all thinking (removes thinking params for fast checks)")
-        ai_disable_thinking_check.setChecked(qa_settings.get('ai_truncation_disable_thinking', False))
+        ai_disable_thinking_check.setChecked(qa_settings.get('ai_truncation_disable_thinking', True))
         ai_thinking_h.addWidget(ai_disable_thinking_check)
         ai_thinking_h.addStretch()
         ai_api_layout.addWidget(ai_thinking_row)
@@ -3497,8 +3498,6 @@ class QAScannerMixin:
             
             ai_url_label.setStyleSheet(f"color: {label_color};")
             ai_url_entry.setStyleSheet(f"color: {color};")
-            
-            ai_disable_thinking_check.setStyleSheet(f"color: {color};" if checked else "color: #909090;")
         check_ai_truncation_checkbox.toggled.connect(_toggle_ai_api_section)
         _toggle_ai_api_section(check_ai_truncation_checkbox.isChecked())
 
