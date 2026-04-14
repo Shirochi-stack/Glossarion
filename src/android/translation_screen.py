@@ -717,18 +717,21 @@ class TranslationScreen(MDScreen):
 
     def _update_auth_btn_label(self):
         sys_name = self._get_auth_system_name()
+        system = "authgem" if "AuthGem" in sys_name else "authgpt"
         if self.authgpt_logged_in:
             from android_oauth import get_account_email
-            email = get_account_email(self._get_auth_account_id())
+            email = get_account_email(self._get_auth_account_id(), system=system)
             self.authgpt_status_text = f"🔓 {sys_name}: {email}" if email else f"🔓 {sys_name}: Logged In"
         else:
             self.authgpt_status_text = f"🔒 {sys_name}: Login"
 
     def _check_authgpt_status(self):
         """Check if Auth token exists and update UI accordingly."""
+        sys_name = self._get_auth_system_name()
+        system = "authgem" if "AuthGem" in sys_name else "authgpt"
         try:
             from android_oauth import has_valid_token
-            if has_valid_token(self._get_auth_account_id()):
+            if has_valid_token(self._get_auth_account_id(), system=system):
                 self.authgpt_logged_in = True
             else:
                 self.authgpt_logged_in = False
@@ -745,13 +748,15 @@ class TranslationScreen(MDScreen):
             toast(f"Already logged in as {self.authgpt_status_text.replace('🔓 ', '')}")
             return
 
-        self.authgpt_status_text = f"⏳ {sys_name}: Logging in..."
+        sys_name = self._get_auth_system_name()
+        system = "authgem" if "AuthGem" in sys_name else "authgpt"
         try:
             from android_oauth import start_oauth_flow
             start_oauth_flow(
                 on_success=self._on_authgpt_success,
                 on_error=self._on_authgpt_error,
-                account_id=self._get_auth_account_id()
+                account_id=self._get_auth_account_id(),
+                system=system
             )
         except Exception as e:
             self._update_auth_btn_label()
@@ -773,9 +778,11 @@ class TranslationScreen(MDScreen):
 
     def authgpt_logout(self):
         """Clear stored OAuth tokens."""
+        sys_name = self._get_auth_system_name()
+        system = "authgem" if "AuthGem" in sys_name else "authgpt"
         try:
             from android_oauth import logout
-            logout(self._get_auth_account_id())
+            logout(self._get_auth_account_id(), system=system)
         except Exception:
             pass
         self.authgpt_logged_in = False
