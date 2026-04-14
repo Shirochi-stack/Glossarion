@@ -433,9 +433,9 @@ class QAScannerMixin:
             """)
             mode_dialog.setWindowTitle("Select QA Scanner Mode")
             mode_dialog.resize(dialog_width, dialog_height)
-            # Non-modal but stays on top
+            # Non-modal, standard OS window stacking
             mode_dialog.setModal(False)
-            mode_dialog.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+            mode_dialog.setWindowFlags(Qt.Window)
             # Set window icon
             try:
                 ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
@@ -3211,7 +3211,7 @@ class QAScannerMixin:
             )
             def _reset_all_defaults():
                 reply = QMessageBox.question(
-                    pdialog, "Confirm Reset", 
+                    prompt_dlg, "Confirm Reset", 
                     "Are you sure you want to reset the prompt and truncation settings to their defaults?\nThis action cannot be undone.",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No
                 )
