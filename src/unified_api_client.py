@@ -12322,6 +12322,10 @@ class UnifiedClient:
             else:
                 context = 'general'
         
+        # QA truncation: each request gets its own unique subfolder (like image payloads)
+        if context in ('qa_truncation', 'Truncation'):
+            return self._generate_unique_thread_dir(context)
+        
         thread_dir = os.path.join(_payloads_dir(), context, f"{thread_name}_{threading.current_thread().ident}")
         try:
             os.makedirs(thread_dir, exist_ok=True)
