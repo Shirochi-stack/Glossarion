@@ -1396,7 +1396,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.synthetic_merge_headers_var = self.config.get('synthetic_merge_headers', True)
         self.selected_files = []
         self.current_file_index = 0
-        self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', True)
+        self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
         self.gemini_openai_endpoint_var = self.config.get('gemini_openai_endpoint', 'generativelanguage.googleapis.com')
         self.force_native_anthropic_var = self.config.get('force_native_anthropic', False)
         self.anthropic_base_url_var = self.config.get('anthropic_base_url', '')
@@ -19038,7 +19038,7 @@ Important rules:
                 ('split_the_merge', ['split_the_merge_var'], True, bool),
                 ('disable_merge_fallback', ['disable_merge_fallback_var'], True, bool),
                 ('synthetic_merge_headers', ['synthetic_merge_headers_var'], True, bool),
-                ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], True, bool),
+                ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
@@ -20119,7 +20119,7 @@ Important rules:
                 ('GROQ_API_URL', getattr(self, 'groq_base_url_var', '')),
                 ('FIREWORKS_API_URL', getattr(self, 'fireworks_base_url_var', '')),
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
-                ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', True) else '0'),
+                ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'),
                 ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', 'generativelanguage.googleapis.com')),
                 ('FORCE_NATIVE_ANTHROPIC', '1' if getattr(self, 'force_native_anthropic_var', False) else '0'),
                 ('ANTHROPIC_BASE_URL', getattr(self, 'anthropic_base_url_var', '')),
