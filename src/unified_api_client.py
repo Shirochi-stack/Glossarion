@@ -12310,7 +12310,7 @@ class UnifiedClient:
         thread_name = threading.current_thread().name
         # Prefer the client's explicit context if available
         explicit = getattr(self, 'context', None)
-        if explicit in ('translation', 'glossary', 'summary', 'review', 'metadata', 'book_title'):
+        if explicit in ('translation', 'glossary', 'summary', 'review', 'metadata', 'book_title', 'qa_truncation', 'Truncation'):
             context = explicit
         else:
             if 'Translation' in thread_name:
@@ -12465,18 +12465,21 @@ class UnifiedClient:
             thinking_level = "high"
 
         # If user tries to disable thinking via budget=0, map to the lowest supported level per model
-        if self._is_gemini_3_model() and thinking_budget == 0:
+        # Skip warning if caller already set thinking_level=minimal (e.g. QA scanner disable_thinking)
+        if self._is_gemini_3_model() and thinking_budget == 0 and thinking_level != "minimal":
             if "flash" in model_lower:
                 thinking_level = "minimal"
                 if not getattr(self.__class__, '_gemini3_flash_thinking_alert_shown', False) and not self._is_stop_requested():
-                    print("   ⚠️ Gemini 3 Flash does not support disabled thinking; using minimal instead of 0")
+                    print(f"   ⚠️ {self.model} does not support disabled thinking; using minimal instead of 0")
                     self.__class__._gemini3_flash_thinking_alert_shown = True
             else:
                 thinking_level = "low"
                 if not getattr(self.__class__, '_gemini3_pro_thinking_alert_shown', False) and not self._is_stop_requested():
-                    print("   ⚠️ Gemini 3 Pro does not support disabled thinking; using low instead of 0")
+                    print(f"   ⚠️ {self.model} does not support disabled thinking; using low instead of 0")
                     self.__class__._gemini3_pro_thinking_alert_shown = True
             thinking_budget = -1  # avoid sending 0 budget for Gemini 3
+        elif self._is_gemini_3_model() and thinking_budget == 0 and thinking_level == "minimal":
+            thinking_budget = -1  # silently fix budget — caller already set minimal
 
         # Gemini 2.5 Pro cannot disable thinking. A budget of 0 leads to API errors.
         # Fallback to the minimum functional budget.
