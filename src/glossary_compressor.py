@@ -148,6 +148,7 @@ def _compress_token_efficient_format(lines, source_text):
     """Compress token-efficient glossary format with section headers."""
     filtered_lines = []
     current_section = None
+    current_section_is_character = False
     
     for line in lines:
         stripped = line.strip()
@@ -160,6 +161,7 @@ def _compress_token_efficient_format(lines, source_text):
         # Track section headers
         if stripped.startswith('==='):
             current_section = line
+            current_section_is_character = 'CHARACTER' in stripped.upper()
             continue
         
         # Process entry lines (start with "* ")
@@ -170,7 +172,7 @@ def _compress_token_efficient_format(lines, source_text):
             if match:
                 raw_name = match.group(1).strip()
                 # Check if raw name appears in source text
-                if _text_contains_term(source_text, raw_name):
+                if _text_contains_term(source_text, raw_name, is_character=current_section_is_character):
                     # Add section header if this is the first entry in section
                     if current_section:
                         filtered_lines.append(current_section)
@@ -214,12 +216,13 @@ def _compress_legacy_csv_format(lines, source_text):
             # Parse CSV line using detected separator
             parts = [p.strip() for p in line.split(sep)]
             if len(parts) >= 3:
-                entry_type = parts[0].strip()
+                entry_type = parts[0].strip().lower()
                 raw_name = parts[1].strip()
                 translated_name = parts[2].strip()
                 
+                is_char = entry_type == 'character'
                 # Check if raw name appears in source text
-                if _text_contains_term(source_text, raw_name):
+                if _text_contains_term(source_text, raw_name, is_character=is_char):
                     filtered_lines.append(line)
         except Exception:
             # If parsing fails, keep the line to be safe
@@ -241,12 +244,19 @@ def _compress_json_glossary(json_data, source_text):
             print("⚠️ Glossary compression: JSON parsing failed, falling back to raw-name scan")
             return _compress_fallback_text(json_data, source_text)
     
+    def _is_char_entry(val):
+        """Check if a JSON entry value represents a character."""
+        if isinstance(val, dict):
+            return val.get('type', '').lower() == 'character'
+        return False
+    
     if isinstance(json_data, dict):
         # Handle dict with 'entries' key
         if 'entries' in json_data:
             filtered_entries = {}
             for key, value in json_data['entries'].items():
-                if _text_contains_term(source_text, key):
+                is_char = _is_char_entry(value)
+                if _text_contains_term(source_text, key, is_character=is_char):
                     filtered_entries[key] = value
             
             result = json_data.copy()
@@ -258,8 +268,10 @@ def _compress_json_glossary(json_data, source_text):
             for key, value in json_data.items():
                 if key == 'metadata':
                     filtered_dict[key] = value
-                elif _text_contains_term(source_text, key):
-                    filtered_dict[key] = value
+                else:
+                    is_char = _is_char_entry(value)
+                    if _text_contains_term(source_text, key, is_character=is_char):
+                        filtered_dict[key] = value
             return filtered_dict
     
     elif isinstance(json_data, list):
@@ -269,7 +281,8 @@ def _compress_json_glossary(json_data, source_text):
             if isinstance(entry, dict):
                 # Check various possible keys for the raw term
                 raw_term = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
-                if raw_term and _text_contains_term(source_text, raw_term):
+                is_char = entry.get('type', '').lower() == 'character'
+                if raw_term and _text_contains_term(source_text, raw_term, is_character=is_char):
                     filtered_list.append(entry)
         return filtered_list
     
@@ -417,11 +430,17 @@ def _compress_fallback_text(content, source_text):
     
     # ── Phase 3: Match entry groups against source text ──────────────────
     # For each entry group, extract candidates and check against source.
+    # Track which section header (if any) precedes each entry group for
+    # character-type detection.
+    current_section_is_character = False
     for group in groups:
-        if group['type'] == 'entry':
+        if group['type'] == 'header':
+            header_text = lines[group['line_indices'][0]].strip().upper()
+            current_section_is_character = 'CHARACTER' in header_text
+        elif group['type'] == 'entry':
             entry_text = '\n'.join(lines[idx] for idx in group['line_indices'])
             candidates = _extract_candidates(entry_text)
-            group['keep'] = any(_text_contains_term(source_text, c) for c in candidates)
+            group['keep'] = any(_text_contains_term(source_text, c, is_character=current_section_is_character) for c in candidates)
         elif group['type'] in ('meta', 'blank'):
             group['keep'] = True  # always keep meta lines and blanks (blanks filtered later)
         elif group['type'] == 'header':
@@ -471,15 +490,21 @@ def _compress_fallback_text(content, source_text):
     return '\n'.join(result_lines)
 
 
-def _text_contains_term(text, term):
+def _text_contains_term(text, term, is_character=False):
     """
     Check if term appears in text using substring matching.
     Works well with any language — CJK, Latin, Arabic, etc.
     
     For multi-word terms (e.g. "미샤 랄토스"), also checks if ANY
-    individual word (≥2 chars) appears in the source text, so that
-    a partial name match (family name or given name alone) still
-    keeps the glossary entry.
+    individual word appears in the source text, so that a partial
+    name match (family name or given name alone) still keeps the
+    glossary entry.
+    
+    Args:
+        is_character: When True (character-type entries), accept
+            partial tokens of any length (≥1 char). When False,
+            require ≥2 chars to reduce false positives on
+            non-character entries like terms and places.
     """
     if not term or not text:
         return False
@@ -488,10 +513,13 @@ def _text_contains_term(text, term):
     if term in text:
         return True
     
-    # Multi-word: check individual tokens (≥ 2 chars each)
+    # Multi-word: check individual tokens
+    # Character entries: accept any token length (≥1 char)
+    # Non-character entries: require ≥2 chars to limit false positives
+    min_token_len = 1 if is_character else 2
     if ' ' in term:
         for token in term.split():
-            if len(token) >= 2 and token in text:
+            if len(token) >= min_token_len and token in text:
                 return True
     
     return False
