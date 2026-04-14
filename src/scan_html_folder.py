@@ -7906,6 +7906,35 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         issues.append(issue_text)
                     else:
                         issues.append(f"ai_refusal_pattern_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_leaked_translation_rules':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:80] if len(str(examples[0])) > 80 else str(examples[0])
+                        log(f"   🤖 Leaked translation rules detected ({artifact['count']} keywords matched)")
+                        issue_text = f"ai_leaked_translation_rules: {artifact['count']} translation keywords"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_leaked_translation_rules_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_thinking_preamble':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:60] if len(str(examples[0])) > 60 else str(examples[0])
+                        log(f"   🤖 AI thinking preamble detected: '{first_example}'")
+                        issue_text = f"ai_thinking_preamble: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_thinking_preamble_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_prompt_section_headers':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        headers_str = ', '.join(str(e) for e in examples[:3])
+                        log(f"   🤖 Leaked prompt headers detected: {headers_str}")
+                        issue_text = f"ai_prompt_headers: {headers_str}"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_prompt_section_headers_{artifact['count']}_found")
                 elif 'glossary_' in artifact['type']:
                     severity = artifact.get('severity', 'medium')
                     examples = artifact.get('examples', [])
