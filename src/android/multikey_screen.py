@@ -257,8 +257,10 @@ class MultiKeyScreen(MDScreen):
                 model_menu.dismiss()
                 model_menu = None
 
-        def _show_model_menu(*args):
+        def _show_model_menu(caller_widget=None, *args):
             nonlocal model_menu
+            if model_menu:
+                model_menu.dismiss()
             items = [{
                 "text": m,
                 "viewclass": "OneLineListItem",
@@ -266,7 +268,7 @@ class MultiKeyScreen(MDScreen):
                 "on_release": (lambda x=m: _select_model(x)),
             } for m in DEFAULT_MODELS]
             model_menu = MDDropdownMenu(
-                caller=model_btn,
+                caller=caller_widget or model_btn,
                 items=items,
                 width_mult=5,
                 position="center",
@@ -274,7 +276,12 @@ class MultiKeyScreen(MDScreen):
             )
             model_menu.open()
 
-        model_btn.bind(on_release=_show_model_menu)
+        def _on_model_focus(instance, focused):
+            if focused:
+                _show_model_menu(model_field)
+
+        model_btn.bind(on_release=lambda *a: _show_model_menu(model_btn))
+        model_field.bind(focus=_on_model_focus)
 
         def add_key(*args):
             key = api_field.text.strip()
@@ -339,8 +346,10 @@ class MultiKeyScreen(MDScreen):
                 model_menu.dismiss()
                 model_menu = None
 
-        def _show_model_menu(*args):
+        def _show_model_menu(caller_widget=None, *args):
             nonlocal model_menu
+            if model_menu:
+                model_menu.dismiss()
             items = [{
                 "text": m,
                 "viewclass": "OneLineListItem",
@@ -348,7 +357,7 @@ class MultiKeyScreen(MDScreen):
                 "on_release": (lambda x=m: _select_model(x)),
             } for m in DEFAULT_MODELS]
             model_menu = MDDropdownMenu(
-                caller=model_btn,
+                caller=caller_widget or model_btn,
                 items=items,
                 width_mult=5,
                 position="center",
@@ -356,7 +365,12 @@ class MultiKeyScreen(MDScreen):
             )
             model_menu.open()
 
-        model_btn.bind(on_release=_show_model_menu)
+        def _on_model_focus(instance, focused):
+            if focused:
+                _show_model_menu(model_field)
+
+        model_btn.bind(on_release=lambda *a: _show_model_menu(model_btn))
+        model_field.bind(focus=_on_model_focus)
 
         def save_edit(*args):
             self.api_keys[index]['api_key'] = api_field.text.strip()
