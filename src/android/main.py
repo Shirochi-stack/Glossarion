@@ -60,6 +60,7 @@ from kivy.core.text import LabelBase
 from kivy.utils import platform
 from kivy.lang import Builder
 from kivy.clock import Clock
+from kivy.animation import Animation
 
 # ── CJK font helper ──
 def _get_cjk_font_paths():
@@ -126,108 +127,132 @@ from android_notification import create_notification_channels
 KV = '''
 #:import SlideTransition kivy.uix.screenmanager.SlideTransition
 
-BoxLayout:
-    orientation: 'vertical'
-
-    ScreenManager:
-        id: screen_manager
-        transition: SlideTransition(duration=0.25)
-
-        LibraryScreen:
-            name: 'library'
-
-        ReaderScreen:
-            name: 'reader'
-
-        MultiKeyScreen:
-            name: 'multikey'
-
-        ExtractGlossaryScreen:
-            name: 'extract_glossary'
-
-        ProgressScreen:
-            name: 'progress'
-
-        OtherSettingsScreen:
-            name: 'other_settings'
-
-        TranslationScreen:
-            name: 'translation'
-
-    # Horizontal scroll tab strip (fits more tabs than fixed icon row)
+FloatLayout:
     BoxLayout:
-        id: bottom_nav
-        size_hint_y: None
-        height: dp(62)
+        orientation: 'vertical'
+        size_hint: 1, 1
 
-        canvas.before:
-            Color:
-                rgba: app.theme_cls.bg_dark
-            Rectangle:
-                pos: self.pos
-                size: self.size
-            # Top border line
-            Color:
-                rgba: 0.3, 0.3, 0.3, 0.5
-            Rectangle:
-                pos: self.x, self.top - 1
-                size: self.width, 1
+        ScreenManager:
+            id: screen_manager
+            transition: SlideTransition(duration=0.25)
 
-        ScrollView:
-            do_scroll_x: True
-            do_scroll_y: False
-            bar_width: dp(2)
-            scroll_type: ['bars', 'content']
+            LibraryScreen:
+                name: 'library'
+
+            ReaderScreen:
+                name: 'reader'
+
+            MultiKeyScreen:
+                name: 'multikey'
+
+            ExtractGlossaryScreen:
+                name: 'extract_glossary'
+
+            ProgressScreen:
+                name: 'progress'
+
+            OtherSettingsScreen:
+                name: 'other_settings'
+
+            TranslationScreen:
+                name: 'translation'
+
+    Button:
+        id: tab_menu_scrim
+        size_hint: 1, 1
+        background_normal: ''
+        background_color: 0, 0, 0, 0.48
+        opacity: 0
+        disabled: True
+        on_release: app.close_tab_menu()
+
+    MDCard:
+        id: tab_menu_panel
+        size_hint: None, 1
+        width: dp(260)
+        x: -self.width
+        y: 0
+        elevation: 8
+        radius: [0, dp(18), dp(18), 0]
+        md_bg_color: app.theme_cls.bg_dark
+        padding: [dp(10), dp(12), dp(10), dp(12)]
+
+        BoxLayout:
+            orientation: 'vertical'
+            spacing: dp(8)
 
             BoxLayout:
-                id: nav_tabs
-                orientation: 'horizontal'
-                size_hint_x: None
-                width: self.minimum_width
+                size_hint_y: None
+                height: dp(40)
                 spacing: dp(8)
-                padding: [dp(8), dp(8), dp(8), dp(8)]
 
-                MDRaisedButton:
-                    text: "Library"
-                    size_hint_x: None
-                    width: dp(108)
-                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'library' else (0.30, 0.30, 0.34, 1)
-                    on_release: app.switch_screen('library')
+                MDLabel:
+                    text: "Navigation"
+                    font_style: "Subtitle1"
 
-                MDRaisedButton:
-                    text: "Multi-Key"
-                    size_hint_x: None
-                    width: dp(110)
-                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'multikey' else (0.30, 0.30, 0.34, 1)
-                    on_release: app.switch_screen('multikey')
+                MDIconButton:
+                    icon: "close"
+                    on_release: app.close_tab_menu()
 
-                MDRaisedButton:
-                    text: "Extract Glossary"
-                    size_hint_x: None
-                    width: dp(150)
-                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'extract_glossary' else (0.30, 0.30, 0.34, 1)
-                    on_release: app.switch_screen('extract_glossary')
+            ScrollView:
+                do_scroll_x: False
 
-                MDRaisedButton:
-                    text: "Progress"
-                    size_hint_x: None
-                    width: dp(108)
-                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'progress' else (0.30, 0.30, 0.34, 1)
-                    on_release: app.switch_screen('progress')
+                BoxLayout:
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(8)
+                    padding: [0, dp(4), 0, dp(4)]
 
-                MDRaisedButton:
-                    text: "Translate"
-                    size_hint_x: None
-                    width: dp(108)
-                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'translation' else (0.30, 0.30, 0.34, 1)
-                    on_release: app.switch_screen('translation')
+                    MDRaisedButton:
+                        text: "Library"
+                        size_hint_y: None
+                        height: dp(40)
+                        md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'library' else (0.30, 0.30, 0.34, 1)
+                        on_release: app.switch_screen_from_menu('library')
 
-                MDRaisedButton:
-                    text: "Other Settings"
-                    size_hint_x: None
-                    width: dp(132)
-                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'other_settings' else (0.30, 0.30, 0.34, 1)
-                    on_release: app.switch_screen('other_settings')
+                    MDRaisedButton:
+                        text: "Multi-Key"
+                        size_hint_y: None
+                        height: dp(40)
+                        md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'multikey' else (0.30, 0.30, 0.34, 1)
+                        on_release: app.switch_screen_from_menu('multikey')
+
+                    MDRaisedButton:
+                        text: "Extract Glossary"
+                        size_hint_y: None
+                        height: dp(40)
+                        md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'extract_glossary' else (0.30, 0.30, 0.34, 1)
+                        on_release: app.switch_screen_from_menu('extract_glossary')
+
+                    MDRaisedButton:
+                        text: "Progress"
+                        size_hint_y: None
+                        height: dp(40)
+                        md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'progress' else (0.30, 0.30, 0.34, 1)
+                        on_release: app.switch_screen_from_menu('progress')
+
+                    MDRaisedButton:
+                        text: "Translate"
+                        size_hint_y: None
+                        height: dp(40)
+                        md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'translation' else (0.30, 0.30, 0.34, 1)
+                        on_release: app.switch_screen_from_menu('translation')
+
+                    MDRaisedButton:
+                        text: "Other Settings"
+                        size_hint_y: None
+                        height: dp(40)
+                        md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'other_settings' else (0.30, 0.30, 0.34, 1)
+                        on_release: app.switch_screen_from_menu('other_settings')
+
+    MDIconButton:
+        id: tab_menu_button
+        icon: "menu"
+        pos_hint: {"x": 0.015, "top": 0.99}
+        theme_text_color: "Custom"
+        text_color: 1, 1, 1, 1
+        on_release: app.toggle_tab_menu()
 '''
 
 
@@ -331,21 +356,57 @@ class GlossarionApp(MDApp):
         sm = self.root.ids.screen_manager
         sm.current = screen_name
 
-        # Show/hide bottom nav for reader
-        bottom_nav = self.root.ids.bottom_nav
+        # Show/hide left-menu trigger for reader
+        menu_btn = self.root.ids.tab_menu_button
         if screen_name == 'reader':
-            bottom_nav.opacity = 0
-            bottom_nav.disabled = True
-            bottom_nav.height = 0
+            self.close_tab_menu()
+            menu_btn.opacity = 0
+            menu_btn.disabled = True
         else:
-            bottom_nav.opacity = 1
-            bottom_nav.disabled = False
-            bottom_nav.height = 62
+            menu_btn.opacity = 1
+            menu_btn.disabled = False
 
         # Pass data to target screen
         screen = sm.get_screen(screen_name)
         if hasattr(screen, 'on_enter_data') and kwargs:
             screen.on_enter_data(**kwargs)
+
+    def switch_screen_from_menu(self, screen_name):
+        """Switch screen from side menu and close it."""
+        self.switch_screen(screen_name)
+        self.close_tab_menu()
+
+    def toggle_tab_menu(self):
+        if not self.root:
+            return
+        panel = self.root.ids.tab_menu_panel
+        if panel.x < -1:
+            self.open_tab_menu()
+        else:
+            self.close_tab_menu()
+
+    def open_tab_menu(self):
+        if not self.root:
+            return
+        panel = self.root.ids.tab_menu_panel
+        scrim = self.root.ids.tab_menu_scrim
+        scrim.disabled = False
+        Animation.cancel_all(panel)
+        Animation.cancel_all(scrim)
+        Animation(x=0, d=0.18, t='out_quad').start(panel)
+        Animation(opacity=1, d=0.16).start(scrim)
+
+    def close_tab_menu(self, *_args):
+        if not self.root:
+            return
+        panel = self.root.ids.tab_menu_panel
+        scrim = self.root.ids.tab_menu_scrim
+        Animation.cancel_all(panel)
+        Animation.cancel_all(scrim)
+        Animation(x=-panel.width, d=0.18, t='out_quad').start(panel)
+        anim = Animation(opacity=0, d=0.16)
+        anim.bind(on_complete=lambda *_: setattr(scrim, 'disabled', True))
+        anim.start(scrim)
 
     def open_reader(self, file_path):
         self.switch_screen('reader', file_path=file_path)

@@ -221,7 +221,7 @@ class OtherSettingsScreen(MDScreen):
             height=dp(26),
         ))
         content.add_widget(MDLabel(
-            text="Double-tap field to copy (or paste if empty).",
+            text="Double-tap field to copy, or use Copy/Paste buttons.",
             theme_text_color="Secondary",
             font_style="Caption",
             size_hint_y=None,
@@ -251,20 +251,26 @@ class OtherSettingsScreen(MDScreen):
             elevation=0,
             padding=dp(10),
             radius=[10, 10, 10, 10],
-            md_bg_color=(0.13, 0.13, 0.16, 1),
+            md_bg_color=(0.14, 0.14, 0.18, 1),
         )
         inner = BoxLayout(
             orientation='vertical',
-            spacing=dp(6),
+            spacing=dp(8),
             size_hint_y=None,
         )
         inner.bind(minimum_height=inner.setter('height'))
         block.add_widget(inner)
         block.bind(height=lambda *_: setattr(block, 'height', inner.height + dp(18)))
 
-        header = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        header.add_widget(MDLabel(text=title, size_hint_x=0.68, shorten=True, shorten_from="right"))
-        btn = MDRaisedButton(size_hint_x=0.32)
+        header = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        header.add_widget(MDLabel(
+            text=title,
+            size_hint_x=0.64,
+            font_style="Subtitle2",
+            shorten=True,
+            shorten_from="right",
+        ))
+        btn = MDRaisedButton(size_hint_x=0.36)
         self._set_toggle_button_style(btn, self._bool_values.get(toggle_key, False))
         btn.bind(on_release=lambda *_a, k=toggle_key, b=btn: self._toggle_bool_key(k, b))
         header.add_widget(btn)
@@ -282,8 +288,25 @@ class OtherSettingsScreen(MDScreen):
         inner.add_widget(field)
         self._endpoint_fields[url_key] = field
 
+        action_row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(6))
+        action_row.add_widget(MDLabel(
+            text="Field actions",
+            theme_text_color="Secondary",
+            font_style="Caption",
+            size_hint_x=0.56,
+            shorten=True,
+            shorten_from="right",
+        ))
+        copy_btn = MDFlatButton(text="Copy", size_hint_x=0.22)
+        copy_btn.bind(on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k))
+        action_row.add_widget(copy_btn)
+        paste_btn = MDFlatButton(text="Paste", size_hint_x=0.22)
+        paste_btn.bind(on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k))
+        action_row.add_widget(paste_btn)
+        inner.add_widget(action_row)
+
         short_hint = MDLabel(
-            text="Shortcuts (double-tap text or tap Use):",
+            text="Shortcuts",
             theme_text_color="Secondary",
             font_style="Caption",
             size_hint_y=None,
@@ -292,24 +315,40 @@ class OtherSettingsScreen(MDScreen):
         inner.add_widget(short_hint)
 
         for preset in self._ENDPOINT_PRESETS.get(url_key, []):
-            row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
+            row = MDCard(
+                size_hint_y=None,
+                height=dp(36),
+                elevation=0,
+                padding=[dp(8), 0, dp(4), 0],
+                radius=[8, 8, 8, 8],
+                md_bg_color=(0.16, 0.16, 0.2, 1),
+            )
+            row_inner = BoxLayout(spacing=dp(4))
             lbl = MDLabel(
-                text=f"[u]{preset}[/u]",
+                text=f"[u]{self._compact_url(preset)}[/u]",
                 markup=True,
                 theme_text_color="Custom",
                 text_color=[0.2, 0.75, 1, 1],
                 shorten=True,
-                shorten_from="middle",
-                size_hint_x=0.78,
+                shorten_from="center",
+                size_hint_x=0.66,
+                font_style="Caption",
             )
             lbl.bind(on_touch_down=lambda inst, touch, p=preset, k=url_key: self._shortcut_touch(inst, touch, p, k))
-            row.add_widget(lbl)
+            row_inner.add_widget(lbl)
             use_btn = MDFlatButton(
                 text="Use",
-                size_hint_x=0.22,
+                size_hint_x=0.17,
             )
             use_btn.bind(on_release=lambda *_a, p=preset, k=url_key: self._apply_shortcut(k, p))
-            row.add_widget(use_btn)
+            row_inner.add_widget(use_btn)
+            copy_short_btn = MDFlatButton(
+                text="Copy",
+                size_hint_x=0.17,
+            )
+            copy_short_btn.bind(on_release=lambda *_a, p=preset: self._copy_shortcut_value(p))
+            row_inner.add_widget(copy_short_btn)
+            row.add_widget(row_inner)
             inner.add_widget(row)
 
         return block
@@ -350,6 +389,40 @@ class OtherSettingsScreen(MDScreen):
         self._apply_shortcut(key, preset_value)
         toast(f"Pasted + copied {key}")
         return True
+
+    @staticmethod
+    def _compact_url(value):
+        text = (value or '').strip()
+        if len(text) <= 42:
+            return text
+        return f"{text[:24]}...{text[-14:]}"
+
+    def _copy_endpoint_value(self, key):
+        field = self._endpoint_fields.get(key)
+        if field is None:
+            return
+        value = (field.text or '').strip()
+        if not value:
+            toast("Field is empty")
+            return
+        Clipboard.copy(value)
+        toast(f"Copied {key}")
+
+    def _paste_endpoint_value(self, key):
+        pasted = (Clipboard.paste() or '').strip()
+        if not pasted:
+            toast("Clipboard is empty")
+            return
+        field = self._endpoint_fields.get(key)
+        if field is not None:
+            field.text = pasted
+        self._on_text_changed(key, pasted)
+        toast(f"Pasted into {key}")
+
+    @staticmethod
+    def _copy_shortcut_value(value):
+        Clipboard.copy(value or '')
+        toast("Shortcut copied")
 
     def _apply_shortcut(self, key, preset_value):
         field = self._endpoint_fields.get(key)
