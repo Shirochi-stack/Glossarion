@@ -218,8 +218,12 @@ class MultiKeyScreen(MDScreen):
         usage = key_data.get('usage_count', 0)
         cooldown = key_data.get('cooldown', 0)
 
+        temp_display = self._format_optional_temperature(key_data.get('individual_key_temperature'))
         line2 = f"Model: {model}" if model else "No model set"
-        line3 = f"{'[ON] Enabled' if enabled else '[OFF] Disabled'} · Used: {usage}x · Cooldown: {cooldown}s"
+        line3 = (
+            f"{'[ON] Enabled' if enabled else '[OFF] Disabled'} · "
+            f"Used: {usage}x · Cooldown: {cooldown}s · Temp: {temp_display}"
+        )
 
         item = ThreeLineListItem(
             text=f"Key #{index + 1}: {masked}",
@@ -229,22 +233,55 @@ class MultiKeyScreen(MDScreen):
         )
         return item
 
+    @staticmethod
+    def _parse_optional_temperature(raw_text):
+        """Parse per-key temperature override. Empty means global default."""
+        text = (raw_text or '').strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            raise ValueError("Temperature must be a number")
+        if value < 0:
+            raise ValueError("Temperature must be >= 0")
+        return value
+
+    @staticmethod
+    def _format_optional_temperature(value):
+        if value is None or value == '':
+            return "global"
+        try:
+            return f"{float(value):g}"
+        except (TypeError, ValueError):
+            return "global"
+
     def show_add_key_dialog(self):
         if len(self.api_keys) >= 20:
             Snackbar(text="Maximum 20 keys allowed").open()
             return
 
-        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(270))
+        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(344))
         api_field = MDTextField(hint_text="API Key")
         model_field = MDTextField(hint_text="Model (optional)", size_hint_x=0.82)
         model_btn = MDIconButton(icon="chevron-down", size_hint_x=0.18)
         model_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         model_row.add_widget(model_field)
         model_row.add_widget(model_btn)
+        temp_field = MDTextField(hint_text="Temperature override (optional)")
+        temp_hint = MDLabel(
+            text="Leave blank to use global temperature",
+            theme_text_color="Secondary",
+            font_style="Caption",
+            size_hint_y=None,
+            height=dp(20),
+        )
         endpoint_field = MDTextField(hint_text="Custom Endpoint (optional)")
         cooldown_field = MDTextField(hint_text="Cooldown seconds (0)", input_filter='int')
         content.add_widget(api_field)
         content.add_widget(model_row)
+        content.add_widget(temp_field)
+        content.add_widget(temp_hint)
         content.add_widget(endpoint_field)
         content.add_widget(cooldown_field)
 
@@ -287,9 +324,15 @@ class MultiKeyScreen(MDScreen):
             key = api_field.text.strip()
             if not key:
                 return
+            try:
+                temperature = self._parse_optional_temperature(temp_field.text)
+            except ValueError as exc:
+                Snackbar(text=str(exc)).open()
+                return
             self.api_keys.append({
                 'api_key': key,
                 'model': model_field.text.strip(),
+                'individual_key_temperature': temperature,
                 'endpoint': endpoint_field.text.strip(),
                 'cooldown': int(cooldown_field.text or '0'),
                 'enabled': True,
@@ -316,13 +359,24 @@ class MultiKeyScreen(MDScreen):
             return
         kd = self.api_keys[index]
 
-        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(308))
+        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(380))
         api_field = MDTextField(hint_text="API Key", text=kd.get('api_key', ''))
         model_field = MDTextField(hint_text="Model", text=kd.get('model', ''), size_hint_x=0.82)
         model_btn = MDIconButton(icon="chevron-down", size_hint_x=0.18)
         model_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         model_row.add_widget(model_field)
         model_row.add_widget(model_btn)
+        temp_field = MDTextField(
+            hint_text="Temperature override (optional)",
+            text=self._format_optional_temperature(kd.get('individual_key_temperature')).replace('global', ''),
+        )
+        temp_hint = MDLabel(
+            text="Leave blank to use global temperature",
+            theme_text_color="Secondary",
+            font_style="Caption",
+            size_hint_y=None,
+            height=dp(20),
+        )
         endpoint_field = MDTextField(hint_text="Endpoint", text=kd.get('endpoint', ''))
         cooldown_field = MDTextField(hint_text="Cooldown", text=str(kd.get('cooldown', 0)), input_filter='int')
 
@@ -333,6 +387,8 @@ class MultiKeyScreen(MDScreen):
 
         content.add_widget(api_field)
         content.add_widget(model_row)
+        content.add_widget(temp_field)
+        content.add_widget(temp_hint)
         content.add_widget(endpoint_field)
         content.add_widget(cooldown_field)
         content.add_widget(enabled_row)
@@ -373,8 +429,14 @@ class MultiKeyScreen(MDScreen):
         model_field.bind(focus=_on_model_focus)
 
         def save_edit(*args):
+            try:
+                temperature = self._parse_optional_temperature(temp_field.text)
+            except ValueError as exc:
+                Snackbar(text=str(exc)).open()
+                return
             self.api_keys[index]['api_key'] = api_field.text.strip()
             self.api_keys[index]['model'] = model_field.text.strip()
+            self.api_keys[index]['individual_key_temperature'] = temperature
             self.api_keys[index]['endpoint'] = endpoint_field.text.strip()
             self.api_keys[index]['cooldown'] = int(cooldown_field.text or '0')
             self.api_keys[index]['enabled'] = switch.active
