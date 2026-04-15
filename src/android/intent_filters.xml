@@ -1,78 +1,61 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Intent filters for Glossarion Android.
-     Allows the app to appear in "Open with" dialogs for EPUB, TXT, and PDF files.
-     Buildozer injects these into the AndroidManifest.xml activity element. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <application>
-    <activity>
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="file" />
+    <data android:scheme="content" />
+    <data android:mimeType="application/epub+zip" />
+</intent-filter>
 
-      <intent-filter>
-        <action android:name="android.intent.action.VIEW" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <category android:name="android.intent.category.BROWSABLE" />
-        <!-- EPUB files by MIME type -->
-        <data android:scheme="file" />
-        <data android:scheme="content" />
-        <data android:mimeType="application/epub+zip" />
-      </intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="file" />
+    <data android:scheme="content" />
+    <data android:mimeType="application/octet-stream" />
+    <data android:pathPattern=".*\\.epub" />
+    <data android:pathPattern=".*\\.EPUB" />
+</intent-filter>
 
-      <intent-filter>
-        <action android:name="android.intent.action.VIEW" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <category android:name="android.intent.category.BROWSABLE" />
-        <!-- EPUB by file extension (some file managers use octet-stream) -->
-        <data android:scheme="file" />
-        <data android:scheme="content" />
-        <data android:mimeType="application/octet-stream" />
-        <data android:pathPattern=".*\\.epub" />
-        <data android:pathPattern=".*\\.EPUB" />
-      </intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="file" />
+    <data android:scheme="content" />
+    <data android:mimeType="text/plain" />
+</intent-filter>
 
-      <intent-filter>
-        <action android:name="android.intent.action.VIEW" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <category android:name="android.intent.category.BROWSABLE" />
-        <!-- Plain text files -->
-        <data android:scheme="file" />
-        <data android:scheme="content" />
-        <data android:mimeType="text/plain" />
-      </intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="file" />
+    <data android:scheme="content" />
+    <data android:mimeType="application/pdf" />
+</intent-filter>
 
-      <intent-filter>
-        <action android:name="android.intent.action.VIEW" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <category android:name="android.intent.category.BROWSABLE" />
-        <!-- PDF files -->
-        <data android:scheme="file" />
-        <data android:scheme="content" />
-        <data android:mimeType="application/pdf" />
-      </intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="application/epub+zip" />
+</intent-filter>
 
-      <!-- "Share to Glossarion" intents -->
-      <intent-filter>
-        <action android:name="android.intent.action.SEND" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <data android:mimeType="application/epub+zip" />
-      </intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="application/octet-stream" />
+</intent-filter>
 
-      <intent-filter>
-        <action android:name="android.intent.action.SEND" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <data android:mimeType="application/octet-stream" />
-      </intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="text/plain" />
+</intent-filter>
 
-      <intent-filter>
-        <action android:name="android.intent.action.SEND" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <data android:mimeType="text/plain" />
-      </intent-filter>
-
-      <intent-filter>
-        <action android:name="android.intent.action.SEND" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <data android:mimeType="application/pdf" />
-      </intent-filter>
-
-    </activity>
-  </application>
-</manifest>
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="application/pdf" />
+</intent-filter>
