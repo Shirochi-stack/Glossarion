@@ -2,16 +2,20 @@
 """
 Android Other Settings screen.
 
-Shows endpoint controls plus a dynamic list of config keys discovered from
-other_settings.py so Android can expose the same configurable surface area.
+Design goals:
+- Only show keys discovered from other_settings.py (+ endpoint keys)
+- Avoid UI lag by debounced filtering + paged rendering
+- Stable card heights to prevent label/field overlap
 """
 
+import ast
 import copy
 import json
 import logging
 import os
 import re
 
+from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
 from kivy.lang import Builder
 from kivy.metrics import dp
@@ -76,7 +80,7 @@ KV = '''
 
 
 class OtherSettingsScreen(MDScreen):
-    """Dynamic settings page with endpoint shortcuts and full config key list."""
+    """Dynamic settings page for other_settings.py keys."""
 
     app = ObjectProperty(None, allownone=True)
     search_text = StringProperty('')
@@ -126,6 +130,12 @@ class OtherSettingsScreen(MDScreen):
         self._bool_values = {}
         self._endpoint_fields = {}
         self._dynamic_box = None
+        self._discovered_defaults = None
+
+        self._render_step = 36
+        self._render_limit = self._render_step
+        self._filtered_keys = []
+        self._filter_event = None
 
     def on_enter(self, *args):
         if not self.app:
@@ -144,30 +154,38 @@ class OtherSettingsScreen(MDScreen):
             return
         self._refresh_from_app_config()
         self._sync_buffers_from_pending()
+        self._render_limit = self._render_step
         self._build_ui()
         toast("Reloaded settings")
 
     def apply_filter(self, text):
         self.search_text = (text or '').strip().lower()
-        self._render_dynamic_settings()
+        self._render_limit = self._render_step
+        if self._filter_event is not None:
+            self._filter_event.cancel()
+        self._filter_event = Clock.schedule_once(lambda _dt: self._render_dynamic_settings(), 0.12)
 
     def _init_state(self):
         self._refresh_from_app_config()
-        self._all_keys = sorted(
-            set(self._discover_config_keys())
-            | set(self._pending_config.keys())
-            | self._ENDPOINT_KEYS
-        )
+        if self._discovered_defaults is None:
+            self._discovered_defaults = self._discover_config_defaults()
+        self._all_keys = sorted(set(self._discovered_defaults.keys()) | self._ENDPOINT_KEYS)
         self._sync_buffers_from_pending()
 
     def _sync_buffers_from_pending(self):
         for key in self._all_keys:
+            default = self._discovered_defaults.get(key, self._default_for_key(key))
             if key not in self._pending_config:
-                self._pending_config[key] = self._default_for_key(key)
-            self._types.setdefault(key, self._infer_type(key, self._pending_config.get(key)))
+                self._pending_config[key] = default
+
+            value = self._pending_config.get(key, default)
+            self._types[key] = self._infer_type(key, value, default)
             if self._types[key] is bool:
-                self._bool_values[key] = bool(self._pending_config.get(key, False))
-            self._raw_values[key] = self._value_to_text(self._pending_config.get(key))
+                b = bool(value)
+                self._bool_values[key] = b
+                self._raw_values[key] = 'true' if b else 'false'
+            else:
+                self._raw_values[key] = self._value_to_text(value)
 
     def _refresh_from_app_config(self):
         cfg = copy.deepcopy(self.app.config_data if self.app else {})
@@ -181,10 +199,12 @@ class OtherSettingsScreen(MDScreen):
         box.add_widget(self._build_endpoint_card())
 
         title = MDLabel(
-            text="All Other Config Keys (from other_settings.py)",
+            text="Other Settings Keys (from other_settings.py only)",
             theme_text_color="Secondary",
             size_hint_y=None,
-            height=dp(28),
+            height=dp(34),
+            shorten=True,
+            shorten_from="right",
         )
         box.add_widget(title)
 
@@ -212,34 +232,34 @@ class OtherSettingsScreen(MDScreen):
         )
         content.bind(minimum_height=content.setter('height'))
         card.add_widget(content)
-        card.bind(height=lambda *_: setattr(card, 'height', content.height + dp(24)))
+        card.bind(height=lambda *_: setattr(card, 'height', content.height + dp(22)))
 
         content.add_widget(MDLabel(
             text="Custom API Endpoints",
             bold=True,
             size_hint_y=None,
-            height=dp(26),
+            height=dp(24),
         ))
         content.add_widget(MDLabel(
             text="Double-tap field to copy, or use Copy/Paste buttons.",
             theme_text_color="Secondary",
             font_style="Caption",
             size_hint_y=None,
-            height=dp(20),
+            height=dp(18),
         ))
 
         content.add_widget(self._build_endpoint_block(
-            "OpenAI Custom Endpoint",
+            "OpenAI endpoint",
             'use_custom_openai_endpoint',
             'openai_base_url',
         ))
         content.add_widget(self._build_endpoint_block(
-            "Gemini Custom Endpoint",
+            "Gemini endpoint",
             'use_gemini_openai_endpoint',
             'gemini_openai_endpoint',
         ))
         content.add_widget(self._build_endpoint_block(
-            "Anthropic Custom Endpoint",
+            "Anthropic endpoint",
             'force_native_anthropic',
             'anthropic_base_url',
         ))
@@ -253,16 +273,12 @@ class OtherSettingsScreen(MDScreen):
             radius=[10, 10, 10, 10],
             md_bg_color=(0.14, 0.14, 0.18, 1),
         )
-        inner = BoxLayout(
-            orientation='vertical',
-            spacing=dp(8),
-            size_hint_y=None,
-        )
+        inner = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None)
         inner.bind(minimum_height=inner.setter('height'))
         block.add_widget(inner)
-        block.bind(height=lambda *_: setattr(block, 'height', inner.height + dp(18)))
+        block.bind(height=lambda *_: setattr(block, 'height', inner.height + dp(16)))
 
-        header = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        header = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         header.add_widget(MDLabel(
             text=title,
             size_hint_x=0.64,
@@ -288,85 +304,16 @@ class OtherSettingsScreen(MDScreen):
         inner.add_widget(field)
         self._endpoint_fields[url_key] = field
 
-        action_row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(6))
-        action_row.add_widget(MDLabel(
-            text="Field actions",
-            theme_text_color="Secondary",
-            font_style="Caption",
-            size_hint_x=0.56,
-            shorten=True,
-            shorten_from="right",
-        ))
-        copy_btn = MDFlatButton(text="Copy", size_hint_x=0.22)
-        copy_btn.bind(on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k))
-        action_row.add_widget(copy_btn)
-        paste_btn = MDFlatButton(text="Paste", size_hint_x=0.22)
-        paste_btn.bind(on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k))
-        action_row.add_widget(paste_btn)
-        inner.add_widget(action_row)
-
-        short_hint = MDLabel(
-            text="Shortcuts",
-            theme_text_color="Secondary",
-            font_style="Caption",
-            size_hint_y=None,
-            height=dp(20),
-        )
-        inner.add_widget(short_hint)
-
-        for preset in self._ENDPOINT_PRESETS.get(url_key, []):
-            row = MDCard(
-                size_hint_y=None,
-                height=dp(36),
-                elevation=0,
-                padding=[dp(8), 0, dp(4), 0],
-                radius=[8, 8, 8, 8],
-                md_bg_color=(0.16, 0.16, 0.2, 1),
-            )
-            row_inner = BoxLayout(spacing=dp(4))
-            lbl = MDLabel(
-                text=f"[u]{self._compact_url(preset)}[/u]",
-                markup=True,
-                theme_text_color="Custom",
-                text_color=[0.2, 0.75, 1, 1],
-                shorten=True,
-                shorten_from="center",
-                size_hint_x=0.66,
-                font_style="Caption",
-            )
-            lbl.bind(on_touch_down=lambda inst, touch, p=preset, k=url_key: self._shortcut_touch(inst, touch, p, k))
-            row_inner.add_widget(lbl)
-            use_btn = MDFlatButton(
-                text="Use",
-                size_hint_x=0.17,
-            )
-            use_btn.bind(on_release=lambda *_a, p=preset, k=url_key: self._apply_shortcut(k, p))
-            row_inner.add_widget(use_btn)
-            copy_short_btn = MDFlatButton(
-                text="Copy",
-                size_hint_x=0.17,
-            )
-            copy_short_btn.bind(on_release=lambda *_a, p=preset: self._copy_shortcut_value(p))
-            row_inner.add_widget(copy_short_btn)
-            row.add_widget(row_inner)
-            inner.add_widget(row)
+        actions = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
+        actions.add_widget(MDFlatButton(text="Copy", on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k)))
+        actions.add_widget(MDFlatButton(text="Paste", on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k)))
+        for idx, preset in enumerate(self._ENDPOINT_PRESETS.get(url_key, []), start=1):
+            b = MDFlatButton(text=f"Preset {idx}")
+            b.bind(on_release=lambda *_a, k=url_key, p=preset: self._apply_shortcut(k, p))
+            actions.add_widget(b)
+        inner.add_widget(actions)
 
         return block
-
-    def _add_endpoint_block(
-        self,
-        parent,
-        title,
-        toggle_key,
-        url_key,
-    ):
-        # Backward compatibility placeholder; endpoint UI now built by
-        # _build_endpoint_block and added directly in _build_endpoint_card.
-        parent.add_widget(self._build_endpoint_block(
-            title,
-            toggle_key,
-            url_key,
-        ))
 
     def _endpoint_field_touch(self, field, touch, key):
         if not field.collide_point(*touch.pos) or not touch.is_double_tap:
@@ -382,20 +329,6 @@ class OtherSettingsScreen(MDScreen):
                 self._on_text_changed(key, pasted)
                 toast(f"Pasted into {key}")
         return True
-
-    def _shortcut_touch(self, label, touch, preset_value, key):
-        if not label.collide_point(*touch.pos) or not touch.is_double_tap:
-            return False
-        self._apply_shortcut(key, preset_value)
-        toast(f"Pasted + copied {key}")
-        return True
-
-    @staticmethod
-    def _compact_url(value):
-        text = (value or '').strip()
-        if len(text) <= 42:
-            return text
-        return f"{text[:24]}...{text[-14:]}"
 
     def _copy_endpoint_value(self, key):
         field = self._endpoint_fields.get(key)
@@ -419,77 +352,94 @@ class OtherSettingsScreen(MDScreen):
         self._on_text_changed(key, pasted)
         toast(f"Pasted into {key}")
 
-    @staticmethod
-    def _copy_shortcut_value(value):
-        Clipboard.copy(value or '')
-        toast("Shortcut copied")
-
     def _apply_shortcut(self, key, preset_value):
         field = self._endpoint_fields.get(key)
         if field is not None:
             field.text = preset_value
         self._on_text_changed(key, preset_value)
         Clipboard.copy(preset_value)
+        toast(f"Applied {key} preset")
 
     def _render_dynamic_settings(self):
         if self._dynamic_box is None:
             return
         self._dynamic_box.clear_widgets()
-        needle = self.search_text
 
+        needle = self.search_text
+        filtered = []
         for key in self._all_keys:
             if key in self._ENDPOINT_KEYS:
                 continue
             if needle and needle not in key.lower():
                 continue
+            filtered.append(key)
+        self._filtered_keys = filtered
+
+        visible = filtered[:self._render_limit]
+        for key in visible:
             self._dynamic_box.add_widget(self._build_setting_row(key))
+
+        remaining = len(filtered) - len(visible)
+        if remaining > 0:
+            load_more_btn = MDRaisedButton(
+                text=f"Load more ({remaining} left)",
+                size_hint_y=None,
+                height=dp(40),
+                on_release=lambda *_a: self._load_more_rows(),
+            )
+            self._dynamic_box.add_widget(load_more_btn)
+
+    def _load_more_rows(self):
+        self._render_limit += self._render_step
+        self._render_dynamic_settings()
 
     def _build_setting_row(self, key):
         t = self._types.get(key, str)
+        is_bool = (t is bool)
         is_complex = t in (dict, list)
+        card_h = dp(94) if is_bool else (dp(166) if is_complex else dp(116))
 
         card = MDCard(
             size_hint_y=None,
+            height=card_h,
             elevation=1,
             padding=dp(10),
             radius=[10, 10, 10, 10],
         )
-        inner = BoxLayout(
-            orientation='vertical',
-            spacing=dp(6),
-            size_hint_y=None,
-        )
-        inner.bind(minimum_height=inner.setter('height'))
+        inner = BoxLayout(orientation='vertical', spacing=dp(8))
         card.add_widget(inner)
-        card.bind(height=lambda *_: setattr(card, 'height', inner.height + dp(18)))
 
         inner.add_widget(MDLabel(
             text=key,
             bold=True,
             size_hint_y=None,
             height=dp(22),
+            shorten=True,
+            shorten_from="right",
         ))
 
-        if t is bool:
-            btn = MDRaisedButton(size_hint_y=None, height=dp(38))
+        if is_bool:
+            row = BoxLayout(size_hint_y=None, height=dp(40))
+            btn = MDRaisedButton(size_hint_x=None, width=dp(136))
             self._set_toggle_button_style(btn, self._bool_values.get(key, False))
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._toggle_bool_key(k, b))
-            inner.add_widget(btn)
+            row.add_widget(btn)
+            row.add_widget(BoxLayout())
+            inner.add_widget(row)
             return card
 
         field = MDTextField(
             text=self._raw_values.get(key, ''),
             multiline=is_complex,
             size_hint_y=None,
-            height=dp(96) if is_complex else dp(56),
+            height=dp(104) if is_complex else dp(56),
         )
         field.bind(text=lambda _i, text, k=key: self._on_text_changed(k, text))
         inner.add_widget(field)
         return card
 
     def _toggle_bool_key(self, key, button):
-        current = bool(self._bool_values.get(key, False))
-        new_value = not current
+        new_value = not bool(self._bool_values.get(key, False))
         self._bool_values[key] = new_value
         self._pending_config[key] = new_value
         self._raw_values[key] = 'true' if new_value else 'false'
@@ -506,7 +456,7 @@ class OtherSettingsScreen(MDScreen):
     def save_all(self):
         if not self.app:
             return
-        new_cfg = copy.deepcopy(self._pending_config)
+        new_cfg = copy.deepcopy(self.app.config_data)
         errors = []
 
         for key in self._all_keys:
@@ -515,13 +465,14 @@ class OtherSettingsScreen(MDScreen):
                 new_cfg[key] = bool(self._bool_values.get(key, False))
                 continue
             raw = self._raw_values.get(key, '')
+            default = self._discovered_defaults.get(key, self._default_for_key(key))
             try:
-                new_cfg[key] = self._coerce_value(raw, t)
+                new_cfg[key] = self._coerce_value(raw, t, default)
             except Exception as exc:
                 errors.append(f"{key}: {exc}")
 
         if errors:
-            toast(f"Save blocked ({len(errors)} parse errors). Fix highlighted values.")
+            toast(f"Save blocked ({len(errors)} parse errors)")
             logger.warning("Other settings parse errors: %s", "; ".join(errors[:8]))
             return
 
@@ -531,65 +482,49 @@ class OtherSettingsScreen(MDScreen):
         toast("Saved all settings")
 
     @staticmethod
-    def _coerce_value(raw_text, value_type):
+    def _coerce_value(raw_text, value_type, default):
         text = (raw_text or '').strip()
         if value_type is int:
-            return int(text) if text else 0
+            return int(text) if text else int(default or 0)
         if value_type is float:
-            return float(text) if text else 0.0
+            return float(text) if text else float(default or 0.0)
         if value_type is dict:
             if not text:
-                return {}
+                return {} if not isinstance(default, dict) else default
             loaded = json.loads(text)
             if not isinstance(loaded, dict):
                 raise ValueError("must be a JSON object")
             return loaded
         if value_type is list:
             if not text:
-                return []
+                return [] if not isinstance(default, list) else default
             loaded = json.loads(text)
             if not isinstance(loaded, list):
                 raise ValueError("must be a JSON array")
             return loaded
-        return text
+        return text if text else ('' if default is None else str(default))
 
-    def _infer_type(self, key, value):
-        if isinstance(value, bool):
+    def _infer_type(self, key, value, default):
+        if key in {'use_custom_openai_endpoint', 'use_gemini_openai_endpoint', 'force_native_anthropic'}:
+            return bool
+        if isinstance(value, bool) or isinstance(default, bool):
             return bool
         if isinstance(value, int) and not isinstance(value, bool):
             return int
-        if isinstance(value, float):
+        if isinstance(default, int) and not isinstance(default, bool):
+            return int
+        if isinstance(value, float) or isinstance(default, float):
             return float
-        if isinstance(value, dict):
+        if isinstance(value, dict) or isinstance(default, dict):
             return dict
-        if isinstance(value, list):
+        if isinstance(value, list) or isinstance(default, list):
             return list
-        if self._looks_bool_key(key):
-            return bool
         return str
 
     def _default_for_key(self, key):
         if key in self._ENDPOINT_DEFAULTS:
             return self._ENDPOINT_DEFAULTS[key]
-        if self._looks_bool_key(key):
-            return False
         return ''
-
-    @staticmethod
-    def _looks_bool_key(key):
-        lk = key.lower()
-        prefixes = (
-            'enable_', 'disable_', 'use_', 'force_', 'skip_', 'show_',
-            'auto_', 'retain_', 'append_', 'deduplicate_', 'allow_',
-            'save_', 'preserve_', 'optimize_', 'ignore_',
-        )
-        exact = {
-            'contextual',
-            'translation_history_rolling',
-            'batch_translation',
-            'token_limit_disabled',
-        }
-        return lk.startswith(prefixes) or lk in exact
 
     @staticmethod
     def _value_to_text(value):
@@ -602,27 +537,49 @@ class OtherSettingsScreen(MDScreen):
                 return ''
         return str(value)
 
-    @staticmethod
-    def _discover_config_keys():
-        """Extract config keys referenced by other_settings.py."""
+    def _discover_config_defaults(self):
+        """Extract config keys + default literals from other_settings.py."""
         here = os.path.dirname(os.path.abspath(__file__))
         src_root = os.path.dirname(here)
         target = os.path.join(src_root, 'other_settings.py')
         if not os.path.isfile(target):
-            return []
+            return {}
 
         try:
             with open(target, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
         except Exception:
-            return []
+            return {}
 
-        keys = set()
-        patterns = [
-            r"(?:[A-Za-z_][\w\.]*)?config\.get\(\s*['\"]([^'\"]+)['\"]",
-            r"(?:[A-Za-z_][\w\.]*)?config\[\s*['\"]([^'\"]+)['\"]\s*\]",
-            r"(?:[A-Za-z_][\w\.]*)?config\[\s*['\"]([^'\"]+)['\"]\s*\]\s*=",
-        ]
-        for pattern in patterns:
-            keys.update(re.findall(pattern, text))
-        return sorted(k for k in keys if k and not k.startswith('_') and len(k) < 160)
+        defaults = {}
+        get_pattern = r"(?:[A-Za-z_][\w\.]*)?config\.get\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*([^\)]*?))?\)"
+        for match in re.finditer(get_pattern, text, flags=re.MULTILINE):
+            key = (match.group(1) or '').strip()
+            if not key or key.startswith('_'):
+                continue
+            default_expr = (match.group(2) or '').strip()
+            if default_expr.endswith(','):
+                default_expr = default_expr[:-1].strip()
+            defaults.setdefault(key, self._parse_default_literal(default_expr))
+
+        for key in re.findall(r"(?:[A-Za-z_][\w\.]*)?config\[\s*['\"]([^'\"]+)['\"]\s*\]", text):
+            if key and not key.startswith('_'):
+                defaults.setdefault(key, '')
+
+        for key, value in self._ENDPOINT_DEFAULTS.items():
+            defaults.setdefault(key, value)
+        return defaults
+
+    @staticmethod
+    def _parse_default_literal(expr):
+        if not expr:
+            return ''
+        simple_tokens = {'True': True, 'False': False, 'None': ''}
+        if expr in simple_tokens:
+            return simple_tokens[expr]
+        try:
+            return ast.literal_eval(expr)
+        except Exception:
+            if expr.startswith(("'", '"')) and expr.endswith(("'", '"')):
+                return expr[1:-1]
+            return ''

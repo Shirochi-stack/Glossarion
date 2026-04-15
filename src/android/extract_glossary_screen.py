@@ -141,7 +141,7 @@ KV = """
                 MDLabel:
                     text: "Glossary Settings (auto-imported from GlossaryManager_GUI.py)"
                     size_hint_y: None
-                    height: dp(24)
+                    height: dp(40)
                     theme_text_color: "Secondary"
 
                 BoxLayout:
@@ -262,6 +262,65 @@ class ExtractGlossaryScreen(MDScreen):
         "auto_inject_book_title",
     }
 
+    _BOOL_KEYS = {
+        "enable_auto_glossary",
+        "append_glossary",
+        "append_glossary_auto_load",
+        "add_additional_glossary",
+        "glossary_enable_chapter_split",
+        "compress_glossary_prompt",
+        "strip_honorifics",
+        "glossary_disable_honorifics_filter",
+        "glossary_history_rolling",
+        "glossary_request_merging_enabled",
+        "glossary_include_all_characters",
+        "glossary_skip_identical_entries",
+        "glossary_use_legacy_csv",
+        "glossary_output_legacy_json",
+        "use_glossary_keys",
+        "glossary_enable_anti_duplicate",
+        "glossary_logit_bias_enabled",
+        "glossary_bias_common_words",
+        "glossary_bias_repetitive_phrases",
+        "include_book_title_glossary",
+        "auto_inject_book_title",
+    }
+
+    _INT_KEYS = {
+        "manual_context_limit",
+        "glossary_min_frequency",
+        "glossary_max_names",
+        "glossary_max_titles",
+        "glossary_max_text_size",
+        "glossary_max_sentences",
+        "glossary_chapter_split_threshold",
+        "glossary_request_merge_count",
+        "glossary_max_output_tokens",
+        "glossary_top_k",
+        "glossary_candidate_count",
+    }
+
+    _FLOAT_KEYS = {
+        "manual_glossary_temperature",
+        "glossary_fuzzy_threshold",
+        "glossary_compression_factor",
+        "glossary_top_p",
+        "glossary_frequency_penalty",
+        "glossary_presence_penalty",
+        "glossary_repetition_penalty",
+        "glossary_logit_bias_strength",
+    }
+
+    _LIST_KEYS = {
+        "glossary_keys",
+        "glossary_custom_fields",
+        "emergency_glossary_compliance_custom_types",
+    }
+
+    _DICT_KEYS = {
+        "glossary_custom_entry_types",
+    }
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         Builder.load_string(KV)
@@ -274,6 +333,10 @@ class ExtractGlossaryScreen(MDScreen):
         self._types = {}
         self._raw_values = {}
         self._bool_values = {}
+        self._cached_discovered_defaults = None
+        self._render_step = 36
+        self._render_limit = self._render_step
+        self._filter_event = None
 
     def on_enter(self, *args):
         if not self.app:
@@ -310,7 +373,9 @@ class ExtractGlossaryScreen(MDScreen):
 
     def _load_state(self):
         cfg = copy.deepcopy(self.app.config_data if self.app else {})
-        discovered_defaults = self._discover_glossary_defaults()
+        if self._cached_discovered_defaults is None:
+            self._cached_discovered_defaults = self._discover_glossary_defaults()
+        discovered_defaults = self._cached_discovered_defaults
         keys = set(discovered_defaults.keys()) | set(self._FORCED_KEYS)
         keys |= {k for k in cfg.keys() if self._is_glossary_key(k)}
 
@@ -333,6 +398,7 @@ class ExtractGlossaryScreen(MDScreen):
                 self._raw_values[key] = self._value_to_text(value)
 
         self.status_text = f"{len(self._settings_keys)} glossary settings loaded"
+        self._render_limit = self._render_step
 
     def reload_settings(self):
         if self.is_running:
@@ -343,63 +409,92 @@ class ExtractGlossaryScreen(MDScreen):
         toast("Reloaded glossary settings")
 
     def apply_filter(self, text):
-        self._build_settings_ui((text or "").strip().lower())
+        self.search_text = (text or "").strip().lower()
+        self._render_limit = self._render_step
+        if self._filter_event is not None:
+            self._filter_event.cancel()
+        self._filter_event = Clock.schedule_once(lambda _dt: self._render_settings_rows(), 0.12)
 
-    def _build_settings_ui(self, needle=""):
+    def _build_settings_ui(self):
         box = self.ids.settings_box
         box.clear_widgets()
-        for key in self._settings_keys:
-            if needle and needle not in key.lower():
-                continue
+        self._render_settings_rows()
+
+    def _render_settings_rows(self):
+        box = self.ids.settings_box
+        box.clear_widgets()
+        needle = getattr(self, "search_text", "")
+        filtered = [k for k in self._settings_keys if (not needle or needle in k.lower())]
+        visible = filtered[:self._render_limit]
+        for key in visible:
             box.add_widget(self._build_setting_row(key))
+        remaining = len(filtered) - len(visible)
+        if remaining > 0:
+            box.add_widget(MDRaisedButton(
+                text=f"Load more ({remaining} left)",
+                size_hint_y=None,
+                height=dp(40),
+                on_release=lambda *_a: self._load_more_rows(),
+            ))
+
+    def _load_more_rows(self):
+        self._render_limit += self._render_step
+        self._render_settings_rows()
 
     def _build_setting_row(self, key):
         t = self._types.get(key, str)
+        is_bool = (t is bool)
+        is_enum = key in self._ENUM_OPTIONS
+        is_multiline = t in (list, dict)
+        card_height = dp(94) if (is_bool or is_enum) else (dp(166) if is_multiline else dp(116))
+
         card = MDCard(
             size_hint_y=None,
+            height=card_height,
             elevation=1,
             padding=dp(10),
             radius=[10, 10, 10, 10],
         )
         inner = BoxLayout(
             orientation="vertical",
-            spacing=dp(6),
-            size_hint_y=None,
+            spacing=dp(8),
         )
-        inner.bind(minimum_height=inner.setter("height"))
         card.add_widget(inner)
-        card.bind(height=lambda *_: setattr(card, "height", inner.height + dp(16)))
 
         inner.add_widget(MDLabel(
             text=key,
             bold=True,
             size_hint_y=None,
             height=dp(22),
+            shorten=True,
+            shorten_from="right",
         ))
 
-        if t is bool:
-            btn = MDRaisedButton(size_hint_y=None, height=dp(38))
+        if is_bool:
+            row = BoxLayout(size_hint_y=None, height=dp(40))
+            btn = MDRaisedButton(size_hint_x=None, width=dp(136))
             self._sync_toggle_btn(btn, self._bool_values.get(key, False))
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._toggle_bool(k, b))
-            inner.add_widget(btn)
+            row.add_widget(btn)
+            row.add_widget(BoxLayout())
+            inner.add_widget(row)
             return card
 
-        if key in self._ENUM_OPTIONS:
+        if is_enum:
             btn = MDRaisedButton(
                 text=(self._raw_values.get(key, "") or self._ENUM_OPTIONS[key][0]),
                 size_hint_y=None,
-                height=dp(38),
+                height=dp(40),
             )
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._open_enum_menu(k, b))
             inner.add_widget(btn)
             return card
 
-        multiline = t in (list, dict)
         field = MDTextField(
             text=self._raw_values.get(key, ""),
-            multiline=multiline,
+            multiline=is_multiline,
             size_hint_y=None,
-            height=dp(96) if multiline else dp(56),
+            height=dp(104) if is_multiline else dp(56),
         )
         field.bind(text=lambda _i, text, k=key: self._raw_values.__setitem__(k, text))
         inner.add_widget(field)
@@ -702,54 +797,30 @@ class ExtractGlossaryScreen(MDScreen):
             return list
         if isinstance(value, dict) or isinstance(default, dict):
             return dict
-        if key in {"glossary_keys", "glossary_custom_fields", "emergency_glossary_compliance_custom_types"}:
+        if key in self._LIST_KEYS:
             return list
-        if key in {"glossary_custom_entry_types"}:
+        if key in self._DICT_KEYS:
             return dict
-        if self._looks_bool_key(key):
+        if key in self._BOOL_KEYS:
             return bool
-        if self._looks_int_key(key):
+        if key in self._INT_KEYS:
             return int
-        if self._looks_float_key(key):
+        if key in self._FLOAT_KEYS:
             return float
         return str
-
-    @staticmethod
-    def _looks_bool_key(key):
-        lk = key.lower()
-        prefixes = (
-            "enable_", "disable_", "use_", "force_", "skip_", "show_",
-            "auto_", "append_", "retain_", "allow_", "include_",
-            "compress_", "translate_", "preserve_",
-        )
-        return lk.startswith(prefixes) or lk.endswith("_enabled")
-
-    @staticmethod
-    def _looks_int_key(key):
-        lk = key.lower()
-        parts = (
-            "count", "size", "limit", "tokens", "frequency", "threshold",
-            "max_", "min_", "attempts", "budget", "chapters",
-        )
-        return any(p in lk for p in parts) and "temperature" not in lk and "factor" not in lk and "penalty" not in lk
-
-    @staticmethod
-    def _looks_float_key(key):
-        lk = key.lower()
-        return any(p in lk for p in ("temperature", "factor", "threshold", "penalty", "ratio", "top_p", "strength"))
 
     def _default_for_key(self, key):
         if key in self._ENUM_OPTIONS:
             return self._ENUM_OPTIONS[key][0]
-        if self._looks_bool_key(key):
+        if key in self._BOOL_KEYS:
             return False
-        if self._looks_int_key(key):
+        if key in self._INT_KEYS:
             return 0
-        if self._looks_float_key(key):
+        if key in self._FLOAT_KEYS:
             return 0.0
-        if key in {"glossary_keys", "glossary_custom_fields", "emergency_glossary_compliance_custom_types"}:
+        if key in self._LIST_KEYS:
             return []
-        if key in {"glossary_custom_entry_types"}:
+        if key in self._DICT_KEYS:
             return {}
         return ""
 
