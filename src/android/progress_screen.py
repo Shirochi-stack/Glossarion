@@ -1,66 +1,50 @@
 # progress_screen.py
 """
-ProgressScreen — Translation progress viewer for all output directories.
-Scans the Glossarion Library for translation_progress.json files and
-displays per-book progress with chapter-level status detail.
-KivyMD 1.2.0 compatible.
+Progress manager for Android.
+
+Shows both:
+1) Translation progress (translation_progress.json)
+2) Glossary extraction progress (*_glossary_progress.json / glossary_progress.json)
 """
 
-import os
 import json
-import time
 import logging
+import os
 import threading
+import time
 
-from kivy.properties import ObjectProperty, ListProperty, StringProperty
 from kivy.clock import Clock
 from kivy.lang import Builder
-from kivy.metrics import dp, sp
+from kivy.metrics import dp
+from kivy.properties import ListProperty, ObjectProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
 
-from kivymd.uix.screen import MDScreen
-from kivymd.uix.card import MDCard
-from kivymd.uix.button import MDFlatButton, MDRaisedButton, MDIconButton
-from kivymd.uix.label import MDLabel
-from kivymd.uix.toolbar import MDTopAppBar
-from kivymd.uix.dialog import MDDialog
-from kivymd.uix.list import OneLineListItem, TwoLineListItem, ThreeLineListItem
-from kivymd.uix.progressbar import MDProgressBar
 from kivymd.toast import toast
+from kivymd.uix.button import MDFlatButton, MDRaisedButton
+from kivymd.uix.card import MDCard
+from kivymd.uix.dialog import MDDialog
+from kivymd.uix.label import MDLabel
+from kivymd.uix.progressbar import MDProgressBar
+from kivymd.uix.screen import MDScreen
 
 logger = logging.getLogger(__name__)
 
-# Status display info (color + label)
-STATUS_COLORS = {
-    'completed':       (0.18, 0.80, 0.44, 1),   # green
-    'completed_empty': (0.18, 0.80, 0.44, 0.7),  # green faded
-    'merged':          (0.18, 0.80, 0.44, 0.7),
-    'in_progress':     (1.00, 0.76, 0.03, 1),    # amber
-    'pending':         (0.61, 0.61, 0.61, 1),     # grey
-    'failed':          (0.91, 0.30, 0.24, 1),     # red
-    'error':           (0.91, 0.30, 0.24, 1),
-    'qa_failed':       (0.90, 0.49, 0.13, 1),     # orange
-    'file_missing':    (0.91, 0.30, 0.24, 0.7),
-    'not_translated':  (0.50, 0.50, 0.50, 1),     # dark grey
+TRANSLATION_STATUS_COLORS = {
+    "completed": (0.18, 0.80, 0.44, 1),
+    "completed_empty": (0.18, 0.80, 0.44, 0.7),
+    "merged": (0.18, 0.80, 0.44, 0.7),
+    "in_progress": (1.00, 0.76, 0.03, 1),
+    "pending": (0.61, 0.61, 0.61, 1),
+    "failed": (0.91, 0.30, 0.24, 1),
+    "error": (0.91, 0.30, 0.24, 1),
+    "qa_failed": (0.90, 0.49, 0.13, 1),
+    "file_missing": (0.91, 0.30, 0.24, 0.7),
 }
 
-STATUS_LABELS = {
-    'completed':       '✓ Done',
-    'completed_empty': '✓ Empty',
-    'merged':          '↗ Merged',
-    'in_progress':     '⟳ Running',
-    'pending':         '⏳ Pending',
-    'failed':          '✗ Failed',
-    'error':           '✗ Error',
-    'qa_failed':       '⚠ QA Failed',
-    'file_missing':    '⚠ Missing',
-    'not_translated':  '—',
-}
-
-KV = '''
+KV = """
 <ProgressScreen>:
     BoxLayout:
-        orientation: 'vertical'
+        orientation: "vertical"
 
         MDTopAppBar:
             title: "Progress Manager"
@@ -68,16 +52,15 @@ KV = '''
             md_bg_color: app.theme_cls.primary_color
             elevation: 2
 
-        # Summary bar
         MDCard:
             size_hint: 1, None
-            height: dp(56)
+            height: dp(60)
             padding: [dp(16), dp(8)]
             elevation: 1
             md_bg_color: app.theme_cls.bg_dark
 
             BoxLayout:
-                spacing: dp(12)
+                spacing: dp(8)
 
                 MDLabel:
                     id: summary_label
@@ -85,9 +68,9 @@ KV = '''
                     font_style: "Subtitle2"
                     theme_text_color: "Secondary"
 
-                MDIconButton:
-                    icon: "folder-open-outline"
-                    pos_hint: {"center_y": 0.5}
+                MDRaisedButton:
+                    text: "Library"
+                    size_hint_x: 0.25
                     on_release: root.open_library_folder()
 
         ScrollView:
@@ -95,7 +78,7 @@ KV = '''
 
             BoxLayout:
                 id: progress_list
-                orientation: 'vertical'
+                orientation: "vertical"
                 size_hint_y: None
                 height: self.minimum_height
                 padding: [dp(8), dp(8)]
@@ -103,22 +86,22 @@ KV = '''
 
         MDLabel:
             id: empty_label
-            text: "No translations found.\\nTranslate an EPUB to see progress here."
+            text: "No progress files found yet."
             halign: "center"
             theme_text_color: "Hint"
             font_style: "Body1"
             size_hint_y: None
             height: 0
             opacity: 0
-'''
+"""
 
 
 class ProgressScreen(MDScreen):
-    """Translation progress viewer for all output directories."""
+    """Unified progress manager screen."""
 
     app = ObjectProperty(None, allownone=True)
-    summary_text = StringProperty("Scanning…")
-    _book_data = ListProperty([])
+    summary_text = StringProperty("Scanning...")
+    _entries = ListProperty([])
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -127,318 +110,382 @@ class ProgressScreen(MDScreen):
         self._scanning = False
 
     def on_enter(self, *args):
-        """Called each time the screen is displayed."""
         self.refresh_all()
 
-    # ── Scanning ──
-
     def refresh_all(self):
-        """Scan all output directories and refresh the display."""
         if self._scanning:
             return
         self._scanning = True
-        self.summary_text = "Scanning…"
+        self.summary_text = "Scanning..."
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
-        """Background worker to scan for progress files."""
         try:
-            from android_file_utils import get_library_dir, get_documents_dir
-            results = []
+            roots = self._get_scan_roots()
+            translation_items = self._scan_translation_progress(roots)
+            glossary_items = self._scan_glossary_progress(roots)
 
-            # Collect all directories to scan
-            scan_roots = [get_library_dir()]
-            docs = get_documents_dir()
-            if docs != scan_roots[0]:
-                scan_roots.append(docs)
-
-            # Also scan user-configured dirs
-            if self.app:
-                extra = self.app.config_data.get('library_scan_dirs', [])
-                for d in extra:
-                    if d not in scan_roots and os.path.isdir(d):
-                        scan_roots.append(d)
-
-            visited = set()
-            for root_dir in scan_roots:
-                if not os.path.isdir(root_dir):
-                    continue
-                try:
-                    for entry in os.scandir(root_dir):
-                        if not entry.is_dir():
-                            continue
-                        abs_path = os.path.abspath(entry.path)
-                        if abs_path in visited:
-                            continue
-                        visited.add(abs_path)
-
-                        progress_file = os.path.join(entry.path,
-                                                      "translation_progress.json")
-                        if not os.path.isfile(progress_file):
-                            continue
-
-                        info = self._parse_progress_file(progress_file,
-                                                          entry.path, entry.name)
-                        if info:
-                            results.append(info)
-                except PermissionError:
-                    pass
-
-            # Sort by last modified (newest first)
-            results.sort(key=lambda r: r.get('last_modified', 0), reverse=True)
-
+            results = translation_items + glossary_items
+            results.sort(key=lambda r: r.get("last_modified", 0), reverse=True)
             Clock.schedule_once(lambda dt: self._on_scan_done(results), 0)
-        except Exception as e:
-            logger.error(f"Progress scan error: {e}")
-            Clock.schedule_once(
-                lambda dt: self._on_scan_done([]), 0)
+        except Exception as exc:
+            logger.error("Progress scan error: %s", exc)
+            Clock.schedule_once(lambda dt: self._on_scan_done([]), 0)
 
-    def _parse_progress_file(self, progress_path, output_dir, dir_name):
-        """Parse a single translation_progress.json and return summary dict."""
+    def _get_scan_roots(self):
+        from android_file_utils import get_documents_dir, get_library_dir
+
+        roots = [get_library_dir()]
+        docs = get_documents_dir()
+        if docs not in roots:
+            roots.append(docs)
+        if self.app:
+            for d in self.app.config_data.get("library_scan_dirs", []):
+                if d and os.path.isdir(d) and d not in roots:
+                    roots.append(d)
+        return roots
+
+    def _scan_translation_progress(self, roots):
+        results = []
+        visited_dirs = set()
+        for root_dir in roots:
+            if not os.path.isdir(root_dir):
+                continue
+            try:
+                for entry in os.scandir(root_dir):
+                    if not entry.is_dir():
+                        continue
+                    abs_dir = os.path.abspath(entry.path)
+                    if abs_dir in visited_dirs:
+                        continue
+                    visited_dirs.add(abs_dir)
+
+                    progress_path = os.path.join(entry.path, "translation_progress.json")
+                    if not os.path.isfile(progress_path):
+                        continue
+                    info = self._parse_translation_progress(progress_path, entry.path, entry.name)
+                    if info:
+                        results.append(info)
+            except Exception:
+                continue
+        return results
+
+    def _scan_glossary_progress(self, roots):
+        results = []
+        seen_files = set()
+        for root_dir in roots:
+            if not os.path.isdir(root_dir):
+                continue
+            for current_dir, _, files in os.walk(root_dir):
+                for filename in files:
+                    lower = filename.lower()
+                    if not (lower.endswith("_glossary_progress.json") or lower == "glossary_progress.json"):
+                        continue
+                    progress_path = os.path.abspath(os.path.join(current_dir, filename))
+                    if progress_path in seen_files:
+                        continue
+                    seen_files.add(progress_path)
+                    info = self._parse_glossary_progress(progress_path)
+                    if info:
+                        results.append(info)
+        return results
+
+    def _parse_translation_progress(self, progress_path, output_dir, dir_name):
         try:
-            with open(progress_path, 'r', encoding='utf-8') as f:
-                prog = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.debug(f"Could not read {progress_path}: {e}")
+            with open(progress_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
             return None
 
-        chapters = prog.get('chapters', {})
+        chapters = data.get("chapters", {})
         if not chapters:
             return None
 
-        # Count statuses
         counts = {}
         last_updated = 0
         for ch_info in chapters.values():
-            st = ch_info.get('status', 'unknown')
-            counts[st] = counts.get(st, 0) + 1
-            ts = ch_info.get('last_updated', 0)
+            status = ch_info.get("status", "unknown")
+            counts[status] = counts.get(status, 0) + 1
+            ts = ch_info.get("last_updated", 0)
             if ts and ts > last_updated:
                 last_updated = ts
 
         total = len(chapters)
-        completed = counts.get('completed', 0) + counts.get('completed_empty', 0)
-        merged = counts.get('merged', 0)
-        failed = counts.get('failed', 0) + counts.get('error', 0)
-        qa_failed = counts.get('qa_failed', 0)
-        in_progress = counts.get('in_progress', 0)
-        pending = counts.get('pending', 0)
+        completed = counts.get("completed", 0) + counts.get("completed_empty", 0)
+        merged = counts.get("merged", 0)
+        failed = counts.get("failed", 0) + counts.get("error", 0)
+        qa_failed = counts.get("qa_failed", 0)
+        in_progress = counts.get("in_progress", 0)
+        pending = counts.get("pending", 0)
 
-        # Derive display name from folder name (strip _output suffix)
-        display_name = dir_name
-        if display_name.endswith('_output'):
-            display_name = display_name[:-7]
-        # Shorten if too long
-        if len(display_name) > 50:
-            display_name = display_name[:47] + '…'
+        display_name = dir_name[:-7] if dir_name.endswith("_output") else dir_name
+        if len(display_name) > 64:
+            display_name = display_name[:61] + "..."
+
+        done = completed + merged
+        pct = int(done / total * 100) if total else 0
 
         return {
-            'display_name': display_name,
-            'output_dir': output_dir,
-            'progress_path': progress_path,
-            'total': total,
-            'completed': completed,
-            'merged': merged,
-            'failed': failed,
-            'qa_failed': qa_failed,
-            'in_progress': in_progress,
-            'pending': pending,
-            'counts': counts,
-            'progress_pct': int((completed + merged) / total * 100) if total else 0,
-            'last_modified': last_updated,
-            'chapters': chapters,
+            "kind": "translation",
+            "display_name": display_name,
+            "progress_path": progress_path,
+            "output_dir": output_dir,
+            "total": total,
+            "completed": completed,
+            "merged": merged,
+            "failed": failed,
+            "qa_failed": qa_failed,
+            "in_progress": in_progress,
+            "pending": pending,
+            "progress_pct": pct,
+            "last_modified": max(last_updated, os.path.getmtime(progress_path)),
+            "chapters": chapters,
         }
 
-    def _on_scan_done(self, results):
-        """Called on main thread when scan completes."""
-        self._scanning = False
-        self._book_data = results
+    def _parse_glossary_progress(self, progress_path):
+        try:
+            with open(progress_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return None
 
-        total_books = len(results)
-        total_complete = sum(1 for r in results if r['progress_pct'] == 100)
-        total_chapters = sum(r['total'] for r in results)
-        total_done = sum(r['completed'] + r['merged'] for r in results)
+        completed = self._to_int_set(data.get("completed", []))
+        merged = self._to_int_set(data.get("merged_indices", []))
+        failed = self._to_int_set(data.get("failed", []))
+        done = completed | merged
+
+        reported_total = data.get("total_chapters")
+        total = 0
+        if isinstance(reported_total, int) and reported_total > 0:
+            total = reported_total
+        elif completed or merged or failed:
+            total = max(completed | merged | failed) + 1
+
+        pct = int(len(done) / total * 100) if total else 0
+        display_name = self._derive_glossary_name(progress_path)
+        book_title = str(data.get("book_title", "") or "")
+
+        return {
+            "kind": "glossary",
+            "display_name": display_name,
+            "book_title": book_title,
+            "progress_path": progress_path,
+            "output_dir": os.path.dirname(progress_path),
+            "total": total,
+            "completed_indices": completed,
+            "merged_indices": merged,
+            "failed_indices": failed,
+            "completed": max(0, len(done - merged)),
+            "merged": len(merged),
+            "failed": len(failed),
+            "in_progress": 0,
+            "pending": max(0, total - len(done | failed)),
+            "progress_pct": pct,
+            "last_modified": os.path.getmtime(progress_path),
+        }
+
+    @staticmethod
+    def _to_int_set(values):
+        out = set()
+        if not isinstance(values, list):
+            return out
+        for value in values:
+            try:
+                out.add(int(value))
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _derive_glossary_name(progress_path):
+        filename = os.path.basename(progress_path)
+        lower = filename.lower()
+        if lower.endswith("_glossary_progress.json"):
+            return filename[:-len("_glossary_progress.json")]
+
+        parent = os.path.basename(os.path.dirname(progress_path))
+        if parent.lower() == "glossary":
+            grandparent = os.path.basename(os.path.dirname(os.path.dirname(progress_path)))
+            return grandparent or parent
+        return parent or "glossary"
+
+    def _on_scan_done(self, results):
+        self._scanning = False
+        self._entries = results
+
+        translation = [r for r in results if r.get("kind") == "translation"]
+        glossary = [r for r in results if r.get("kind") == "glossary"]
+        t_total = sum(r.get("total", 0) for r in translation)
+        t_done = sum(r.get("completed", 0) + r.get("merged", 0) for r in translation)
+        g_total = sum(r.get("total", 0) for r in glossary)
+        g_done = sum(r.get("completed", 0) + r.get("merged", 0) for r in glossary)
 
         self.summary_text = (
-            f"{total_books} books · {total_done}/{total_chapters} chapters"
-            f" · {total_complete} complete"
+            f"{len(translation)} translation | {len(glossary)} glossary | "
+            f"T {t_done}/{t_total} | G {g_done}/{g_total}"
         )
 
         self._populate_list()
 
-    # ── UI ──
-
     def _populate_list(self):
-        """Rebuild the scrollable list of progress cards."""
         progress_list = self.ids.progress_list
         progress_list.clear_widgets()
 
-        empty_label = self.ids.empty_label
-        if not self._book_data:
-            empty_label.opacity = 1
-            empty_label.height = dp(200)
+        if not self._entries:
+            self.ids.empty_label.opacity = 1
+            self.ids.empty_label.height = dp(180)
             return
-        empty_label.opacity = 0
-        empty_label.height = 0
 
-        for info in self._book_data:
-            card = self._build_book_card(info)
-            progress_list.add_widget(card)
+        self.ids.empty_label.opacity = 0
+        self.ids.empty_label.height = 0
 
-    def _build_book_card(self, info):
-        """Build a single book progress card."""
-        pct = info['progress_pct']
-        total = info['total']
-        completed = info['completed'] + info['merged']
-        failed = info['failed'] + info['qa_failed']
+        for info in self._entries:
+            progress_list.add_widget(self._build_card(info))
 
-        # Card
+    def _build_card(self, info):
+        pct = info.get("progress_pct", 0)
+        completed = info.get("completed", 0) + info.get("merged", 0)
+        failed = info.get("failed", 0) + info.get("qa_failed", 0)
+        total = info.get("total", 0)
+        kind = info.get("kind", "translation")
+        kind_label = "Glossary" if kind == "glossary" else "Translation"
+
         card = MDCard(
             size_hint=(1, None),
-            height=dp(120),
+            height=dp(126),
             padding=dp(12),
             elevation=2,
             ripple_behavior=True,
-            on_release=lambda x, i=info: self._show_detail(i),
+            on_release=lambda _btn, i=info: self._show_detail(i),
         )
 
-        outer = BoxLayout(orientation='vertical', spacing=dp(4))
+        outer = BoxLayout(orientation="vertical", spacing=dp(5))
 
-        # Row 1: title + percentage
-        row1 = BoxLayout(size_hint_y=None, height=dp(28))
-        title_label = MDLabel(
-            text=info['display_name'],
-            font_style="Subtitle1",
-            shorten=True,
-            shorten_from="right",
-            size_hint_x=0.75,
-        )
-        pct_label = MDLabel(
-            text=f"{pct}%",
-            font_style="H6",
-            halign="right",
-            size_hint_x=0.25,
-            theme_text_color="Custom",
-            text_color=(0.18, 0.80, 0.44, 1) if pct == 100
-                        else (1.0, 0.76, 0.03, 1) if pct > 0
-                        else (0.61, 0.61, 0.61, 1),
-        )
-        row1.add_widget(title_label)
-        row1.add_widget(pct_label)
+        row1 = BoxLayout(size_hint_y=None, height=dp(26), spacing=dp(8))
+        row1.add_widget(MDLabel(text=info.get("display_name", "unknown"), size_hint_x=0.62, shorten=True, shorten_from="right"))
+        row1.add_widget(MDLabel(text=kind_label, size_hint_x=0.2, theme_text_color="Secondary", halign="center"))
+        row1.add_widget(MDLabel(text=f"{pct}%", size_hint_x=0.18, halign="right"))
         outer.add_widget(row1)
 
-        # Row 2: progress bar
         bar = MDProgressBar(
             value=pct,
             max=100,
             size_hint_y=None,
             height=dp(6),
-            color=(0.18, 0.80, 0.44, 1) if pct == 100
-                   else (1.0, 0.76, 0.03, 1),
+            color=(0.18, 0.80, 0.44, 1) if pct == 100 else (1.0, 0.76, 0.03, 1),
         )
         outer.add_widget(bar)
 
-        # Row 3: status chips
-        row3 = BoxLayout(
-            size_hint_y=None,
-            height=dp(28),
-            spacing=dp(8),
-            padding=[0, dp(4)],
-        )
-
-        chips = [
-            (f"✓ {completed}", (0.18, 0.80, 0.44, 1)),
-        ]
+        row2 = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(8))
+        row2.add_widget(MDLabel(text=f"Done {completed}/{total}", size_hint_x=0.45, theme_text_color="Secondary"))
         if failed > 0:
-            chips.append((f"✗ {failed}", (0.91, 0.30, 0.24, 1)))
-        if info['qa_failed'] > 0:
-            chips.append((f"⚠ {info['qa_failed']}", (0.90, 0.49, 0.13, 1)))
-        if info['in_progress'] > 0:
-            chips.append((f"⟳ {info['in_progress']}", (1.0, 0.76, 0.03, 1)))
+            row2.add_widget(MDLabel(text=f"Failed {failed}", size_hint_x=0.25, theme_text_color="Error"))
+        if info.get("in_progress", 0) > 0:
+            row2.add_widget(MDLabel(text=f"Running {info.get('in_progress', 0)}", size_hint_x=0.3, theme_text_color="Custom", text_color=(1.0, 0.76, 0.03, 1)))
+        else:
+            row2.add_widget(MDLabel(text="", size_hint_x=0.3))
+        outer.add_widget(row2)
 
-        remaining = total - completed
-        if remaining > 0 and info['in_progress'] == 0:
-            chips.append((f"— {remaining}", (0.50, 0.50, 0.50, 1)))
-
-        for chip_text, chip_color in chips:
-            lbl = MDLabel(
-                text=chip_text,
-                font_style="Caption",
-                theme_text_color="Custom",
-                text_color=chip_color,
-                size_hint_x=None,
-                width=dp(60),
-                halign="center",
-            )
-            row3.add_widget(lbl)
-        row3.add_widget(BoxLayout())  # spacer
-        outer.add_widget(row3)
-
-        # Row 4: last updated timestamp
-        if info['last_modified'] > 0:
-            ts = time.strftime("%Y-%m-%d %H:%M",
-                               time.localtime(info['last_modified']))
-            ts_label = MDLabel(
-                text=f"Last updated: {ts}",
+        if kind == "glossary" and info.get("book_title"):
+            outer.add_widget(MDLabel(
+                text=f"Book: {info.get('book_title')}",
                 font_style="Caption",
                 theme_text_color="Hint",
                 size_hint_y=None,
                 height=dp(18),
-            )
-            outer.add_widget(ts_label)
+                shorten=True,
+                shorten_from="right",
+            ))
+        elif info.get("last_modified", 0) > 0:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(info["last_modified"]))
+            outer.add_widget(MDLabel(
+                text=f"Updated: {ts}",
+                font_style="Caption",
+                theme_text_color="Hint",
+                size_hint_y=None,
+                height=dp(18),
+            ))
 
         card.add_widget(outer)
         return card
 
-    # ── Detail dialog ──
-
     def _show_detail(self, info):
-        """Show a dialog with chapter-level progress for one book."""
-        chapters = info.get('chapters', {})
+        if info.get("kind") == "glossary":
+            self._show_glossary_detail(info)
+        else:
+            self._show_translation_detail(info)
+
+    def _show_translation_detail(self, info):
+        chapters = info.get("chapters", {})
         if not chapters:
             toast("No chapter data available")
             return
 
-        # Build sorted chapter list
-        sorted_chs = self._sort_chapters(chapters)
-
-        # Content
-        content = BoxLayout(
-            orientation='vertical',
-            spacing=dp(2),
-            size_hint_y=None,
-        )
-
-        # Summary row
-        summary = MDLabel(
-            text=(f"{info['completed']+info['merged']}/{info['total']} completed"
-                  f" · {info['failed']+info['qa_failed']} failed"
-                  f" · {info['progress_pct']}%"),
+        sorted_chapters = self._sort_translation_chapters(chapters)
+        content = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_y=None)
+        content.add_widget(MDLabel(
+            text=f"{info.get('completed', 0)+info.get('merged', 0)}/{info.get('total', 0)} done | {info.get('failed', 0)+info.get('qa_failed', 0)} failed | {info.get('progress_pct', 0)}%",
             font_style="Caption",
             theme_text_color="Secondary",
             size_hint_y=None,
             height=dp(28),
-            padding=[dp(4), 0],
-        )
-        content.add_widget(summary)
+        ))
+        for ch_key, ch_info in sorted_chapters:
+            content.add_widget(self._build_translation_row(ch_key, ch_info, info.get("output_dir", "")))
+        content.height = dp(28) + dp(42) * len(sorted_chapters)
+        self._open_detail_dialog(info.get("display_name", "Translation"), content, info.get("output_dir", ""))
 
-        # Chapter entries
-        for ch_key, ch_info in sorted_chs:
-            row = self._build_chapter_row(ch_key, ch_info, info['output_dir'])
+    def _show_glossary_detail(self, info):
+        completed = info.get("completed_indices", set())
+        merged = info.get("merged_indices", set())
+        failed = info.get("failed_indices", set())
+        total = int(info.get("total", 0) or 0)
+
+        if total <= 0:
+            known = sorted(completed | merged | failed)
+            total = (known[-1] + 1) if known else 0
+        if total <= 0:
+            toast("No glossary chapter progress available")
+            return
+
+        content = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_y=None)
+        done = len((completed | merged))
+        content.add_widget(MDLabel(
+            text=f"{done}/{total} done | failed {len(failed)} | {info.get('progress_pct', 0)}%",
+            font_style="Caption",
+            theme_text_color="Secondary",
+            size_hint_y=None,
+            height=dp(28),
+        ))
+
+        for idx in range(total):
+            if idx in failed:
+                label = "Failed"
+                color = (0.91, 0.30, 0.24, 1)
+            elif idx in merged:
+                label = "Merged"
+                color = (0.20, 0.64, 0.80, 1)
+            elif idx in completed:
+                label = "Completed"
+                color = (0.18, 0.80, 0.44, 1)
+            else:
+                label = "Pending"
+                color = (0.61, 0.61, 0.61, 1)
+
+            row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8), padding=[dp(8), dp(2)])
+            row.add_widget(MDLabel(text=f"Ch {idx + 1}", size_hint_x=0.28))
+            row.add_widget(MDLabel(text=label, size_hint_x=0.72, halign="right", theme_text_color="Custom", text_color=color))
             content.add_widget(row)
 
-        content.height = dp(28) + dp(44) * len(sorted_chs)
+        content.height = dp(28) + dp(40) * total
+        self._open_detail_dialog(info.get("display_name", "Glossary"), content, info.get("output_dir", ""))
 
+    def _open_detail_dialog(self, title, content_widget, folder_path):
         from kivy.uix.scrollview import ScrollView
-        scroll = ScrollView(
-            size_hint=(1, None),
-            height=min(dp(400), dp(28) + dp(44) * len(sorted_chs)),
-            do_scroll_x=False,
-        )
-        scroll.add_widget(content)
 
-        wrapper = BoxLayout(orientation='vertical', size_hint_y=None,
-                            height=scroll.height)
+        scroll = ScrollView(size_hint=(1, None), height=min(dp(430), max(dp(180), content_widget.height)), do_scroll_x=False)
+        scroll.add_widget(content_widget)
+        wrapper = BoxLayout(orientation="vertical", size_hint_y=None, height=scroll.height)
         wrapper.add_widget(scroll)
 
         if self._detail_dialog:
@@ -448,138 +495,69 @@ class ProgressScreen(MDScreen):
                 pass
 
         self._detail_dialog = MDDialog(
-            title=info['display_name'],
+            title=title,
             type="custom",
             content_cls=wrapper,
             buttons=[
-                MDFlatButton(
-                    text="OPEN FOLDER",
-                    on_release=lambda x, d=info['output_dir']:
-                        self._open_folder(d),
-                ),
-                MDRaisedButton(
-                    text="CLOSE",
-                    on_release=lambda x: self._detail_dialog.dismiss(),
-                ),
+                MDFlatButton(text="OPEN FOLDER", on_release=lambda _b, p=folder_path: self._open_folder(p)),
+                MDRaisedButton(text="CLOSE", on_release=lambda _b: self._detail_dialog.dismiss()),
             ],
         )
         self._detail_dialog.open()
 
-    def _sort_chapters(self, chapters):
-        """Sort chapters by actual number, then key."""
+    @staticmethod
+    def _sort_translation_chapters(chapters):
         def _sort_key(item):
-            ch_key, ch_info = item
-            num = ch_info.get('actual_num', 0)
-            if num is None:
-                num = 0
+            key, info = item
+            num = info.get("actual_num", 0)
             try:
-                return (float(num), ch_key)
-            except (ValueError, TypeError):
-                return (0, ch_key)
+                return (float(num), key)
+            except Exception:
+                return (0, key)
         return sorted(chapters.items(), key=_sort_key)
 
-    def _build_chapter_row(self, ch_key, ch_info, output_dir):
-        """Build a single chapter status row."""
-        status = ch_info.get('status', 'unknown')
-        actual_num = ch_info.get('actual_num', ch_key)
-        output_file = ch_info.get('output_file', '')
-        color = STATUS_COLORS.get(status, (0.5, 0.5, 0.5, 1))
-        label = STATUS_LABELS.get(status, status)
+    def _build_translation_row(self, ch_key, ch_info, output_dir):
+        status = ch_info.get("status", "unknown")
+        actual_num = ch_info.get("actual_num", ch_key)
+        output_file = ch_info.get("output_file", "")
+        label = status.replace("_", " ").title()
+        color = TRANSLATION_STATUS_COLORS.get(status, (0.5, 0.5, 0.5, 1))
 
-        # Check if output file actually exists
-        file_exists = False
-        if output_file:
-            file_path = os.path.join(output_dir, output_file)
-            file_exists = os.path.isfile(file_path)
+        if output_file and status in ("completed", "completed_empty"):
+            path = os.path.join(output_dir, output_file)
+            if not os.path.isfile(path):
+                label = "Missing Output"
+                color = TRANSLATION_STATUS_COLORS["file_missing"]
 
-        # If status is 'completed' but file doesn't exist, show warning
-        if status in ('completed', 'completed_empty') and not file_exists and output_file:
-            label = '⚠ Missing'
-            color = STATUS_COLORS['file_missing']
-
-        row = BoxLayout(
-            size_hint_y=None,
-            height=dp(42),
-            spacing=dp(8),
-            padding=[dp(8), dp(2)],
-        )
-
-        # Chapter number
-        num_label = MDLabel(
-            text=f"Ch {actual_num}",
-            font_style="Body2",
-            size_hint_x=0.2,
-        )
-        row.add_widget(num_label)
-
-        # Output file name
-        file_label = MDLabel(
-            text=output_file if output_file else "—",
-            font_style="Caption",
-            theme_text_color="Secondary",
-            shorten=True,
-            shorten_from="center",
-            size_hint_x=0.5,
-        )
-        row.add_widget(file_label)
-
-        # Status badge
-        status_label = MDLabel(
-            text=label,
-            font_style="Caption",
-            theme_text_color="Custom",
-            text_color=color,
-            halign="right",
-            size_hint_x=0.3,
-        )
-        row.add_widget(status_label)
-
+        row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8), padding=[dp(8), dp(2)])
+        row.add_widget(MDLabel(text=f"Ch {actual_num}", size_hint_x=0.2))
+        row.add_widget(MDLabel(text=output_file if output_file else "-", size_hint_x=0.52, theme_text_color="Secondary", shorten=True, shorten_from="center"))
+        row.add_widget(MDLabel(text=label, size_hint_x=0.28, halign="right", theme_text_color="Custom", text_color=color))
         return row
 
-    # ── Actions ──
-
     def open_library_folder(self):
-        """Open the library directory in the system file manager."""
         try:
-            from android_file_utils import get_library_dir, is_android
-            lib_dir = get_library_dir()
-            if is_android():
-                try:
-                    from jnius import autoclass
-                    Intent = autoclass('android.content.Intent')
-                    Uri = autoclass('android.net.Uri')
-                    PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                    intent = Intent(Intent.ACTION_VIEW)
-                    intent.setDataAndType(Uri.parse(f"file://{lib_dir}"),
-                                          "resource/folder")
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    PythonActivity.mActivity.startActivity(intent)
-                except Exception:
-                    toast(f"Library: {lib_dir}")
-            else:
-                import subprocess, sys
-                if sys.platform == 'win32':
-                    os.startfile(lib_dir)
-                elif sys.platform == 'darwin':
-                    subprocess.Popen(['open', lib_dir])
-                else:
-                    subprocess.Popen(['xdg-open', lib_dir])
-        except Exception as e:
-            toast(f"Could not open folder: {e}")
+            from android_file_utils import get_library_dir
+            self._open_folder(get_library_dir())
+        except Exception as exc:
+            toast(f"Could not open library: {exc}")
 
     def _open_folder(self, path):
-        """Open a specific output folder."""
+        if not path:
+            return
         try:
             from android_file_utils import is_android
             if is_android():
-                toast(f"Output: {path}")
+                toast(f"Folder: {path}")
+                return
+            import subprocess
+            import sys
+
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
             else:
-                import subprocess, sys
-                if sys.platform == 'win32':
-                    os.startfile(path)
-                elif sys.platform == 'darwin':
-                    subprocess.Popen(['open', path])
-                else:
-                    subprocess.Popen(['xdg-open', path])
-        except Exception as e:
-            toast(f"Could not open folder: {e}")
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            toast(f"Could not open folder: {exc}")

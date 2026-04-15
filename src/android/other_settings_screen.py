@@ -19,7 +19,7 @@ from kivy.properties import ObjectProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
 
 from kivymd.toast import toast
-from kivymd.uix.button import MDRaisedButton
+from kivymd.uix.button import MDFlatButton, MDRaisedButton
 from kivymd.uix.card import MDCard
 from kivymd.uix.label import MDLabel
 from kivymd.uix.screen import MDScreen
@@ -220,35 +220,55 @@ class OtherSettingsScreen(MDScreen):
             size_hint_y=None,
             height=dp(26),
         ))
+        content.add_widget(MDLabel(
+            text="Double-tap field to copy (or paste if empty).",
+            theme_text_color="Secondary",
+            font_style="Caption",
+            size_hint_y=None,
+            height=dp(20),
+        ))
 
-        self._add_endpoint_block(
-            content,
+        content.add_widget(self._build_endpoint_block(
             "OpenAI Custom Endpoint",
             'use_custom_openai_endpoint',
             'openai_base_url',
-        )
-        self._add_endpoint_block(
-            content,
+        ))
+        content.add_widget(self._build_endpoint_block(
             "Gemini Custom Endpoint",
             'use_gemini_openai_endpoint',
             'gemini_openai_endpoint',
-        )
-        self._add_endpoint_block(
-            content,
+        ))
+        content.add_widget(self._build_endpoint_block(
             "Anthropic Custom Endpoint",
             'force_native_anthropic',
             'anthropic_base_url',
-        )
+        ))
         return card
 
-    def _add_endpoint_block(self, parent, title, toggle_key, url_key):
+    def _build_endpoint_block(self, title, toggle_key, url_key):
+        block = MDCard(
+            size_hint_y=None,
+            elevation=0,
+            padding=dp(10),
+            radius=[10, 10, 10, 10],
+            md_bg_color=(0.13, 0.13, 0.16, 1),
+        )
+        inner = BoxLayout(
+            orientation='vertical',
+            spacing=dp(6),
+            size_hint_y=None,
+        )
+        inner.bind(minimum_height=inner.setter('height'))
+        block.add_widget(inner)
+        block.bind(height=lambda *_: setattr(block, 'height', inner.height + dp(18)))
+
         header = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        header.add_widget(MDLabel(text=title, size_hint_x=0.7))
-        btn = MDRaisedButton(size_hint_x=0.3)
+        header.add_widget(MDLabel(text=title, size_hint_x=0.68, shorten=True, shorten_from="right"))
+        btn = MDRaisedButton(size_hint_x=0.32)
         self._set_toggle_button_style(btn, self._bool_values.get(toggle_key, False))
         btn.bind(on_release=lambda *_a, k=toggle_key, b=btn: self._toggle_bool_key(k, b))
         header.add_widget(btn)
-        parent.add_widget(header)
+        inner.add_widget(header)
 
         field = MDTextField(
             hint_text="Endpoint URL / host",
@@ -259,31 +279,55 @@ class OtherSettingsScreen(MDScreen):
         )
         field.bind(text=lambda _i, text, k=url_key: self._on_text_changed(k, text))
         field.bind(on_touch_down=lambda inst, touch, k=url_key: self._endpoint_field_touch(inst, touch, k))
-        parent.add_widget(field)
+        inner.add_widget(field)
         self._endpoint_fields[url_key] = field
 
-        hint = MDLabel(
-            text="Double-tap field: copy current value (or paste clipboard if empty)",
+        short_hint = MDLabel(
+            text="Shortcuts (double-tap text or tap Use):",
             theme_text_color="Secondary",
             font_style="Caption",
             size_hint_y=None,
             height=dp(20),
         )
-        parent.add_widget(hint)
+        inner.add_widget(short_hint)
 
-        shortcuts = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(6))
-        shortcuts.add_widget(MDLabel(text="Shortcuts (double-tap):", size_hint_x=0.45))
         for preset in self._ENDPOINT_PRESETS.get(url_key, []):
+            row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
             lbl = MDLabel(
                 text=f"[u]{preset}[/u]",
                 markup=True,
                 theme_text_color="Custom",
                 text_color=[0.2, 0.75, 1, 1],
-                size_hint_x=0.9,
+                shorten=True,
+                shorten_from="middle",
+                size_hint_x=0.78,
             )
             lbl.bind(on_touch_down=lambda inst, touch, p=preset, k=url_key: self._shortcut_touch(inst, touch, p, k))
-            shortcuts.add_widget(lbl)
-        parent.add_widget(shortcuts)
+            row.add_widget(lbl)
+            use_btn = MDFlatButton(
+                text="Use",
+                size_hint_x=0.22,
+            )
+            use_btn.bind(on_release=lambda *_a, p=preset, k=url_key: self._apply_shortcut(k, p))
+            row.add_widget(use_btn)
+            inner.add_widget(row)
+
+        return block
+
+    def _add_endpoint_block(
+        self,
+        parent,
+        title,
+        toggle_key,
+        url_key,
+    ):
+        # Backward compatibility placeholder; endpoint UI now built by
+        # _build_endpoint_block and added directly in _build_endpoint_card.
+        parent.add_widget(self._build_endpoint_block(
+            title,
+            toggle_key,
+            url_key,
+        ))
 
     def _endpoint_field_touch(self, field, touch, key):
         if not field.collide_point(*touch.pos) or not touch.is_double_tap:
@@ -303,13 +347,16 @@ class OtherSettingsScreen(MDScreen):
     def _shortcut_touch(self, label, touch, preset_value, key):
         if not label.collide_point(*touch.pos) or not touch.is_double_tap:
             return False
+        self._apply_shortcut(key, preset_value)
+        toast(f"Pasted + copied {key}")
+        return True
+
+    def _apply_shortcut(self, key, preset_value):
         field = self._endpoint_fields.get(key)
         if field is not None:
             field.text = preset_value
         self._on_text_changed(key, preset_value)
         Clipboard.copy(preset_value)
-        toast(f"Pasted + copied {key}")
-        return True
 
     def _render_dynamic_settings(self):
         if self._dynamic_box is None:

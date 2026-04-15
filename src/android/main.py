@@ -112,6 +112,7 @@ def _get_cjk_font_paths():
 from library_screen import LibraryScreen
 from reader_screen import ReaderScreen
 from multikey_screen import MultiKeyScreen
+from extract_glossary_screen import ExtractGlossaryScreen
 from translation_screen import TranslationScreen
 from progress_screen import ProgressScreen
 from other_settings_screen import OtherSettingsScreen
@@ -141,6 +142,9 @@ BoxLayout:
         MultiKeyScreen:
             name: 'multikey'
 
+        ExtractGlossaryScreen:
+            name: 'extract_glossary'
+
         ProgressScreen:
             name: 'progress'
 
@@ -150,13 +154,11 @@ BoxLayout:
         TranslationScreen:
             name: 'translation'
 
-    # Custom bottom nav bar (MDBottomNavigation reserves its own content
-    # panel area which clips the ScreenManager to ~50% height)
+    # Horizontal scroll tab strip (fits more tabs than fixed icon row)
     BoxLayout:
         id: bottom_nav
         size_hint_y: None
-        height: dp(56)
-        padding: [dp(8), 0]
+        height: dp(62)
 
         canvas.before:
             Color:
@@ -171,48 +173,61 @@ BoxLayout:
                 pos: self.x, self.top - 1
                 size: self.width, 1
 
-        MDIconButton:
-            icon: "bookshelf"
-            theme_text_color: "Custom"
-            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'library' else (0.5,0.5,0.5,1)
-            pos_hint: {"center_y": 0.5}
-            on_release: app.switch_screen('library')
+        ScrollView:
+            do_scroll_x: True
+            do_scroll_y: False
+            bar_width: dp(2)
+            scroll_type: ['bars', 'content']
 
-        Widget:
+            BoxLayout:
+                id: nav_tabs
+                orientation: 'horizontal'
+                size_hint_x: None
+                width: self.minimum_width
+                spacing: dp(8)
+                padding: [dp(8), dp(8), dp(8), dp(8)]
 
-        MDIconButton:
-            icon: "key-chain-variant"
-            theme_text_color: "Custom"
-            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'multikey' else (0.5,0.5,0.5,1)
-            pos_hint: {"center_y": 0.5}
-            on_release: app.switch_screen('multikey')
+                MDRaisedButton:
+                    text: "Library"
+                    size_hint_x: None
+                    width: dp(108)
+                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'library' else (0.30, 0.30, 0.34, 1)
+                    on_release: app.switch_screen('library')
 
-        Widget:
+                MDRaisedButton:
+                    text: "Multi-Key"
+                    size_hint_x: None
+                    width: dp(110)
+                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'multikey' else (0.30, 0.30, 0.34, 1)
+                    on_release: app.switch_screen('multikey')
 
-        MDIconButton:
-            icon: "chart-bar-stacked"
-            theme_text_color: "Custom"
-            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'progress' else (0.5,0.5,0.5,1)
-            pos_hint: {"center_y": 0.5}
-            on_release: app.switch_screen('progress')
+                MDRaisedButton:
+                    text: "Extract Glossary"
+                    size_hint_x: None
+                    width: dp(150)
+                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'extract_glossary' else (0.30, 0.30, 0.34, 1)
+                    on_release: app.switch_screen('extract_glossary')
 
-        Widget:
+                MDRaisedButton:
+                    text: "Progress"
+                    size_hint_x: None
+                    width: dp(108)
+                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'progress' else (0.30, 0.30, 0.34, 1)
+                    on_release: app.switch_screen('progress')
 
-        MDIconButton:
-            icon: "cog"
-            theme_text_color: "Custom"
-            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'other_settings' else (0.5,0.5,0.5,1)
-            pos_hint: {"center_y": 0.5}
-            on_release: app.switch_screen('other_settings')
+                MDRaisedButton:
+                    text: "Translate"
+                    size_hint_x: None
+                    width: dp(108)
+                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'translation' else (0.30, 0.30, 0.34, 1)
+                    on_release: app.switch_screen('translation')
 
-        Widget:
-
-        MDIconButton:
-            icon: "translate"
-            theme_text_color: "Custom"
-            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'translation' else (0.5,0.5,0.5,1)
-            pos_hint: {"center_y": 0.5}
-            on_release: app.switch_screen('translation')
+                MDRaisedButton:
+                    text: "Other Settings"
+                    size_hint_x: None
+                    width: dp(132)
+                    md_bg_color: (0.20, 0.55, 0.90, 1) if app.root and app.root.ids.screen_manager.current == 'other_settings' else (0.30, 0.30, 0.34, 1)
+                    on_release: app.switch_screen('other_settings')
 '''
 
 
@@ -293,7 +308,7 @@ class GlossarionApp(MDApp):
             pass
 
         # Initialize screens
-        for screen_name in ['library', 'reader', 'multikey', 'progress', 'other_settings', 'translation']:
+        for screen_name in ['library', 'reader', 'multikey', 'extract_glossary', 'progress', 'other_settings', 'translation']:
             try:
                 screen = self.root.ids.screen_manager.get_screen(screen_name)
                 screen.app = self
@@ -325,7 +340,7 @@ class GlossarionApp(MDApp):
         else:
             bottom_nav.opacity = 1
             bottom_nav.disabled = False
-            bottom_nav.height = 56  # dp(56) handled by KV
+            bottom_nav.height = 62
 
         # Pass data to target screen
         screen = sm.get_screen(screen_name)
