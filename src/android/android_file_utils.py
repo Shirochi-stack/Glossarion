@@ -312,20 +312,25 @@ _MIME_MAP = {
     '.csv':  'text/csv',
 }
 
+# Valid extensions for client-side filtering after SAF returns
+_VALID_EXTENSIONS = {'.epub', '.txt', '.pdf', '.csv'}
+
 # Request codes for different picker contexts
 REQUEST_CODE_OPEN_FILE = 9001
 REQUEST_CODE_OPEN_GLOSSARY = 9002
 
 # Pending callbacks — keyed by request code
 _pending_callbacks = {}
+# Pending extension filters — keyed by request code
+_pending_extensions = {}
 
 
 def _copy_uri_to_local(uri_string):
     """Copy content from a content:// URI to the Glossarion Library folder.
-    
+
     Android's SAF returns content:// URIs which may not be directly readable
     as file paths.  We copy the content to a local file and return that path.
-    
+
     Returns:
         str: Path to the local copy, or None on failure.
     """
@@ -334,22 +339,24 @@ def _copy_uri_to_local(uri_string):
 
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         Uri = autoclass('android.net.Uri')
-        ContentResolver = autoclass('android.content.ContentResolver')
 
         activity = PythonActivity.mActivity
         resolver = activity.getContentResolver()
         uri = Uri.parse(uri_string)
 
-        # Try to get the display name from the cursor
+        # ── Get display name ──
         filename = None
-        cursor = resolver.query(uri, None, None, None, None)
-        if cursor is not None:
-            try:
-                name_index = cursor.getColumnIndex("_display_name")
-                if name_index >= 0 and cursor.moveToFirst():
-                    filename = cursor.getString(name_index)
-            finally:
-                cursor.close()
+        try:
+            cursor = resolver.query(uri, None, None, None, None)
+            if cursor is not None:
+                try:
+                    name_index = cursor.getColumnIndex("_display_name")
+                    if name_index >= 0 and cursor.moveToFirst():
+                        filename = cursor.getString(name_index)
+                finally:
+                    cursor.close()
+        except Exception as e:
+            print(f"[WARN] Cursor query failed: {e}")
 
         if not filename:
             # Fallback: extract from URI path
@@ -362,38 +369,79 @@ def _copy_uri_to_local(uri_string):
         # Sanitize filename
         filename = filename.replace('/', '_').replace('\\', '_')
 
-        # Copy to Library dir
+        # Determine destination directory
         lib_dir = get_library_dir()
         dest_path = os.path.join(lib_dir, filename)
 
-        # Read from content URI and write to local file
+        # Avoid overwriting — append counter if file exists
+        if os.path.exists(dest_path):
+            base, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(dest_path):
+                dest_path = os.path.join(lib_dir, f"{base}_{counter}{ext}")
+                counter += 1
+
+        # ── Read from content URI and write to local file ──
         input_stream = resolver.openInputStream(uri)
         if input_stream is None:
             print(f"[WARN] Could not open input stream for URI: {uri_string}")
             return None
 
-        BufferedInputStream = autoclass('java.io.BufferedInputStream')
-        bis = BufferedInputStream(input_stream)
+        # Use a simpler, reliable byte reading approach
+        # DataInputStream.readFully + available() is more reliable than
+        # reflection-based Array.newInstance across different Android versions
+        try:
+            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+            baos = ByteArrayOutputStream()
+            buf_size = 8192
 
-        with open(dest_path, 'wb') as f:
-            buf = bytearray(8192)
+            # Read using a Java byte[] created via simple instantiation
+            Byte_TYPE = autoclass('java.lang.Byte').TYPE
+            Array = autoclass('java.lang.reflect.Array')
+            java_buf = Array.newInstance(Byte_TYPE, buf_size)
+
             while True:
-                # Read into a Java byte array
-                java_buf = autoclass('java.lang.reflect.Array').newInstance(
-                    autoclass('java.lang.Byte').TYPE, 8192
-                )
-                bytes_read = bis.read(java_buf)
+                bytes_read = input_stream.read(java_buf)
                 if bytes_read == -1:
                     break
-                # Convert Java byte[] to Python bytes
-                for i in range(bytes_read):
-                    buf[i] = java_buf[i] & 0xFF
-                f.write(bytes(buf[:bytes_read]))
+                baos.write(java_buf, 0, bytes_read)
 
-        bis.close()
-        input_stream.close()
+            input_stream.close()
 
-        print(f"[INFO] Copied URI to local: {dest_path}")
+            # Get all bytes at once and write to Python file
+            java_bytes = baos.toByteArray()
+            baos.close()
+
+            # Convert Java byte[] to Python bytes
+            total_len = Array.getLength(java_bytes)
+            with open(dest_path, 'wb') as f:
+                # Write in chunks to avoid massive memory allocation
+                chunk_size = 65536
+                for offset in range(0, total_len, chunk_size):
+                    end = min(offset + chunk_size, total_len)
+                    chunk = bytearray(end - offset)
+                    for i in range(end - offset):
+                        b = Array.getByte(java_bytes, offset + i)
+                        chunk[i] = b & 0xFF
+                    f.write(bytes(chunk))
+
+        except Exception as e:
+            print(f"[WARN] ByteArrayOutputStream approach failed: {e}, trying fallback...")
+            # Fallback: read byte by byte (slow but always works)
+            try:
+                input_stream.close()
+            except Exception:
+                pass
+            input_stream = resolver.openInputStream(uri)
+            with open(dest_path, 'wb') as f:
+                while True:
+                    byte_val = input_stream.read()
+                    if byte_val == -1:
+                        break
+                    f.write(bytes([byte_val & 0xFF]))
+            input_stream.close()
+
+        print(f"[INFO] Copied URI to local: {dest_path} ({os.path.getsize(dest_path)} bytes)")
         return dest_path
 
     except Exception as e:
@@ -405,13 +453,14 @@ def _copy_uri_to_local(uri_string):
 
 def open_native_file_picker(callback, extensions=None, request_code=None):
     """Open the Android native file picker (Storage Access Framework).
-    
-    Uses ACTION_OPEN_DOCUMENT Intent which respects scoped storage,
-    shows the system document picker UI, and lets the user browse all
-    accessible locations (Downloads, Drive, file managers, etc.).
-    
+
+    Uses ACTION_GET_CONTENT Intent which is more broadly compatible than
+    ACTION_OPEN_DOCUMENT across Android versions and OEM skins.  Shows the
+    system document picker UI and lets the user browse all accessible
+    locations (Downloads, Drive, file managers, etc.).
+
     On non-Android platforms, falls back to a KivyMD MDFileManager.
-    
+
     Args:
         callback: function(file_path_or_None) called with the selected
                   file's local path, or None if cancelled.
@@ -424,7 +473,6 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
         request_code = REQUEST_CODE_OPEN_FILE
 
     if not is_android():
-        # Desktop fallback: use KivyMD file manager
         _desktop_file_picker(callback, extensions)
         return
 
@@ -435,7 +483,9 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
         Intent = autoclass('android.content.Intent')
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
 
-        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        # ACTION_GET_CONTENT is more compatible than ACTION_OPEN_DOCUMENT
+        # across different Android versions and OEM skins (Samsung, Xiaomi, etc.)
+        intent = Intent(Intent.ACTION_GET_CONTENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
 
         # Build MIME types from extensions
@@ -451,26 +501,40 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
         if len(mime_types) == 1:
             intent.setType(mime_types[0])
         else:
-            # Multiple MIME types → use EXTRA_MIME_TYPES
+            # Multiple MIME types: set type to */* and add EXTRA_MIME_TYPES
             intent.setType('*/*')
-            String = autoclass('java.lang.String')
-            Array = autoclass('java.lang.reflect.Array')
-            mime_array = Array.newInstance(String.getClass(), len(mime_types))
-            for i, m in enumerate(mime_types):
-                Array.set(mime_array, i, String(m))
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, mime_array)
 
-        # Register the activity result callback
+            # CRITICAL: To create a Java String[], we must call getClass()
+            # on a String INSTANCE, not on the pyjnius wrapper class.
+            # String.getClass() returns java.lang.Class (wrong!),
+            # String("x").getClass() returns java.lang.String (correct!).
+            try:
+                JString = autoclass('java.lang.String')
+                Array = autoclass('java.lang.reflect.Array')
+                # Create a dummy instance to get the correct Class object
+                str_class = JString("").getClass()
+                mime_array = Array.newInstance(str_class, len(mime_types))
+                for i, m in enumerate(mime_types):
+                    Array.set(mime_array, i, JString(m))
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, mime_array)
+                print(f"[INFO] Set EXTRA_MIME_TYPES: {mime_types}")
+            except Exception as e:
+                # If array construction fails, fall back to */* (shows all files)
+                print(f"[WARN] Could not set EXTRA_MIME_TYPES: {e}")
+                # */* is already set, so all files will be shown
+
+        # Store callback and extension filter
         _pending_callbacks[request_code] = callback
+        _pending_extensions[request_code] = set(ext.lower() for ext in extensions)
 
         def _on_activity_result(request_code_recv, result_code, intent_data):
             cb = _pending_callbacks.pop(request_code_recv, None)
+            valid_exts = _pending_extensions.pop(request_code_recv, None)
             if cb is None:
                 return
 
             # RESULT_OK == -1
             if result_code != -1 or intent_data is None:
-                # User cancelled
                 try:
                     from kivy.clock import Clock
                     Clock.schedule_once(lambda dt: cb(None), 0)
@@ -495,6 +559,14 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
 
             def _copy_worker():
                 local_path = _copy_uri_to_local(uri_string)
+
+                # Client-side extension validation
+                if local_path and valid_exts:
+                    ext = os.path.splitext(local_path)[1].lower()
+                    if ext not in valid_exts:
+                        print(f"[WARN] Selected file has wrong extension: {ext}")
+                        # Still allow it — user explicitly chose it
+
                 try:
                     from kivy.clock import Clock
                     Clock.schedule_once(lambda dt: cb(local_path), 0)
@@ -505,15 +577,16 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
 
         android_activity.bind(on_activity_result=_on_activity_result)
 
+        # Use createChooser for a nicer picker UI on some devices
+        chooser = Intent.createChooser(intent, "Select file")
         current_activity = PythonActivity.mActivity
-        current_activity.startActivityForResult(intent, request_code)
+        current_activity.startActivityForResult(chooser, request_code)
         print(f"[INFO] Opened native file picker (request_code={request_code})")
 
     except Exception as e:
         print(f"[ERR] Native file picker failed: {e}")
         import traceback
         traceback.print_exc()
-        # Fall back to KivyMD file manager
         _desktop_file_picker(callback, extensions)
 
 
@@ -546,3 +619,62 @@ def _desktop_file_picker(callback, extensions):
     except Exception as e:
         print(f"[WARN] Desktop file picker error: {e}")
         callback(None)
+
+
+# ===========================================================================
+# Handle "Open with" intents (app launched via EPUB file association)
+# ===========================================================================
+
+def get_intent_file_path():
+    """Check if the app was launched via an "Open with" intent for a file.
+
+    Returns:
+        str: Local file path if launched with a file intent, None otherwise.
+    """
+    if not is_android():
+        return None
+
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        Intent = autoclass('android.content.Intent')
+
+        activity = PythonActivity.mActivity
+        intent = activity.getIntent()
+
+        if intent is None:
+            return None
+
+        action = intent.getAction()
+
+        # Only process VIEW or SEND actions
+        if action not in (Intent.ACTION_VIEW, Intent.ACTION_SEND):
+            return None
+
+        uri = intent.getData()
+        if uri is None:
+            # Try EXTRA_STREAM for ACTION_SEND
+            uri = intent.getParcelableExtra(Intent.EXTRA_STREAM)
+
+        if uri is None:
+            return None
+
+        uri_string = uri.toString()
+        print(f"[INFO] App launched with intent URI: {uri_string}")
+
+        # If it's a file:// URI, extract the path directly
+        scheme = uri.getScheme()
+        if scheme == 'file':
+            file_path = uri.getPath()
+            if file_path and os.path.isfile(file_path):
+                return file_path
+
+        # For content:// URIs, copy to local Library
+        local_path = _copy_uri_to_local(uri_string)
+        return local_path
+
+    except Exception as e:
+        print(f"[WARN] Could not process intent file: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

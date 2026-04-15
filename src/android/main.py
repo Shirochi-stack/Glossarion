@@ -59,6 +59,7 @@ from kivy.core.window import Window
 from kivy.core.text import LabelBase
 from kivy.utils import platform
 from kivy.lang import Builder
+from kivy.clock import Clock
 
 # ── CJK font helper ──
 def _get_cjk_font_paths():
@@ -292,6 +293,11 @@ class GlossarionApp(MDApp):
         except Exception as e:
             print(f"Library init error: {e}")
 
+        # Handle "Open with" intent — if user tapped an EPUB in a file manager
+        # and chose Glossarion, open that file after UI init completes
+        if platform == 'android':
+            Clock.schedule_once(self._handle_open_with_intent, 0.5)
+
     def switch_screen(self, screen_name, **kwargs):
         """Switch to a screen by name."""
         sm = self.root.ids.screen_manager
@@ -328,6 +334,24 @@ class GlossarionApp(MDApp):
 
     def on_stop(self):
         save_config(self.config_data)
+
+    def _handle_open_with_intent(self, dt):
+        """Check if the app was launched via 'Open with' and handle the file."""
+        try:
+            from android_file_utils import get_intent_file_path
+            file_path = get_intent_file_path()
+            if file_path and os.path.isfile(file_path):
+                print(f"[INFO] Opening file from intent: {file_path}")
+                # Refresh library so the imported file shows up
+                try:
+                    lib_screen = self.root.ids.screen_manager.get_screen('library')
+                    lib_screen.load_books()
+                except Exception:
+                    pass
+                # Open the file in the reader
+                self.open_reader(file_path)
+        except Exception as e:
+            print(f"[WARN] Intent handling error: {e}")
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ title = Glossarion
 package.name = glossarion
 package.domain = com.glossarion
 source.dir = .
-source.include_exts = py,kv,png,jpg,ico,json,csv,txt,otf,ttf,ttc,gradle
+source.include_exts = py,kv,png,jpg,ico,json,csv,txt,otf,ttf,ttc,gradle,xml
 source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 
 # Versioning
@@ -40,6 +40,10 @@ android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANA
 
 # Android features
 android.enable_androidx = True
+
+# Intent filters — register as handler for EPUB, TXT, PDF files
+# (allows app to appear in "Open with" dialogs)
+android.manifest.intent_filters = intent_filters.xml
 
 # Gradle dependencies for AndroidX notifications
 android.gradle_dependencies = androidx.core:core:1.12.0,androidx.appcompat:appcompat:1.6.1
