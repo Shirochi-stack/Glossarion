@@ -881,7 +881,21 @@ class TranslationScreen(MDScreen):
         """Push property values into Yes/No buttons (called once after KV build)."""
         self._update_toggle_btn('batch_btn', self.batch_enabled)
         self._update_toggle_btn('thinking_btn', self.reader_enable_thinking)
-        self._update_toggle_btn('multi_key_btn', self.use_multi_keys)
+        self._refresh_multi_key_status()
+
+    def _refresh_multi_key_status(self):
+        """Update read-only multi-key status shown on Translation screen."""
+        total = 0
+        active = 0
+        if self.app:
+            keys = self.app.config_data.get('multi_api_keys', [])
+            total = len(keys)
+            active = sum(1 for k in keys if k.get('enabled', True))
+
+        if self.use_multi_keys:
+            self.multi_key_status_text = f"On {active}/{total}" if total else "On 0/0"
+        else:
+            self.multi_key_status_text = "Off"
 
     def _update_toggle_btn(self, btn_id, value):
         """Update a toggle button's text and color."""
@@ -901,20 +915,6 @@ class TranslationScreen(MDScreen):
         """Toggle thinking on/off."""
         self.reader_enable_thinking = not self.reader_enable_thinking
         self._update_toggle_btn('thinking_btn', self.reader_enable_thinking)
-
-    def _toggle_multi_key(self):
-        """Toggle multi-key mode on/off."""
-        self.use_multi_keys = not self.use_multi_keys
-        self._update_toggle_btn('multi_key_btn', self.use_multi_keys)
-        
-        # Keep Multi-Key manager screen toggle in sync if it exists
-        try:
-            mkm = self.app.root.ids.screen_manager.get_screen('multikey')
-            mkm.multi_key_enabled = self.use_multi_keys
-            if hasattr(mkm, '_update_toggle_btn'):
-                mkm._update_toggle_btn(self.use_multi_keys)
-        except:
-            pass
 
     # ── Translation ──
 

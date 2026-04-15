@@ -24,8 +24,22 @@ from kivymd.uix.selectioncontrol import MDSwitch
 from kivymd.uix.label import MDLabel
 from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.snackbar import Snackbar
+from kivymd.uix.menu import MDDropdownMenu
 
 logger = logging.getLogger(__name__)
+
+try:
+    from model_options import get_model_options
+    DEFAULT_MODELS = get_model_options()
+except ImportError:
+    DEFAULT_MODELS = [
+        'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash',
+        'gpt-5.4', 'gpt-5.2', 'gpt-5-mini',
+        'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001',
+        'deepseek-chat',
+        'authgpt/gpt-5.2', 'authgpt/gemini-2.5-flash',
+        'antigravity/claude-sonnet-4-6', 'antigravity/gemini-2.5-flash',
+    ]
 
 KV = '''
 <MultiKeyScreen>:
@@ -162,6 +176,19 @@ class MultiKeyScreen(MDScreen):
         self.app.config_data['use_multi_api_keys'] = self.multi_key_enabled
         from android_config import save_config
         save_config(self.app.config_data)
+        self._sync_translation_state()
+
+    def _sync_translation_state(self):
+        """Push multi-key state to Translation screen when it is available."""
+        if not self.app:
+            return
+        try:
+            ts = self.app.root.ids.screen_manager.get_screen('translation')
+            ts.use_multi_keys = self.multi_key_enabled
+            if hasattr(ts, '_refresh_multi_key_status'):
+                ts._refresh_multi_key_status()
+        except Exception:
+            pass
 
     def _update_info(self):
         total = len(self.api_keys)
@@ -207,15 +234,47 @@ class MultiKeyScreen(MDScreen):
             Snackbar(text="Maximum 20 keys allowed").open()
             return
 
-        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(220))
+        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(270))
         api_field = MDTextField(hint_text="API Key")
-        model_field = MDTextField(hint_text="Model (optional)")
+        model_field = MDTextField(hint_text="Model (optional)", size_hint_x=0.82)
+        model_btn = MDIconButton(icon="chevron-down", size_hint_x=0.18)
+        model_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        model_row.add_widget(model_field)
+        model_row.add_widget(model_btn)
         endpoint_field = MDTextField(hint_text="Custom Endpoint (optional)")
         cooldown_field = MDTextField(hint_text="Cooldown seconds (0)", input_filter='int')
         content.add_widget(api_field)
-        content.add_widget(model_field)
+        content.add_widget(model_row)
         content.add_widget(endpoint_field)
         content.add_widget(cooldown_field)
+
+        model_menu = None
+
+        def _select_model(model_name):
+            nonlocal model_menu
+            model_field.text = model_name
+            if model_menu:
+                model_menu.dismiss()
+                model_menu = None
+
+        def _show_model_menu(*args):
+            nonlocal model_menu
+            items = [{
+                "text": m,
+                "viewclass": "OneLineListItem",
+                "height": dp(48),
+                "on_release": (lambda x=m: _select_model(x)),
+            } for m in DEFAULT_MODELS]
+            model_menu = MDDropdownMenu(
+                caller=model_btn,
+                items=items,
+                width_mult=5,
+                position="center",
+                max_height=dp(240),
+            )
+            model_menu.open()
+
+        model_btn.bind(on_release=_show_model_menu)
 
         def add_key(*args):
             key = api_field.text.strip()
@@ -250,9 +309,13 @@ class MultiKeyScreen(MDScreen):
             return
         kd = self.api_keys[index]
 
-        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(260))
+        content = BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None, height=dp(308))
         api_field = MDTextField(hint_text="API Key", text=kd.get('api_key', ''))
-        model_field = MDTextField(hint_text="Model", text=kd.get('model', ''))
+        model_field = MDTextField(hint_text="Model", text=kd.get('model', ''), size_hint_x=0.82)
+        model_btn = MDIconButton(icon="chevron-down", size_hint_x=0.18)
+        model_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        model_row.add_widget(model_field)
+        model_row.add_widget(model_btn)
         endpoint_field = MDTextField(hint_text="Endpoint", text=kd.get('endpoint', ''))
         cooldown_field = MDTextField(hint_text="Cooldown", text=str(kd.get('cooldown', 0)), input_filter='int')
 
@@ -262,10 +325,38 @@ class MultiKeyScreen(MDScreen):
         enabled_row.add_widget(switch)
 
         content.add_widget(api_field)
-        content.add_widget(model_field)
+        content.add_widget(model_row)
         content.add_widget(endpoint_field)
         content.add_widget(cooldown_field)
         content.add_widget(enabled_row)
+
+        model_menu = None
+
+        def _select_model(model_name):
+            nonlocal model_menu
+            model_field.text = model_name
+            if model_menu:
+                model_menu.dismiss()
+                model_menu = None
+
+        def _show_model_menu(*args):
+            nonlocal model_menu
+            items = [{
+                "text": m,
+                "viewclass": "OneLineListItem",
+                "height": dp(48),
+                "on_release": (lambda x=m: _select_model(x)),
+            } for m in DEFAULT_MODELS]
+            model_menu = MDDropdownMenu(
+                caller=model_btn,
+                items=items,
+                width_mult=5,
+                position="center",
+                max_height=dp(240),
+            )
+            model_menu.open()
+
+        model_btn.bind(on_release=_show_model_menu)
 
         def save_edit(*args):
             self.api_keys[index]['api_key'] = api_field.text.strip()
@@ -301,15 +392,6 @@ class MultiKeyScreen(MDScreen):
         self.multi_key_enabled = not self.multi_key_enabled
         self._update_toggle_btn(self.multi_key_enabled)
         self._save_keys()
-        
-        # Keep Translation screen toggle in sync if it exists
-        try:
-            ts = self.app.root.ids.screen_manager.get_screen('translation')
-            ts.use_multi_keys = self.multi_key_enabled
-            if hasattr(ts, '_sync_buttons'):
-                ts._sync_buttons()
-        except:
-            pass
 
     def _update_toggle_btn(self, value):
         try:
