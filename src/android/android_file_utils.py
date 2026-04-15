@@ -480,65 +480,67 @@ def _copy_uri_to_local(uri_string):
                 dest_path = os.path.join(lib_dir, f"{base}_{counter}{ext}")
                 counter += 1
 
-        # ── Read from content URI and write to local file ──
+        # ── Copy file using lightning fast java.nio.file API ──
+        # Runs entirely in Java space with 0 context switches. Android 8.0+ (API 26+)
         input_stream = resolver.openInputStream(uri)
         if input_stream is None:
             print(f"[WARN] Could not open input stream for URI: {uri_string}")
             return None
 
-        # Use a simpler, reliable byte reading approach
-        # DataInputStream.readFully + available() is more reliable than
-        # reflection-based Array.newInstance across different Android versions
         try:
+            jFiles = autoclass('java.nio.file.Files')
+            jPaths = autoclass('java.nio.file.Paths')
+            
+            # Create empty arrays to satisfy varargs method signatures 
+            JString = autoclass('java.lang.String')
+            Array = autoclass('java.lang.reflect.Array')
+            str_array = Array.newInstance(JString("").getClass(), 0)
+            dest_java_path = jPaths.get(dest_path, str_array)
+            
+            CopyOption_class = autoclass('java.nio.file.CopyOption')
+            opts_array = Array.newInstance(CopyOption_class, 0)
+
+            # Do the copy!
+            jFiles.copy(input_stream, dest_java_path, opts_array)
+            input_stream.close()
+            print(f"[INFO] Fast native Java copy successful.")
+
+        except Exception as e:
+            print(f"[WARN] Native Java file copy failed ({e}), trying fallback...")
+            import traceback
+            traceback.print_exc()
+
+            try:
+                input_stream.close()
+            except:
+                pass
+            
+            # Fallback: Java String conversion via ISO-8859-1 mapping.
+            # Faster than reading byte-by-byte.
+            input_stream = resolver.openInputStream(uri)
             ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
             baos = ByteArrayOutputStream()
             buf_size = 8192
-
-            # Read using a Java byte[] created via simple instantiation
+            
             Byte_TYPE = autoclass('java.lang.Byte').TYPE
-            Array = autoclass('java.lang.reflect.Array')
             java_buf = Array.newInstance(Byte_TYPE, buf_size)
-
+            
             while True:
                 bytes_read = input_stream.read(java_buf)
                 if bytes_read == -1:
                     break
                 baos.write(java_buf, 0, bytes_read)
-
+            
             input_stream.close()
-
-            # Get all bytes at once and write to Python file
-            java_bytes = baos.toByteArray()
+            
+            # ISO-8859-1 natively preserves raw byte values directly
+            java_string = baos.toString("ISO-8859-1")
             baos.close()
-
-            # Convert Java byte[] to Python bytes
-            total_len = Array.getLength(java_bytes)
+            
             with open(dest_path, 'wb') as f:
-                # Write in chunks to avoid massive memory allocation
-                chunk_size = 65536
-                for offset in range(0, total_len, chunk_size):
-                    end = min(offset + chunk_size, total_len)
-                    chunk = bytearray(end - offset)
-                    for i in range(end - offset):
-                        b = Array.getByte(java_bytes, offset + i)
-                        chunk[i] = b & 0xFF
-                    f.write(bytes(chunk))
-
-        except Exception as e:
-            print(f"[WARN] ByteArrayOutputStream approach failed: {e}, trying fallback...")
-            # Fallback: read byte by byte (slow but always works)
-            try:
-                input_stream.close()
-            except Exception:
-                pass
-            input_stream = resolver.openInputStream(uri)
-            with open(dest_path, 'wb') as f:
-                while True:
-                    byte_val = input_stream.read()
-                    if byte_val == -1:
-                        break
-                    f.write(bytes([byte_val & 0xFF]))
-            input_stream.close()
+                f.write(java_string.encode('iso-8859-1'))
+            
+            print(f"[INFO] String-encoded copy successful.")
 
         print(f"[INFO] Copied URI to local: {dest_path} ({os.path.getsize(dest_path)} bytes)")
         return dest_path

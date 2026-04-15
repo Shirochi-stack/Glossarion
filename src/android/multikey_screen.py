@@ -95,10 +95,12 @@ KV = '''
                 text: "Enable Multi-Key Rotation"
                 size_hint_x: 0.7
 
-            MDSwitch:
-                id: multi_key_switch
-                active: root.multi_key_enabled
-                on_active: root.toggle_multi_key(self.active)
+            MDRaisedButton:
+                id: multi_key_btn
+                text: "No"
+                on_release: root.toggle_multi_key()
+                size_hint_x: 0.3
+                md_bg_color: (0.3, 0.3, 0.3, 1)
 
         ScrollView:
             MDList:
@@ -147,6 +149,9 @@ class MultiKeyScreen(MDScreen):
         self.api_keys = cfg.get('multi_api_keys', [])
         self.rotation_frequency = cfg.get('rotation_frequency', 1)
         self.multi_key_enabled = cfg.get('use_multi_api_keys', False)
+        
+        from kivy.clock import Clock
+        Clock.schedule_once(lambda dt: self._update_toggle_btn(self.multi_key_enabled), 0)
         self._update_info()
 
     def _save_keys(self):
@@ -292,9 +297,27 @@ class MultiKeyScreen(MDScreen):
         )
         edit_dialog.open()
 
-    def toggle_multi_key(self, enabled):
-        self.multi_key_enabled = enabled
+    def toggle_multi_key(self):
+        self.multi_key_enabled = not self.multi_key_enabled
+        self._update_toggle_btn(self.multi_key_enabled)
         self._save_keys()
+        
+        # Keep Translation screen toggle in sync if it exists
+        try:
+            ts = self.app.root.ids.screen_manager.get_screen('translation')
+            ts.use_multi_keys = self.multi_key_enabled
+            if hasattr(ts, '_sync_buttons'):
+                ts._sync_buttons()
+        except:
+            pass
+
+    def _update_toggle_btn(self, value):
+        try:
+            btn = self.ids.multi_key_btn
+            btn.text = "Yes" if value else "No"
+            btn.md_bg_color = (0.2, 0.6, 0.3, 1) if value else (0.3, 0.3, 0.3, 1)
+        except (KeyError, AttributeError):
+            pass
 
     def increase_rotation(self):
         if self.rotation_frequency < 100:

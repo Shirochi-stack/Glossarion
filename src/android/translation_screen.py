@@ -168,11 +168,12 @@ KV = '''
                                 text: "Multi-Key Rotation"
                                 size_hint_x: 0.55
 
-                            MDSwitch:
-                                active: root.use_multi_keys
-                                on_active: root.use_multi_keys = self.active
+                            MDRaisedButton:
+                                id: multi_key_btn
+                                text: "No"
+                                on_release: root._toggle_multi_key()
                                 size_hint_x: 0.2
-                                pos_hint: {"center_y": 0.5}
+                                md_bg_color: (0.3, 0.3, 0.3, 1)
 
                             MDIconButton:
                                 icon: "key-chain-variant"
@@ -878,6 +879,7 @@ class TranslationScreen(MDScreen):
         """Push property values into Yes/No buttons (called once after KV build)."""
         self._update_toggle_btn('batch_btn', self.batch_enabled)
         self._update_toggle_btn('thinking_btn', self.reader_enable_thinking)
+        self._update_toggle_btn('multi_key_btn', self.use_multi_keys)
 
     def _update_toggle_btn(self, btn_id, value):
         """Update a toggle button's text and color."""
@@ -897,6 +899,20 @@ class TranslationScreen(MDScreen):
         """Toggle thinking on/off."""
         self.reader_enable_thinking = not self.reader_enable_thinking
         self._update_toggle_btn('thinking_btn', self.reader_enable_thinking)
+
+    def _toggle_multi_key(self):
+        """Toggle multi-key mode on/off."""
+        self.use_multi_keys = not self.use_multi_keys
+        self._update_toggle_btn('multi_key_btn', self.use_multi_keys)
+        
+        # Keep Multi-Key manager screen toggle in sync if it exists
+        try:
+            mkm = self.app.root.ids.screen_manager.get_screen('multikey')
+            mkm.multi_key_enabled = self.use_multi_keys
+            if hasattr(mkm, '_update_toggle_btn'):
+                mkm._update_toggle_btn(self.use_multi_keys)
+        except:
+            pass
 
     # ── Translation ──
 
