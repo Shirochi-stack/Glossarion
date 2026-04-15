@@ -166,19 +166,19 @@ KV = '''
 
                             MDLabel:
                                 text: "Multi-Key Rotation"
-                                size_hint_x: 0.55
+                                size_hint_x: 0.5
+
+                            MDLabel:
+                                id: multi_key_status
+                                text: root.multi_key_status_text
+                                halign: "right"
+                                theme_text_color: "Secondary"
+                                size_hint_x: 0.2
 
                             MDRaisedButton:
-                                id: multi_key_btn
-                                text: "No"
-                                on_release: root._toggle_multi_key()
-                                size_hint_x: 0.2
-                                md_bg_color: (0.3, 0.3, 0.3, 1)
-
-                            MDIconButton:
-                                icon: "key-chain-variant"
+                                text: "Manage"
                                 on_release: root.open_multikey_manager()
-                                size_hint_x: 0.25
+                                size_hint_x: 0.3
 
                         BoxLayout:
                             size_hint_y: None
@@ -487,6 +487,7 @@ class TranslationScreen(MDScreen):
     authgpt_logged_in = BooleanProperty(False)
     authgpt_status_text = StringProperty('AuthGPT: Login')
     use_multi_keys = BooleanProperty(False)
+    multi_key_status_text = StringProperty('Off')
     temperature = NumericProperty(0.3)
     active_profile = StringProperty('Universal')
     system_prompt = StringProperty('')
@@ -540,6 +541,7 @@ class TranslationScreen(MDScreen):
         self.output_language = cfg.get('output_language', 'English')
         self.reader_enable_thinking = cfg.get('reader_enable_thinking', False)
         self.reader_glossary_path = cfg.get('reader_glossary_path', '')
+        self._refresh_multi_key_status()
 
         # Load system prompt for active profile
         self.system_prompt = self._get_prompt_for_profile(self.active_profile)
