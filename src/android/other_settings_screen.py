@@ -65,6 +65,12 @@ KV = '''
 
         ScrollView:
             do_scroll_x: False
+            do_scroll_y: True
+            scroll_distance: dp(10)
+            scroll_timeout: 120
+            bar_width: dp(4)
+            bar_inactive_color: 1, 1, 1, 0.25
+            bar_color: 1, 1, 1, 0.55
 
             BoxLayout:
                 id: settings_box
@@ -252,10 +258,11 @@ class OtherSettingsScreen(MDScreen):
             orientation='vertical',
             spacing=dp(10),
             size_hint_y=None,
+            height=0,
         )
         content.bind(minimum_height=content.setter('height'))
+        content.bind(minimum_height=lambda _i, h: setattr(card, 'height', h + dp(24)))
         card.add_widget(content)
-        card.bind(height=lambda *_: setattr(card, 'height', content.height + dp(22)))
 
         content.add_widget(MDLabel(
             text="Custom API Endpoints",
@@ -296,10 +303,10 @@ class OtherSettingsScreen(MDScreen):
             radius=self._CARD_RADIUS,
             md_bg_color=self._SUBCARD_BG,
         )
-        inner = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None)
+        inner = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None, height=0)
         inner.bind(minimum_height=inner.setter('height'))
+        inner.bind(minimum_height=lambda _i, h: setattr(block, 'height', h + dp(18)))
         block.add_widget(inner)
-        block.bind(height=lambda *_: setattr(block, 'height', inner.height + dp(16)))
 
         header = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         header.add_widget(MDLabel(
@@ -327,14 +334,30 @@ class OtherSettingsScreen(MDScreen):
         inner.add_widget(field)
         self._endpoint_fields[url_key] = field
 
-        actions = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
-        actions.add_widget(MDFlatButton(text="Copy", on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k), size_hint_x=0.18))
-        actions.add_widget(MDFlatButton(text="Paste", on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k), size_hint_x=0.20))
+        actions_wrap = BoxLayout(
+            orientation='vertical',
+            size_hint_y=None,
+            height=dp(74),
+            spacing=dp(4),
+        )
+        row_a = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(4))
+        copy_btn = MDFlatButton(text="Copy")
+        copy_btn.bind(on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k))
+        paste_btn = MDFlatButton(text="Paste")
+        paste_btn.bind(on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k))
+        row_a.add_widget(copy_btn)
+        row_a.add_widget(paste_btn)
+        row_a.add_widget(BoxLayout())
+        actions_wrap.add_widget(row_a)
+
+        row_b = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(4))
         for idx, preset in enumerate(self._ENDPOINT_PRESETS.get(url_key, []), start=1):
-            b = MDFlatButton(text=f"Preset {idx}", size_hint_x=0.26)
+            b = MDFlatButton(text=f"Preset {idx}")
             b.bind(on_release=lambda *_a, k=url_key, p=preset: self._apply_shortcut(k, p))
-            actions.add_widget(b)
-        inner.add_widget(actions)
+            row_b.add_widget(b)
+        row_b.add_widget(BoxLayout())
+        actions_wrap.add_widget(row_b)
+        inner.add_widget(actions_wrap)
 
         return block
 
@@ -421,17 +444,17 @@ class OtherSettingsScreen(MDScreen):
         t = self._types.get(key, str)
         is_bool = (t is bool)
         is_complex = t in (dict, list)
-        card_h = dp(100) if is_bool else (dp(170) if is_complex else dp(122))
 
         card = MDCard(
             size_hint_y=None,
-            height=card_h,
             elevation=1,
             padding=dp(10),
             radius=self._CARD_RADIUS,
             md_bg_color=self._CARD_BG,
         )
-        inner = BoxLayout(orientation='vertical', spacing=dp(8))
+        inner = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None, height=0)
+        inner.bind(minimum_height=inner.setter('height'))
+        inner.bind(minimum_height=lambda _i, h: setattr(card, 'height', h + dp(20)))
         card.add_widget(inner)
 
         inner.add_widget(MDLabel(
@@ -444,7 +467,7 @@ class OtherSettingsScreen(MDScreen):
         ))
 
         if is_bool:
-            row = BoxLayout(size_hint_y=None, height=dp(40))
+            row = BoxLayout(size_hint_y=None, height=dp(44))
             btn = MDRaisedButton(size_hint_x=None, width=dp(140))
             self._set_toggle_button_style(btn, self._bool_values.get(key, False))
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._toggle_bool_key(k, b))

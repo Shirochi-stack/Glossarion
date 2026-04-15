@@ -45,6 +45,12 @@ KV = """
 
         ScrollView:
             do_scroll_x: False
+            do_scroll_y: True
+            scroll_distance: dp(10)
+            scroll_timeout: 120
+            bar_width: dp(4)
+            bar_inactive_color: 1, 1, 1, 0.25
+            bar_color: 1, 1, 1, 0.55
 
             BoxLayout:
                 orientation: "vertical"
@@ -453,11 +459,9 @@ class ExtractGlossaryScreen(MDScreen):
         is_bool = (t is bool)
         is_enum = key in self._ENUM_OPTIONS
         is_multiline = t in (list, dict)
-        card_height = dp(100) if (is_bool or is_enum) else (dp(170) if is_multiline else dp(122))
 
         card = MDCard(
             size_hint_y=None,
-            height=card_height,
             elevation=1,
             padding=dp(10),
             radius=self._CARD_RADIUS,
@@ -466,7 +470,11 @@ class ExtractGlossaryScreen(MDScreen):
         inner = BoxLayout(
             orientation="vertical",
             spacing=dp(8),
+            size_hint_y=None,
+            height=0,
         )
+        inner.bind(minimum_height=inner.setter("height"))
+        inner.bind(minimum_height=lambda _i, h: setattr(card, "height", h + dp(20)))
         card.add_widget(inner)
 
         inner.add_widget(MDLabel(
@@ -479,7 +487,7 @@ class ExtractGlossaryScreen(MDScreen):
         ))
 
         if is_bool:
-            row = BoxLayout(size_hint_y=None, height=dp(40))
+            row = BoxLayout(size_hint_y=None, height=dp(44))
             btn = MDRaisedButton(size_hint_x=None, width=dp(140))
             self._sync_toggle_btn(btn, self._bool_values.get(key, False))
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._toggle_bool(k, b))

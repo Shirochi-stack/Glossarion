@@ -390,23 +390,35 @@ class GlossarionApp(MDApp):
             return
         panel = self.root.ids.tab_menu_panel
         scrim = self.root.ids.tab_menu_scrim
+        menu_btn = self.root.ids.tab_menu_button
+        menu_btn.disabled = True
+        menu_btn.opacity = 0
         scrim.disabled = False
+        scrim.opacity = 1
         Animation.cancel_all(panel)
         Animation.cancel_all(scrim)
         Animation(x=0, d=0.18, t='out_quad').start(panel)
-        Animation(opacity=1, d=0.16).start(scrim)
 
     def close_tab_menu(self, *_args):
         if not self.root:
             return
         panel = self.root.ids.tab_menu_panel
         scrim = self.root.ids.tab_menu_scrim
+        menu_btn = self.root.ids.tab_menu_button
+        current = self.root.ids.screen_manager.current
         Animation.cancel_all(panel)
         Animation.cancel_all(scrim)
+        # Force-release touch capture immediately; scrim animation race could
+        # leave an invisible full-screen button blocking scroll/input.
+        scrim.disabled = True
+        scrim.opacity = 0
         Animation(x=-panel.width, d=0.18, t='out_quad').start(panel)
-        anim = Animation(opacity=0, d=0.16)
-        anim.bind(on_complete=lambda *_: setattr(scrim, 'disabled', True))
-        anim.start(scrim)
+        if current == 'reader':
+            menu_btn.disabled = True
+            menu_btn.opacity = 0
+        else:
+            menu_btn.disabled = False
+            menu_btn.opacity = 1
 
     def open_reader(self, file_path):
         self.switch_screen('reader', file_path=file_path)
