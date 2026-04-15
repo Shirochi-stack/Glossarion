@@ -11,10 +11,10 @@ source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 # Versioning
 version = 1.0.0
 
-# Dependencies (python-for-android recipes)
-# NOTE: lxml removed — p4a's lxml 4.8.0 recipe is incompatible with Python 3.11.
-# All BeautifulSoup usage uses html.parser instead.
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,bs4,ebooklib,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools,filetype
+# Dependencies (python-for-android recipes and pip packages)
+# Keep python3 on 3.10 where lxml + ebooklib are reliable on Android.
+# BeautifulSoup remains required by EPUB parsing paths.
+requirements = python3==3.10.14,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,soupsieve,ebooklib,lxml,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools,filetype,typing_extensions
 
 # Entry point
 entrypoint = main.py
@@ -41,7 +41,7 @@ android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANA
 # Android features
 android.enable_androidx = True
 
-# Intent filters — register as handler for EPUB, TXT, PDF files
+# Intent filters - register as handler for EPUB, TXT, PDF files
 # (allows app to appear in "Open with" dialogs)
 android.manifest.intent_filters = intent_filters.xml
 
@@ -51,7 +51,7 @@ android.gradle_dependencies = androidx.core:core:1.12.0,androidx.appcompat:appco
 # Services (foreground translation service)
 # services = GlossarionTranslation:service.py:foreground
 
-# Arch — ARM64 + ARM for real devices, x86_64 for CI emulator smoke test
+# Arch - ARM64 + ARM for real devices, x86_64 for CI emulator smoke test
 android.archs = arm64-v8a,armeabi-v7a,x86_64
 
 # Allow backup

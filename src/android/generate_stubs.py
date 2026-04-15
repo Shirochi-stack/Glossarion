@@ -15,12 +15,12 @@ def main():
     stubs = {
         'image_translator.py': '''\
 class ImageTranslator:
-    """Stub — image translation not supported on Android."""
+    """Stub - image translation not supported on Android."""
     pass
 ''',
         'ai_hunter_enhanced.py': '''\
 class ImprovedAIHunterDetection:
-    """Stub — AI hunter not available on Android."""
+    """Stub - AI hunter not available on Android."""
     pass
 ''',
         'pdf_extractor.py': '''\
@@ -31,7 +31,7 @@ def create_pdf_from_html(*args, **kwargs): return False
 def create_pdf_from_text(*args, **kwargs): return False
 ''',
         'httpx_stub.py': '''\
-"""Stub — httpx not available on Android, use requests instead."""
+"""Stub - httpx not available on Android, use requests instead."""
 class Client:
     def __init__(self, *a, **kw): pass
     def get(self, *a, **kw): raise NotImplementedError("httpx unavailable")
@@ -39,7 +39,7 @@ class Client:
 class AsyncClient(Client): pass
 ''',
         'rapidfuzz_stub.py': '''\
-"""Stub — rapidfuzz not available on Android, falls back to difflib."""
+"""Stub - rapidfuzz not available on Android, falls back to difflib."""
 import difflib
 class fuzz:
     @staticmethod
@@ -54,12 +54,12 @@ class process:
         return (best, score, 0) if score > kw.get('score_cutoff', 0) else None
 ''',
         'langdetect_stub.py': '''\
-"""Stub — langdetect not available on Android."""
+"""Stub - langdetect not available on Android."""
 def detect(text): return "unknown"
 def detect_langs(text): return []
 ''',
         'ebooklib_stub.py': '''\
-"""Stub — ebooklib not available on Android."""
+"""Stub - ebooklib not available on Android."""
 ITEM_DOCUMENT = 9
 ITEM_STYLE = 3
 ITEM_IMAGE = 6
@@ -86,7 +86,7 @@ class _EpubModule:
 epub = _EpubModule()
 ''',
         'tiktoken_stub.py': '''\
-"""Stub — tiktoken not available on Android."""
+"""Stub - tiktoken not available on Android."""
 class _DummyEncoding:
     def encode(self, text, *a, **kw): return list(range(len(text) // 4))
     def decode(self, tokens, *a, **kw): return ""
@@ -123,10 +123,11 @@ for mod_name, stub_name in _stub_map.items():
         path = os.path.join(backend_dir, fname)
         with open(path, 'w') as f:
             f.write(content)
-        print(f"  ✅ {fname}")
+        print(f"  [ok] {fname}")
 
     print(f"Generated {len(stubs)} stub files in {backend_dir}")
 
 
 if __name__ == '__main__':
     main()
+
