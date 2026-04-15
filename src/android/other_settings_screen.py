@@ -45,7 +45,7 @@ KV = '''
 
         BoxLayout:
             size_hint_y: None
-            height: dp(56)
+            height: dp(64)
             padding: [dp(12), dp(8)]
             spacing: dp(8)
 
@@ -118,6 +118,10 @@ class OtherSettingsScreen(MDScreen):
             'https://openrouter.ai/api',
         ],
     }
+
+    _CARD_RADIUS = [12, 12, 12, 12]
+    _CARD_BG = (0.13, 0.13, 0.17, 1)
+    _SUBCARD_BG = (0.16, 0.16, 0.20, 1)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -202,7 +206,8 @@ class OtherSettingsScreen(MDScreen):
             text="Other Settings Keys (from other_settings.py only)",
             theme_text_color="Secondary",
             size_hint_y=None,
-            height=dp(34),
+            height=dp(28),
+            font_style="Subtitle2",
             shorten=True,
             shorten_from="right",
         )
@@ -223,11 +228,12 @@ class OtherSettingsScreen(MDScreen):
             size_hint_y=None,
             elevation=2,
             padding=dp(12),
-            radius=[12, 12, 12, 12],
+            radius=self._CARD_RADIUS,
+            md_bg_color=self._CARD_BG,
         )
         content = BoxLayout(
             orientation='vertical',
-            spacing=dp(8),
+            spacing=dp(10),
             size_hint_y=None,
         )
         content.bind(minimum_height=content.setter('height'))
@@ -236,7 +242,7 @@ class OtherSettingsScreen(MDScreen):
 
         content.add_widget(MDLabel(
             text="Custom API Endpoints",
-            bold=True,
+            font_style="Subtitle2",
             size_hint_y=None,
             height=dp(24),
         ))
@@ -270,8 +276,8 @@ class OtherSettingsScreen(MDScreen):
             size_hint_y=None,
             elevation=0,
             padding=dp(10),
-            radius=[10, 10, 10, 10],
-            md_bg_color=(0.14, 0.14, 0.18, 1),
+            radius=self._CARD_RADIUS,
+            md_bg_color=self._SUBCARD_BG,
         )
         inner = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None)
         inner.bind(minimum_height=inner.setter('height'))
@@ -305,10 +311,10 @@ class OtherSettingsScreen(MDScreen):
         self._endpoint_fields[url_key] = field
 
         actions = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
-        actions.add_widget(MDFlatButton(text="Copy", on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k)))
-        actions.add_widget(MDFlatButton(text="Paste", on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k)))
+        actions.add_widget(MDFlatButton(text="Copy", on_release=lambda *_a, k=url_key: self._copy_endpoint_value(k), size_hint_x=0.18))
+        actions.add_widget(MDFlatButton(text="Paste", on_release=lambda *_a, k=url_key: self._paste_endpoint_value(k), size_hint_x=0.20))
         for idx, preset in enumerate(self._ENDPOINT_PRESETS.get(url_key, []), start=1):
-            b = MDFlatButton(text=f"Preset {idx}")
+            b = MDFlatButton(text=f"Preset {idx}", size_hint_x=0.26)
             b.bind(on_release=lambda *_a, k=url_key, p=preset: self._apply_shortcut(k, p))
             actions.add_widget(b)
         inner.add_widget(actions)
@@ -385,6 +391,7 @@ class OtherSettingsScreen(MDScreen):
                 text=f"Load more ({remaining} left)",
                 size_hint_y=None,
                 height=dp(40),
+                md_bg_color=(0.30, 0.30, 0.34, 1),
                 on_release=lambda *_a: self._load_more_rows(),
             )
             self._dynamic_box.add_widget(load_more_btn)
@@ -397,30 +404,31 @@ class OtherSettingsScreen(MDScreen):
         t = self._types.get(key, str)
         is_bool = (t is bool)
         is_complex = t in (dict, list)
-        card_h = dp(94) if is_bool else (dp(166) if is_complex else dp(116))
+        card_h = dp(100) if is_bool else (dp(170) if is_complex else dp(122))
 
         card = MDCard(
             size_hint_y=None,
             height=card_h,
             elevation=1,
             padding=dp(10),
-            radius=[10, 10, 10, 10],
+            radius=self._CARD_RADIUS,
+            md_bg_color=self._CARD_BG,
         )
         inner = BoxLayout(orientation='vertical', spacing=dp(8))
         card.add_widget(inner)
 
         inner.add_widget(MDLabel(
             text=key,
-            bold=True,
+            font_style="Body2",
             size_hint_y=None,
-            height=dp(22),
+            height=dp(24),
             shorten=True,
             shorten_from="right",
         ))
 
         if is_bool:
             row = BoxLayout(size_hint_y=None, height=dp(40))
-            btn = MDRaisedButton(size_hint_x=None, width=dp(136))
+            btn = MDRaisedButton(size_hint_x=None, width=dp(140))
             self._set_toggle_button_style(btn, self._bool_values.get(key, False))
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._toggle_bool_key(k, b))
             row.add_widget(btn)

@@ -57,7 +57,7 @@ KV = """
 
                 MDCard:
                     size_hint_y: None
-                    height: dp(136)
+                    height: dp(142)
                     padding: dp(12)
                     elevation: 2
 
@@ -94,7 +94,7 @@ KV = """
 
                 MDCard:
                     size_hint_y: None
-                    height: dp(88)
+                    height: dp(92)
                     padding: dp(12)
                     elevation: 2
 
@@ -105,22 +105,22 @@ KV = """
                             id: run_btn
                             text: root.run_button_text
                             md_bg_color: root.run_button_color
-                            size_hint_x: 0.42
+                            size_hint_x: 0.36
                             on_release: root.toggle_run_stop()
 
                         MDRaisedButton:
                             text: "Save Settings"
-                            size_hint_x: 0.28
+                            size_hint_x: 0.33
                             on_release: root.save_glossary_settings()
 
                         MDRaisedButton:
                             text: "Reload"
-                            size_hint_x: 0.3
+                            size_hint_x: 0.31
                             on_release: root.reload_settings()
 
                 MDCard:
                     size_hint_y: None
-                    height: dp(84)
+                    height: dp(94)
                     padding: dp(12)
                     elevation: 1
 
@@ -142,7 +142,10 @@ KV = """
                     text: "Glossary Settings (auto-imported from GlossaryManager_GUI.py)"
                     size_hint_y: None
                     height: dp(40)
+                    font_style: "Subtitle2"
                     theme_text_color: "Secondary"
+                    shorten: True
+                    shorten_from: "right"
 
                 BoxLayout:
                     id: settings_box
@@ -153,7 +156,7 @@ KV = """
 
                 MDCard:
                     size_hint_y: None
-                    height: dp(280)
+                    height: dp(260)
                     padding: dp(12)
                     elevation: 1
 
@@ -321,6 +324,9 @@ class ExtractGlossaryScreen(MDScreen):
         "glossary_custom_entry_types",
     }
 
+    _CARD_RADIUS = [12, 12, 12, 12]
+    _CARD_BG = (0.13, 0.13, 0.17, 1)
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         Builder.load_string(KV)
@@ -434,6 +440,7 @@ class ExtractGlossaryScreen(MDScreen):
                 text=f"Load more ({remaining} left)",
                 size_hint_y=None,
                 height=dp(40),
+                md_bg_color=(0.30, 0.30, 0.34, 1),
                 on_release=lambda *_a: self._load_more_rows(),
             ))
 
@@ -446,14 +453,15 @@ class ExtractGlossaryScreen(MDScreen):
         is_bool = (t is bool)
         is_enum = key in self._ENUM_OPTIONS
         is_multiline = t in (list, dict)
-        card_height = dp(94) if (is_bool or is_enum) else (dp(166) if is_multiline else dp(116))
+        card_height = dp(100) if (is_bool or is_enum) else (dp(170) if is_multiline else dp(122))
 
         card = MDCard(
             size_hint_y=None,
             height=card_height,
             elevation=1,
             padding=dp(10),
-            radius=[10, 10, 10, 10],
+            radius=self._CARD_RADIUS,
+            md_bg_color=self._CARD_BG,
         )
         inner = BoxLayout(
             orientation="vertical",
@@ -463,16 +471,16 @@ class ExtractGlossaryScreen(MDScreen):
 
         inner.add_widget(MDLabel(
             text=key,
-            bold=True,
+            font_style="Body2",
             size_hint_y=None,
-            height=dp(22),
+            height=dp(24),
             shorten=True,
             shorten_from="right",
         ))
 
         if is_bool:
             row = BoxLayout(size_hint_y=None, height=dp(40))
-            btn = MDRaisedButton(size_hint_x=None, width=dp(136))
+            btn = MDRaisedButton(size_hint_x=None, width=dp(140))
             self._sync_toggle_btn(btn, self._bool_values.get(key, False))
             btn.bind(on_release=lambda *_a, k=key, b=btn: self._toggle_bool(k, b))
             row.add_widget(btn)
