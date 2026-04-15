@@ -77,6 +77,7 @@ def start_oauth_flow(
         The multi-account ID slot (e.g., 2 for authgpt2).
     """
     def _worker():
+        try:
             if system == "authgem":
                 # AuthGem Flow
                 import authgem_auth
