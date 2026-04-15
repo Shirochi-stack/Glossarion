@@ -78,6 +78,66 @@ def get_downloads_dir():
         return os.path.join(os.path.expanduser('~'), 'Downloads')
 
 
+def get_sd_card_dirs():
+    """Detect mounted SD card directories on Android.
+    
+    Scans /storage/ for non-emulated, non-self mount points and also
+    uses Context.getExternalFilesDirs() to find secondary storage.
+    
+    Returns:
+        list: Absolute paths to accessible SD card root directories.
+    """
+    sd_dirs = []
+    if not is_android():
+        return sd_dirs
+
+    # Method 1: Scan /storage/ for mount points
+    # SD cards appear as /storage/XXXX-XXXX/ (hex formatted label)
+    storage_root = '/storage'
+    try:
+        if os.path.isdir(storage_root):
+            for entry in os.scandir(storage_root):
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                # Skip internal storage + self
+                if name in ('emulated', 'self'):
+                    continue
+                # Verify actually accessible
+                if os.access(entry.path, os.R_OK):
+                    sd_dirs.append(entry.path)
+    except (PermissionError, OSError):
+        pass
+
+    # Method 2: Use Android Context.getExternalFilesDirs()
+    # Returns app-private directories on all mounted volumes;
+    # we extract the volume root from each path.
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        # getExternalFilesDirs(null) returns File[] for all volumes
+        ext_dirs = activity.getExternalFilesDirs(None)
+        if ext_dirs:
+            for i in range(ext_dirs.length):
+                d = ext_dirs[i]
+                if d is None:
+                    continue
+                abs_path = d.getAbsolutePath()
+                # Extract volume root: everything before /Android/data/...
+                android_idx = abs_path.find('/Android/')
+                if android_idx > 0:
+                    volume_root = abs_path[:android_idx]
+                    if (volume_root not in sd_dirs
+                            and '/emulated/' not in volume_root
+                            and os.access(volume_root, os.R_OK)):
+                        sd_dirs.append(volume_root)
+    except Exception as e:
+        print(f"[WARN] getExternalFilesDirs failed: {e}")
+
+    return sd_dirs
+
+
 def get_config_path():
     """Get the config file path."""
     data_dir = get_app_data_dir()
@@ -252,12 +312,15 @@ def request_storage_permissions():
         return False
 
 
-def scan_for_books(directory=None, extensions=None):
+def scan_for_books(directory=None, extensions=None, include_downloads=False,
+                   include_sdcard=False):
     """Scan a directory for EPUB, TXT, and PDF files.
     
     Args:
         directory: Directory to scan (default: documents dir)
         extensions: List of extensions to include (default: ['.epub', '.txt', '.pdf'])
+        include_downloads: Also scan the Downloads directory
+        include_sdcard: Also scan detected SD card root directories
         
     Returns:
         list: List of dicts with 'path', 'name', 'ext', 'size', 'modified' keys
@@ -270,6 +333,44 @@ def scan_for_books(directory=None, extensions=None):
     
     books = []
     
+    # Scan the primary directory
+    books.extend(_scan_single_dir(directory, extensions))
+    
+    # Optionally scan Downloads
+    if include_downloads:
+        dl = get_downloads_dir()
+        if dl and os.path.isdir(dl) and dl != directory:
+            books.extend(_scan_single_dir(dl, extensions))
+    
+    # Optionally scan SD card root directories
+    if include_sdcard and is_android():
+        for sd_root in get_sd_card_dirs():
+            # Scan root-level files
+            books.extend(_scan_single_dir(sd_root, extensions))
+            # Scan common subdirectories on SD cards
+            for subdir in ('Download', 'Downloads', 'Documents', 'Books',
+                           'Glossarion', 'EPUBs'):
+                sd_sub = os.path.join(sd_root, subdir)
+                if os.path.isdir(sd_sub):
+                    books.extend(_scan_single_dir(sd_sub, extensions))
+    
+    # Deduplicate by absolute path
+    seen = set()
+    unique = []
+    for b in books:
+        abs_p = os.path.abspath(b['path'])
+        if abs_p not in seen:
+            seen.add(abs_p)
+            unique.append(b)
+    
+    # Sort by modification time (newest first)
+    unique.sort(key=lambda b: b['modified'], reverse=True)
+    return unique
+
+
+def _scan_single_dir(directory, extensions):
+    """Scan a single directory (non-recursive) for matching files."""
+    books = []
     if not os.path.isdir(directory):
         return books
     
@@ -295,8 +396,6 @@ def scan_for_books(directory=None, extensions=None):
     except PermissionError:
         print(f"[WARN] No permission to scan: {directory}")
     
-    # Sort by modification time (newest first)
-    books.sort(key=lambda b: b['modified'], reverse=True)
     return books
 
 
@@ -522,6 +621,22 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
                 # If array construction fails, fall back to */* (shows all files)
                 print(f"[WARN] Could not set EXTRA_MIME_TYPES: {e}")
                 # */* is already set, so all files will be shown
+
+        # Set initial URI to Downloads — on Android 8+ this opens with
+        # a sidebar showing all mounted volumes (internal + SD card).
+        try:
+            DocumentsContract = autoclass(
+                'android.provider.DocumentsContract')
+            Uri = autoclass('android.net.Uri')
+            # "com.android.providers.downloads.documents" is the Downloads
+            # provider; its root URI shows the Downloads folder but the
+            # sidebar lets the user switch to any volume.
+            downloads_uri = Uri.parse(
+                "content://com.android.providers.downloads.documents/root/downloads")
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloads_uri)
+        except Exception:
+            # EXTRA_INITIAL_URI requires API 26+ (we target 26 minimum)
+            pass
 
         # Store callback and extension filter
         _pending_callbacks[request_code] = callback

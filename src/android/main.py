@@ -337,21 +337,41 @@ class GlossarionApp(MDApp):
 
     def _handle_open_with_intent(self, dt):
         """Check if the app was launched via 'Open with' and handle the file."""
+        import threading
+
+        def _process_intent():
+            try:
+                from android_file_utils import get_intent_file_path
+                file_path = get_intent_file_path()
+                if file_path and os.path.isfile(file_path):
+                    print(f"[INFO] Intent file copied to: {file_path}")
+                    # Schedule UI updates on main thread
+                    Clock.schedule_once(lambda dt: self._on_intent_file_ready(file_path), 0)
+                else:
+                    if file_path:
+                        print(f"[WARN] Intent file path resolved but file missing: {file_path}")
+            except Exception as e:
+                print(f"[WARN] Intent handling error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        threading.Thread(target=_process_intent, daemon=True).start()
+
+    def _on_intent_file_ready(self, file_path):
+        """Called on the main thread after an intent file has been copied."""
+        from kivymd.toast import toast
+        fname = os.path.basename(file_path)
+        toast(f"Imported: {fname}")
+
+        # Refresh library so the imported file shows up
         try:
-            from android_file_utils import get_intent_file_path
-            file_path = get_intent_file_path()
-            if file_path and os.path.isfile(file_path):
-                print(f"[INFO] Opening file from intent: {file_path}")
-                # Refresh library so the imported file shows up
-                try:
-                    lib_screen = self.root.ids.screen_manager.get_screen('library')
-                    lib_screen.load_books()
-                except Exception:
-                    pass
-                # Open the file in the reader
-                self.open_reader(file_path)
-        except Exception as e:
-            print(f"[WARN] Intent handling error: {e}")
+            lib_screen = self.root.ids.screen_manager.get_screen('library')
+            lib_screen.load_books()
+        except Exception:
+            pass
+
+        # Open the file in the reader
+        self.open_reader(file_path)
 
 
 if __name__ == '__main__':

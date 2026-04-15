@@ -89,6 +89,12 @@ jobs:
           cp "$SRC_DIR/model_options.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
           cp "$SRC_DIR/android/reader_translator.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
           
+          # Auth modules (required by android_oauth.py)
+          cp "$SRC_DIR/authgpt_auth.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/authgem_auth.py" "$ANDROID_DIR/_backend/"
+          cp "$SRC_DIR/authza_auth.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
+          cp "$SRC_DIR/token_encryption.py" "$ANDROID_DIR/_backend/" 2>/dev/null || true
+          
           # Generate stub modules for packages not available on Android
           cd "$ANDROID_DIR" && python3 generate_stubs.py && cd -
           

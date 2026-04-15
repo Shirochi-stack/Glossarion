@@ -314,9 +314,10 @@ KV = '''
                             size_hint_x: 0.2
 
                         MDSwitch:
-                            active: root.batch_enabled
-                            on_active: root.batch_enabled = self.active
-                            size_hint_x: 0.2
+                            id: batch_switch
+                            on_active: root._on_batch_toggle(self.active)
+                            size_hint: None, None
+                            size: dp(48), dp(24)
                             pos_hint: {"center_y": 0.5}
 
                         MDLabel:
@@ -380,14 +381,15 @@ KV = '''
                         spacing: dp(12)
 
                         MDLabel:
-                            text: "Enable Thinking"
-                            size_hint_x: 0.7
+                            text: "Thinking"
+                            size_hint_x: 0.6
 
                         MDSwitch:
                             id: thinking_switch
-                            active: root.reader_enable_thinking
-                            on_active: root.reader_enable_thinking = self.active
-                            size_hint_x: 0.3
+                            on_active: root._on_thinking_toggle(self.active)
+                            size_hint: None, None
+                            size: dp(48), dp(24)
+                            pos_hint: {"center_y": 0.5}
 
                 # ── Reader: Load Glossary ──
                 MDCard:
@@ -543,6 +545,11 @@ class TranslationScreen(MDScreen):
 
         # Check if AuthGPT token already exists
         self._check_authgpt_status()
+
+        # Sync switch widgets AFTER KV tree is ready
+        # (cannot use `active: root.prop` in KV — causes circular reset in KivyMD 1.2)
+        from kivy.clock import Clock
+        Clock.schedule_once(lambda dt: self._sync_switches(), 0)
 
     def _get_prompt_for_profile(self, profile_name):
         """Get system prompt text for a profile.
@@ -865,6 +872,33 @@ class TranslationScreen(MDScreen):
             self.batch_size = int(text)
         except (ValueError, TypeError):
             pass
+
+    # ── Switch toggle handlers (avoid circular binding) ──
+
+    _switch_syncing = False  # guard against circular updates
+
+    def _sync_switches(self):
+        """Push property values into switch widgets (called once after KV build)."""
+        self._switch_syncing = True
+        try:
+            if hasattr(self.ids, 'batch_switch'):
+                self.ids.batch_switch.active = self.batch_enabled
+            if hasattr(self.ids, 'thinking_switch'):
+                self.ids.thinking_switch.active = self.reader_enable_thinking
+        finally:
+            self._switch_syncing = False
+
+    def _on_batch_toggle(self, value):
+        """Handle batch switch toggle."""
+        if self._switch_syncing:
+            return
+        self.batch_enabled = value
+
+    def _on_thinking_toggle(self, value):
+        """Handle thinking switch toggle."""
+        if self._switch_syncing:
+            return
+        self.reader_enable_thinking = value
 
     # ── Translation ──
 

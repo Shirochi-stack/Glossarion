@@ -18,7 +18,8 @@ from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.button import MDFloatingActionButton
 from kivymd.uix.label import MDLabel
 
-from android_file_utils import scan_for_books, get_library_dir
+from android_file_utils import (scan_for_books, get_library_dir,
+                                 get_downloads_dir, get_sd_card_dirs)
 
 logger = logging.getLogger(__name__)
 
@@ -70,20 +71,19 @@ class LibraryScreen(MDScreen):
         self._cover_cache = {}
 
     def load_books(self):
-        """Scan the dedicated Library folder for translated EPUB/TXT files."""
+        """Scan Library, Downloads, SD cards, and user-configured dirs."""
         if not self.app:
             Clock.schedule_once(lambda dt: self.load_books(), 0.5)
             return
 
         self.books.clear()
 
-        # Only scan the dedicated Library folder (translated EPUBs)
+        # 1. Scan the dedicated Library folder + its subdirs
         lib_dir = get_library_dir()
-
         if os.path.isdir(lib_dir):
             found = scan_for_books(lib_dir)
             self.books.extend(found)
-            # Also scan subdirectories (for _output folders)
+            # Subdirectories (e.g. _output folders)
             try:
                 for entry in os.scandir(lib_dir):
                     if entry.is_dir():
@@ -92,19 +92,35 @@ class LibraryScreen(MDScreen):
             except (PermissionError, OSError):
                 pass
 
-        # Also scan any user-configured extra dirs
+        # 2. Scan Downloads
+        dl_dir = get_downloads_dir()
+        if dl_dir and os.path.isdir(dl_dir) and dl_dir != lib_dir:
+            found = scan_for_books(dl_dir)
+            self.books.extend(found)
+
+        # 3. Scan SD card common directories
+        for sd_root in get_sd_card_dirs():
+            for subdir in ('', 'Download', 'Downloads', 'Documents',
+                           'Books', 'Glossarion', 'EPUBs'):
+                sd_path = os.path.join(sd_root, subdir) if subdir else sd_root
+                if os.path.isdir(sd_path):
+                    found = scan_for_books(sd_path)
+                    self.books.extend(found)
+
+        # 4. User-configured extra dirs
         scan_dirs = self.app.config_data.get('library_scan_dirs', [])
         for d in scan_dirs:
             if os.path.isdir(d) and d != lib_dir:
                 found = scan_for_books(d)
                 self.books.extend(found)
 
-        # Deduplicate
+        # Deduplicate by absolute path
         seen = set()
         unique = []
         for b in self.books:
-            if b['path'] not in seen:
-                seen.add(b['path'])
+            abs_p = os.path.abspath(b['path'])
+            if abs_p not in seen:
+                seen.add(abs_p)
                 unique.append(b)
         self.books = unique
         self._populate_list()
