@@ -338,15 +338,19 @@ class ExtractGlossaryScreen(MDScreen):
         self._raw_values = {}
         self._bool_values = {}
         self._cached_discovered_defaults = None
-        self._render_step = 36
+        self._render_step = 16
         self._render_limit = self._render_step
         self._filter_event = None
+        self._build_event = None
 
     def on_enter(self, *args):
         if not self.app:
             return
+        if self._build_event is not None:
+            self._build_event.cancel()
+            self._build_event = None
         self._load_state()
-        self._build_settings_ui()
+        self._build_event = Clock.schedule_once(lambda _dt: self._build_settings_ui(), 0)
         self._hydrate_selected_file_from_other_screens()
         self._initialized = True
 
@@ -376,7 +380,7 @@ class ExtractGlossaryScreen(MDScreen):
             pass
 
     def _load_state(self):
-        cfg = copy.deepcopy(self.app.config_data if self.app else {})
+        cfg = dict(self.app.config_data if self.app else {})
         if self._cached_discovered_defaults is None:
             self._cached_discovered_defaults = self._build_local_defaults()
         discovered_defaults = self._cached_discovered_defaults
@@ -398,8 +402,6 @@ class ExtractGlossaryScreen(MDScreen):
                 bool_val = bool(value)
                 self._bool_values[key] = bool_val
                 self._raw_values[key] = "true" if bool_val else "false"
-            else:
-                self._raw_values[key] = self._value_to_text(value)
 
         self.status_text = f"{len(self._settings_keys)} glossary settings loaded"
         self._render_limit = self._render_step
@@ -422,7 +424,7 @@ class ExtractGlossaryScreen(MDScreen):
     def _build_settings_ui(self):
         box = self.ids.settings_box
         box.clear_widgets()
-        self._render_settings_rows()
+        Clock.schedule_once(lambda _dt: self._render_settings_rows(), 0)
 
     def _render_settings_rows(self):
         box = self.ids.settings_box
@@ -488,7 +490,7 @@ class ExtractGlossaryScreen(MDScreen):
 
         if is_enum:
             btn = MDRaisedButton(
-                text=(self._raw_values.get(key, "") or self._ENUM_OPTIONS[key][0]),
+                text=(self._get_raw_value(key) or self._ENUM_OPTIONS[key][0]),
                 size_hint_y=None,
                 height=dp(40),
             )
@@ -497,12 +499,12 @@ class ExtractGlossaryScreen(MDScreen):
             return card
 
         field = MDTextField(
-            text=self._raw_values.get(key, ""),
+            text=self._get_raw_value(key),
             multiline=is_multiline,
             size_hint_y=None,
             height=dp(104) if is_multiline else dp(56),
         )
-        field.bind(text=lambda _i, text, k=key: self._raw_values.__setitem__(k, text))
+        field.bind(text=lambda _i, text, k=key: self._on_text_changed(k, text))
         inner.add_widget(field)
         return card
 
@@ -545,6 +547,9 @@ class ExtractGlossaryScreen(MDScreen):
         if self._menu:
             self._menu.dismiss()
             self._menu = None
+
+    def _on_text_changed(self, key, text):
+        self._raw_values[key] = text
 
     def pick_file(self):
         try:
@@ -705,7 +710,7 @@ class ExtractGlossaryScreen(MDScreen):
         if not self.app:
             return False
 
-        new_cfg = copy.deepcopy(self.app.config_data)
+        new_cfg = dict(self.app.config_data)
         parse_errors = []
 
         for key in self._settings_keys:
@@ -713,8 +718,12 @@ class ExtractGlossaryScreen(MDScreen):
             if target_type is bool:
                 new_cfg[key] = bool(self._bool_values.get(key, False))
                 continue
-            raw = self._raw_values.get(key, "")
             default = self._settings_defaults.get(key, self._default_for_key(key))
+            if key not in self._raw_values:
+                if key not in new_cfg:
+                    new_cfg[key] = copy.deepcopy(default) if isinstance(default, (dict, list)) else default
+                continue
+            raw = self._raw_values.get(key, "")
             try:
                 new_cfg[key] = self._coerce_value(raw, target_type, default)
             except Exception as exc:
@@ -790,6 +799,16 @@ class ExtractGlossaryScreen(MDScreen):
                 return ""
         return str(value)
 
+    def _get_raw_value(self, key):
+        if key in self._raw_values:
+            return self._raw_values[key]
+        default = self._settings_defaults.get(key, self._default_for_key(key))
+        source = self.app.config_data if self.app else {}
+        value = source.get(key, default)
+        text = self._value_to_text(value)
+        self._raw_values[key] = text
+        return text
+
     def _infer_type(self, key, value, default):
         if isinstance(value, bool) or isinstance(default, bool):
             return bool
@@ -837,12 +856,12 @@ class ExtractGlossaryScreen(MDScreen):
         discovered = {}
         for key in self._FORCED_KEYS:
             if key in DEFAULT_CONFIG:
-                discovered[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+                discovered[key] = DEFAULT_CONFIG[key]
             else:
                 discovered[key] = self._default_for_key(key)
         for key, value in DEFAULT_CONFIG.items():
             if self._is_glossary_key(key):
-                discovered.setdefault(key, copy.deepcopy(value))
+                discovered.setdefault(key, value)
         return discovered
 
     @staticmethod

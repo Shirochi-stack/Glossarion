@@ -133,22 +133,26 @@ class OtherSettingsScreen(MDScreen):
         self._dynamic_box = None
         self._discovered_defaults = None
 
-        self._render_step = 36
+        self._render_step = 16
         self._render_limit = self._render_step
         self._filtered_keys = []
         self._filter_event = None
+        self._build_event = None
 
     def on_enter(self, *args):
         if not self.app:
             return
+        if self._build_event is not None:
+            self._build_event.cancel()
+            self._build_event = None
         if not self._initialized:
             self._init_state()
-            self._build_ui()
+            self._build_event = Clock.schedule_once(lambda _dt: self._build_ui(), 0)
             self._initialized = True
         else:
             self._refresh_from_app_config()
             self._sync_buffers_from_pending()
-            self._build_ui()
+            self._build_event = Clock.schedule_once(lambda _dt: self._build_ui(), 0)
 
     def reload_settings(self):
         if not self.app:
@@ -174,11 +178,11 @@ class OtherSettingsScreen(MDScreen):
             self._all_keys = sorted(k for k in key_pool if k and not str(k).startswith('_'))
             for key in self._all_keys:
                 if key in self._ENDPOINT_DEFAULTS:
-                    self._discovered_defaults[key] = copy.deepcopy(self._ENDPOINT_DEFAULTS[key])
+                    self._discovered_defaults[key] = self._ENDPOINT_DEFAULTS[key]
                 elif key in DEFAULT_CONFIG:
-                    self._discovered_defaults[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+                    self._discovered_defaults[key] = DEFAULT_CONFIG[key]
                 elif key in self._pending_config:
-                    self._discovered_defaults[key] = copy.deepcopy(self._pending_config[key])
+                    self._discovered_defaults[key] = self._pending_config[key]
                 else:
                     self._discovered_defaults[key] = ''
         else:
@@ -186,10 +190,15 @@ class OtherSettingsScreen(MDScreen):
         self._sync_buffers_from_pending()
 
     def _sync_buffers_from_pending(self):
+        self._types.clear()
+        self._bool_values.clear()
+        stale = set(self._raw_values.keys()) - set(self._all_keys)
+        for key in stale:
+            self._raw_values.pop(key, None)
         for key in self._all_keys:
             default = self._discovered_defaults.get(key, self._default_for_key(key))
             if key not in self._pending_config:
-                self._pending_config[key] = default
+                self._pending_config[key] = self._clone_value(default)
 
             value = self._pending_config.get(key, default)
             self._types[key] = self._infer_type(key, value, default)
@@ -197,13 +206,12 @@ class OtherSettingsScreen(MDScreen):
                 b = bool(value)
                 self._bool_values[key] = b
                 self._raw_values[key] = 'true' if b else 'false'
-            else:
-                self._raw_values[key] = self._value_to_text(value)
 
     def _refresh_from_app_config(self):
-        cfg = copy.deepcopy(self.app.config_data if self.app else {})
+        cfg = dict(self.app.config_data if self.app else {})
         for key, value in self._ENDPOINT_DEFAULTS.items():
-            cfg.setdefault(key, value)
+            if key not in cfg:
+                cfg[key] = self._clone_value(value)
         self._pending_config = cfg
 
     def _build_ui(self):
@@ -230,7 +238,7 @@ class OtherSettingsScreen(MDScreen):
         )
         self._dynamic_box.bind(minimum_height=self._dynamic_box.setter('height'))
         box.add_widget(self._dynamic_box)
-        self._render_dynamic_settings()
+        Clock.schedule_once(lambda _dt: self._render_dynamic_settings(), 0)
 
     def _build_endpoint_card(self):
         card = MDCard(
@@ -309,7 +317,7 @@ class OtherSettingsScreen(MDScreen):
 
         field = MDTextField(
             hint_text="Endpoint URL / host",
-            text=self._raw_values.get(url_key, ''),
+            text=self._get_raw_value(url_key),
             multiline=False,
             size_hint_y=None,
             height=dp(56),
@@ -446,7 +454,7 @@ class OtherSettingsScreen(MDScreen):
             return card
 
         field = MDTextField(
-            text=self._raw_values.get(key, ''),
+            text=self._get_raw_value(key),
             multiline=is_complex,
             size_hint_y=None,
             height=dp(104) if is_complex else dp(56),
@@ -469,17 +477,25 @@ class OtherSettingsScreen(MDScreen):
 
     def _on_text_changed(self, key, text):
         self._raw_values[key] = text
+        self._pending_config[key] = text
 
     def save_all(self):
         if not self.app:
             return
-        new_cfg = copy.deepcopy(self.app.config_data)
+        new_cfg = dict(self.app.config_data)
         errors = []
 
         for key in self._all_keys:
             t = self._types.get(key, str)
             if t is bool:
                 new_cfg[key] = bool(self._bool_values.get(key, False))
+                continue
+            default = self._discovered_defaults.get(key, self._default_for_key(key))
+            if key not in self._raw_values:
+                if key in self._pending_config:
+                    new_cfg[key] = self._pending_config[key]
+                elif key not in new_cfg:
+                    new_cfg[key] = self._clone_value(default)
                 continue
             raw = self._raw_values.get(key, '')
             default = self._discovered_defaults.get(key, self._default_for_key(key))
@@ -495,7 +511,8 @@ class OtherSettingsScreen(MDScreen):
 
         self.app.config_data.update(new_cfg)
         save_config(self.app.config_data)
-        self._pending_config = copy.deepcopy(self.app.config_data)
+        self._refresh_from_app_config()
+        self._sync_buffers_from_pending()
         toast("Saved all settings")
 
     @staticmethod
@@ -553,6 +570,24 @@ class OtherSettingsScreen(MDScreen):
             except Exception:
                 return ''
         return str(value)
+
+    def _get_raw_value(self, key):
+        if key in self._raw_values:
+            return self._raw_values[key]
+        default = self._discovered_defaults.get(key, self._default_for_key(key))
+        value = self._pending_config.get(key, default)
+        text = self._value_to_text(value)
+        self._raw_values[key] = text
+        return text
+
+    @staticmethod
+    def _clone_value(value):
+        if isinstance(value, (dict, list, tuple, set)):
+            try:
+                return copy.deepcopy(value)
+            except Exception:
+                return value
+        return value
 
     # NOTE:
     # Runtime parsing of other_settings.py was intentionally removed because
