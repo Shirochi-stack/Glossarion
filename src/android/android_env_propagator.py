@@ -158,6 +158,15 @@ def set_all_env_vars(config):
     os.environ['DISABLE_GEMINI_SAFETY'] = '1' if _get('disable_gemini_safety', False) else '0'
     os.environ['USE_HTTP_OPENROUTER'] = '1' if _get('use_http_openrouter', False) else '0'
     os.environ['DISABLE_OPENROUTER_COMPRESSION'] = '1' if _get('disable_openrouter_compression', False) else '0'
+    os.environ['OPENAI_CUSTOM_BASE_URL'] = str(_get('openai_base_url', ''))
+    os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1' if _get('use_custom_openai_endpoint', False) else '0'
+    os.environ['USE_GEMINI_OPENAI_ENDPOINT'] = '1' if _get('use_gemini_openai_endpoint', False) else '0'
+    os.environ['GEMINI_OPENAI_ENDPOINT'] = str(_get('gemini_openai_endpoint', 'generativelanguage.googleapis.com'))
+    os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if _get('force_native_anthropic', False) else '0'
+    os.environ['ANTHROPIC_BASE_URL'] = str(_get('anthropic_base_url', ''))
+    os.environ['AZURE_API_VERSION'] = str(_get('azure_api_version', '2024-08-01-preview'))
+    os.environ['GROQ_BASE_URL'] = str(_get('groq_base_url', ''))
+    os.environ['FIREWORKS_BASE_URL'] = str(_get('fireworks_base_url', ''))
 
     # ── Multi API key support ──
     os.environ['USE_MULTI_API_KEYS'] = '1' if _get('use_multi_api_keys', False) else '0'

@@ -114,6 +114,7 @@ from reader_screen import ReaderScreen
 from multikey_screen import MultiKeyScreen
 from translation_screen import TranslationScreen
 from progress_screen import ProgressScreen
+from other_settings_screen import OtherSettingsScreen
 
 # Import utilities
 from android_config import load_config, save_config
@@ -142,6 +143,9 @@ BoxLayout:
 
         ProgressScreen:
             name: 'progress'
+
+        OtherSettingsScreen:
+            name: 'other_settings'
 
         TranslationScreen:
             name: 'translation'
@@ -191,6 +195,15 @@ BoxLayout:
             text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'progress' else (0.5,0.5,0.5,1)
             pos_hint: {"center_y": 0.5}
             on_release: app.switch_screen('progress')
+
+        Widget:
+
+        MDIconButton:
+            icon: "cog"
+            theme_text_color: "Custom"
+            text_color: (1,1,1,1) if app.root and app.root.ids.screen_manager.current == 'other_settings' else (0.5,0.5,0.5,1)
+            pos_hint: {"center_y": 0.5}
+            on_release: app.switch_screen('other_settings')
 
         Widget:
 
@@ -280,7 +293,7 @@ class GlossarionApp(MDApp):
             pass
 
         # Initialize screens
-        for screen_name in ['library', 'reader', 'multikey', 'progress', 'translation']:
+        for screen_name in ['library', 'reader', 'multikey', 'progress', 'other_settings', 'translation']:
             try:
                 screen = self.root.ids.screen_manager.get_screen(screen_name)
                 screen.app = self

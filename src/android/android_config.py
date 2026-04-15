@@ -80,6 +80,17 @@ DEFAULT_CONFIG = {
     'enable_gemini_thinking': False,
     'gemini_thinking_budget': 0,
 
+    # Custom endpoints
+    'use_custom_openai_endpoint': False,
+    'openai_base_url': '',
+    'use_gemini_openai_endpoint': False,
+    'gemini_openai_endpoint': 'generativelanguage.googleapis.com',
+    'force_native_anthropic': False,
+    'anthropic_base_url': '',
+    'groq_base_url': '',
+    'fireworks_base_url': '',
+    'azure_api_version': '2024-08-01-preview',
+
     # Prompt profiles (merged with built-in defaults at load time)
     'prompt_profiles': {},
 }
