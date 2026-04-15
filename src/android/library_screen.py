@@ -235,19 +235,27 @@ class LibraryScreen(MDScreen):
             self.file_manager = MDFileManager(
                 exit_manager=self.exit_manager,
                 select_path=self._on_fm_selected,
-                ext=['.epub', '.txt']
+                ext=['.epub', '.txt', '.pdf']
             )
 
     def pick_file(self):
-        """Open MDFileManager for file selection."""
+        """Open the native Android file picker (SAF) for file selection."""
         try:
-            self._init_file_manager()
-            self._fm_mode = 'file'
-            from android_file_utils import is_android, get_documents_dir
-            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
-            self.file_manager.show(start_path)
+            from android_file_utils import open_native_file_picker, REQUEST_CODE_OPEN_FILE
+            open_native_file_picker(
+                callback=self._on_native_file_picked,
+                extensions=['.epub', '.txt', '.pdf'],
+                request_code=REQUEST_CODE_OPEN_FILE,
+            )
         except Exception as e:
             logger.error(f"File picker error: {e}")
+
+    def _on_native_file_picked(self, path):
+        """Handle file selection from the native SAF picker."""
+        if path and os.path.isfile(path):
+            self.load_books()
+            if self.app:
+                self.app.open_reader(path)
 
     def browse_folder(self):
         """Open MDFileManager for folder selection."""

@@ -2,6 +2,10 @@
 """
 Android-safe file path utilities for Glossarion.
 Handles path resolution across Android, Windows, and macOS.
+
+On Android, file picking uses the native Storage Access Framework
+(ACTION_OPEN_DOCUMENT) which properly shows all accessible .epub,
+.txt, and .pdf files.  On desktop, falls back to KivyMD's MDFileManager.
 """
 
 import os
@@ -249,11 +253,11 @@ def request_storage_permissions():
 
 
 def scan_for_books(directory=None, extensions=None):
-    """Scan a directory for EPUB and TXT files.
+    """Scan a directory for EPUB, TXT, and PDF files.
     
     Args:
         directory: Directory to scan (default: documents dir)
-        extensions: List of extensions to include (default: ['.epub', '.txt'])
+        extensions: List of extensions to include (default: ['.epub', '.txt', '.pdf'])
         
     Returns:
         list: List of dicts with 'path', 'name', 'ext', 'size', 'modified' keys
@@ -262,7 +266,7 @@ def scan_for_books(directory=None, extensions=None):
         directory = get_documents_dir()
     
     if extensions is None:
-        extensions = ['.epub', '.txt']
+        extensions = ['.epub', '.txt', '.pdf']
     
     books = []
     
@@ -294,3 +298,251 @@ def scan_for_books(directory=None, extensions=None):
     # Sort by modification time (newest first)
     books.sort(key=lambda b: b['modified'], reverse=True)
     return books
+
+
+# ===========================================================================
+# Android native file picker (Storage Access Framework)
+# ===========================================================================
+
+# MIME types for each supported extension
+_MIME_MAP = {
+    '.epub': 'application/epub+zip',
+    '.txt':  'text/plain',
+    '.pdf':  'application/pdf',
+    '.csv':  'text/csv',
+}
+
+# Request codes for different picker contexts
+REQUEST_CODE_OPEN_FILE = 9001
+REQUEST_CODE_OPEN_GLOSSARY = 9002
+
+# Pending callbacks — keyed by request code
+_pending_callbacks = {}
+
+
+def _copy_uri_to_local(uri_string):
+    """Copy content from a content:// URI to the Glossarion Library folder.
+    
+    Android's SAF returns content:// URIs which may not be directly readable
+    as file paths.  We copy the content to a local file and return that path.
+    
+    Returns:
+        str: Path to the local copy, or None on failure.
+    """
+    try:
+        from jnius import autoclass
+
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        Uri = autoclass('android.net.Uri')
+        ContentResolver = autoclass('android.content.ContentResolver')
+
+        activity = PythonActivity.mActivity
+        resolver = activity.getContentResolver()
+        uri = Uri.parse(uri_string)
+
+        # Try to get the display name from the cursor
+        filename = None
+        cursor = resolver.query(uri, None, None, None, None)
+        if cursor is not None:
+            try:
+                name_index = cursor.getColumnIndex("_display_name")
+                if name_index >= 0 and cursor.moveToFirst():
+                    filename = cursor.getString(name_index)
+            finally:
+                cursor.close()
+
+        if not filename:
+            # Fallback: extract from URI path
+            path_part = uri.getPath()
+            if path_part:
+                filename = os.path.basename(path_part)
+            else:
+                filename = 'imported_file'
+
+        # Sanitize filename
+        filename = filename.replace('/', '_').replace('\\', '_')
+
+        # Copy to Library dir
+        lib_dir = get_library_dir()
+        dest_path = os.path.join(lib_dir, filename)
+
+        # Read from content URI and write to local file
+        input_stream = resolver.openInputStream(uri)
+        if input_stream is None:
+            print(f"[WARN] Could not open input stream for URI: {uri_string}")
+            return None
+
+        BufferedInputStream = autoclass('java.io.BufferedInputStream')
+        bis = BufferedInputStream(input_stream)
+
+        with open(dest_path, 'wb') as f:
+            buf = bytearray(8192)
+            while True:
+                # Read into a Java byte array
+                java_buf = autoclass('java.lang.reflect.Array').newInstance(
+                    autoclass('java.lang.Byte').TYPE, 8192
+                )
+                bytes_read = bis.read(java_buf)
+                if bytes_read == -1:
+                    break
+                # Convert Java byte[] to Python bytes
+                for i in range(bytes_read):
+                    buf[i] = java_buf[i] & 0xFF
+                f.write(bytes(buf[:bytes_read]))
+
+        bis.close()
+        input_stream.close()
+
+        print(f"[INFO] Copied URI to local: {dest_path}")
+        return dest_path
+
+    except Exception as e:
+        print(f"[ERR] Failed to copy URI to local: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def open_native_file_picker(callback, extensions=None, request_code=None):
+    """Open the Android native file picker (Storage Access Framework).
+    
+    Uses ACTION_OPEN_DOCUMENT Intent which respects scoped storage,
+    shows the system document picker UI, and lets the user browse all
+    accessible locations (Downloads, Drive, file managers, etc.).
+    
+    On non-Android platforms, falls back to a KivyMD MDFileManager.
+    
+    Args:
+        callback: function(file_path_or_None) called with the selected
+                  file's local path, or None if cancelled.
+        extensions: list of '.ext' strings (default: ['.epub', '.txt', '.pdf'])
+        request_code: int request code (default: REQUEST_CODE_OPEN_FILE)
+    """
+    if extensions is None:
+        extensions = ['.epub', '.txt', '.pdf']
+    if request_code is None:
+        request_code = REQUEST_CODE_OPEN_FILE
+
+    if not is_android():
+        # Desktop fallback: use KivyMD file manager
+        _desktop_file_picker(callback, extensions)
+        return
+
+    try:
+        from jnius import autoclass
+        from android import activity as android_activity
+
+        Intent = autoclass('android.content.Intent')
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+
+        # Build MIME types from extensions
+        mime_types = []
+        for ext in extensions:
+            mime = _MIME_MAP.get(ext.lower())
+            if mime:
+                mime_types.append(mime)
+
+        if not mime_types:
+            mime_types = ['*/*']
+
+        if len(mime_types) == 1:
+            intent.setType(mime_types[0])
+        else:
+            # Multiple MIME types → use EXTRA_MIME_TYPES
+            intent.setType('*/*')
+            String = autoclass('java.lang.String')
+            Array = autoclass('java.lang.reflect.Array')
+            mime_array = Array.newInstance(String.getClass(), len(mime_types))
+            for i, m in enumerate(mime_types):
+                Array.set(mime_array, i, String(m))
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, mime_array)
+
+        # Register the activity result callback
+        _pending_callbacks[request_code] = callback
+
+        def _on_activity_result(request_code_recv, result_code, intent_data):
+            cb = _pending_callbacks.pop(request_code_recv, None)
+            if cb is None:
+                return
+
+            # RESULT_OK == -1
+            if result_code != -1 or intent_data is None:
+                # User cancelled
+                try:
+                    from kivy.clock import Clock
+                    Clock.schedule_once(lambda dt: cb(None), 0)
+                except ImportError:
+                    cb(None)
+                return
+
+            uri = intent_data.getData()
+            if uri is None:
+                try:
+                    from kivy.clock import Clock
+                    Clock.schedule_once(lambda dt: cb(None), 0)
+                except ImportError:
+                    cb(None)
+                return
+
+            uri_string = uri.toString()
+            print(f"[INFO] SAF picked URI: {uri_string}")
+
+            # Copy from content:// URI to a local file in a worker thread
+            import threading
+
+            def _copy_worker():
+                local_path = _copy_uri_to_local(uri_string)
+                try:
+                    from kivy.clock import Clock
+                    Clock.schedule_once(lambda dt: cb(local_path), 0)
+                except ImportError:
+                    cb(local_path)
+
+            threading.Thread(target=_copy_worker, daemon=True).start()
+
+        android_activity.bind(on_activity_result=_on_activity_result)
+
+        current_activity = PythonActivity.mActivity
+        current_activity.startActivityForResult(intent, request_code)
+        print(f"[INFO] Opened native file picker (request_code={request_code})")
+
+    except Exception as e:
+        print(f"[ERR] Native file picker failed: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fall back to KivyMD file manager
+        _desktop_file_picker(callback, extensions)
+
+
+def _desktop_file_picker(callback, extensions):
+    """Fallback file picker for desktop using KivyMD's MDFileManager."""
+    try:
+        from kivymd.uix.filemanager import MDFileManager
+
+        fm = None
+
+        def _exit(path=None):
+            nonlocal fm
+            if fm:
+                fm.close()
+
+        def _select(path):
+            _exit()
+            if path and os.path.isfile(path):
+                callback(path)
+            else:
+                callback(None)
+
+        fm = MDFileManager(
+            exit_manager=_exit,
+            select_path=_select,
+            ext=list(extensions),
+        )
+        start_path = get_documents_dir()
+        fm.show(start_path)
+    except Exception as e:
+        print(f"[WARN] Desktop file picker error: {e}")
+        callback(None)

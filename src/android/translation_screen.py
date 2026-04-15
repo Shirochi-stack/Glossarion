@@ -654,44 +654,28 @@ class TranslationScreen(MDScreen):
 
     # ── Glossary File Picker ──
 
-    def _init_file_manager_glossary(self):
-        if not hasattr(self, 'file_manager_glossary'):
-            from kivymd.uix.filemanager import MDFileManager
-            self.file_manager_glossary = MDFileManager(
-                exit_manager=self._exit_fm_glossary,
-                select_path=self._on_fm_glossary_selected,
-                ext=['.csv']
-            )
-
     def _pick_glossary(self):
-        """Open a file picker to select a glossary CSV file."""
+        """Open the native file picker to select a glossary CSV file."""
         try:
-            self._init_file_manager_glossary()
-            from android_file_utils import is_android, get_documents_dir
-            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
-            self.file_manager_glossary.show(start_path)
+            from android_file_utils import open_native_file_picker, REQUEST_CODE_OPEN_GLOSSARY
+            open_native_file_picker(
+                callback=self._on_glossary_picked,
+                extensions=['.csv'],
+                request_code=REQUEST_CODE_OPEN_GLOSSARY,
+            )
         except Exception as e:
             logger.error(f"Glossary file picker error: {e}")
+            self._append_log(f"[WARN] Glossary picker error: {e}")
 
-    def _exit_fm_glossary(self, *args):
-        self.file_manager_glossary.close()
-
-    def _on_fm_glossary_selected(self, path):
-        self._exit_fm_glossary()
-        self._on_glossary_selected([path])
-
-    def _on_glossary_selected(self, selection):
-        """Handle glossary file selection."""
-        if selection:
-            path = selection[0] if isinstance(selection, list) else selection
-            if path and os.path.isfile(path):
-                self.reader_glossary_path = path
-                # Show just the filename in a toast
-                try:
-                    from kivymd.toast import toast
-                    toast(f"Loaded: {os.path.basename(path)}")
-                except Exception:
-                    pass
+    def _on_glossary_picked(self, path):
+        """Handle glossary file selection from native picker."""
+        if path and os.path.isfile(path):
+            self.reader_glossary_path = path
+            try:
+                from kivymd.toast import toast
+                toast(f"Loaded: {os.path.basename(path)}")
+            except Exception:
+                pass
 
     # ── AuthGPT / AuthGem OAuth ──
 
@@ -774,7 +758,9 @@ class TranslationScreen(MDScreen):
         self._update_auth_btn_label()
         self._append_log(f"[ERR] {self._get_auth_system_name()}: {message}")
         from kivymd.toast import toast
-        toast(f"{self._get_auth_system_name()} login failed")
+        # Show the actual error message, not just "login failed"
+        short_msg = str(message)[:120] if message else "Unknown error"
+        toast(f"{self._get_auth_system_name()}: {short_msg}")
 
     def authgpt_logout(self):
         """Clear stored OAuth tokens."""
@@ -792,36 +778,33 @@ class TranslationScreen(MDScreen):
 
     # ── UI ──
 
-    def _init_file_manager_main(self):
-        if not hasattr(self, 'file_manager_main'):
-            from kivymd.uix.filemanager import MDFileManager
-            self.file_manager_main = MDFileManager(
-                exit_manager=self._exit_fm_main,
-                select_path=self._on_fm_main_selected,
-                ext=['.epub', '.txt']
-            )
-
     def pick_file(self):
+        """Open the native Android file picker (SAF) for input file selection."""
         try:
-            self._init_file_manager_main()
-            from android_file_utils import is_android, get_documents_dir
-            start_path = '/storage/emulated/0' if is_android() else get_documents_dir()
-            self.file_manager_main.show(start_path)
+            from android_file_utils import open_native_file_picker, REQUEST_CODE_OPEN_FILE
+            open_native_file_picker(
+                callback=self._on_native_file_picked,
+                extensions=['.epub', '.txt', '.pdf'],
+                request_code=REQUEST_CODE_OPEN_FILE,
+            )
         except Exception as e:
             self._append_log(f"[WARN] File picker error: {e}")
 
-    def _exit_fm_main(self, *args):
-        self.file_manager_main.close()
-
-    def _on_fm_main_selected(self, path):
-        self._exit_fm_main()
-        self._on_file_selected([path])
-
-    def _on_file_selected(self, selection):
-        if selection:
-            path = selection[0] if isinstance(selection, list) else selection
+    def _on_native_file_picked(self, path):
+        """Handle file selection from native picker."""
+        if path and os.path.isfile(path):
             self.selected_file = path
             self.selected_file_display = os.path.basename(path)
+            try:
+                from kivymd.toast import toast
+                toast(f"Selected: {os.path.basename(path)}")
+            except Exception:
+                pass
+        elif path is None:
+            # User cancelled — no action needed
+            pass
+        else:
+            self._append_log(f"[WARN] Selected file not found: {path}")
 
     def show_model_menu(self, caller):
         items = [{"text": m, "viewclass": "OneLineListItem",
