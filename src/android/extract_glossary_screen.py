@@ -3,16 +3,14 @@
 Extract Glossary screen for Android.
 
 Runs extract_glossary_from_epub.py with Android-friendly controls and exposes
-the glossary configuration surface by auto-discovering keys referenced in
-GlossaryManager_GUI.py and translator_gui.py.
+the glossary configuration surface using local/default keys (no heavy runtime
+parsing of desktop GUI scripts).
 """
 
-import ast
 import copy
 import json
 import logging
 import os
-import re
 import threading
 import traceback
 
@@ -31,7 +29,7 @@ from kivymd.uix.menu import MDDropdownMenu
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.textfield import MDTextField
 
-from android_config import save_config
+from android_config import DEFAULT_CONFIG, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +137,7 @@ KV = """
                             theme_text_color: "Secondary"
 
                 MDLabel:
-                    text: "Glossary Settings (auto-imported from GlossaryManager_GUI.py)"
+                    text: "Glossary Settings"
                     size_hint_y: None
                     height: dp(40)
                     font_style: "Subtitle2"
@@ -380,7 +378,7 @@ class ExtractGlossaryScreen(MDScreen):
     def _load_state(self):
         cfg = copy.deepcopy(self.app.config_data if self.app else {})
         if self._cached_discovered_defaults is None:
-            self._cached_discovered_defaults = self._discover_glossary_defaults()
+            self._cached_discovered_defaults = self._build_local_defaults()
         discovered_defaults = self._cached_discovered_defaults
         keys = set(discovered_defaults.keys()) | set(self._FORCED_KEYS)
         keys |= {k for k in cfg.keys() if self._is_glossary_key(k)}
@@ -832,59 +830,20 @@ class ExtractGlossaryScreen(MDScreen):
             return {}
         return ""
 
-    def _discover_glossary_defaults(self):
-        src_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        files = [
-            os.path.join(src_root, "GlossaryManager_GUI.py"),
-            os.path.join(src_root, "translator_gui.py"),
-        ]
+    def _build_local_defaults(self):
+        """
+        Build defaults without runtime parsing of huge desktop GUI scripts.
+        """
         discovered = {}
-        for path in files:
-            if not os.path.isfile(path):
-                continue
-            allow_all_keys = os.path.basename(path).lower() == "glossarymanager_gui.py"
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-                    text = handle.read()
-            except Exception:
-                continue
-
-            for match in re.finditer(
-                r"(?:self\.)?config\.get\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*([^\)]*?))?\)",
-                text,
-                flags=re.MULTILINE,
-            ):
-                key = match.group(1).strip()
-                if not allow_all_keys and not self._is_glossary_key(key):
-                    continue
-                default_expr = (match.group(2) or "").strip()
-                if default_expr.endswith(","):
-                    default_expr = default_expr[:-1].strip()
-                value = self._parse_default_literal(default_expr)
-                if key not in discovered:
-                    discovered[key] = value
-
-            for key in re.findall(r"(?:self\.)?config\[\s*['\"]([^'\"]+)['\"]\s*\]", text):
-                if (allow_all_keys or self._is_glossary_key(key)) and key not in discovered:
-                    discovered[key] = self._default_for_key(key)
-
-        for forced in self._FORCED_KEYS:
-            discovered.setdefault(forced, self._default_for_key(forced))
+        for key in self._FORCED_KEYS:
+            if key in DEFAULT_CONFIG:
+                discovered[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+            else:
+                discovered[key] = self._default_for_key(key)
+        for key, value in DEFAULT_CONFIG.items():
+            if self._is_glossary_key(key):
+                discovered.setdefault(key, copy.deepcopy(value))
         return discovered
-
-    @staticmethod
-    def _parse_default_literal(expr):
-        if not expr:
-            return ""
-        simple_tokens = {"True": True, "False": False, "None": ""}
-        if expr in simple_tokens:
-            return simple_tokens[expr]
-        try:
-            return ast.literal_eval(expr)
-        except Exception:
-            if expr.startswith(("'", '"')) and expr.endswith(("'", '"')):
-                return expr[1:-1]
-            return ""
 
     @staticmethod
     def _is_glossary_key(key):

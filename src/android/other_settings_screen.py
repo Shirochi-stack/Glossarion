@@ -3,17 +3,14 @@
 Android Other Settings screen.
 
 Design goals:
-- Only show keys discovered from other_settings.py (+ endpoint keys)
+- Use local/default config keys (+ endpoint keys) with no heavy script parsing
 - Avoid UI lag by debounced filtering + paged rendering
 - Stable card heights to prevent label/field overlap
 """
 
-import ast
 import copy
 import json
 import logging
-import os
-import re
 
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
@@ -29,7 +26,7 @@ from kivymd.uix.label import MDLabel
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.textfield import MDTextField
 
-from android_config import save_config
+from android_config import DEFAULT_CONFIG, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -172,8 +169,20 @@ class OtherSettingsScreen(MDScreen):
     def _init_state(self):
         self._refresh_from_app_config()
         if self._discovered_defaults is None:
-            self._discovered_defaults = self._discover_config_defaults()
-        self._all_keys = sorted(set(self._discovered_defaults.keys()) | self._ENDPOINT_KEYS)
+            self._discovered_defaults = {}
+            key_pool = set(DEFAULT_CONFIG.keys()) | set(self._pending_config.keys()) | self._ENDPOINT_KEYS
+            self._all_keys = sorted(k for k in key_pool if k and not str(k).startswith('_'))
+            for key in self._all_keys:
+                if key in self._ENDPOINT_DEFAULTS:
+                    self._discovered_defaults[key] = copy.deepcopy(self._ENDPOINT_DEFAULTS[key])
+                elif key in DEFAULT_CONFIG:
+                    self._discovered_defaults[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+                elif key in self._pending_config:
+                    self._discovered_defaults[key] = copy.deepcopy(self._pending_config[key])
+                else:
+                    self._discovered_defaults[key] = ''
+        else:
+            self._all_keys = sorted(set(self._discovered_defaults.keys()) | self._ENDPOINT_KEYS | set(self._pending_config.keys()))
         self._sync_buffers_from_pending()
 
     def _sync_buffers_from_pending(self):
@@ -203,7 +212,7 @@ class OtherSettingsScreen(MDScreen):
         box.add_widget(self._build_endpoint_card())
 
         title = MDLabel(
-            text="Other Settings Keys (from other_settings.py only)",
+            text="Other Settings Keys (config/default set)",
             theme_text_color="Secondary",
             size_hint_y=None,
             height=dp(28),
@@ -545,49 +554,7 @@ class OtherSettingsScreen(MDScreen):
                 return ''
         return str(value)
 
-    def _discover_config_defaults(self):
-        """Extract config keys + default literals from other_settings.py."""
-        here = os.path.dirname(os.path.abspath(__file__))
-        src_root = os.path.dirname(here)
-        target = os.path.join(src_root, 'other_settings.py')
-        if not os.path.isfile(target):
-            return {}
-
-        try:
-            with open(target, 'r', encoding='utf-8', errors='ignore') as f:
-                text = f.read()
-        except Exception:
-            return {}
-
-        defaults = {}
-        get_pattern = r"(?:[A-Za-z_][\w\.]*)?config\.get\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*([^\)]*?))?\)"
-        for match in re.finditer(get_pattern, text, flags=re.MULTILINE):
-            key = (match.group(1) or '').strip()
-            if not key or key.startswith('_'):
-                continue
-            default_expr = (match.group(2) or '').strip()
-            if default_expr.endswith(','):
-                default_expr = default_expr[:-1].strip()
-            defaults.setdefault(key, self._parse_default_literal(default_expr))
-
-        for key in re.findall(r"(?:[A-Za-z_][\w\.]*)?config\[\s*['\"]([^'\"]+)['\"]\s*\]", text):
-            if key and not key.startswith('_'):
-                defaults.setdefault(key, '')
-
-        for key, value in self._ENDPOINT_DEFAULTS.items():
-            defaults.setdefault(key, value)
-        return defaults
-
-    @staticmethod
-    def _parse_default_literal(expr):
-        if not expr:
-            return ''
-        simple_tokens = {'True': True, 'False': False, 'None': ''}
-        if expr in simple_tokens:
-            return simple_tokens[expr]
-        try:
-            return ast.literal_eval(expr)
-        except Exception:
-            if expr.startswith(("'", '"')) and expr.endswith(("'", '"')):
-                return expr[1:-1]
-            return ''
+    # NOTE:
+    # Runtime parsing of other_settings.py was intentionally removed because
+    # it caused significant UI lag. This screen now uses in-memory/default
+    # config keys only.
