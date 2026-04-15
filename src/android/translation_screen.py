@@ -313,12 +313,12 @@ KV = '''
                             text: "Batch"
                             size_hint_x: 0.2
 
-                        MDSwitch:
-                            id: batch_switch
-                            on_active: root._on_batch_toggle(self.active)
-                            size_hint: None, None
-                            size: dp(48), dp(24)
-                            pos_hint: {"center_y": 0.5}
+                        MDRaisedButton:
+                            id: batch_btn
+                            text: "No"
+                            on_release: root._toggle_batch()
+                            size_hint_x: 0.2
+                            md_bg_color: (0.3, 0.3, 0.3, 1)
 
                         MDLabel:
                             text: "Size:"
@@ -384,12 +384,12 @@ KV = '''
                             text: "Thinking"
                             size_hint_x: 0.6
 
-                        MDSwitch:
-                            id: thinking_switch
-                            on_active: root._on_thinking_toggle(self.active)
-                            size_hint: None, None
-                            size: dp(48), dp(24)
-                            pos_hint: {"center_y": 0.5}
+                        MDRaisedButton:
+                            id: thinking_btn
+                            text: "No"
+                            on_release: root._toggle_thinking()
+                            size_hint_x: 0.4
+                            md_bg_color: (0.3, 0.3, 0.3, 1)
 
                 # ── Reader: Load Glossary ──
                 MDCard:
@@ -546,10 +546,9 @@ class TranslationScreen(MDScreen):
         # Check if AuthGPT token already exists
         self._check_authgpt_status()
 
-        # Sync switch widgets AFTER KV tree is ready
-        # (cannot use `active: root.prop` in KV — causes circular reset in KivyMD 1.2)
+        # Sync toggle buttons AFTER KV tree is ready
         from kivy.clock import Clock
-        Clock.schedule_once(lambda dt: self._sync_switches(), 0)
+        Clock.schedule_once(lambda dt: self._sync_buttons(), 0)
 
     def _get_prompt_for_profile(self, profile_name):
         """Get system prompt text for a profile.
@@ -873,32 +872,31 @@ class TranslationScreen(MDScreen):
         except (ValueError, TypeError):
             pass
 
-    # ── Switch toggle handlers (avoid circular binding) ──
+    # ── Yes/No button toggle handlers ──
 
-    _switch_syncing = False  # guard against circular updates
+    def _sync_buttons(self):
+        """Push property values into Yes/No buttons (called once after KV build)."""
+        self._update_toggle_btn('batch_btn', self.batch_enabled)
+        self._update_toggle_btn('thinking_btn', self.reader_enable_thinking)
 
-    def _sync_switches(self):
-        """Push property values into switch widgets (called once after KV build)."""
-        self._switch_syncing = True
+    def _update_toggle_btn(self, btn_id, value):
+        """Update a toggle button's text and color."""
         try:
-            if hasattr(self.ids, 'batch_switch'):
-                self.ids.batch_switch.active = self.batch_enabled
-            if hasattr(self.ids, 'thinking_switch'):
-                self.ids.thinking_switch.active = self.reader_enable_thinking
-        finally:
-            self._switch_syncing = False
+            btn = self.ids[btn_id]
+            btn.text = "Yes" if value else "No"
+            btn.md_bg_color = (0.2, 0.6, 0.3, 1) if value else (0.3, 0.3, 0.3, 1)
+        except (KeyError, AttributeError):
+            pass
 
-    def _on_batch_toggle(self, value):
-        """Handle batch switch toggle."""
-        if self._switch_syncing:
-            return
-        self.batch_enabled = value
+    def _toggle_batch(self):
+        """Toggle batch on/off."""
+        self.batch_enabled = not self.batch_enabled
+        self._update_toggle_btn('batch_btn', self.batch_enabled)
 
-    def _on_thinking_toggle(self, value):
-        """Handle thinking switch toggle."""
-        if self._switch_syncing:
-            return
-        self.reader_enable_thinking = value
+    def _toggle_thinking(self):
+        """Toggle thinking on/off."""
+        self.reader_enable_thinking = not self.reader_enable_thinking
+        self._update_toggle_btn('thinking_btn', self.reader_enable_thinking)
 
     # ── Translation ──
 

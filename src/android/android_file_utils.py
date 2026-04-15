@@ -551,19 +551,19 @@ def _copy_uri_to_local(uri_string):
 
 
 def open_native_file_picker(callback, extensions=None, request_code=None):
-    """Open the Android native file picker (Storage Access Framework).
+    """Open the Android native file picker.
 
-    Uses ACTION_GET_CONTENT Intent which is more broadly compatible than
-    ACTION_OPEN_DOCUMENT across Android versions and OEM skins.  Shows the
-    system document picker UI and lets the user browse all accessible
-    locations (Downloads, Drive, file managers, etc.).
+    Uses the simplest possible ACTION_GET_CONTENT intent with type */*
+    to show ALL files on ALL storages (internal + SD card).  No MIME
+    filtering — the user picks whatever they want.
 
     On non-Android platforms, falls back to a KivyMD MDFileManager.
 
     Args:
         callback: function(file_path_or_None) called with the selected
                   file's local path, or None if cancelled.
-        extensions: list of '.ext' strings (default: ['.epub', '.txt', '.pdf'])
+        extensions: list of '.ext' strings (unused on Android — kept for
+                    desktop fallback compatibility)
         request_code: int request code (default: REQUEST_CODE_OPEN_FILE)
     """
     if extensions is None:
@@ -582,69 +582,16 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
         Intent = autoclass('android.content.Intent')
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
 
-        # ACTION_GET_CONTENT is more compatible than ACTION_OPEN_DOCUMENT
-        # across different Android versions and OEM skins (Samsung, Xiaomi, etc.)
+        # Simplest possible intent — show ALL files on ALL storages
         intent = Intent(Intent.ACTION_GET_CONTENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType('*/*')
 
-        # Build MIME types from extensions
-        mime_types = []
-        for ext in extensions:
-            mime = _MIME_MAP.get(ext.lower())
-            if mime:
-                mime_types.append(mime)
-
-        if not mime_types:
-            mime_types = ['*/*']
-
-        if len(mime_types) == 1:
-            intent.setType(mime_types[0])
-        else:
-            # Multiple MIME types: set type to */* and add EXTRA_MIME_TYPES
-            intent.setType('*/*')
-
-            # CRITICAL: To create a Java String[], we must call getClass()
-            # on a String INSTANCE, not on the pyjnius wrapper class.
-            # String.getClass() returns java.lang.Class (wrong!),
-            # String("x").getClass() returns java.lang.String (correct!).
-            try:
-                JString = autoclass('java.lang.String')
-                Array = autoclass('java.lang.reflect.Array')
-                # Create a dummy instance to get the correct Class object
-                str_class = JString("").getClass()
-                mime_array = Array.newInstance(str_class, len(mime_types))
-                for i, m in enumerate(mime_types):
-                    Array.set(mime_array, i, JString(m))
-                intent.putExtra(Intent.EXTRA_MIME_TYPES, mime_array)
-                print(f"[INFO] Set EXTRA_MIME_TYPES: {mime_types}")
-            except Exception as e:
-                # If array construction fails, fall back to */* (shows all files)
-                print(f"[WARN] Could not set EXTRA_MIME_TYPES: {e}")
-                # */* is already set, so all files will be shown
-
-        # Set initial URI to Downloads — on Android 8+ this opens with
-        # a sidebar showing all mounted volumes (internal + SD card).
-        try:
-            DocumentsContract = autoclass(
-                'android.provider.DocumentsContract')
-            Uri = autoclass('android.net.Uri')
-            # "com.android.providers.downloads.documents" is the Downloads
-            # provider; its root URI shows the Downloads folder but the
-            # sidebar lets the user switch to any volume.
-            downloads_uri = Uri.parse(
-                "content://com.android.providers.downloads.documents/root/downloads")
-            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloads_uri)
-        except Exception:
-            # EXTRA_INITIAL_URI requires API 26+ (we target 26 minimum)
-            pass
-
-        # Store callback and extension filter
+        # Store callback
         _pending_callbacks[request_code] = callback
-        _pending_extensions[request_code] = set(ext.lower() for ext in extensions)
 
         def _on_activity_result(request_code_recv, result_code, intent_data):
             cb = _pending_callbacks.pop(request_code_recv, None)
-            valid_exts = _pending_extensions.pop(request_code_recv, None)
             if cb is None:
                 return
 
@@ -667,21 +614,14 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
                 return
 
             uri_string = uri.toString()
-            print(f"[INFO] SAF picked URI: {uri_string}")
+            print(f"[INFO] Picked URI: {uri_string}")
 
             # Copy from content:// URI to a local file in a worker thread
             import threading
 
             def _copy_worker():
                 local_path = _copy_uri_to_local(uri_string)
-
-                # Client-side extension validation
-                if local_path and valid_exts:
-                    ext = os.path.splitext(local_path)[1].lower()
-                    if ext not in valid_exts:
-                        print(f"[WARN] Selected file has wrong extension: {ext}")
-                        # Still allow it — user explicitly chose it
-
+                print(f"[INFO] Copied to local: {local_path}")
                 try:
                     from kivy.clock import Clock
                     Clock.schedule_once(lambda dt: cb(local_path), 0)
@@ -692,14 +632,12 @@ def open_native_file_picker(callback, extensions=None, request_code=None):
 
         android_activity.bind(on_activity_result=_on_activity_result)
 
-        # Use createChooser for a nicer picker UI on some devices
-        chooser = Intent.createChooser(intent, "Select file")
         current_activity = PythonActivity.mActivity
-        current_activity.startActivityForResult(chooser, request_code)
-        print(f"[INFO] Opened native file picker (request_code={request_code})")
+        current_activity.startActivityForResult(intent, request_code)
+        print(f"[INFO] Opened file picker (request_code={request_code})")
 
     except Exception as e:
-        print(f"[ERR] Native file picker failed: {e}")
+        print(f"[ERR] File picker failed: {e}")
         import traceback
         traceback.print_exc()
         _desktop_file_picker(callback, extensions)
