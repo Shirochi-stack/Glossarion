@@ -1780,6 +1780,23 @@ class EPUBCompiler:
                     # File exists - load and apply existing translations
                     self.log("📁 Found existing translated_headers.txt - applying existing translations...")
                     
+                    # Repair: sort entries and discover missing Output File fields
+                    try:
+                        from translate_headers_standalone import repair_translation_file
+                        repair_translation_file(
+                            translations_file, self.epub_path, self.output_dir,
+                            log_callback=self.log
+                        )
+                        # Also repair TOC.txt if it exists
+                        _toc_txt = os.path.join(self.output_dir, 'TOC.txt')
+                        if os.path.exists(_toc_txt):
+                            repair_translation_file(
+                                _toc_txt, self.epub_path, self.output_dir,
+                                log_callback=self.log
+                            )
+                    except Exception:
+                        pass
+                    
                     try:
                         # Import the functions from standalone module
                         from translate_headers_standalone import load_translations_from_file

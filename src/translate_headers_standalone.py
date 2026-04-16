@@ -401,6 +401,133 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
     return source_headers, translated_headers, output_files
 
 
+def repair_translation_file(
+    translations_file: str,
+    epub_path: str,
+    output_dir: str,
+    log_callback=None
+) -> bool:
+    """Repair a translated_headers.txt or TOC.txt file:
+    1. Sort all entries by chapter number
+    2. Discover and add missing Output File fields retroactively
+    
+    Args:
+        translations_file: Path to the translations file to repair
+        epub_path: Path to the source EPUB (for spine order)
+        output_dir: Output directory containing translated HTML files
+        log_callback: Optional logging callback
+        
+    Returns:
+        True if the file was modified, False otherwise
+    """
+    log = log_callback or (lambda msg: None)
+    
+    if not os.path.exists(translations_file):
+        return False
+    
+    # Load existing data
+    source_headers, translated_headers, output_files = load_translations_from_file(
+        translations_file, log_callback=lambda msg: None  # suppress load logs during repair
+    )
+    
+    if not source_headers:
+        return False
+    
+    # Get spine order from EPUB for output file discovery
+    try:
+        source_mapping, spine_order = extract_source_chapters_with_opf_mapping(
+            epub_path, log_callback=lambda msg: None  # suppress logs
+        )
+    except Exception:
+        spine_order = []
+    
+    # Check if repair is needed: unsorted entries or missing Output File fields
+    sorted_nums = sorted(source_headers.keys())
+    current_order = list(source_headers.keys())
+    needs_sort = current_order != sorted_nums
+    
+    # Discover missing Output File entries
+    missing_out = set()
+    try:
+        out_files_list = os.listdir(output_dir)
+    except OSError:
+        out_files_list = []
+    
+    for num in source_headers:
+        if num not in output_files and spine_order:
+            # Try to find output file from spine order
+            if 0 < num <= len(spine_order):
+                src_file = spine_order[num - 1]
+                src_bn = get_basename_without_ext(os.path.basename(src_file))
+                for candidate in out_files_list:
+                    cand_bn = get_basename_without_ext(candidate)
+                    if cand_bn.startswith('response_'):
+                        cand_bn = cand_bn[9:]
+                    if cand_bn == src_bn:
+                        clean = get_basename_without_ext(candidate)
+                        if clean.startswith('response_'):
+                            clean = clean[9:]
+                        output_files[num] = clean
+                        missing_out.add(num)
+                        break
+    
+    if not needs_sort and not missing_out:
+        return False  # Nothing to repair
+    
+    # Detect file type from header line
+    try:
+        with open(translations_file, 'r', encoding='utf-8') as f:
+            first_line = f.readline().strip()
+    except Exception:
+        first_line = ""
+    
+    is_toc = 'TOC' in first_line
+    file_label = "TOC.txt" if is_toc else "translated_headers.txt"
+    header_title = "TOC Translations" if is_toc else "Chapter Header Translations"
+    
+    # Rebuild the file sorted with Output File data
+    try:
+        with open(translations_file, 'w', encoding='utf-8') as f:
+            f.write(f"{header_title}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            has_chapter_zero = 0 in sorted_nums
+            if has_chapter_zero and not is_toc:
+                f.write("Note: This novel uses 0-based chapter numbering (starts with Chapter 0)\n")
+                f.write("-" * 50 + "\n\n")
+            
+            for num in sorted_nums:
+                orig = source_headers.get(num, "Unknown")
+                trans = translated_headers.get(num, orig)
+                f.write(f"Chapter {num}:\n")
+                f.write(f"  Original:   {orig}\n")
+                f.write(f"  Translated: {trans}\n")
+                if num in output_files and output_files[num]:
+                    f.write(f"  Output File: {output_files[num]}\n")
+                if num not in translated_headers:
+                    f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                f.write("-" * 40 + "\n")
+            
+            f.write(f"\nSummary:\n")
+            count_label = "Total entries" if is_toc else "Total chapters"
+            f.write(f"{count_label}: {len(sorted_nums)}\n")
+            if sorted_nums:
+                f.write(f"{'Entry' if is_toc else 'Chapter'} range: {min(sorted_nums)} to {max(sorted_nums)}\n")
+            f.write(f"Successfully translated: {len(translated_headers)}\n")
+        
+        repairs = []
+        if needs_sort:
+            repairs.append("sorted")
+        if missing_out:
+            repairs.append(f"{len(missing_out)} Output File(s) discovered")
+        log(f"🔧 Repaired {file_label}: {', '.join(repairs)}")
+        return True
+        
+    except Exception as e:
+        log(f"⚠️ Failed to repair {file_label}: {e}")
+        return False
+
+
 def apply_existing_translations(
     epub_path: str,
     output_dir: str,
@@ -1167,43 +1294,94 @@ def run_translate_headers_gui(gui_instance):
                                 if new_translations:
                                     gui_instance.append_log(f"✅ Translated {len(new_translations)} new chapter header(s)")
                                     
-                                    # Append to the file
-                                    with open(translations_file, 'r', encoding='utf-8') as f:
-                                        existing_content = f.read()
+                                    # ── Rebuild the entire file sorted, with Output File for all entries ──
+                                    # Merge originals: existing + new
+                                    merged_source = dict(existing_source)
+                                    merged_source.update(all_headers)
                                     
-                                    import re as _re
-                                    summary_match = _re.search(r'\nSummary:\n', existing_content)
-                                    if summary_match:
-                                        existing_content = existing_content[:summary_match.start()]
+                                    # Merge translations: existing + new
+                                    merged_trans = dict(existing_trans)
+                                    merged_trans.update(new_translations)
                                     
+                                    # Merge output files: existing + discover for ALL missing entries
+                                    merged_out = dict(existing_out)
+                                    # Build output dir listing once for efficiency
+                                    try:
+                                        _out_files_list = os.listdir(output_dir)
+                                    except OSError:
+                                        _out_files_list = []
+                                    for num in merged_source:
+                                        if num not in merged_out:
+                                            # Try to find output file from spine order
+                                            if 0 < num <= len(spine_order):
+                                                src_file = spine_order[num - 1]
+                                                src_bn = get_basename_without_ext(os.path.basename(src_file))
+                                                # Check if an output file with this basename exists
+                                                for candidate in _out_files_list:
+                                                    cand_bn = get_basename_without_ext(candidate)
+                                                    if cand_bn.startswith('response_'):
+                                                        cand_bn = cand_bn[9:]
+                                                    if cand_bn == src_bn:
+                                                        # Strip response_ prefix and extensions
+                                                        clean = get_basename_without_ext(candidate)
+                                                        if clean.startswith('response_'):
+                                                            clean = clean[9:]
+                                                        merged_out[num] = clean
+                                                        break
+                                    
+                                    # Write the entire file sorted by chapter number
+                                    all_nums = sorted(merged_source.keys())
                                     with open(translations_file, 'w', encoding='utf-8') as f:
-                                        f.write(existing_content.rstrip('\n') + '\n')
+                                        f.write("Chapter Header Translations\n")
+                                        f.write("=" * 50 + "\n\n")
                                         
-                                        for num in sorted(new_nums):
-                                            orig = all_headers.get(num, "")
-                                            trans = new_translations.get(num, orig)
+                                        has_chapter_zero = 0 in all_nums
+                                        if has_chapter_zero:
+                                            f.write("Note: This novel uses 0-based chapter numbering (starts with Chapter 0)\n")
+                                            f.write("-" * 50 + "\n\n")
+                                        
+                                        for num in all_nums:
+                                            orig = merged_source.get(num, "Unknown")
+                                            trans = merged_trans.get(num, orig)
                                             f.write(f"Chapter {num}:\n")
                                             f.write(f"  Original:   {orig}\n")
                                             f.write(f"  Translated: {trans}\n")
-                                            if num not in new_translations:
+                                            if num in merged_out:
+                                                f.write(f"  Output File: {merged_out[num]}\n")
+                                            if num not in merged_trans:
                                                 f.write("  Status:     ⚠️ Using original (translation failed)\n")
                                             f.write("-" * 40 + "\n")
                                         
-                                        all_nums = sorted(set(existing_source.keys()) | new_nums)
                                         f.write(f"\nSummary:\n")
                                         f.write(f"Total chapters: {len(all_nums)}\n")
                                         if all_nums:
                                             f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
-                                        total_translated = len(existing_trans) + len(new_translations)
+                                        total_translated = len(merged_trans)
                                         f.write(f"Successfully translated: {total_translated}\n")
                                     
-                                    gui_instance.append_log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                    gui_instance.append_log(f"📝 Rebuilt translated_headers.txt with {len(new_translations)} new entries (sorted)")
                             except Exception as new_err:
                                 gui_instance.append_log(f"⚠️ Failed to translate new headers: {new_err}")
                         elif new_nums:
                             gui_instance.append_log(f"⚠️ {len(new_nums)} new chapter(s) detected but no API client — will use originals")
                 except Exception as recon_err:
                     gui_instance.append_log(f"⚠️ Reconciliation check failed: {recon_err} — proceeding with existing file")
+                
+                # ── Repair: sort entries and discover missing Output File fields ──
+                try:
+                    repair_translation_file(
+                        translations_file, current_epub, output_dir,
+                        log_callback=gui_instance.append_log
+                    )
+                    # Also repair TOC.txt if it exists
+                    toc_txt_file = os.path.join(output_dir, "TOC.txt")
+                    if os.path.exists(toc_txt_file):
+                        repair_translation_file(
+                            toc_txt_file, current_epub, output_dir,
+                            log_callback=gui_instance.append_log
+                        )
+                except Exception as repair_err:
+                    gui_instance.append_log(f"⚠️ Repair check failed: {repair_err}")
                 
                 # Use existing translations to update HTML files and toc.ncx
                 gui_instance.append_log(f"   🔄 Will update HTML files using existing translations...")
