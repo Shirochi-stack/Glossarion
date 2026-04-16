@@ -379,8 +379,8 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
             if translated_match:
                 translated_headers[chapter_num] = translated_match.group(1).strip()
             
-            # Parse output file
-            output_match = re.search(r'Output File:\s*(.+?)(?:\n|$)', block)
+            # Parse output file or target URI (TOC uses Target URI, Headers use Output File)
+            output_match = re.search(r'(?:Output File|Target URI):\s*(.+?)(?:\n|$)', block)
             if output_match:
                 output_files[chapter_num] = output_match.group(1).strip()
         
@@ -504,7 +504,8 @@ def repair_translation_file(
                 f.write(f"  Original:   {orig}\n")
                 f.write(f"  Translated: {trans}\n")
                 if num in output_files and output_files[num]:
-                    f.write(f"  Output File: {output_files[num]}\n")
+                    label = "Target URI" if is_toc else "Output File"
+                    f.write(f"  {label}: {output_files[num]}\n")
                 if num not in translated_headers:
                     f.write("  Status:     ⚠️ Using original (translation failed)\n")
                 f.write("-" * 40 + "\n")

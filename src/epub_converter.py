@@ -5108,7 +5108,7 @@ img {
                     f.write(f"  Original:   {orig}\n")
                     f.write(f"  Translated: {trans}\n")
                     if refs and num in refs and refs[num]:
-                        f.write(f"  Output File: {refs[num]}\n")
+                        f.write(f"  Target URI: {refs[num]}\n")
                     if num not in translated:
                         f.write("  Status:     ⚠️ Using original (translation failed)\n")
                     f.write("-" * 40 + "\n")
@@ -5338,6 +5338,34 @@ img {
                 # If TOC.txt exists, treat it as authoritative: only include entries present in the file.
                 if toc_source_headers:
                     toc_filter_nums = set(toc_source_headers.keys())
+                    
+                    # --- Retroactive Fix: Correct Target URIs ---
+                    # Compute the correct target URIs from toc.ncx (preserving fragments/extensions)
+                    correct_output_refs: Dict[int, str] = {}
+                    for _idx, _ent in enumerate(entries, 1):
+                        _src = (_ent.get('src') or '').strip()
+                        if not _src:
+                            _fallback = refs.get(_idx, '')
+                            correct_output_refs[_idx] = os.path.basename(_fallback) if _fallback else ''
+                            continue
+                        _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
+                        _core = self._normalize_core_name(_src_base)
+                        _target = spine_href_by_core.get(_core)
+                        _resolved = _target if _target else _src_base
+                        _final_src = f"{os.path.basename(_resolved)}#{_frag}" if _frag else os.path.basename(_resolved)
+                        correct_output_refs[_idx] = _final_src
+                    
+                    # Check if any loaded refs differ from the correct ones (only for existing toc items)
+                    needs_uri_fix = False
+                    for _k in toc_source_headers.keys():
+                        if correct_output_refs.get(_k) != toc_output_files.get(_k):
+                            needs_uri_fix = True
+                            break
+                            
+                    if needs_uri_fix:
+                        self.log("🔧 Retroactively fixing malformed Target URIs in existing TOC.txt")
+                        self._save_toc_translations_file(toc_txt_path, toc_source_headers, translations, correct_output_refs)
+                        toc_output_files = correct_output_refs
                 
                 # --- Reconcile: detect new entries added to the source EPUB ---
                 existing_toc_nums = set(toc_source_headers.keys()) if toc_source_headers else set()
@@ -5372,35 +5400,22 @@ img {
                                 self.log(f"✅ Translated {len(new_toc_translations)} new TOC entry(ies)")
                                 translations.update(new_toc_translations)
                                 
-                                # Compute output refs for new entries
+                                # Compute target URIs for new entries (preserve fragments and extensions)
                                 new_output_refs = {}
                                 for _idx in new_toc_nums:
                                     if _idx <= len(entries):
                                         _ent = entries[_idx - 1]
                                         _src = (_ent.get('src') or '').strip()
                                         if _src:
-                                            _src_base = _src.split('#', 1)[0] if '#' in _src else _src
+                                            _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
                                             _core = self._normalize_core_name(_src_base)
                                             _target = spine_href_by_core.get(_core)
                                             _resolved = _target if _target else _src_base
-                                            _clean = os.path.basename(_resolved)
-                                            while True:
-                                                _name, _ext = os.path.splitext(_clean)
-                                                if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
-                                                    _clean = _name
-                                                else:
-                                                    break
-                                            new_output_refs[_idx] = _clean
+                                            _final_src = f"{os.path.basename(_resolved)}#{_frag}" if _frag else os.path.basename(_resolved)
+                                            new_output_refs[_idx] = _final_src
                                         else:
-                                            _fb = refs.get(_idx, '')
-                                            _fb_base = os.path.basename(_fb) if _fb else ''
-                                            while _fb_base:
-                                                _n, _e = os.path.splitext(_fb_base)
-                                                if _e and _e.lower() in ['.html', '.xhtml', '.htm', '.xml']:
-                                                    _fb_base = _n
-                                                else:
-                                                    break
-                                            new_output_refs[_idx] = _fb_base
+                                            _fallback = refs.get(_idx, '')
+                                            new_output_refs[_idx] = os.path.basename(_fallback) if _fallback else ''
                                 
                                 # Append new entries to the existing file
                                 try:
@@ -5536,29 +5551,14 @@ img {
                                 _src = (_ent.get('src') or '').strip()
                                 if not _src:
                                     _fallback = refs.get(_idx, '')
-                                    # Strip extensions from fallback too
-                                    _fb_base = os.path.basename(_fallback) if _fallback else ''
-                                    while _fb_base:
-                                        _name, _ext = os.path.splitext(_fb_base)
-                                        if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
-                                            _fb_base = _name
-                                        else:
-                                            break
-                                    output_refs[_idx] = _fb_base
+                                    output_refs[_idx] = os.path.basename(_fallback) if _fallback else ''
                                     continue
                                 _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
                                 _core = self._normalize_core_name(_src_base)
                                 _target = spine_href_by_core.get(_core)
                                 _resolved = _target if _target else _src_base
-                                # Strip extensions to prevent double-extension issues
-                                _clean = os.path.basename(_resolved)
-                                while True:
-                                    _name, _ext = os.path.splitext(_clean)
-                                    if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
-                                        _clean = _name
-                                    else:
-                                        break
-                                output_refs[_idx] = _clean
+                                _final_src = f"{os.path.basename(_resolved)}#{_frag}" if _frag else os.path.basename(_resolved)
+                                output_refs[_idx] = _final_src
                             self._save_toc_translations_file(toc_txt_path, original, translations, output_refs)
                             self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
                         else:
