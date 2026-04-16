@@ -1389,6 +1389,22 @@ class EPUBCompiler:
         if (self.translate_titles or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1' or getattr(self, 'translate_toc_ncx', False)):
             model = os.getenv('MODEL')
             api_key = os.getenv('API_KEY')
+            # Check if model needs API key (vertex/, authgpt/, authgem/, authgem-vertex/, antigravity/,
+            # google-translate, google-translate-free, or models with '@' separator don't need one)
+            _model_lower = (model or '').lower()
+            model_needs_api_key = not (
+                _model_lower in ['google-translate', 'google-translate-free'] or
+                '@' in _model_lower or
+                _model_lower.startswith('vertex/') or
+                _model_lower.startswith('authgpt/') or
+                _model_lower.startswith('authgem/') or
+                _model_lower.startswith('authgem-vertex/') or
+                _model_lower.startswith('antigravity/') or
+                _model_lower.startswith('deepl')
+            )
+            # Use a dummy API key for keyless models so UnifiedClient can initialize
+            if model and not api_key and not model_needs_api_key:
+                api_key = 'dummy-key-not-required'
             if model and api_key and UnifiedClient:
                 self.api_client = UnifiedClient(api_key=api_key, model=model, output_dir=self.output_dir)
             elif model and api_key and not UnifiedClient:
