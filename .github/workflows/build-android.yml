@@ -201,6 +201,18 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # Pre-create the smoke-test log files so the artifact upload below
+      # always has something to upload, even if the emulator-runner step
+      # itself times out or fails before smoke-test.sh can run.
+      - name: Pre-create smoke test log files
+        if: steps.find_apk.outputs.apk_found == 'true'
+        run: |
+          : > "$GITHUB_WORKSPACE/adb-install.log"
+          : > "$GITHUB_WORKSPACE/emulator-logcat-full.log"
+          : > "$GITHUB_WORKSPACE/emulator-logcat-filtered.log"
+          echo "(placeholder — emulator step did not run or failed before writing)" \
+            > "$GITHUB_WORKSPACE/emulator-logcat-full.log"
+
       - name: Run emulator smoke test
         if: steps.find_apk.outputs.apk_found == 'true'
         continue-on-error: true
@@ -210,9 +222,13 @@ jobs:
           arch: x86_64
           target: google_apis
           profile: pixel_5
-          ram-size: 2048M
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          ram-size: 4096M
+          heap-size: 512M
+          disk-size: 6144M
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
           disable-animations: true
+          disable-spellchecker: true
           script: bash $GITHUB_WORKSPACE/.github/workflows/smoke-test.sh
 
       - name: Upload emulator logcat
@@ -224,7 +240,7 @@ jobs:
             emulator-logcat-full.log
             emulator-logcat-filtered.log
             adb-install.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       
       - name: Upload to Release (if tagged)
         if: startsWith(github.ref, 'refs/tags/') && steps.find_apk.outputs.apk_found == 'true'
