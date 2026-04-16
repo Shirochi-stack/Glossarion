@@ -446,35 +446,7 @@ def repair_translation_file(
     current_order = list(source_headers.keys())
     needs_sort = current_order != sorted_nums
     
-    # Discover missing Output File entries
-    missing_out = set()
-    try:
-        out_files_list = os.listdir(output_dir)
-    except OSError:
-        out_files_list = []
-    
-    for num in source_headers:
-        if num not in output_files and spine_order:
-            # Try to find output file from spine order
-            if 0 < num <= len(spine_order):
-                src_file = spine_order[num - 1]
-                src_bn = get_basename_without_ext(os.path.basename(src_file))
-                for candidate in out_files_list:
-                    cand_bn = get_basename_without_ext(candidate)
-                    if cand_bn.startswith('response_'):
-                        cand_bn = cand_bn[9:]
-                    if cand_bn == src_bn:
-                        clean = get_basename_without_ext(candidate)
-                        if clean.startswith('response_'):
-                            clean = clean[9:]
-                        output_files[num] = clean
-                        missing_out.add(num)
-                        break
-    
-    if not needs_sort and not missing_out:
-        return False  # Nothing to repair
-    
-    # Detect file type from header line
+    # Detect file type from header line FIRST
     try:
         with open(translations_file, 'r', encoding='utf-8') as f:
             first_line = f.readline().strip()
@@ -484,6 +456,35 @@ def repair_translation_file(
     is_toc = 'TOC' in first_line
     file_label = "TOC.txt" if is_toc else "translated_headers.txt"
     header_title = "TOC Translations" if is_toc else "Chapter Header Translations"
+
+    # Discover missing Output File entries (ONLY for headers, TOC.txt mappings are not 1:1 with spine)
+    missing_out = set()
+    if not is_toc:
+        try:
+            out_files_list = os.listdir(output_dir)
+        except OSError:
+            out_files_list = []
+        
+        for num in source_headers:
+            if num not in output_files and spine_order:
+                # Try to find output file from spine order
+                if 0 < num <= len(spine_order):
+                    src_file = spine_order[num - 1]
+                    src_bn = get_basename_without_ext(os.path.basename(src_file))
+                    for candidate in out_files_list:
+                        cand_bn = get_basename_without_ext(candidate)
+                        if cand_bn.startswith('response_'):
+                            cand_bn = cand_bn[9:]
+                        if cand_bn == src_bn:
+                            clean = get_basename_without_ext(candidate)
+                            if clean.startswith('response_'):
+                                clean = clean[9:]
+                            output_files[num] = clean
+                            missing_out.add(num)
+                            break
+    
+    if not needs_sort and not missing_out:
+        return False  # Nothing to repair
     
     # Rebuild the file sorted with Output File data
     try:

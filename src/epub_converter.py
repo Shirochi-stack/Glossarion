@@ -1585,6 +1585,14 @@ class EPUBCompiler:
                                                                 f.write(f"Successfully translated: {len(translated_headers)}\n")
                                                             
                                                             self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                                            
+                                                            # ── IMMEDIATE REPAIR TO ENSURE SORTING AND METADATA ──
+                                                            try:
+                                                                from translate_headers_standalone import repair_translation_file
+                                                                repair_translation_file(translations_file, source_epub_path, self.output_dir, log_callback=self.log)
+                                                            except Exception as repair_err:
+                                                                self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+                                                                
                                                         except Exception as append_err:
                                                             self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
                                                     else:
@@ -1643,6 +1651,14 @@ class EPUBCompiler:
                                                                     f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
                                                                 f.write(f"Successfully translated: {len(translated_headers)}\n")
                                                             self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                                            
+                                                            # ── IMMEDIATE REPAIR TO ENSURE SORTING AND METADATA ──
+                                                            try:
+                                                                from translate_headers_standalone import repair_translation_file
+                                                                repair_translation_file(translations_file, source_epub_path, self.output_dir, log_callback=self.log)
+                                                            except Exception as repair_err:
+                                                                self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+                                                                
                                                         except Exception as append_err:
                                                             self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
                                                     else:
@@ -5419,6 +5435,15 @@ img {
                                         f.write(f"Successfully translated: {len(translations)}\n")
                                     
                                     self.log(f"📝 Updated TOC.txt with {len(new_toc_translations)} new entries")
+                                    
+                                    # ── IMMEDIATE REPAIR TO ENSURE SORTING AND METADATA ──
+                                    try:
+                                        from translate_headers_standalone import repair_translation_file
+                                        source_epub_path = os.getenv('EPUB_PATH') or self.epub_path
+                                        repair_translation_file(toc_txt_path, source_epub_path, self.output_dir, log_callback=self.log)
+                                    except Exception as repair_err:
+                                        self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+                                        
                                 except Exception as append_err:
                                     self.log(f"⚠️ Failed to update TOC.txt: {append_err}")
                             else:
