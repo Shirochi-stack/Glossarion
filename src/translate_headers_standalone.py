@@ -586,6 +586,83 @@ def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str],
         log(f"⚠️ Error updating toc.ncx: {e}")
 
 
+def _cross_reference_from_file(
+    entries_to_translate: Dict[int, str],
+    other_file_path: str,
+    log_callback=None
+) -> tuple:
+    """Cross-reference entries against an existing translation file to reuse translations.
+
+    Before sending entries to the API, check if the other translation file
+    (TOC.txt or translated_headers.txt) already contains an identical raw entry.
+    If so, reuse the existing translation to avoid redundant API calls and
+    ensure consistency.
+
+    Args:
+        entries_to_translate: Dict[int, str] mapping index -> raw text
+        other_file_path: Path to the other translation file
+        log_callback: Optional callback for logging
+
+    Returns:
+        Tuple of (reused, remaining) dicts
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+
+    reused: Dict[int, str] = {}
+    remaining: Dict[int, str] = dict(entries_to_translate)
+
+    if not other_file_path or not os.path.exists(other_file_path):
+        return reused, remaining
+
+    try:
+        other_originals, other_translated, _ = load_translations_from_file(
+            other_file_path, log_callback
+        )
+
+        if not other_originals or not other_translated:
+            return reused, remaining
+
+        # Build a map: stripped raw text -> translated text from the other file
+        raw_to_translated: Dict[str, str] = {}
+        for idx, raw in other_originals.items():
+            key = (raw or '').strip()
+            if key and idx in other_translated:
+                trans = (other_translated[idx] or '').strip()
+                if trans and trans != key:
+                    raw_to_translated[key] = trans
+
+        if not raw_to_translated:
+            return reused, remaining
+
+        other_label = os.path.basename(other_file_path)
+
+        # Match entries against the other file's originals
+        for idx, raw in list(remaining.items()):
+            key = (raw or '').strip()
+            if key in raw_to_translated:
+                reused[idx] = raw_to_translated[key]
+                del remaining[idx]
+
+        if reused:
+            log(f"♻️ Reused {len(reused)}/{len(entries_to_translate)} "
+                f"header translation(s) from {other_label}")
+            for idx in list(reused.keys())[:3]:
+                log(f"  ♻️ [{idx}] {entries_to_translate[idx]} → {reused[idx]}")
+            if len(reused) > 3:
+                log(f"  ... and {len(reused) - 3} more")
+
+    except Exception as e:
+        log(f"⚠️ Cross-reference check failed ({e}) — will translate all entries")
+        remaining = dict(entries_to_translate)
+        reused = {}
+
+    return reused, remaining
+
+
 def translate_headers_standalone(
     epub_path: str,
     output_dir: str,
@@ -688,18 +765,40 @@ def translate_headers_standalone(
             # Just set our callback
             api_client._stop_callback = check_gui_stop
     
+    # ── Cross-reference: reuse translations from TOC.txt if it exists ──
+    toc_file = os.path.join(output_dir, 'TOC.txt')
+    reused_from_toc, hdr_remaining = _cross_reference_from_file(
+        headers_to_translate, toc_file, log_callback
+    )
+    
     # Call translate_and_save_headers - IDENTICAL TO PIPELINE
     # This method uses the EXACT same translation prompts, HTML update logic, and file saving
     try:
-        translated_headers = translator.translate_and_save_headers(
-            html_dir=output_dir,
-            headers_dict=headers_to_translate,
-            batch_size=config.get('headers_per_batch', -1) if config else None,
-            output_dir=output_dir,
-            update_html=update_html,  # Uses _update_html_headers_exact - same as pipeline
-            save_to_file=save_to_file,  # Saves to translated_headers.txt - same as pipeline
-            current_titles=current_titles_map  # Enables exact title replacement
-        )
+        if hdr_remaining:
+            # Only translate entries not reused from TOC.txt
+            translated_headers = translator.translate_and_save_headers(
+                html_dir=output_dir,
+                headers_dict=hdr_remaining,
+                batch_size=config.get('headers_per_batch', -1) if config else None,
+                output_dir=output_dir,
+                update_html=update_html,  # Uses _update_html_headers_exact - same as pipeline
+                save_to_file=save_to_file,  # Saves to translated_headers.txt - same as pipeline
+                current_titles=current_titles_map  # Enables exact title replacement
+            )
+        else:
+            translated_headers = {}
+        
+        # Merge reused translations
+        if reused_from_toc:
+            translated_headers.update(reused_from_toc)
+            # Re-save the full file with merged entries
+            if save_to_file:
+                translator._save_translations_to_file(
+                    headers_to_translate, translated_headers,
+                    os.path.join(output_dir, 'translated_headers.txt'),
+                    current_titles_map
+                )
+                log("📝 Re-saved translated_headers.txt with cross-referenced entries")
     except KeyboardInterrupt:
         log("\n⛔ Translation interrupted by user")
         translator.set_stop_flag(True)

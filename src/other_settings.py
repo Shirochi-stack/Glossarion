@@ -5608,23 +5608,26 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
 
-    # Use source toc.ncx
+    # Use & Translate source toc.ncx (combined toggle)
     if not hasattr(self, 'use_toc_ncx_var'):
         self.use_toc_ncx_var = self.config.get('use_toc_ncx', False)
 
-    use_toc_cb = self._create_styled_checkbox("Use toc.ncx")
+    # Sync translate_toc_ncx_var to match use_toc_ncx_var (they're now unified)
+    if not hasattr(self, 'translate_toc_ncx_var'):
+        self.translate_toc_ncx_var = self.use_toc_ncx_var
+    else:
+        self.translate_toc_ncx_var = self.use_toc_ncx_var
+
+    use_toc_cb = self._create_styled_checkbox("Use & Translate toc.ncx")
     use_toc_cb.setToolTip(
-        "Use the toc.ncx from the source EPUB to build the Table of Contents.\n"
-        "This can preserve the original TOC structure and anchor links."
+        "Use the toc.ncx from the source EPUB to build the Table of Contents,\n"
+        "and translate all entries via one API call (cached to TOC.txt).\n"
+        "This preserves the original TOC structure while translating labels."
     )
     try:
         use_toc_cb.setChecked(bool(self.use_toc_ncx_var))
     except Exception:
         pass
-
-    # Translate source toc.ncx (single API call)
-    if not hasattr(self, 'translate_toc_ncx_var'):
-        self.translate_toc_ncx_var = self.config.get('translate_toc_ncx', False)
 
     # TOC batch limit definitions (moved up for toggle logic)
     toc_batch_label = QLabel("TOC entries per batch:")
@@ -5638,23 +5641,13 @@ def _create_prompt_management_section(self, parent):
             self.toc_ncx_per_batch_var = text.strip()
     toc_batch_entry.textChanged.connect(_on_toc_batch_changed)
 
-    translate_toc_cb = self._create_styled_checkbox("Translate toc.ncx")
-    translate_toc_cb.setToolTip(
-        "Translate ALL toc.ncx entries in ONE API call and save a TOC.txt cache file\n"
-        "in the same robust format as translated_headers.txt (Original/Translated blocks)."
-    )
-    try:
-        translate_toc_cb.setChecked(bool(self.translate_toc_ncx_var))
-    except Exception:
-        pass
-
-    # Skip duplicate translations (only when translating toc.ncx)
+    # Skip duplicate translations
     if not hasattr(self, 'skip_duplicate_toc_translation_var'):
         self.skip_duplicate_toc_translation_var = self.config.get('skip_duplicate_toc_translation', False)
 
     skip_dup_toc_cb = self._create_styled_checkbox("Skip duplicate translation")
     skip_dup_toc_cb.setToolTip(
-        "When Translate toc.ncx is enabled, identical source labels are translated once and\n"
+        "When toc.ncx translation is enabled, identical source labels are translated once and\n"
         "duplicates reuse the first translation. Saves tokens and API time."
     )
     try:
@@ -5662,33 +5655,24 @@ def _create_prompt_management_section(self, parent):
     except Exception:
         pass
 
-    # Enable/disable translate checkbox based on master
-    translate_toc_cb.setEnabled(use_toc_cb.isChecked())
-    skip_dup_toc_cb.setEnabled(translate_toc_cb.isChecked())
-    toc_batch_label.setEnabled(translate_toc_cb.isChecked())
-    toc_batch_entry.setEnabled(translate_toc_cb.isChecked())
+    # Enable/disable child widgets based on master toggle
+    skip_dup_toc_cb.setEnabled(use_toc_cb.isChecked())
+    toc_batch_label.setEnabled(use_toc_cb.isChecked())
+    toc_batch_entry.setEnabled(use_toc_cb.isChecked())
 
     def _on_use_toc_ncx_toggle(checked):
         try:
             self.use_toc_ncx_var = bool(checked)
             self.config['use_toc_ncx'] = self.use_toc_ncx_var
             os.environ['USE_TOC_NCX'] = '1' if checked else '0'
-            translate_toc_cb.setEnabled(bool(checked))
-            if checked:
-                enabled = translate_toc_cb.isChecked()
-                skip_dup_toc_cb.setEnabled(enabled)
-                toc_batch_label.setEnabled(enabled)
-                toc_batch_entry.setEnabled(enabled)
-            else:
-                # When use_toc_ncx is OFF, also force translate_toc_ncx OFF
-                # and uncheck the translate checkbox so the state is consistent
-                translate_toc_cb.setChecked(False)
-                self.translate_toc_ncx_var = False
-                self.config['translate_toc_ncx'] = False
-                os.environ['TRANSLATE_TOC_NCX'] = '0'
-                skip_dup_toc_cb.setEnabled(False)
-                toc_batch_label.setEnabled(False)
-                toc_batch_entry.setEnabled(False)
+            # Unified: translate_toc_ncx always mirrors use_toc_ncx
+            self.translate_toc_ncx_var = bool(checked)
+            self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
+            os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
+            # Enable/disable child widgets
+            skip_dup_toc_cb.setEnabled(bool(checked))
+            toc_batch_label.setEnabled(bool(checked))
+            toc_batch_entry.setEnabled(bool(checked))
             # Deduplicate TOC and its child also depend on use_toc_ncx
             dedup_toc_cb.setEnabled(bool(checked))
             if checked:
@@ -5698,21 +5682,7 @@ def _create_prompt_management_section(self, parent):
         except Exception as e:
             print(f"⚠️ _on_use_toc_ncx_toggle error: {e}")
 
-    def _on_translate_toc_ncx_toggle(checked):
-        try:
-            if checked and not use_toc_cb.isChecked():
-                use_toc_cb.setChecked(True)
-            self.translate_toc_ncx_var = bool(checked)
-            self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
-            os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
-            skip_dup_toc_cb.setEnabled(bool(checked))
-            toc_batch_label.setEnabled(bool(checked))
-            toc_batch_entry.setEnabled(bool(checked))
-        except Exception as e:
-            print(f"⚠️ _on_translate_toc_ncx_toggle error: {e}")
-
     use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
-    translate_toc_cb.toggled.connect(_on_translate_toc_ncx_toggle)
     skip_dup_toc_cb.toggled.connect(_on_skip_dup_toc_toggle)
 
     # ── 2-column layout ──────────────────────────────────────────
@@ -5735,9 +5705,8 @@ def _create_prompt_management_section(self, parent):
     _toc_cols_h.addWidget(_toc_col_right)
     section_v.addWidget(_toc_cols_w)
 
-    # Left column: NCX toggles
+    # Left column: NCX toggle + skip dup
     _toc_col_left_v.addWidget(use_toc_cb)
-    _toc_col_left_v.addWidget(translate_toc_cb)
     skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
     _toc_col_left_v.addWidget(skip_dup_toc_cb)
     _toc_col_left_v.addStretch()

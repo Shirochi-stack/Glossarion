@@ -13714,7 +13714,7 @@ Important rules:
             os.environ['EPUB_LAYOUT_MODE'] = _epub_layout
             os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if _epub_layout == 'epub2' else '0'
             os.environ['USE_TOC_NCX'] = '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'
-            os.environ['TRANSLATE_TOC_NCX'] = '1' if (getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) and getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False))) else '0'
+            os.environ['TRANSLATE_TOC_NCX'] = os.environ['USE_TOC_NCX']  # Unified: translate always mirrors use
             os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'
             os.environ['DEDUPLICATE_TOC'] = '1' if getattr(self, 'deduplicate_toc_var', self.config.get('deduplicate_toc', False)) else '0'
             os.environ['FORCE_NCX_ONLY'] = '1' if getattr(self, 'force_ncx_only_var', True) else '0'
@@ -20084,7 +20084,7 @@ Important rules:
                 ('LEGACY_EPUB_STRUCTURE', '1' if getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) == 'epub2' else '0'),
                 # New: Use/translate source toc.ncx
                 ('USE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),
-                ('TRANSLATE_TOC_NCX', '1' if (getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) and getattr(self, 'translate_toc_ncx_var', self.config.get('translate_toc_ncx', False))) else '0'),
+                ('TRANSLATE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),  # Unified: mirrors USE_TOC_NCX
                 ('SKIP_DUPLICATE_TOC_TRANSLATION', '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'),
                 ('USE_P_TAG_TOC_FALLBACK', '1' if getattr(self, 'use_p_tag_toc_fallback_var', self.config.get('use_p_tag_toc_fallback', False)) else '0'),
                 # New: Translate special files (cover, nav, toc, message, etc.)

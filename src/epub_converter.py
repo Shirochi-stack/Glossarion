@@ -1929,16 +1929,37 @@ class EPUBCompiler:
                             for num in list(source_headers.keys())[:3]:
                                 self.log(f"  Example - Chapter {num}: {source_headers[num]}")
                             
-                            _hpb = getattr(self, 'headers_per_batch', -1)
-                            translated_headers = self.header_translator.translate_and_save_headers(
-                                html_dir=self.html_dir,
-                                headers_dict=source_headers,
-                                batch_size=_hpb if _hpb > 0 else None,
-                                output_dir=self.output_dir,
-                                update_html=getattr(self, 'update_html_headers', True),
-                                save_to_file=getattr(self, 'save_header_translations', True),
-                                current_titles=current_titles  # Pass current titles for exact replacement
+                            # ── Cross-reference: reuse translations from TOC.txt ──
+                            _toc_file = os.path.join(self.output_dir, 'TOC.txt')
+                            _reused_from_toc, _hdr_remaining = self._cross_reference_from_other_file(
+                                source_headers, _toc_file, 'header'
                             )
+                            
+                            _hpb = getattr(self, 'headers_per_batch', -1)
+                            if _hdr_remaining:
+                                # Translate only the entries not reused from TOC.txt
+                                translated_headers = self.header_translator.translate_and_save_headers(
+                                    html_dir=self.html_dir,
+                                    headers_dict=_hdr_remaining,
+                                    batch_size=_hpb if _hpb > 0 else None,
+                                    output_dir=self.output_dir,
+                                    update_html=getattr(self, 'update_html_headers', True),
+                                    save_to_file=getattr(self, 'save_header_translations', True),
+                                    current_titles=current_titles  # Pass current titles for exact replacement
+                                )
+                            else:
+                                translated_headers = {}
+                            # Merge reused translations
+                            if _reused_from_toc:
+                                translated_headers.update(_reused_from_toc)
+                                # Re-save the full file if we merged reused entries
+                                if getattr(self, 'save_header_translations', True):
+                                    self.header_translator._save_translations_to_file(
+                                        source_headers, translated_headers,
+                                        os.path.join(self.output_dir, 'translated_headers.txt'),
+                                        current_titles
+                                    )
+                                    self.log("📝 Re-saved translated_headers.txt with cross-referenced entries")
                             
                             # Update chapter_titles_info with translations
                             if translated_headers:
@@ -1968,6 +1989,14 @@ class EPUBCompiler:
                     self.log("⚠️ No source headers found, skipping batch translation")
                 elif not hasattr(self, 'header_translator'):
                     self.log("⚠️ No header translator available")
+
+            # ── Post-reconciliation: ensure TOC.txt and translated_headers.txt are consistent ──
+            if (getattr(self, 'translate_toc_ncx', False) and
+                    hasattr(self, 'batch_translate_headers') and self.batch_translate_headers):
+                try:
+                    self._reconcile_toc_and_headers()
+                except Exception as _recon_err:
+                    self.log(f"⚠️ Post-reconciliation error: {_recon_err}")
 
             # Find HTML files
             html_files = self._find_html_files()
@@ -5053,6 +5082,143 @@ img {
         except Exception:
             return {}, {}, {}
 
+    def _cross_reference_from_other_file(self, entries_to_translate: Dict[int, str],
+                                          other_file_path: str,
+                                          translation_type: str = 'toc') -> Tuple[Dict[int, str], Dict[int, str]]:
+        """Cross-reference entries against an existing translation file to reuse translations.
+
+        Before sending entries to the API for translation, check if the *other*
+        translation file (TOC.txt when translating headers, or translated_headers.txt
+        when translating TOC) already contains an identical raw entry.  If so,
+        reuse the existing translation to avoid redundant API calls and ensure
+        consistency between the two files.
+
+        Args:
+            entries_to_translate: Dict[int, str] mapping index -> raw text to translate
+            other_file_path: Path to the other translation file
+            translation_type: 'toc' or 'header' (for logging only)
+
+        Returns:
+            Tuple of (reused_translations, remaining_to_translate):
+            - reused_translations: entries whose translation was found in the other file
+            - remaining_to_translate: entries that still need an API call
+        """
+        reused: Dict[int, str] = {}
+        remaining: Dict[int, str] = dict(entries_to_translate)
+
+        if not other_file_path or not os.path.exists(other_file_path):
+            return reused, remaining
+
+        try:
+            from translate_headers_standalone import load_translations_from_file
+            other_originals, other_translated, _ = load_translations_from_file(
+                other_file_path, self.log
+            )
+
+            if not other_originals or not other_translated:
+                return reused, remaining
+
+            # Build a map: stripped raw text -> translated text from the other file
+            raw_to_translated: Dict[str, str] = {}
+            for idx, raw in other_originals.items():
+                key = (raw or '').strip()
+                if key and idx in other_translated:
+                    trans = (other_translated[idx] or '').strip()
+                    if trans and trans != key:
+                        raw_to_translated[key] = trans
+
+            if not raw_to_translated:
+                return reused, remaining
+
+            other_label = 'translated_headers.txt' if translation_type == 'toc' else 'TOC.txt'
+
+            # Match entries to translate against the other file's originals
+            for idx, raw in list(remaining.items()):
+                key = (raw or '').strip()
+                if key in raw_to_translated:
+                    reused[idx] = raw_to_translated[key]
+                    del remaining[idx]
+
+            if reused:
+                self.log(f"♻️ Reused {len(reused)}/{len(entries_to_translate)} "
+                         f"{translation_type} translation(s) from {other_label}")
+                # Show a few examples
+                for idx in list(reused.keys())[:3]:
+                    self.log(f"  ♻️ [{idx}] {entries_to_translate[idx]} → {reused[idx]}")
+                if len(reused) > 3:
+                    self.log(f"  ... and {len(reused) - 3} more")
+
+        except Exception as e:
+            self.log(f"⚠️ Cross-reference check failed ({e}) — will translate all entries")
+            remaining = dict(entries_to_translate)
+            reused = {}
+
+        return reused, remaining
+
+    def _reconcile_toc_and_headers(self):
+        """After both TOC and header translations complete, ensure consistency.
+
+        Loads both TOC.txt and translated_headers.txt, and for any entries that
+        share identical raw/original text but received different translations,
+        picks the header translation as canonical and updates both files.
+        """
+        toc_path = os.path.join(self.output_dir, 'TOC.txt')
+        headers_path = os.path.join(self.output_dir, 'translated_headers.txt')
+
+        if not os.path.exists(toc_path) or not os.path.exists(headers_path):
+            return
+
+        try:
+            from translate_headers_standalone import load_translations_from_file
+
+            toc_orig, toc_trans, toc_out = load_translations_from_file(toc_path, self.log)
+            hdr_orig, hdr_trans, hdr_out = load_translations_from_file(headers_path, self.log)
+
+            if not toc_orig or not hdr_orig:
+                return
+
+            # Build raw -> translated maps
+            hdr_raw_to_trans: Dict[str, str] = {}
+            for idx, raw in hdr_orig.items():
+                key = (raw or '').strip()
+                if key and idx in hdr_trans:
+                    hdr_raw_to_trans[key] = hdr_trans[idx]
+
+            toc_raw_to_trans: Dict[str, str] = {}
+            for idx, raw in toc_orig.items():
+                key = (raw or '').strip()
+                if key and idx in toc_trans:
+                    toc_raw_to_trans[key] = toc_trans[idx]
+
+            # Find mismatches: same raw text, different translation
+            toc_updates: Dict[int, str] = {}
+            for idx, raw in toc_orig.items():
+                key = (raw or '').strip()
+                if not key:
+                    continue
+                if key in hdr_raw_to_trans and idx in toc_trans:
+                    header_version = hdr_raw_to_trans[key]
+                    toc_version = toc_trans[idx]
+                    if header_version != toc_version:
+                        toc_updates[idx] = header_version
+
+            if not toc_updates:
+                self.log("✅ TOC and header translations are already consistent")
+                return
+
+            self.log(f"🔄 Reconciling {len(toc_updates)} TOC entry(ies) to match header translations:")
+            for idx, new_trans in toc_updates.items():
+                old_trans = toc_trans[idx]
+                self.log(f"  [{idx}] \"{old_trans}\" → \"{new_trans}\"")
+                toc_trans[idx] = new_trans
+
+            # Rewrite TOC.txt with corrected translations
+            self._save_toc_translations_file(toc_path, toc_orig, toc_trans, toc_out)
+            self.log(f"✅ Updated TOC.txt with {len(toc_updates)} reconciled translation(s)")
+
+        except Exception as e:
+            self.log(f"⚠️ Post-reconciliation failed: {e}")
+
     def _build_toc_from_source_toc_ncx(self, spine: List, existing_toc: List, metadata: dict) -> List:
         """Build TOC from source toc.ncx, optionally translating navLabels and caching to TOC.txt."""
         source_epub_path = os.getenv('EPUB_PATH')
@@ -5260,26 +5426,41 @@ img {
                         if os.environ.get('OUTPUT_LANGUAGE'):
                             _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
                         tr = BatchHeaderTranslator(self.api_client, _bt_config)
-                        skip_dup_translate = os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1'
-                        if skip_dup_translate:
-                            unique_original: Dict[int, str] = {}
-                            first_idx_by_label: Dict[str, int] = {}
-                            for idx, label in original.items():
-                                key = (label or '').strip()
-                                if key in first_idx_by_label:
-                                    continue
-                                first_idx_by_label[key] = idx
-                                unique_original[idx] = label
-                            self.log(f"🔁 Skip duplicate translation enabled: {len(unique_original)}/{len(original)} unique labels")
-                            unique_translations = tr.translate_headers_batch(unique_original, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
-                            translations = {}
-                            for idx, label in original.items():
-                                key = (label or '').strip()
-                                first_idx = first_idx_by_label.get(key, idx)
-                                if first_idx in unique_translations:
-                                    translations[idx] = unique_translations[first_idx]
-                        else:
-                            translations = tr.translate_headers_batch(original, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
+
+                        # ── Cross-reference: reuse translations from translated_headers.txt ──
+                        headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
+                        reused_from_headers, toc_remaining = self._cross_reference_from_other_file(
+                            original, headers_file, 'toc'
+                        )
+                        if reused_from_headers:
+                            translations.update(reused_from_headers)
+
+                        # Only send entries that weren't reused to the API
+                        entries_for_api = toc_remaining if toc_remaining else {}
+
+                        if entries_for_api:
+                            skip_dup_translate = os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1'
+                            if skip_dup_translate:
+                                unique_original: Dict[int, str] = {}
+                                first_idx_by_label: Dict[str, int] = {}
+                                for idx, label in entries_for_api.items():
+                                    key = (label or '').strip()
+                                    if key in first_idx_by_label:
+                                        continue
+                                    first_idx_by_label[key] = idx
+                                    unique_original[idx] = label
+                                self.log(f"🔁 Skip duplicate translation enabled: {len(unique_original)}/{len(entries_for_api)} unique labels")
+                                unique_translations = tr.translate_headers_batch(unique_original, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
+                                for idx, label in entries_for_api.items():
+                                    key = (label or '').strip()
+                                    first_idx = first_idx_by_label.get(key, idx)
+                                    if first_idx in unique_translations:
+                                        translations[idx] = unique_translations[first_idx]
+                            else:
+                                api_translations = tr.translate_headers_batch(entries_for_api, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
+                                translations.update(api_translations)
+                        elif reused_from_headers:
+                            self.log("♻️ All TOC entries were reused from translated_headers.txt — no API call needed")
                         if translations:
                             # Pre-compute actual output paths so "Output File" shows
                             # the path in the built EPUB, not the raw NCX src.
