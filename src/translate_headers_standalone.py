@@ -1276,26 +1276,60 @@ def run_translate_headers_gui(gui_instance):
                         # Find which chapter numbers are new
                         new_nums = set(all_headers.keys()) - set(existing_source.keys())
                         
-                        if new_nums and hasattr(gui_instance, 'api_client') and gui_instance.api_client:
-                            gui_instance.append_log(f"🌐 Translating {len(new_nums)} new chapter header(s)...")
+                        if new_nums:
                             new_headers_to_translate = {n: all_headers[n] for n in sorted(new_nums)}
-                            
+
+                            # ── Cross-reference new entries from TOC.txt (two-way reuse) ──
+                            _toc_file = os.path.join(output_dir, 'TOC.txt')
+                            _reused_from_toc, _hdr_api_remaining = _cross_reference_from_file(
+                                new_headers_to_translate, _toc_file, gui_instance.append_log
+                            )
+                            new_translations: Dict[int, str] = dict(_reused_from_toc)
+
+                            _has_api = hasattr(gui_instance, 'api_client') and gui_instance.api_client
+
                             try:
-                                from metadata_batch_translator import BatchHeaderTranslator
-                                tr = BatchHeaderTranslator(gui_instance.api_client, config or {})
-                                
-                                if hasattr(gui_instance, '_batch_header_translator'):
-                                    gui_instance._batch_header_translator = tr
-                                
-                                new_translations = tr.translate_headers_batch(
-                                    new_headers_to_translate,
-                                    batch_size=config.get('headers_per_batch', -1) if config else None,
-                                    translation_type='header'
-                                ) or {}
+                                if _hdr_api_remaining and _has_api:
+                                    gui_instance.append_log(
+                                        f"🌐 Translating {len(_hdr_api_remaining)} new chapter header(s)..."
+                                    )
+                                    from metadata_batch_translator import BatchHeaderTranslator
+                                    tr = BatchHeaderTranslator(gui_instance.api_client, config or {})
+
+                                    if hasattr(gui_instance, '_batch_header_translator'):
+                                        gui_instance._batch_header_translator = tr
+
+                                    _api_trans = tr.translate_headers_batch(
+                                        _hdr_api_remaining,
+                                        batch_size=config.get('headers_per_batch', -1) if config else None,
+                                        translation_type='header'
+                                    ) or {}
+                                    new_translations.update(_api_trans)
+                                elif _hdr_api_remaining and not _has_api:
+                                    gui_instance.append_log(
+                                        f"⚠️ {len(_hdr_api_remaining)} new chapter(s) remaining and no API client — will use originals"
+                                    )
+                                elif not _hdr_api_remaining:
+                                    gui_instance.append_log(
+                                        "♻️ All new header entries were reused from cached file; skipping API call."
+                                    )
                                 
                                 if new_translations:
-                                    gui_instance.append_log(f"✅ Translated {len(new_translations)} new chapter header(s)")
-                                    
+                                    _api_count = len(new_translations) - len(_reused_from_toc)
+                                    if _reused_from_toc and _api_count > 0:
+                                        gui_instance.append_log(
+                                            f"✅ Resolved {len(new_translations)} new chapter header(s) "
+                                            f"({len(_reused_from_toc)} reused + {_api_count} translated)"
+                                        )
+                                    elif _reused_from_toc:
+                                        gui_instance.append_log(
+                                            f"✅ Reused {len(new_translations)} new chapter header(s) from cached file"
+                                        )
+                                    else:
+                                        gui_instance.append_log(
+                                            f"✅ Translated {len(new_translations)} new chapter header(s)"
+                                        )
+
                                     # ── Rebuild the entire file sorted, with Output File for all entries ──
                                     # Merge originals: existing + new
                                     merged_source = dict(existing_source)
@@ -1364,8 +1398,6 @@ def run_translate_headers_gui(gui_instance):
                                     gui_instance.append_log(f"📝 Rebuilt translated_headers.txt with {len(new_translations)} new entries (sorted)")
                             except Exception as new_err:
                                 gui_instance.append_log(f"⚠️ Failed to translate new headers: {new_err}")
-                        elif new_nums:
-                            gui_instance.append_log(f"⚠️ {len(new_nums)} new chapter(s) detected but no API client — will use originals")
                 except Exception as recon_err:
                     gui_instance.append_log(f"⚠️ Reconciliation check failed: {recon_err} — proceeding with existing file")
                 

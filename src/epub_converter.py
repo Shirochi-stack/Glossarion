@@ -1538,20 +1538,40 @@ class EPUBCompiler:
                                             self.log(f"📦 Source EPUB has {len(new_nums)} NEW chapter(s) not in translated_headers.txt: {sorted(new_nums)}")
                                             
                                             new_headers_to_translate = {n: all_source_headers[n] for n in sorted(new_nums)}
-                                            
-                                            # Try to translate the new entries
+
+                                            # ── Cross-reference new entries from TOC.txt (two-way reuse) ──
+                                            _toc_file = os.path.join(self.output_dir, 'TOC.txt')
+                                            _reused_from_toc, _hdr_api_remaining = self._cross_reference_from_other_file(
+                                                new_headers_to_translate, _toc_file, 'header'
+                                            )
+
+                                            # Try to translate the remaining new entries
                                             if hasattr(self, 'header_translator') and self.header_translator and \
                                                hasattr(self.header_translator, 'client') and self.header_translator.client:
                                                 try:
-                                                    _hpb = getattr(self, 'headers_per_batch', -1)
-                                                    new_translations = self.header_translator.translate_headers_batch(
-                                                        new_headers_to_translate,
-                                                        batch_size=_hpb if _hpb > 0 else None,
-                                                        translation_type='header'
-                                                    ) or {}
+                                                    new_translations = dict(_reused_from_toc)
+                                                    if _hdr_api_remaining:
+                                                        _hpb = getattr(self, 'headers_per_batch', -1)
+                                                        _api_trans = self.header_translator.translate_headers_batch(
+                                                            _hdr_api_remaining,
+                                                            batch_size=_hpb if _hpb > 0 else None,
+                                                            translation_type='header'
+                                                        ) or {}
+                                                        new_translations.update(_api_trans)
+                                                    else:
+                                                        self.log("♻️ All new header entries were reused from cached file; skipping API call.")
                                                     
                                                     if new_translations:
-                                                        self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                                        _api_count = len(new_translations) - len(_reused_from_toc)
+                                                        if _reused_from_toc and _api_count > 0:
+                                                            self.log(
+                                                                f"✅ Resolved {len(new_translations)} new chapter header(s) "
+                                                                f"({len(_reused_from_toc)} reused + {_api_count} translated)"
+                                                            )
+                                                        elif _reused_from_toc:
+                                                            self.log(f"✅ Reused {len(new_translations)} new chapter header(s) from cached file")
+                                                        else:
+                                                            self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
                                                         translated_headers.update(new_translations)
                                                         
                                                         # Append new entries to the existing file
@@ -1606,24 +1626,38 @@ class EPUBCompiler:
                                             elif getattr(self, 'api_client', None):
                                                 # Try using api_client directly
                                                 try:
-                                                    from metadata_batch_translator import BatchHeaderTranslator
-                                                    _bt_config = {}
-                                                    if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
-                                                        _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
-                                                    if os.environ.get('BATCH_HEADER_PROMPT'):
-                                                        _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
-                                                    if os.environ.get('OUTPUT_LANGUAGE'):
-                                                        _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
-                                                    tr = BatchHeaderTranslator(self.api_client, _bt_config)
-                                                    _hpb = getattr(self, 'headers_per_batch', -1)
-                                                    new_translations = tr.translate_headers_batch(
-                                                        new_headers_to_translate,
-                                                        batch_size=_hpb if _hpb > 0 else None,
-                                                        translation_type='header'
-                                                    ) or {}
+                                                    new_translations = dict(_reused_from_toc)
+                                                    if _hdr_api_remaining:
+                                                        from metadata_batch_translator import BatchHeaderTranslator
+                                                        _bt_config = {}
+                                                        if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                                                            _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                                                        if os.environ.get('BATCH_HEADER_PROMPT'):
+                                                            _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                                                        if os.environ.get('OUTPUT_LANGUAGE'):
+                                                            _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                                                        tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                                                        _hpb = getattr(self, 'headers_per_batch', -1)
+                                                        _api_trans = tr.translate_headers_batch(
+                                                            _hdr_api_remaining,
+                                                            batch_size=_hpb if _hpb > 0 else None,
+                                                            translation_type='header'
+                                                        ) or {}
+                                                        new_translations.update(_api_trans)
+                                                    else:
+                                                        self.log("♻️ All new header entries were reused from cached file; skipping API call.")
                                                     
                                                     if new_translations:
-                                                        self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                                        _api_count = len(new_translations) - len(_reused_from_toc)
+                                                        if _reused_from_toc and _api_count > 0:
+                                                            self.log(
+                                                                f"✅ Resolved {len(new_translations)} new chapter header(s) "
+                                                                f"({len(_reused_from_toc)} reused + {_api_count} translated)"
+                                                            )
+                                                        elif _reused_from_toc:
+                                                            self.log(f"✅ Reused {len(new_translations)} new chapter header(s) from cached file")
+                                                        else:
+                                                            self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
                                                         translated_headers.update(new_translations)
                                                         
                                                         try:
@@ -1669,9 +1703,18 @@ class EPUBCompiler:
                                                     for num in new_nums:
                                                         translated_headers[num] = all_source_headers[num]
                                             else:
-                                                self.log("⚠️ No translator/API client available — using original titles for new chapters")
-                                                for num in new_nums:
-                                                    translated_headers[num] = all_source_headers[num]
+                                                # No translator/API client - still apply any reuse from TOC.txt
+                                                if _reused_from_toc:
+                                                    self.log(
+                                                        f"♻️ Reused {len(_reused_from_toc)} header(s) from cached file (no API client)"
+                                                    )
+                                                    translated_headers.update(_reused_from_toc)
+                                                if _hdr_api_remaining:
+                                                    self.log(
+                                                        f"⚠️ {len(_hdr_api_remaining)} new chapter(s) remaining and no API client — using original titles"
+                                                    )
+                                                    for num in _hdr_api_remaining:
+                                                        translated_headers[num] = all_source_headers[num]
                                     except Exception as recon_err:
                                         self.log(f"⚠️ Reconciliation check failed: {recon_err} — proceeding with existing translations")
                                 
