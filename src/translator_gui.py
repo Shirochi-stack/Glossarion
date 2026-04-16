@@ -12503,6 +12503,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log("❌ Error: No glossary prompt configured")
                 return False
             
+            # Propagate custom endpoint settings so UnifiedClient routes Gemini /
+            # OpenAI / Anthropic requests through the user's configured endpoint.
+            try:
+                os.environ['USE_GEMINI_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'
+                os.environ['GEMINI_OPENAI_ENDPOINT'] = getattr(self, 'gemini_openai_endpoint_var', '') or 'generativelanguage.googleapis.com'
+                os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'
+                os.environ['OPENAI_CUSTOM_BASE_URL'] = getattr(self, 'openai_base_url_var', '') or ''
+                os.environ['GROQ_API_URL'] = getattr(self, 'groq_base_url_var', '') or ''
+                os.environ['FIREWORKS_API_URL'] = getattr(self, 'fireworks_base_url_var', '') or ''
+                os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if getattr(self, 'force_native_anthropic_var', False) else '0'
+                os.environ['ANTHROPIC_BASE_URL'] = getattr(self, 'anthropic_base_url_var', '') or ''
+            except Exception:
+                pass
+            
             # Initialize API client
             try:
                 client = UnifiedClient(model=model, api_key=api_key)
@@ -13364,6 +13378,17 @@ Important rules:
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
                     # Subprocess PDF extraction to prevent GUI lag
                     'USE_ASYNC_CHAPTER_EXTRACTION': '1',
+                    # Custom API endpoints (must be propagated so UnifiedClient routes
+                    # Gemini / OpenAI / Anthropic requests through the user's custom endpoint
+                    # during glossary extraction, especially when using glossary keys pool).
+                    'USE_GEMINI_OPENAI_ENDPOINT': '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0',
+                    'GEMINI_OPENAI_ENDPOINT': getattr(self, 'gemini_openai_endpoint_var', '') or 'generativelanguage.googleapis.com',
+                    'USE_CUSTOM_OPENAI_ENDPOINT': '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0',
+                    'OPENAI_CUSTOM_BASE_URL': getattr(self, 'openai_base_url_var', '') or '',
+                    'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
+                    'FIREWORKS_API_URL': getattr(self, 'fireworks_base_url_var', '') or '',
+                    'FORCE_NATIVE_ANTHROPIC': '1' if getattr(self, 'force_native_anthropic_var', False) else '0',
+                    'ANTHROPIC_BASE_URL': getattr(self, 'anthropic_base_url_var', '') or '',
                 }
                 
                 # Add project ID for Vertex AI
