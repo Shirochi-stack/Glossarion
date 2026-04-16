@@ -1850,14 +1850,25 @@ class EPUBCompiler:
                                 # Translate only the new entries
                                 new_headers_to_translate = {n: source_headers[n] for n in sorted(new_nums)}
                                 
+                                # ── Cross-reference new entries from TOC.txt ──
+                                _toc_file = os.path.join(self.output_dir, 'TOC.txt')
+                                _reused, _api_remaining = self._cross_reference_from_other_file(
+                                    new_headers_to_translate, _toc_file, 'header'
+                                )
+                                
+                                new_translations = _reused.copy()
                                 if hasattr(self.header_translator, 'client') and self.header_translator.client:
                                     try:
-                                        _hpb = getattr(self, 'headers_per_batch', -1)
-                                        new_translations = self.header_translator.translate_headers_batch(
-                                            new_headers_to_translate,
-                                            batch_size=_hpb if _hpb > 0 else None,
-                                            translation_type='header'
-                                        ) or {}
+                                        if _api_remaining:
+                                            _hpb = getattr(self, 'headers_per_batch', -1)
+                                            _api_trans = self.header_translator.translate_headers_batch(
+                                                _api_remaining,
+                                                batch_size=_hpb if _hpb > 0 else None,
+                                                translation_type='header'
+                                            ) or {}
+                                            new_translations.update(_api_trans)
+                                        else:
+                                            self.log("♻️ All new entries were reused from cached file; skipping API call.")
                                         
                                         if new_translations:
                                             self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
@@ -1985,30 +1996,18 @@ class EPUBCompiler:
                             )
                             
                             _hpb = getattr(self, 'headers_per_batch', -1)
-                            if _hdr_remaining:
-                                # Translate only the entries not reused from TOC.txt
-                                translated_headers = self.header_translator.translate_and_save_headers(
-                                    html_dir=self.html_dir,
-                                    headers_dict=_hdr_remaining,
-                                    batch_size=_hpb if _hpb > 0 else None,
-                                    output_dir=self.output_dir,
-                                    update_html=getattr(self, 'update_html_headers', True),
-                                    save_to_file=getattr(self, 'save_header_translations', True),
-                                    current_titles=current_titles  # Pass current titles for exact replacement
-                                )
-                            else:
-                                translated_headers = {}
-                            # Merge reused translations
-                            if _reused_from_toc:
-                                translated_headers.update(_reused_from_toc)
-                                # Re-save the full file if we merged reused entries
-                                if getattr(self, 'save_header_translations', True):
-                                    self.header_translator._save_translations_to_file(
-                                        source_headers, translated_headers,
-                                        os.path.join(self.output_dir, 'translated_headers.txt'),
-                                        current_titles
-                                    )
-                                    self.log("📝 Re-saved translated_headers.txt with cross-referenced entries")
+                            # Always call translate_and_save_headers to ensure reused headers are injected into HTML
+                            translated_headers = self.header_translator.translate_and_save_headers(
+                                html_dir=self.html_dir,
+                                headers_dict=_hdr_remaining,  # translate_headers_batch natively skips if empty
+                                batch_size=_hpb if _hpb > 0 else None,
+                                output_dir=self.output_dir,
+                                update_html=getattr(self, 'update_html_headers', True),
+                                save_to_file=getattr(self, 'save_header_translations', True),
+                                current_titles=current_titles,
+                                reused_headers=_reused_from_toc,
+                                source_headers_full=source_headers
+                            )
                             
                             # Update chapter_titles_info with translations
                             if translated_headers:
@@ -5378,26 +5377,37 @@ img {
                     # Translate only the new entries
                     new_toc_to_translate = {n: original[n] for n in sorted(new_toc_nums)}
                     
+                    # ── Cross-reference new entries from translated_headers.txt ──
+                    _headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
+                    _reused_toc, _api_toc_remaining = self._cross_reference_from_other_file(
+                        new_toc_to_translate, _headers_file, 'toc'
+                    )
+                    
+                    new_toc_translations = _reused_toc.copy()
                     if getattr(self, 'api_client', None):
                         try:
-                            from metadata_batch_translator import BatchHeaderTranslator
-                            _bt_config = {}
-                            if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
-                                _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
-                            if os.environ.get('BATCH_HEADER_PROMPT'):
-                                _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
-                            if os.environ.get('OUTPUT_LANGUAGE'):
-                                _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
-                            tr = BatchHeaderTranslator(self.api_client, _bt_config)
-                            toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
-                            new_toc_translations = tr.translate_headers_batch(
-                                new_toc_to_translate,
-                                batch_size=toc_ncx_per_batch if toc_ncx_per_batch > 0 else None,
-                                translation_type='toc'
-                            ) or {}
+                            if _api_toc_remaining:
+                                from metadata_batch_translator import BatchHeaderTranslator
+                                _bt_config = {}
+                                if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                                    _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                                if os.environ.get('BATCH_HEADER_PROMPT'):
+                                    _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                                if os.environ.get('OUTPUT_LANGUAGE'):
+                                    _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                                tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                                toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
+                                _api_trans = tr.translate_headers_batch(
+                                    _api_toc_remaining,
+                                    batch_size=toc_ncx_per_batch if toc_ncx_per_batch > 0 else None,
+                                    translation_type='toc'
+                                ) or {}
+                                new_toc_translations.update(_api_trans)
+                            else:
+                                self.log("♻️ All new TOC entries were reused from cached file; skipping API call.")
                             
                             if new_toc_translations:
-                                self.log(f"✅ Translated {len(new_toc_translations)} new TOC entry(ies)")
+                                self.log(f"✅ Translated/Reused {len(new_toc_translations)} new TOC entry(ies)")
                                 translations.update(new_toc_translations)
                                 
                                 # Compute target URIs for new entries (preserve fragments and extensions)

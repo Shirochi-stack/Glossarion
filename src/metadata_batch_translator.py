@@ -1882,17 +1882,21 @@ class BatchHeaderTranslator:
                                   output_dir: str = None,
                                   update_html: bool = True,
                                   save_to_file: bool = True,
-                                  current_titles: Dict[int, Dict[str, str]] = None) -> Dict[int, str]:
+                                  current_titles: Dict[int, Dict[str, str]] = None,
+                                  reused_headers: Dict[int, str] = None,
+                                  source_headers_full: Dict[int, str] = None) -> Dict[int, str]:
         """Translate headers with optional file output and HTML updates
         
         Args:
             html_dir: Directory containing HTML files
-            headers_dict: Dict mapping chapter numbers to source titles
-            batch_size: Number of titles to translate in one API call (uses config if not specified)
+            headers_dict: Dict mapping chapter numbers to source titles needing translation
+            batch_size: Number of titles to translate in one API call
             output_dir: Directory for saving translation file
             update_html: Whether to update HTML files
             save_to_file: Whether to save translations to file
             current_titles: Dict mapping chapter numbers to {'title': str, 'filename': str}
+            reused_headers: Dict of pre-translated headers to merge in
+            source_headers_full: The complete source dict (headers_dict + reused_headers keys)
         """
         # Use configured batch size if not explicitly provided
         if batch_size is None:
@@ -1909,6 +1913,12 @@ class BatchHeaderTranslator:
             headers_dict, batch_size, translation_type='header'
         )
         
+        # Merge reused headers
+        if reused_headers:
+            if not translated_headers:
+                translated_headers = {}
+            translated_headers.update(reused_headers)
+        
         if not translated_headers:
             return {}
         
@@ -1917,7 +1927,8 @@ class BatchHeaderTranslator:
             if output_dir is None:
                 output_dir = html_dir
             translations_file = os.path.join(output_dir, "translated_headers.txt")
-            self._save_translations_to_file(headers_dict, translated_headers, translations_file, current_titles)
+            _full_dict = source_headers_full if source_headers_full else headers_dict
+            self._save_translations_to_file(_full_dict, translated_headers, translations_file, current_titles)
         
         # Update HTML files if requested
         if update_html:
