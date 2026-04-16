@@ -52,7 +52,7 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v7-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v8-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
       
       - name: Fix stale pyjnius cache
         run: |
@@ -218,8 +218,11 @@ jobs:
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
+          # APK no longer ships x86_64 (lxml can't build on Python 3.11; Python 3.10
+          # crashes zlib on x86_64). Use arm64-v8a emulator so the smoke test
+          # actually matches what the APK contains.
           api-level: 34
-          arch: x86_64
+          arch: arm64-v8a
           target: google_apis
           profile: pixel_5
           ram-size: 4096M
@@ -257,4 +260,4 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v7-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v8-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}

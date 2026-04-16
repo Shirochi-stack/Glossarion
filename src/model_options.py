@@ -105,9 +105,34 @@ def get_model_options() -> List[str]:
         "groq/groq/compound", "groq/groq/compound-mini",
         
         # Chinese Models
-        "glm-4", "glm-3-turbo", "chatglm-6b", "chatglm2-6b", "chatglm3-6b",
+        "chatglm-6b", "chatglm2-6b", "chatglm3-6b",
         "baichuan-13b-chat", "baichuan2-13b-chat",
         "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k",
+        
+        # GLM Models
+        # Text / Reasoning
+        "GLM-5.1", "GLM-5", "GLM-4.7",
+        "GLM-4.7-Flash", "GLM-4.6", "GLM-4.5",
+
+        # Vision / Multimodal
+        "GLM-4.6V", "GLM-4.6V-Flash", "GLM-4.6V-FlashX",
+        "GLM-4.5V",
+
+        # Specialized Variants
+        "GLM-4.1V-Thinking", "GLM-4-Voice", "GLM-4-Plus",
+        "glm-4", "glm-3-turbo", 
+
+        # Text / Reasoning (za prefix)
+        "za/GLM-5.1", "za/GLM-5", "za/GLM-4.7",
+        "za/GLM-4.7-Flash", "za/GLM-4.6", "za/GLM-4.5",
+
+        # Vision / Multimodal (za prefix)
+        "za/GLM-4.6V", "za/GLM-4.6V-Flash", "za/GLM-4.6V-FlashX",
+        "za/GLM-4.5V",
+
+        # Specialized Variants (za prefix)
+        "za/GLM-4.1V-Thinking", "za/GLM-4-Voice", "za/GLM-4-Plus",
+        "za/glm-4", "za/glm-3-turbo", 
         
         # Other Models
         "falcon-40b-instruct", "falcon-7b-instruct",

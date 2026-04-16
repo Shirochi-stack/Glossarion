@@ -12,11 +12,11 @@ source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 version = 1.0.0
 
 # Dependencies (python-for-android recipes and pip packages)
-# Use p4a's default python3 (currently 3.11.x). Pinning to 3.10.14 caused the
-# interpreter to crash on x86_64 right after loading zlib.cpython-310.so on
-# API 34 / NDK r25b. lxml + ebooklib are both supported on 3.11 by current
-# p4a master, so there is no reason to downgrade.
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,soupsieve,ebooklib,lxml,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools,filetype,typing_extensions
+# Pin python3==3.10.14 because p4a's lxml recipe is stuck on lxml 4.8.0, which
+# fails to compile against Python 3.11's C API (struct _frame was made opaque).
+# The previous x86_64 zlib crash is avoided by dropping x86_64 from android.archs
+# below (we only target real devices: arm64-v8a + armeabi-v7a).
+requirements = python3==3.10.14,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,soupsieve,ebooklib,lxml,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools,filetype,typing_extensions
 
 # Entry point
 entrypoint = main.py
@@ -53,8 +53,10 @@ android.gradle_dependencies = androidx.core:core:1.12.0,androidx.appcompat:appco
 # Services (foreground translation service)
 # services = GlossarionTranslation:service.py:foreground
 
-# Arch - ARM64 + ARM for real devices, x86_64 for CI emulator smoke test
-android.archs = arm64-v8a,armeabi-v7a,x86_64
+# Arch - ARM64 + ARM for real devices. x86_64 removed: python3==3.10.14 crashes
+# on x86_64 (zlib.cpython-310.so) at API 34 / NDK r25b, and switching to 3.11
+# breaks lxml compilation. Real devices all use arm architectures.
+android.archs = arm64-v8a,armeabi-v7a
 
 # Allow backup
 android.allow_backup = True
