@@ -5618,7 +5618,7 @@ def _create_prompt_management_section(self, parent):
     else:
         self.translate_toc_ncx_var = self.use_toc_ncx_var
 
-    use_toc_cb = self._create_styled_checkbox("Use & Translate toc.ncx")
+    use_toc_cb = self._create_styled_checkbox("Use && Translate toc.ncx")
     use_toc_cb.setToolTip(
         "Use the toc.ncx from the source EPUB to build the Table of Contents,\n"
         "and translate all entries via one API call (cached to TOC.txt).\n"

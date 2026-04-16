@@ -1667,6 +1667,22 @@ class EPUBCompiler:
                                 if source_epub_path and os.path.exists(source_epub_path):
                                     self.log(f"🔄 Applying translations to HTML files in: {self.html_dir}")
                                     
+                                    # ── Repair: sort entries and discover missing Output File fields ──
+                                    try:
+                                        from translate_headers_standalone import repair_translation_file
+                                        repair_translation_file(
+                                            translations_file, source_epub_path, self.html_dir,
+                                            log_callback=self.log
+                                        )
+                                        _toc_txt = os.path.join(self.output_dir, 'TOC.txt')
+                                        if os.path.exists(_toc_txt):
+                                            repair_translation_file(
+                                                _toc_txt, source_epub_path, self.html_dir,
+                                                log_callback=self.log
+                                            )
+                                    except Exception as repair_err:
+                                        self.log(f"⚠️ Repair check failed: {repair_err}")
+                                    
                                     # Apply translations using the standalone module's function
                                     result = apply_existing_translations(
                                         epub_path=source_epub_path,
@@ -5186,7 +5202,15 @@ img {
             return
 
         try:
-            from translate_headers_standalone import load_translations_from_file
+            source_epub_path = os.getenv('EPUB_PATH') or self.epub_path
+            from translate_headers_standalone import load_translations_from_file, repair_translation_file
+            
+            # ── Repair both files first to ensure structural consistency ──
+            try:
+                repair_translation_file(toc_path, source_epub_path, self.output_dir, log_callback=self.log)
+                repair_translation_file(headers_path, source_epub_path, self.output_dir, log_callback=self.log)
+            except Exception as e:
+                self.log(f"⚠️ Pre-reconciliation repair failed: {e}")
 
             toc_orig, toc_trans, toc_out = load_translations_from_file(toc_path, self.log)
             hdr_orig, hdr_trans, hdr_out = load_translations_from_file(headers_path, self.log)

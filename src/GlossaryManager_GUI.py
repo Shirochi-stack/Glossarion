@@ -904,8 +904,9 @@ class GlossaryManagerMixin:
                 row_layout.setContentsMargins(0, 2, 0, 2)
                 row_layout.setSpacing(6)
                 
-                # Checkbox
-                cb = self._create_styled_checkbox(type_name)
+                # Checkbox (escape ampersand for Qt rendering)
+                display_name = type_name.replace('&', '&&')
+                cb = self._create_styled_checkbox(display_name)
                 cb.setChecked(type_config.get('enabled', True))
                 self.type_enabled_checkboxes[type_name] = cb
                 row_layout.addWidget(cb)
