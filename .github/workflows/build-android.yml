@@ -52,7 +52,7 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v6-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v7-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
       
       - name: Fix stale pyjnius cache
         run: |
@@ -257,4 +257,4 @@ jobs:
           path: |
             ~/.buildozer
             src/android/.buildozer
-          key: buildozer-v6-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}
+          key: buildozer-v7-${{ runner.os }}-${{ hashFiles('src/android/buildozer.spec', '.github/workflows/build-android.yml') }}

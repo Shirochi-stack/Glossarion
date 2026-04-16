@@ -12,9 +12,11 @@ source.exclude_dirs = .buildozer,bin,dist,__pycache__,.git,.github
 version = 1.0.0
 
 # Dependencies (python-for-android recipes and pip packages)
-# Keep python3 on 3.10 where lxml + ebooklib are reliable on Android.
-# BeautifulSoup remains required by EPUB parsing paths.
-requirements = python3==3.10.14,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,soupsieve,ebooklib,lxml,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools,filetype,typing_extensions
+# Use p4a's default python3 (currently 3.11.x). Pinning to 3.10.14 caused the
+# interpreter to crash on x86_64 right after loading zlib.cpython-310.so on
+# API 34 / NDK r25b. lxml + ebooklib are both supported on 3.11 by current
+# p4a master, so there is no reason to downgrade.
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pillow,beautifulsoup4,soupsieve,ebooklib,lxml,requests,certifi,charset-normalizer,chardet,html2text,tqdm,plyer,pyjnius,six,setuptools,filetype,typing_extensions
 
 # Entry point
 entrypoint = main.py

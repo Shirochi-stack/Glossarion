@@ -120,7 +120,10 @@ adb logcat -d > "$GITHUB_WORKSPACE/emulator-logcat-full.log" 2>&1
 LOG_SIZE=$(stat -c %s "$GITHUB_WORKSPACE/emulator-logcat-full.log" 2>/dev/null || echo 0)
 log "Logcat size: $LOG_SIZE bytes"
 
-grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime|Exception|Error)' \
+# Include native-crash patterns (tombstone/libc/SIGSEGV/DEBUG/signal) so a
+# Python interpreter crash at init — which produces no Python traceback —
+# still shows up in the filtered log.
+grep -iE '(python|kivy|glossarion|SDL|Traceback|ModuleNotFound|ImportError|FATAL|AndroidRuntime|Exception|Error|tombstone|libc|SIGSEGV|SIGABRT|SIGBUS|signal [0-9]+|DEBUG.*pid|WIN DEATH|Force removing ActivityRecord|died,)' \
   "$GITHUB_WORKSPACE/emulator-logcat-full.log" \
   > "$GITHUB_WORKSPACE/emulator-logcat-filtered.log" 2>/dev/null || true
 
