@@ -274,8 +274,13 @@ class CustomAPIProvider(OCRProvider):
             
             # Check if model uses own auth (no API key needed)
             _ml = (model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
-                api_key = 'own-auth'  # placeholder — actual auth handled by provider
+            # Local custom endpoints (Ollama/LM Studio/etc.) → no API key needed
+            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint:
+                if not api_key:
+                    api_key = 'own-auth'  # placeholder — actual auth handled by provider/local endpoint
             elif not api_key:
                 self._log("❌ No API key configured", "error")
                 return False

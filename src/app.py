@@ -86,8 +86,26 @@ except ImportError as e:
 # Models that do not require an API key
 _NO_API_KEY_PREFIXES = ('vertex/', 'authgpt/', 'authgem/', 'authgem-vertex/', 'antigravity/', 'google-translate', 'deepl')
 
+def _is_local_custom_endpoint() -> bool:
+    """Return True if user has enabled a custom OpenAI endpoint pointing to localhost.
+
+    Local endpoints (Ollama, LM Studio, vLLM, etc.) typically don't require an API key.
+    """
+    try:
+        if os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') != '1':
+            return False
+        url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+        if not url:
+            return False
+        return ('localhost' in url) or ('127.0.0.1' in url) or ('0.0.0.0' in url) or ('::1' in url)
+    except Exception:
+        return False
+
 def _model_needs_no_api_key(model: str) -> bool:
     """Return True if the given model name does not require a user-supplied API key."""
+    # Local custom endpoint (Ollama/LM Studio/etc.) → no API key needed
+    if _is_local_custom_endpoint():
+        return True
     if not model:
         return False
     m = model.lower().strip()

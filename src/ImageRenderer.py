@@ -4436,9 +4436,14 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
                 model = self.main_gui.config.get('model')
             
             # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+            # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
             if not api_key:
                 _ml = (model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
+                _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+                _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+                if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                        _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                     api_key = 'own-auth'
             
             if not api_key:
@@ -4624,9 +4629,14 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
             model = self.main_gui.config.get('model')
         
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
         if not api_key:
             _ml = (model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
+            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+            if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                    _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                 api_key = 'own-auth'
         
         if not api_key:
@@ -7659,9 +7669,14 @@ def _translate_this_text_background(self, message: str, region_index: int):
             model = self.main_gui.config.get('model')
         
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
         if not api_key:
             _ml = (model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
+            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+            if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                    _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                 api_key = 'own-auth'
         
         if not api_key:
@@ -9388,8 +9403,14 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
                 api_key = self.main_gui.config.get('api_key', '') if hasattr(self, 'main_gui') else ''
                 model = self.main_gui.config.get('model', 'gpt-4o-mini') if hasattr(self, 'main_gui') else 'gpt-4o-mini'
                 # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+                # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
                 _model_lower = model.lower() if model else ''
-                _uses_own_auth = _model_lower.startswith('authgpt/') or _model_lower.startswith('authgem/') or _model_lower.startswith('authgem-vertex/') or _model_lower.startswith('vertex/')
+                _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+                _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+                _uses_own_auth = (_model_lower.startswith('authgpt/') or _model_lower.startswith('authgem/') or
+                                  _model_lower.startswith('authgem-vertex/') or _model_lower.startswith('vertex/') or
+                                  _model_lower.startswith('antigravity/') or _is_local_endpoint)
                 if not api_key and not _uses_own_auth:
                     print(f"[RENDER] ERROR: No API key found!")
                     raise ValueError("No API key found")
@@ -10928,10 +10949,16 @@ def _get_ocr_config(self) -> dict:
         if not api_key and hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
             api_key = self.main_gui.config.get('api_key', '')
         # Check if model uses own auth (no API key needed)
+        # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
         _model = ''
         if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
             _model = (self.main_gui.config.get('model', '') or '').lower()
-        _uses_own_auth = _model.startswith('authgpt/') or _model.startswith('authgem/') or _model.startswith('authgem-vertex/') or _model.startswith('vertex/') or _model.startswith('antigravity/')
+        _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+        _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+        _uses_own_auth = (_model.startswith('authgpt/') or _model.startswith('authgem/') or
+                          _model.startswith('authgem-vertex/') or _model.startswith('vertex/') or
+                          _model.startswith('antigravity/') or _is_local_endpoint)
         if api_key:
             print(f"[DEBUG] Using custom-api provider (API key available)")
             print(f"[DEBUG] API key available for custom-api OCR")

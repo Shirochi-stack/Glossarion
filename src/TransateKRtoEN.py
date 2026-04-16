@@ -9379,8 +9379,13 @@ def main(log_callback=None, stop_callback=None):
         return
 
     # Check if model needs API key
+    # Local custom endpoints (Ollama/LM Studio/etc.) → no API key needed
+    _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+    _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+    _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
     model_needs_api_key = not (config.MODEL.lower() in ['google-translate', 'google-translate-free'] or 
-                              '@' in config.MODEL or config.MODEL.startswith('vertex/') or config.MODEL.startswith('authgpt/') or config.MODEL.startswith('authgem/') or config.MODEL.startswith('authgem-vertex/') or config.MODEL.startswith('antigravity/'))
+                              '@' in config.MODEL or config.MODEL.startswith('vertex/') or config.MODEL.startswith('authgpt/') or config.MODEL.startswith('authgem/') or config.MODEL.startswith('authgem-vertex/') or config.MODEL.startswith('antigravity/') or
+                              _is_local_endpoint)
     
     if model_needs_api_key and not config.API_KEY:
         print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")

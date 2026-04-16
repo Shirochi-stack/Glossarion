@@ -1227,10 +1227,15 @@ class MangaTranslationTab(QObject):
                 has_api_key = False
             
             # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+            # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
             if not has_api_key:
                 _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
                 _ml = (_model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/') or _ml.startswith('antigravity/'):
+                _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+                _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+                if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                        _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                     has_api_key = True
             
             if not has_api_key:
@@ -2523,11 +2528,16 @@ class MangaTranslationTab(QObject):
                     self.provider_status_label.setText("⚠️ Enable AI bubble detection for best results")
                     self.provider_status_label.setStyleSheet("color: orange;")
             else:
-                # Check if model uses own auth (no API key needed)
+                # Check if model uses own auth or localhost custom endpoint (no API key needed)
                 _model = (self.main_gui.config.get('model', '') or '').lower()
-                if _model.startswith('authgpt/') or _model.startswith('authgem/') or _model.startswith('authgem-vertex/') or _model.startswith('vertex/') or _model.startswith('antigravity/'):
+                _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+                _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+                if (_model.startswith('authgpt/') or _model.startswith('authgem/') or _model.startswith('authgem-vertex/') or
+                        _model.startswith('vertex/') or _model.startswith('antigravity/') or _is_local_endpoint):
+                    _label_suffix = "local endpoint" if _is_local_endpoint else "own-auth model"
                     if bubble_detection_enabled:
-                        self.provider_status_label.setText("✅ Ready (own-auth model)")
+                        self.provider_status_label.setText(f"✅ Ready ({_label_suffix})")
                         self.provider_status_label.setStyleSheet("color: green;")
                     else:
                         self.provider_status_label.setText("⚠️ Enable AI bubble detection for best results")
@@ -3147,10 +3157,15 @@ class MangaTranslationTab(QObject):
             has_api_key = False
         
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
         if not has_api_key:
             _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
             _ml = (_model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
+            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+            if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                    _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                 has_api_key = True
         
         # Get current provider
@@ -3282,10 +3297,15 @@ class MangaTranslationTab(QObject):
             has_api_key = False
         
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
         if not has_api_key:
             _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
             _ml = (_model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
+            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+            if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                    _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                 has_api_key = True
         
         # Get the saved OCR provider to check appropriate credentials
@@ -5342,10 +5362,15 @@ class MangaTranslationTab(QObject):
             has_api_key = False
         
         # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+        # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
         if not has_api_key:
             _model = self.main_gui.config.get('model', '') if hasattr(self, 'main_gui') else ''
             _ml = (_model or '').lower()
-            if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
+            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+            if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                    _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
                 has_api_key = True
             
         provider = self.ocr_provider_value
@@ -10767,11 +10792,16 @@ class MangaTranslationTab(QObject):
                     api_key = self.main_gui.config.get('api_key', '')
                 
                 # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+                # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
                 if not api_key:
                     _model = self.main_gui.config.get('model', '') if hasattr(self.main_gui, 'config') else ''
                     _ml = (_model or '').lower()
-                    if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
-                        api_key = 'own-auth'  # placeholder — actual auth handled by provider
+                    _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                    _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+                    _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+                    if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                            _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
+                        api_key = 'own-auth'  # placeholder — actual auth handled by provider/local endpoint
                 
                 if not api_key:
                     self._log("❌ API key not configured for translation", "error")
@@ -11230,10 +11260,15 @@ class MangaTranslationTab(QObject):
                 model = self.main_gui.config.get('model')
             
             # authgpt/ and vertex/ prefixes handle their own auth — no API key needed
+            # Also local custom endpoints (Ollama/LM Studio/etc.) don't need an API key
             if not api_key:
                 _ml = (model or '').lower()
-                if _ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or _ml.startswith('vertex/'):
-                    api_key = 'own-auth'  # placeholder — actual auth handled by provider
+                _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+                _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
+                if (_ml.startswith('authgpt/') or _ml.startswith('authgem/') or _ml.startswith('authgem-vertex/') or
+                        _ml.startswith('vertex/') or _ml.startswith('antigravity/') or _is_local_endpoint):
+                    api_key = 'own-auth'  # placeholder — actual auth handled by provider/local endpoint
             
             if not api_key:
                 self._log("❌ API key not found. Please configure your API key in the main settings.", "error")

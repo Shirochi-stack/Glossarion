@@ -217,11 +217,20 @@ def translate_chapter_streaming(
         system_prompt = _get_system_prompt(config_data)
         use_html2text = config_data.get('extraction_mode', 'html2text') == 'html2text'
 
-        # Check API key (skip for authgpt/antigravity)
+        # Check API key (skip for authgpt/antigravity, local custom endpoints, etc.)
         model_lower = model.lower()
+        _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1' or bool(config_data.get('use_custom_openai_endpoint', False))
+        _custom_ep_url = (config_data.get('openai_base_url', '') or os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+        _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
         needs_key = not (model_lower.startswith('authgpt/') or
+                         model_lower.startswith('authgem/') or
+                         model_lower.startswith('authgem-vertex/') or
+                         model_lower.startswith('vertex/') or
                          model_lower.startswith('antigravity/') or
-                         model_lower == 'google-translate-free')
+                         model_lower == 'google-translate-free' or
+                         model_lower == 'google-translate' or
+                         model_lower.startswith('deepl') or
+                         _is_local_endpoint)
         if needs_key and not api_key:
             if on_error:
                 on_error("No API key configured. Set one in Translation Settings.")

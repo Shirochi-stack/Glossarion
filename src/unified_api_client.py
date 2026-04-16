@@ -1823,9 +1823,29 @@ class UnifiedClient:
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
+    @staticmethod
+    def _is_local_custom_endpoint() -> bool:
+        """Return True if user has enabled a custom OpenAI endpoint pointing to localhost.
+
+        Local endpoints (Ollama, LM Studio, vLLM, etc.) typically don't require an API key,
+        so we allow the client to initialize without one.
+        """
+        try:
+            if os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') != '1':
+                return False
+            url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            if not url:
+                return False
+            return ('localhost' in url) or ('127.0.0.1' in url) or ('0.0.0.0' in url) or ('::1' in url)
+        except Exception:
+            return False
+
     @classmethod
     def _model_needs_api_key(cls, model: str) -> bool:
         """Return False for models that authenticate without an API key."""
+        # Local custom endpoint (Ollama/LM Studio/etc.) → no API key needed
+        if cls._is_local_custom_endpoint():
+            return False
         model_lower = model.lower()
         for prefix in cls._NO_API_KEY_PREFIXES:
             if model_lower.startswith(prefix):

@@ -926,11 +926,21 @@ class TranslationScreen(MDScreen):
         if not self.selected_file or not os.path.isfile(self.selected_file):
             toast("Please select a file first")
             return
-        # authgpt/ and antigravity/ prefixes don't need an API key
+        # authgpt/, antigravity/, vertex/, local endpoints, etc. don't need an API key
         model_lower = self.model_name.lower()
+        _cfg = self.app.config_data if self.app else {}
+        _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1' or bool(_cfg.get('use_custom_openai_endpoint', False))
+        _custom_ep_url = (_cfg.get('openai_base_url', '') or os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+        _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
         needs_api_key = not (model_lower.startswith('authgpt/') or
+                             model_lower.startswith('authgem/') or
+                             model_lower.startswith('authgem-vertex/') or
+                             model_lower.startswith('vertex/') or
                              model_lower.startswith('antigravity/') or
-                             model_lower == 'google-translate-free')
+                             model_lower == 'google-translate-free' or
+                             model_lower == 'google-translate' or
+                             model_lower.startswith('deepl') or
+                             _is_local_endpoint)
         if needs_api_key and not self.api_key and not self.use_multi_keys:
             toast("Please enter an API key")
             return

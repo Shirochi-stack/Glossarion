@@ -10744,8 +10744,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             model = self.model_var.strip()
             
             # Check if model needs API key
+            # Local custom endpoints (Ollama/LM Studio/etc.) → no API key needed
+            _custom_ep_on = bool(getattr(self, 'use_custom_openai_endpoint_var', False)) or os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (getattr(self, 'openai_base_url_var', '') or os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/') or
+                                      _is_local_endpoint)
             
             if model_needs_api_key and not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
@@ -11451,8 +11456,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             model = self.model_var
             
             # Check if model needs API key
+            # Local custom endpoints (Ollama/LM Studio/etc.) → no API key needed
+            _custom_ep_on = bool(getattr(self, 'use_custom_openai_endpoint_var', False)) or os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (getattr(self, 'openai_base_url_var', '') or os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/') or
+                                      _is_local_endpoint)
             
             # Validate API key and model (same as original)
             if '@' in model or model.startswith('vertex/'):
@@ -12477,8 +12487,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             model = self.model_var
             
             # Check if model needs API key
+            # Local custom endpoints (Ollama/LM Studio/etc.) → no API key needed
+            _custom_ep_on = bool(getattr(self, 'use_custom_openai_endpoint_var', False)) or os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (getattr(self, 'openai_base_url_var', '') or os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/') or
+                                      _is_local_endpoint)
             
             if (model_needs_api_key and not api_key) or not model:
                 self.append_log("❌ Error: API key and model required")
@@ -13205,8 +13220,13 @@ Important rules:
                return {}
             
             # Check if model needs API key
+            # Local custom endpoints (Ollama/LM Studio/etc.) → no API key needed
+            _custom_ep_on = bool(getattr(self, 'use_custom_openai_endpoint_var', False)) or os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            _custom_ep_url = (getattr(self, 'openai_base_url_var', '') or os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
+            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
             model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
-                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/'))
+                                      '@' in model or model.startswith('vertex/') or model.startswith('authgpt/') or model.startswith('authgem/') or model.startswith('authgem-vertex/') or model.startswith('antigravity/') or
+                                      _is_local_endpoint)
             
             # Validate Vertex AI credentials if needed
             if '@' in model or model.startswith('vertex/'):
