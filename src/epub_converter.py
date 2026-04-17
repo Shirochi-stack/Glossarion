@@ -5332,19 +5332,74 @@ img {
                     continue
                 if key in hdr_raw_to_trans and idx in toc_trans:
                     toc_version = toc_trans[idx]
-            if not toc_updates:
+                    hdr_version = hdr_raw_to_trans[key]
+                    if toc_version != hdr_version:
+                        conflicts.append((idx, raw, toc_version, hdr_version))
+
+            if not conflicts:
                 self.log("✅ TOC and header translations are already consistent")
                 return
 
-            self.log(f"🔄 Reconciling {len(toc_updates)} TOC entry(ies) to match header translations:")
-            for idx, new_trans in toc_updates.items():
-                old_trans = toc_trans[idx]
-                self.log(f"  [{idx}] \"{old_trans}\" → \"{new_trans}\"")
-                toc_trans[idx] = new_trans
+            self.log(
+                f"🔄 Reconciling {len(conflicts)} conflicting translation(s): "
+                f"{authority_label} is newer and will be treated as authoritative"
+            )
 
-            # Rewrite TOC.txt with corrected translations
-            self._save_toc_translations_file(toc_path, toc_orig, toc_trans, toc_out)
-            self.log(f"✅ Updated TOC.txt with {len(toc_updates)} reconciled translation(s)")
+            toc_updates: Dict[int, str] = {}
+            hdr_updates: Dict[int, str] = {}
+
+            for idx, raw, toc_version, hdr_version in conflicts:
+                if toc_is_newer:
+                    # TOC wins → propagate toc_version into headers
+                    canonical = toc_version
+                    old_val = hdr_version
+                    for hidx, hraw in hdr_orig.items():
+                        if (hraw or '').strip() == (raw or '').strip():
+                            hdr_updates[hidx] = canonical
+                            break
+                else:
+                    # Headers win → propagate hdr_version into TOC
+                    canonical = hdr_version
+                    old_val = toc_version
+                    toc_updates[idx] = canonical
+
+                self.log(f"  [{idx}] \"{old_val}\" → \"{canonical}\" (raw: {raw!r})")
+
+            # Apply TOC updates (headers were authoritative)
+            if toc_updates:
+                for idx, new_trans in toc_updates.items():
+                    toc_trans[idx] = new_trans
+                self._save_toc_translations_file(toc_path, toc_orig, toc_trans, toc_out)
+                self.log(f"✅ Updated {loser_label} with {len(toc_updates)} reconciled translation(s)")
+
+            # Apply header updates (TOC was authoritative)
+            if hdr_updates:
+                for idx, new_trans in hdr_updates.items():
+                    hdr_trans[idx] = new_trans
+                try:
+                    with open(headers_path, 'w', encoding='utf-8') as f:
+                        f.write("Chapter Header Translations\n")
+                        f.write("=" * 50 + "\n\n")
+                        for num in sorted(hdr_orig.keys()):
+                            orig = hdr_orig.get(num, "Unknown")
+                            trans = hdr_trans.get(num, orig)
+                            f.write(f"Chapter {num}:\n")
+                            f.write(f"  Original:   {orig}\n")
+                            f.write(f"  Translated: {trans}\n")
+                            if num in hdr_out and hdr_out[num]:
+                                f.write(f"  Output File: {hdr_out[num]}\n")
+                            if num not in hdr_trans:
+                                f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                            f.write("-" * 40 + "\n")
+                        all_nums = sorted(hdr_orig.keys())
+                        f.write("\nSummary:\n")
+                        f.write(f"Total chapters: {len(all_nums)}\n")
+                        if all_nums:
+                            f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                        f.write(f"Successfully translated: {len(hdr_trans)}\n")
+                    self.log(f"✅ Updated {loser_label} with {len(hdr_updates)} reconciled translation(s)")
+                except Exception as write_err:
+                    self.log(f"⚠️ Failed to write updated translated_headers.txt: {write_err}")
 
         except Exception as e:
             self.log(f"⚠️ Post-reconciliation failed: {e}")
