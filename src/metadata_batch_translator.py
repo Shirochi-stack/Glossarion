@@ -2448,12 +2448,13 @@ class BatchHeaderTranslator:
         """
         updated_count = 0
         added_count = 0
-        
+        skipped_files = []  # collect up-to-date files for a single summary line
+
         for num, new_title in translated_headers.items():
             if num not in current_titles:
                 print(f"⚠️ No HTML file mapping for chapter {num}")
                 continue
-                
+
             current_info = current_titles[num]
             current_title = current_info['title']
             html_file = current_info['filename']
@@ -2461,7 +2462,7 @@ class BatchHeaderTranslator:
 
             # Skip if the translated name is identical to what's already in the file
             if new_title.strip() == current_title.strip():
-                print(f"⏭️ Skipping {html_file}: title already matches '{new_title}'")
+                skipped_files.append(html_file)
                 continue
 
             try:
@@ -2586,6 +2587,8 @@ class BatchHeaderTranslator:
                 import traceback
                 traceback.print_exc()
         
+        if skipped_files:
+            print(f"⏭️ {len(skipped_files)} file(s) already up-to-date (skipped write)")
         print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
     
     def _update_html_headers(self, html_dir: str, translated_headers: Dict[int, str]):
@@ -2594,6 +2597,7 @@ class BatchHeaderTranslator:
         """
         updated_count = 0
         added_count = 0
+        skipped_files = []  # collect up-to-date files for a single summary line
         
         # Get all HTML files in directory (support all HTML extensions)
         html_extensions = ('.html', '.xhtml', '.htm')
@@ -2665,7 +2669,7 @@ class BatchHeaderTranslator:
                             existing_title = _tag.get_text().strip()
                             break
                     if existing_title and existing_title == new_title.strip():
-                        print(f"⏭️ Skipping {html_file}: title already matches '{new_title}'")
+                        skipped_files.append(html_file)
                         continue
 
                     updated = False
@@ -2736,6 +2740,8 @@ class BatchHeaderTranslator:
             except Exception as e:
                 print(f"❌ Error processing chapter {num}: {e}")
         
+        if skipped_files:
+            print(f"⏭️ {len(skipped_files)} file(s) already up-to-date (skipped write)")
         print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
 
 class MetadataTranslator:
