@@ -5272,7 +5272,8 @@ img {
 
         Loads both TOC.txt and translated_headers.txt, and for any entries that
         share identical raw/original text but received different translations,
-        picks the header translation as canonical and updates both files.
+        picks the translation from whichever file was modified most recently
+        (cross-platform: uses os.path.getmtime) and propagates it to the other file.
         """
         toc_path = os.path.join(self.output_dir, 'TOC.txt')
         headers_path = os.path.join(self.output_dir, 'translated_headers.txt')
@@ -5310,18 +5311,27 @@ img {
                 if key and idx in toc_trans:
                     toc_raw_to_trans[key] = toc_trans[idx]
 
+            # ── Determine authority: whichever file was saved most recently wins ──
+            # os.path.getmtime returns a float (POSIX timestamp) on all platforms.
+            try:
+                toc_mtime = os.path.getmtime(toc_path)
+                hdr_mtime = os.path.getmtime(headers_path)
+                toc_is_newer = toc_mtime > hdr_mtime
+            except OSError:
+                # Fallback: keep original behaviour (headers win)
+                toc_is_newer = False
+
+            authority_label = "TOC.txt" if toc_is_newer else "translated_headers.txt"
+            loser_label = "translated_headers.txt" if toc_is_newer else "TOC.txt"
+
             # Find mismatches: same raw text, different translation
-            toc_updates: Dict[int, str] = {}
+            conflicts = []  # list of (toc_idx, raw, toc_version, hdr_version)
             for idx, raw in toc_orig.items():
                 key = (raw or '').strip()
                 if not key:
                     continue
                 if key in hdr_raw_to_trans and idx in toc_trans:
-                    header_version = hdr_raw_to_trans[key]
                     toc_version = toc_trans[idx]
-                    if header_version != toc_version:
-                        toc_updates[idx] = header_version
-
             if not toc_updates:
                 self.log("✅ TOC and header translations are already consistent")
                 return
