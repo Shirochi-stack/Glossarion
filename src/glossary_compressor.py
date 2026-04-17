@@ -50,6 +50,79 @@ _SECTION_HEADER_RE = re.compile(
     r')'
 )
 
+# Built-in glossary base columns (always present regardless of user config)
+_BASE_COLUMN_NAMES = {'type', 'raw_name', 'translated_name', 'gender'}
+
+
+def _get_active_column_header_tokens():
+    """Return the set of legitimate column-header tokens (lowercased).
+    
+    Combines built-in base columns with the user's configured custom fields
+    (GLOSSARY_CUSTOM_FIELDS env var). Used to decide if a CSV-like row is a
+    column-header rather than a data entry. Includes 'description' because the
+    saver auto-appends it whenever any entry has a non-empty description.
+    """
+    tokens = set(_BASE_COLUMN_NAMES)
+    tokens.add('description')  # auto-appended by save_glossary_csv
+    try:
+        custom_fields_json = os.environ.get('GLOSSARY_CUSTOM_FIELDS', '[]') or '[]'
+        custom_fields = json.loads(custom_fields_json)
+        if isinstance(custom_fields, list):
+            for f in custom_fields:
+                if isinstance(f, str) and f.strip():
+                    tokens.add(f.strip().lower())
+    except Exception:
+        pass
+    return tokens
+
+
+def _get_active_entry_types():
+    """Return the set of active glossary entry-type tokens (lowercased).
+    
+    Reads GLOSSARY_CUSTOM_ENTRY_TYPES env var (JSON dict) and returns the
+    keys whose entries are enabled. Falls back to {'character', 'term'} if
+    nothing is configured. Used to recognize legitimate data rows whose first
+    field is one of these types.
+    """
+    try:
+        types_json = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '{}') or '{}'
+        types = json.loads(types_json)
+        if isinstance(types, dict) and types:
+            active = {k.lower() for k, v in types.items()
+                      if isinstance(v, dict) and v.get('enabled', True)}
+            if active:
+                return active
+    except Exception:
+        pass
+    return {'character', 'term'}
+
+
+def _is_csv_column_header_line(line):
+    """Return True if a CSV-like row consists ONLY of column-header tokens.
+    
+    Uses the user's active entry types and custom fields to decide what counts
+    as a header token. A row whose first field IS an active entry type
+    (e.g. 'character', 'term') is treated as a real data row, never a header.
+    """
+    s = line.strip()
+    if not s:
+        return False
+    # Try each known separator and pick the one that produces the most fields
+    best_parts = None
+    for sep in ('\x1F', '\t', '|', ','):
+        if sep in s:
+            parts = [p.strip().lower().strip('"\'') for p in s.split(sep) if p.strip()]
+            if parts and (best_parts is None or len(parts) > len(best_parts)):
+                best_parts = parts
+    if not best_parts:
+        return False
+    # If the first field is an active entry type, this is a real data row.
+    active_types = _get_active_entry_types()
+    if best_parts[0] in active_types:
+        return False
+    header_tokens = _get_active_column_header_tokens()
+    return all(p in header_tokens for p in best_parts)
+
 
 def compress_glossary(glossary_content, source_text, glossary_format='auto'):
     """
@@ -172,7 +245,8 @@ def _compress_token_efficient_format(lines, source_text):
     for line in lines:
         stripped = line.strip()
         
-        # Defer glossary header (e.g. "Glossary Columns: ...") until we know an entry survives
+        # Defer glossary metadata header (e.g. "Glossary Columns: ...") until
+        # we know an entry survives. Drop entirely if no entries match.
         if stripped.lower().startswith('glossary:') or stripped.lower().startswith('glossary columns:'):
             pending_meta_lines.append(line)
             continue
@@ -409,13 +483,18 @@ def _compress_fallback_text(content, source_text):
     
     # ── Phase 1: Classify each line ──────────────────────────────────────
     # Types: 'header', 'entry', 'continuation', 'blank', 'meta'
+    # 'meta' lines (Glossary Columns: ... metadata, CSV column-header rows) and
+    # 'header' rows (=== ... ===, # ...) are kept only when at least one real
+    # entry survives. Decided in Phase 4 / 4.5.
     classifications = []
     for line in lines:
         stripped = line.strip()
         if not stripped:
             classifications.append('blank')
         elif stripped.lower().startswith('glossary columns:') or stripped.lower().startswith('glossary:'):
-            classifications.append('meta')  # always keep
+            classifications.append('meta')  # deferred — kept only if entries survive
+        elif _is_csv_column_header_line(line):
+            classifications.append('meta')  # deferred — kept only if entries survive
         elif _is_section_header(stripped):
             classifications.append('header')
         elif _is_entry_line(line):
@@ -475,8 +554,10 @@ def _compress_fallback_text(content, source_text):
             entry_text = '\n'.join(lines[idx] for idx in group['line_indices'])
             candidates = _extract_candidates(entry_text)
             group['keep'] = any(_text_contains_term(source_text, c, is_character=current_section_is_character) for c in candidates)
-        elif group['type'] in ('meta', 'blank'):
-            group['keep'] = True  # always keep meta lines and blanks (blanks filtered later)
+        elif group['type'] == 'blank':
+            group['keep'] = True  # blanks filtered later
+        elif group['type'] == 'meta':
+            group['keep'] = False  # determined by Phase 4.5 (only kept if any entry survives)
         elif group['type'] == 'header':
             group['keep'] = False  # determined by child entries below
     
@@ -496,10 +577,18 @@ def _compress_fallback_text(content, source_text):
                 break
         group['keep'] = has_kept_child
     
-    # ── Phase 5: Reassemble ────────────────────────────────────────
+    # ── Phase 4.5: Meta line decision ────────────────────────────────────
+    # Meta lines (Glossary Columns: ... and bare CSV column-header rows) are
+    # only kept if at least one real entry survives anywhere. When 0 entries
+    # match, drop them too so we don't ship header-only content to the LLM.
+    has_kept_entry = any(g.get('type') == 'entry' and g.get('keep') for g in groups)
+    for group in groups:
+        if group['type'] == 'meta':
+            group['keep'] = has_kept_entry
+    
+    # ── Phase 5: Reassemble ───────────────────────────────────
     # Short-circuit: if no entry groups survived, return empty so the caller
     # can skip appending an entry-less header-only glossary block to the prompt.
-    has_kept_entry = any(g.get('type') == 'entry' and g.get('keep') for g in groups)
     if not has_kept_entry:
         return ''
     
