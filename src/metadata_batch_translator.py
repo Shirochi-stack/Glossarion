@@ -2458,7 +2458,12 @@ class BatchHeaderTranslator:
             current_title = current_info['title']
             html_file = current_info['filename']
             html_path = os.path.join(html_dir, html_file)
-            
+
+            # Skip if the translated name is identical to what's already in the file
+            if new_title.strip() == current_title.strip():
+                print(f"⏭️ Skipping {html_file}: title already matches '{new_title}'")
+                continue
+
             try:
                 # Check if HTML has a header
                 has_header, soup = self._check_html_has_header(html_path)
@@ -2652,6 +2657,17 @@ class BatchHeaderTranslator:
                     print(f"✓ Added header to {html_file}")
                 else:
                     # HTML has header, update it WITHOUT reparsing/rewriting the rest of the file
+                    # Check existing header text first to avoid unnecessary writes
+                    existing_title = None
+                    for _tag_name in ['h1', 'h2', 'h3']:
+                        _tag = soup.find(_tag_name)
+                        if _tag:
+                            existing_title = _tag.get_text().strip()
+                            break
+                    if existing_title and existing_title == new_title.strip():
+                        print(f"⏭️ Skipping {html_file}: title already matches '{new_title}'")
+                        continue
+
                     updated = False
                     import re as _re
                     with open(html_path, 'r', encoding='utf-8') as rf:
