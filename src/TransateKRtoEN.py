@@ -5603,6 +5603,16 @@ class BatchTranslationProcessor:
             if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             
+            # Post-process: Add spaces between letters and numbers for subword tokenization bug
+            if os.getenv('NUMBER_SPACING_TOKEN_FIX', '0') == '1' and isinstance(cleaned, str):
+                cleaned, count = re.subn(
+                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}():,\-—]*)(\d+)(?![a-zA-Z])(?![^<]*>)',
+                    r'\1 \2',
+                    cleaned
+                )
+                if count > 0:
+                    print(f"🔧 Number Spacing Fix applied: separated {count} letter-number run-on(s)")
+            
             img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
             if img_count > 0:
                 print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (post-processing)")
@@ -6231,6 +6241,16 @@ class BatchTranslationProcessor:
                         enhanced_group_check = False
                     if not enhanced_group_check:
                         cleaned = _fix_empty_attr_tags_bs(cleaned)
+                
+                # Post-process: Add spaces between letters and numbers for subword tokenization bug
+                if os.getenv('NUMBER_SPACING_TOKEN_FIX', '0') == '1' and isinstance(cleaned, str):
+                    cleaned, count = re.subn(
+                        r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}():,\-—]*)(\d+)(?![a-zA-Z])(?![^<]*>)',
+                        r'\1 \2',
+                        cleaned
+                    )
+                    if count > 0:
+                        print(f"🔧 Number Spacing Fix applied (merged): separated {count} letter-number run-on(s)")
                 
                 # Get parent chapter info
                 parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
@@ -13821,6 +13841,20 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Skip normal save since we handled it above and exit this translation run
                 continue
+
+            # Post-process: Fix empty attribute tags for BeautifulSoup mode
+            if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not c.get('enhanced_extraction', False):
+                cleaned = _fix_empty_attr_tags_bs(cleaned)
+
+            # Post-process: Add spaces between letters and numbers for subword tokenization bug
+            if os.getenv('NUMBER_SPACING_TOKEN_FIX', '0') == '1' and isinstance(cleaned, str):
+                cleaned, count = re.subn(
+                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}():,\-—]*)(\d+)(?![a-zA-Z])(?![^<]*>)',
+                    r'\1 \2',
+                    cleaned
+                )
+                if count > 0:
+                    print(f"🔧 Number Spacing Fix applied: separated {count} letter-number run-on(s)")
 
             # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
             # Pattern matches: &lt;img ... /&gt; where the tag ends with /
