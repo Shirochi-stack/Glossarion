@@ -139,7 +139,24 @@ def _compress_csv_glossary(csv_content, source_text):
     
     if len(result_data_lines) == 0 and original_data_count > 0:
         print("⚠️ Glossary compression: CSV produced 0 matching entries, falling back to raw-name scan")
-        return _compress_fallback_text(csv_content, source_text)
+        fallback_result = _compress_fallback_text(csv_content, source_text)
+        # If fallback also yields no entries, return empty string so the caller
+        # can skip appending an entry-less glossary block (header-only) to the prompt.
+        if not fallback_result or not fallback_result.strip():
+            return ''
+        # Verify fallback produced real data (not just remaining meta/header lines)
+        fallback_data_lines = [l for l in fallback_result.split('\n') if l.strip()
+                               and not _is_glossary_header(l)
+                               and not l.strip().startswith('===')
+                               and not l.strip().lower().startswith('glossary columns:')
+                               and not l.strip().lower().startswith('glossary:')]
+        if not fallback_data_lines:
+            return ''
+        return fallback_result
+    
+    # No matching entries found at all → don't return header-only content
+    if len(result_data_lines) == 0:
+        return ''
     
     return result
 
@@ -147,15 +164,17 @@ def _compress_csv_glossary(csv_content, source_text):
 def _compress_token_efficient_format(lines, source_text):
     """Compress token-efficient glossary format with section headers."""
     filtered_lines = []
+    pending_meta_lines = []  # 'Glossary Columns:' / 'Glossary:' headers, kept only if any entry survives
     current_section = None
     current_section_is_character = False
+    has_kept_entry = False
     
     for line in lines:
         stripped = line.strip()
         
-        # Keep glossary header (e.g. "Glossary Columns: ...")
+        # Defer glossary header (e.g. "Glossary Columns: ...") until we know an entry survives
         if stripped.lower().startswith('glossary:') or stripped.lower().startswith('glossary columns:'):
-            filtered_lines.append(line)
+            pending_meta_lines.append(line)
             continue
         
         # Track section headers
@@ -173,14 +192,22 @@ def _compress_token_efficient_format(lines, source_text):
                 raw_name = match.group(1).strip()
                 # Check if raw name appears in source text
                 if _text_contains_term(source_text, raw_name, is_character=current_section_is_character):
+                    # Flush any pending meta header lines on the first kept entry
+                    if pending_meta_lines and not has_kept_entry:
+                        filtered_lines.extend(pending_meta_lines)
                     # Add section header if this is the first entry in section
                     if current_section:
                         filtered_lines.append(current_section)
                         current_section = None
                     filtered_lines.append(line)
+                    has_kept_entry = True
         elif not stripped:
             # Keep blank lines
             filtered_lines.append(line)
+    
+    # If no entries survived, return empty so the caller skips appending the glossary section
+    if not has_kept_entry:
+        return ''
     
     return '\n'.join(filtered_lines)
 
@@ -196,18 +223,17 @@ def _compress_legacy_csv_format(lines, source_text):
     
     filtered_lines = []
     
-    # Keep header if present
-    if has_header:
-        filtered_lines.append(lines[0])
-        data_lines = lines[1:]
-    else:
-        data_lines = lines
+    # Defer keeping the header until we know an entry survives.
+    # Returning header-only content otherwise wastes tokens on a useless block.
+    header_line = lines[0] if has_header else None
+    data_lines = lines[1:] if has_header else lines
     
     # Auto-detect separator from content
     sample = '\n'.join(lines[:5])
     sep = _gsep(sample)
     
     # Process each CSV row
+    has_kept_entry = False
     for line in data_lines:
         if not line.strip():
             continue
@@ -224,10 +250,17 @@ def _compress_legacy_csv_format(lines, source_text):
                 # Check if raw name appears in source text
                 if _text_contains_term(source_text, raw_name, is_character=is_char):
                     filtered_lines.append(line)
+                    has_kept_entry = True
         except Exception:
             # If parsing fails, keep the line to be safe
             filtered_lines.append(line)
+            has_kept_entry = True
     
+    if not has_kept_entry:
+        return ''
+    
+    if header_line is not None:
+        return '\n'.join([header_line] + filtered_lines)
     return '\n'.join(filtered_lines)
 
 
@@ -236,6 +269,7 @@ def _compress_json_glossary(json_data, source_text):
     Compress JSON glossary by excluding entries not found in source text.
     Handles both dict format and list format.
     Falls back to text-based scanning if JSON parsing fails.
+    Returns empty dict / list if no entries match (caller should treat as empty).
     """
     if isinstance(json_data, str):
         try:
@@ -462,7 +496,13 @@ def _compress_fallback_text(content, source_text):
                 break
         group['keep'] = has_kept_child
     
-    # ── Phase 5: Reassemble ──────────────────────────────────────────────
+    # ── Phase 5: Reassemble ────────────────────────────────────────
+    # Short-circuit: if no entry groups survived, return empty so the caller
+    # can skip appending an entry-less header-only glossary block to the prompt.
+    has_kept_entry = any(g.get('type') == 'entry' and g.get('keep') for g in groups)
+    if not has_kept_entry:
+        return ''
+    
     # Collect kept lines, then strip trailing blank lines from dropped sections.
     kept_line_set = set()
     for group in groups:

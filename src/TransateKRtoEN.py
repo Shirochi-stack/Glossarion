@@ -8364,6 +8364,12 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                     original_glossary_text = glossary_text  # Store original for token counting
                     original_length = len(glossary_text)
                     glossary_text = compress_glossary(glossary_text, source_text, glossary_format='auto')
+                    # Normalize to string for downstream length / token measurements
+                    if not isinstance(glossary_text, str):
+                        try:
+                            glossary_text = json.dumps(glossary_text, ensure_ascii=False, indent=2)
+                        except Exception:
+                            glossary_text = str(glossary_text)
                     compressed_length = len(glossary_text)
                     reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
                     
@@ -8389,20 +8395,26 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                     print(f"⚠️ Glossary compression failed: {e}")
                     # Continue with uncompressed glossary
             
-            if system:
-                system += "\n\n"
-            
-            custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "").strip()
-            if not custom_prompt:
-                raise ValueError(
-                    "APPEND_GLOSSARY_PROMPT environment variable is not set!\n"
-                    "Please configure your glossary append format in:\n"
-                    "Glossary Manager → Automatic Glossary → Glossary Append Format"
-                )
-            
-            system += f"{custom_prompt}\n{glossary_text}"
-            
-            print(f"✅ Glossary appended ({len(glossary_text):,} characters)")
+            # If compression produced no entries, skip the glossary section entirely —
+            # appending just the prefix prompt with no entries (or a header-only block)
+            # is misleading and wastes tokens.
+            if not isinstance(glossary_text, str) or not glossary_text.strip():
+                print("ℹ️ Glossary skipped — no entries match this chunk's source text")
+            else:
+                if system:
+                    system += "\n\n"
+                
+                custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "").strip()
+                if not custom_prompt:
+                    raise ValueError(
+                        "APPEND_GLOSSARY_PROMPT environment variable is not set!\n"
+                        "Please configure your glossary append format in:\n"
+                        "Glossary Manager → Automatic Glossary → Glossary Append Format"
+                    )
+                
+                system += f"{custom_prompt}\n{glossary_text}"
+                
+                print(f"✅ Glossary appended ({len(glossary_text):,} characters)")
             
             # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
             add_additional_glossary = os.getenv("ADD_ADDITIONAL_GLOSSARY", "0") == "1"
@@ -8428,15 +8440,24 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                                 from glossary_compressor import compress_glossary
                                 original_add_length = len(additional_glossary_text)
                                 additional_glossary_text = compress_glossary(additional_glossary_text, source_text, glossary_format='auto')
+                                # Normalize to string for downstream measurements
+                                if not isinstance(additional_glossary_text, str):
+                                    try:
+                                        additional_glossary_text = json.dumps(additional_glossary_text, ensure_ascii=False, indent=2)
+                                    except Exception:
+                                        additional_glossary_text = str(additional_glossary_text)
                                 compressed_add_length = len(additional_glossary_text)
                                 add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
                                 print(f"🗃️ Glossary extension compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
                             except Exception as e:
                                 print(f"⚠️ Glossary extension compression failed: {e}")
                         
-                        # Append glossary extension
-                        system += f"\n\n{additional_glossary_text}"
-                        print(f"✅ Glossary extension appended ({len(additional_glossary_text):,} characters)")
+                        # Append glossary extension only if it has actual content
+                        if isinstance(additional_glossary_text, str) and additional_glossary_text.strip():
+                            system += f"\n\n{additional_glossary_text}"
+                            print(f"✅ Glossary extension appended ({len(additional_glossary_text):,} characters)")
+                        else:
+                            print("ℹ️ Glossary extension skipped — no entries match this chunk's source text")
                         
                     except Exception as e:
                         print(f"⚠️ Failed to load glossary extension: {e}")
