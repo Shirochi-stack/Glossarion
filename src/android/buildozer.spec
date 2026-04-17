@@ -53,10 +53,10 @@ android.gradle_dependencies = androidx.core:core:1.12.0,androidx.appcompat:appco
 # Services (foreground translation service)
 # services = GlossarionTranslation:service.py:foreground
 
-# Arch - ARM64 + ARM for real devices. x86_64 removed: python3==3.10.14 crashes
-# on x86_64 (zlib.cpython-310.so) at API 34 / NDK r25b, and switching to 3.11
-# breaks lxml compilation. Real devices all use arm architectures.
-android.archs = arm64-v8a,armeabi-v7a
+# Arch - ARM64 + ARM for real devices + x86_64 for CI emulator smoke test.
+# NOTE: python3==3.10.14 may crash with zlib on x86_64 at API 34 / NDK r25b.
+# If emulator smoke test fails, either pin emulator to API 33 or drop x86_64 again.
+android.archs = arm64-v8a,armeabi-v7a,x86_64
 
 # Allow backup
 android.allow_backup = True

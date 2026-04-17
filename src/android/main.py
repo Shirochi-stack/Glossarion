@@ -61,6 +61,8 @@ from kivy.utils import platform
 from kivy.lang import Builder
 from kivy.clock import Clock
 from kivy.animation import Animation
+from kivy.uix.widget import Widget
+from kivy.graphics import Color, Rectangle
 
 # ── CJK font helper ──
 def _get_cjk_font_paths():
@@ -157,20 +159,22 @@ FloatLayout:
             TranslationScreen:
                 name: 'translation'
 
-    Button:
+    # Scrim: plain Widget so it NEVER consumes touches when inactive.
+    # We draw the dark overlay via canvas and only intercept touches
+    # when actually visible (opacity > 0 means menu is open).
+    ScrimWidget:
         id: tab_menu_scrim
         size_hint: 1, 1
-        background_normal: ''
-        background_color: 0, 0, 0, 0.48
         opacity: 0
-        disabled: True
-        on_release: app.close_tab_menu()
 
     MDCard:
         id: tab_menu_panel
         size_hint: None, 1
         width: dp(260)
-        x: -self.width
+        # Start well off-screen; we animate x in open_tab_menu().
+        # Using a fixed -dp(300) avoids the "x: -self.width" late-binding
+        # race that left the panel at x=0 during the first layout pass.
+        x: -dp(300)
         y: 0
         elevation: 8
         radius: [0, dp(18), dp(18), 0]
