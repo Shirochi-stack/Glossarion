@@ -8911,7 +8911,54 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     import re
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
-    
+
+    # -------------------------------------------------------------------------
+    # PRE-PASS: Strip any HTML tags the AI injected into the translated output.
+    # We use html2text (same library/settings used during extraction) so that
+    # image/media tags are preserved exactly as during extraction.
+    # Only runs when html tags are actually detected; logs the model name so
+    # you can track which AI is ignoring the "no HTML" formatting instruction.
+    # -------------------------------------------------------------------------
+    _html_tag_re = re.compile(r'</?[a-zA-Z][^>]*>', re.DOTALL)
+    if _html_tag_re.search(plain_text):
+        try:
+            import html2text as _html2text_mod
+            _h = _html2text_mod.HTML2Text()
+            # Mirror the settings used in EnhancedTextExtractor._configure_html2text()
+            _h.unicode_snob   = True
+            _h.escape_snob    = os.getenv('HTML2TEXT_ESCAPE_SNOB', '0') == '1'
+            _h.body_width     = 0
+            _h.ignore_links   = False
+            _h.ignore_images  = False
+            _h.ignore_anchors = False
+            _h.ignore_tables  = False
+            _h.images_as_html = True   # Keep <img> tags intact
+            _h.images_to_alt  = False
+            _h.images_with_size = True
+            _h.wrap_links     = False
+            _h.protect_links  = True
+            _h.single_line_break = os.getenv('ENHANCED_SINGLE_LINE_BREAK', '0') == '1'
+
+            # Wrap in a minimal HTML shell so html2text processes it correctly
+            _wrapped = f'<div>{plain_text}</div>'
+            _stripped = _h.handle(_wrapped).strip()
+
+            if _stripped != plain_text.strip():
+                # Something was actually changed — log the offender
+                _model  = os.getenv('MODEL', 'unknown-model')
+                _chnum  = chapter_info.get('chapter_num', '') if chapter_info else ''
+                _chtitle = chapter_info.get('title', '')      if chapter_info else ''
+                _label  = f" ch{_chnum}" if _chnum else ''
+                _label += f" '{_chtitle}'" if _chtitle else ''
+                print(f"⚠️  [HTML-in-translation{_label}] Model '{_model}' returned HTML tags "
+                      f"inside the translated text — stripped before markdown→HTML conversion.")
+            plain_text = _stripped
+        except ImportError:
+            # html2text not available; fall through to the existing _escape_tag_like logic
+            pass
+        except Exception as _e:
+            print(f"⚠️  [HTML-in-translation] html2text strip pass failed: {_e}")
+
     # Pre-process: Convert angle-bracket "tag-like" sequences into HTML entities.
     # This prevents markdown converters from stripping/mangling them.
     # IMPORTANT: Preserve real anchor tags (<a ...> and </a>) so EPUB TOC links remain clickable.
