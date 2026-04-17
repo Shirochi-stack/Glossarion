@@ -1704,6 +1704,7 @@ class UnifiedClient:
         'o3': 'openai',
         'o4': 'openai',
         'gemini': 'gemini',
+        'gemma': 'gemini',  # Gemma models are served via the Gemini API (generativelanguage.googleapis.com)
         'claude': 'anthropic',
         'chutes': 'chutes',
         'chutes/': 'chutes',
@@ -3268,6 +3269,26 @@ class UnifiedClient:
                                 if self.__class__._rate_limit_cache:
                                     self.__class__._rate_limit_cache.add_rate_limit(key_id, cooldown)
     
+    @staticmethod
+    def _should_override_gemma_to_custom_endpoint(model: str) -> bool:
+        """Return True when the given Gemma model should be routed through the user's
+        OpenAI custom endpoint (Ollama / LM Studio / vLLM / etc.) instead of the
+        Gemini API endpoint. Controlled by the 'Override Gemma routing' GUI toggle.
+        """
+        try:
+            if not model:
+                return False
+            if not model.lower().startswith('gemma'):
+                return False
+            if os.getenv('OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT', '1') != '1':
+                return False
+            if os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') != '1':
+                return False
+            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
+            return bool(custom_base_url)
+        except Exception:
+            return False
+
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
@@ -3277,8 +3298,13 @@ class UnifiedClient:
             if not custom_base_url.startswith(('http://', 'https://')):
                 custom_base_url = 'https://' + custom_base_url
             
+            # Gemma models can be overridden to use the OpenAI custom endpoint (local LLM)
+            # even though they're served by the Gemini API by default.
+            _gemma_override = self._should_override_gemma_to_custom_endpoint(getattr(self, 'model', None))
+            
             # Don't override Gemini models - they have their own separate endpoint toggle
-            if self.client_type == 'gemini':
+            # (unless this is a Gemma model with the override toggle enabled)
+            if self.client_type == 'gemini' and not _gemma_override:
                 # Only log if Gemini OpenAI endpoint is not also enabled
                 use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
                 if not use_gemini_endpoint:
@@ -3318,8 +3344,12 @@ class UnifiedClient:
             if not individual_endpoint.startswith(('http://', 'https://')):
                 individual_endpoint = 'https://' + individual_endpoint
             
+            # Gemma models can be overridden to use the (per-key) custom endpoint even though
+            # they're identified as 'gemini' provider (Gemma is freely available as a local LLM).
+            _gemma_override = self._should_override_gemma_to_custom_endpoint(getattr(self, 'model', None))
+            
             # Don't override Gemini models - they have their own separate endpoint toggle
-            if self.client_type == 'gemini':
+            if self.client_type == 'gemini' and not _gemma_override:
                 # Only log if Gemini OpenAI endpoint is not also enabled
                 use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
                 if not use_gemini_endpoint:
@@ -4956,11 +4986,19 @@ class UnifiedClient:
             elif self.client_type == 'openai':
                 logger.info(f"Using custom OpenAI endpoint for OpenAI model: {model_snapshot}")
             elif self.client_type == 'gemini':
-                # Don't override Gemini - it has its own separate endpoint toggle
-                # Only log if Gemini OpenAI endpoint is not also enabled
-                use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
-                if not use_gemini_endpoint:
-                    self._log_once(f"Gemini model detected, not overriding with custom OpenAI endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)")
+                # Gemma is also identified as a 'gemini' provider but is freely available
+                # as a local LLM. When 'Override Gemma routing' is enabled (default),
+                # route Gemma models through the OpenAI-compatible custom endpoint instead.
+                if self._should_override_gemma_to_custom_endpoint(model_snapshot):
+                    self.client_type = 'openai'
+                    print(f"[DEBUG] Override Gemma: routing {model_snapshot} through OpenAI custom endpoint ({custom_base_url})")
+                    logger.info(f"Override Gemma enabled: Routing Gemma model {model_snapshot} through OpenAI custom endpoint")
+                else:
+                    # Don't override Gemini - it has its own separate endpoint toggle
+                    # Only log if Gemini OpenAI endpoint is not also enabled
+                    use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+                    if not use_gemini_endpoint:
+                        self._log_once(f"Gemini model detected, not overriding with custom OpenAI endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)")
             else:
                 # Override other model types to use custom OpenAI endpoint when toggle is enabled
                 original_client_type = self.client_type

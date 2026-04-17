@@ -1398,6 +1398,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
         self.gemini_openai_endpoint_var = self.config.get('gemini_openai_endpoint', 'generativelanguage.googleapis.com')
+        # Override Gemma routing: when enabled (default), Gemma models use the OpenAI custom endpoint
+        # instead of the Gemini custom endpoint, so they can run on local LLM servers (Ollama/LM Studio/etc.)
+        self.override_gemma_for_custom_endpoint_var = self.config.get('override_gemma_for_custom_endpoint', True)
+        try:
+            os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if self.override_gemma_for_custom_endpoint_var else '0'
+        except Exception:
+            pass
         self.force_native_anthropic_var = self.config.get('force_native_anthropic', False)
         self.anthropic_base_url_var = self.config.get('anthropic_base_url', '')
         self.azure_api_version_var = self.config.get('azure_api_version', '2025-01-01-preview')
@@ -11937,6 +11944,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else 'generativelanguage.googleapis.com',
+            'OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT': '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0',
             'FORCE_NATIVE_ANTHROPIC': '1' if getattr(self, 'force_native_anthropic_var', False) else '0',
             'ANTHROPIC_BASE_URL': getattr(self, 'anthropic_base_url_var', '') or '',
             'FUZZY_AUTO_MAPPING': '1' if getattr(self, 'fuzzy_auto_mapping_var', False) else '0',
@@ -12510,6 +12518,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 os.environ['USE_GEMINI_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'
                 os.environ['GEMINI_OPENAI_ENDPOINT'] = getattr(self, 'gemini_openai_endpoint_var', '') or 'generativelanguage.googleapis.com'
+                os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0'
                 os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'
                 os.environ['OPENAI_CUSTOM_BASE_URL'] = getattr(self, 'openai_base_url_var', '') or ''
                 os.environ['GROQ_API_URL'] = getattr(self, 'groq_base_url_var', '') or ''
@@ -13385,6 +13394,7 @@ Important rules:
                     # during glossary extraction, especially when using glossary keys pool).
                     'USE_GEMINI_OPENAI_ENDPOINT': '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0',
                     'GEMINI_OPENAI_ENDPOINT': getattr(self, 'gemini_openai_endpoint_var', '') or 'generativelanguage.googleapis.com',
+                    'OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT': '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0',
                     'USE_CUSTOM_OPENAI_ENDPOINT': '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0',
                     'OPENAI_CUSTOM_BASE_URL': getattr(self, 'openai_base_url_var', '') or '',
                     'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
@@ -20182,6 +20192,7 @@ Important rules:
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
                 ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'),
                 ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', 'generativelanguage.googleapis.com')),
+                ('OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT', '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0'),
                 ('FORCE_NATIVE_ANTHROPIC', '1' if getattr(self, 'force_native_anthropic_var', False) else '0'),
                 ('ANTHROPIC_BASE_URL', getattr(self, 'anthropic_base_url_var', '')),
                 ('FUZZY_AUTO_MAPPING', '1' if getattr(self, 'fuzzy_auto_mapping_var', False) else '0'),

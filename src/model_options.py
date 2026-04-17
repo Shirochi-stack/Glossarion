@@ -30,6 +30,10 @@ def get_model_options() -> List[str]:
         "gemini-3-flash-preview", "gemini-3-pro-image-preview",
         "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
         "gemini-2.0-flash","gemini-2.0-flash-lite",
+        # Gemma models (served via the Gemini API endpoint)
+        "gemma-4-31b-it", "gemma-3-27b-it", "gemma-3-12b-it",
+        "gemma-3-4b-it", "gemma-3-1b-it", "gemma-3n-e4b-it", "gemma-3n-e2b-it",
+        "gemma-2-27b-it", "gemma-2-9b-it", "gemma-2-2b-it",
         
         # Anthropic Claude Models
         "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 

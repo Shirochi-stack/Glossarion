@@ -9821,6 +9821,41 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     shortcuts_h.addStretch()
     additional_v.addWidget(shortcuts_widget)
 
+    # ── Override Gemma routing (Gemma is also available as a local LLM via Ollama / LM Studio) ──
+    if not hasattr(self, 'override_gemma_for_custom_endpoint_var'):
+        self.override_gemma_for_custom_endpoint_var = bool(
+            self.config.get('override_gemma_for_custom_endpoint', True)
+        )
+    override_gemma_cb = self._create_styled_checkbox("Override Gemma routing (use OpenAI custom endpoint for Gemma models)")
+    override_gemma_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+        "When enabled (default), Gemma models (e.g. gemma-3-27b-it) are routed through the "
+        "<b>Override API Endpoint</b> above (Ollama / LM Studio / vLLM) instead of the "
+        "<b>Gemini Custom Endpoint</b>. Gemma is freely available as a local LLM, so this lets you "
+        "run it locally even while the Gemini Custom Endpoint toggle is enabled for actual Gemini models. "
+        "Disable to force Gemma through the Gemini API endpoint instead."
+        "</p></qt>"
+    )
+    try:
+        override_gemma_cb.setChecked(bool(self.override_gemma_for_custom_endpoint_var))
+    except Exception:
+        pass
+    def _on_override_gemma_toggle(checked):
+        try:
+            self.override_gemma_for_custom_endpoint_var = bool(checked)
+            self.config['override_gemma_for_custom_endpoint'] = self.override_gemma_for_custom_endpoint_var
+            os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if checked else '0'
+        except Exception:
+            pass
+    override_gemma_cb.toggled.connect(_on_override_gemma_toggle)
+    override_gemma_cb.setContentsMargins(0, 8, 0, 5)
+    additional_v.addWidget(override_gemma_cb)
+    # Push the initial value into env so backends pick it up before the user toggles it
+    try:
+        os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if self.override_gemma_for_custom_endpoint_var else '0'
+    except Exception:
+        pass
+
     # ── Anthropic Custom Endpoint ──
     anthropic_sep = QFrame()
     anthropic_sep.setFrameShape(QFrame.HLine)
