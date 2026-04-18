@@ -514,6 +514,11 @@ class EnhancedTextExtractor:
             # Pre-process HTML to decode all entities
             html_content = self._decode_entities(html_content)
             
+            # Protect CJK angle brackets BEFORE BeautifulSoup/lxml sees them.
+            # Without this, lxml re-encodes <Korean text> back to &lt;...&gt;
+            # during serialisation, causing entities to leak into the AI prompt.
+            html_content = self._protect_cjk_angle_brackets(html_content)
+            
             # Detect language early (don't log - already logged in extraction summary)
             self.detected_language = self._detect_content_language(html_content)
             
@@ -633,7 +638,7 @@ class EnhancedTextExtractor:
             # Restore protected quotes
             clean_text = self._restore_quotes(clean_text)
             
-            # Restore CJK angle brackets as HTML entities
+            # Restore CJK angle brackets as raw < > for the AI prompt
             clean_text = self._restore_cjk_angle_brackets(clean_text)
             
             # Remove markdown duplicate headers if enabled
