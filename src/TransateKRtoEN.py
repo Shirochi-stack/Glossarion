@@ -8937,6 +8937,26 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
 
     # -------------------------------------------------------------------------
+    # ESCAPE PASS: Convert prose angle-bracket sequences to HTML entities FIRST
+    # so they survive the html2text strip pass below unchanged.
+    # e.g. <Alice's Nightmare> -> &lt;Alice's Nightmare&gt;
+    # Allowed tags (a, img, svg, picture, figure) are kept as real HTML.
+    # -------------------------------------------------------------------------
+    _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure")
+    def _escape_tag_like(m):
+        inner = m.group(1)
+        try:
+            mname = re.match(r'\s*/?\s*([a-zA-Z0-9]+)', inner)
+            tag = (mname.group(1) if mname else "").lower()
+        except Exception:
+            tag = ""
+        if tag in _ALLOWED_TAGS:
+            return "<" + inner + ">"
+        return "&lt;" + inner + "&gt;"
+
+    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
+
+    # -------------------------------------------------------------------------
     # PRE-PASS: Strip any HTML tags the AI injected into the translated output.
     # We use html2text (same library/settings used during extraction) so that
     # image/media tags are preserved exactly as during extraction.
@@ -8997,28 +9017,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         except Exception as _e:
             print(f"⚠️  [HTML-in-translation] html2text strip pass failed: {_e}")
 
-    # Pre-process: Convert angle-bracket "tag-like" sequences into HTML entities.
-    # This prevents markdown converters from stripping/mangling them.
-    # IMPORTANT: Preserve real anchor tags (<a ...> and </a>) so EPUB TOC links remain clickable.
-    # IMPORTANT: Preserve the 4 image-format tags (<img>, <svg>, <picture>, <figure>)
-    # so image-only chapters don't get their media escaped into visible entity text.
-    # These names are never prose, so allow-listing them is safe.
-    _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure")
-    def _escape_tag_like(m):
-        inner = m.group(1)  # e.g. 'a href="..."' or '/a'
-        try:
-            mname = re.match(r'\s*/?\s*([a-zA-Z0-9]+)', inner)
-            tag = (mname.group(1) if mname else "").lower()
-        except Exception:
-            tag = ""
-
-        # Allowlist: tags we must keep as real HTML in enhanced mode
-        if tag in _ALLOWED_TAGS:
-            return "<" + inner + ">"
-
-        return "&lt;" + inner + "&gt;"
-
-    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
+    # (escape_tag_like already ran above before the html2text pass)
     
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
