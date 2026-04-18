@@ -27,6 +27,7 @@ import json
 import zipfile
 import csv
 from bs4 import BeautifulSoup
+from _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags
 from langdetect import detect, LangDetectException
 from difflib import SequenceMatcher
 from collections import Counter, defaultdict
@@ -221,10 +222,11 @@ TRANSLATION_ARTIFACTS = {
         r'"(?:type|raw_name|translated_name|gender|description)"\s*:\s*"[^"]+"\s*,?\s*"(?:type|raw_name|translated_name|gender|description)"',
         re.IGNORECASE
     ),
-    'empty_attribute_tags': re.compile(
-        r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)\s*=\s*""\s*>(.*?)</\1>',
-        re.IGNORECASE | re.DOTALL
-    )
+    # NOTE: 'empty_attribute_tags' detection is done separately against the
+    # raw HTML file content (see the per-file loop below). It cannot live in
+    # this dict because ``detect_translation_artifacts`` is called on the
+    # *extracted* plain text, which has its HTML tags already stripped by
+    # BeautifulSoup. The shared implementation lives in ``_empty_attr_fix``.
 }
 
 # AI artifact detection patterns (mirrors ContentProcessor.clean_ai_artifacts)
@@ -5461,11 +5463,14 @@ STANDARD_HTML_TAGS = frozenset([
 # Matches real angle-bracket tags like <concept> or <概念>. Tag names can be
 # any run of characters that aren't whitespace, angle brackets, slash, equals,
 # quote or ampersand, so this also catches translated (non-ASCII) tag names.
-_CUSTOM_TAG_ANGLE_RE = re.compile(r'<\s*/?\s*([^\s<>/="\'&]+)(?:\s[^>]*)?/?\s*>')
+# Group 2 captures whatever follows the tag name (attributes or free text)
+# so we can tell ``<a href="...">`` from ``<I have many things>``.
+_CUSTOM_TAG_ANGLE_RE = re.compile(r'<\s*/?\s*([^\s<>/="\'&]+)(\s[^>]*)?/?\s*>')
 
 # Matches HTML-entity-encoded tags like &lt;concept&gt; or &lt;概念&gt;.
+# Group 2 captures the content after the tag name, same reason as above.
 _CUSTOM_TAG_ENTITY_RE = re.compile(
-    r'&lt;\s*/?\s*([^\s<>/="\'&;]+?)(?:\s[^&]*?)?/?\s*&gt;',
+    r'&lt;\s*/?\s*([^\s<>/="\'&;]+?)(\s[^&]*?)?/?\s*&gt;',
     re.IGNORECASE
 )
 
@@ -5481,23 +5486,52 @@ def _is_standard_tag(raw_name):
     return name in STANDARD_HTML_TAGS
 
 
+def _is_standard_tag_match(raw_name, trailing):
+    """Classify a tag match as a real HTML tag vs. a custom/story tag.
+
+    Returns True only if BOTH conditions hold:
+      * the tag name is a known HTML/SVG/EPUB element, AND
+      * the content between the name and the closing bracket is either
+        empty, a lone self-closing slash, or looks like HTML attributes
+        (i.e. contains an ``=`` sign).
+
+    This prevents mis-classifying story/translation tags whose first word
+    happens to be a standard tag name -- e.g. ``&lt;I have many things&gt;``
+    would otherwise be read as the HTML italic tag and silently dropped
+    from custom-tag counts.
+    """
+    if not _is_standard_tag(raw_name):
+        return False
+    if trailing is None:
+        return True
+    stripped = trailing.strip()
+    if not stripped or stripped == '/':
+        return True
+    # Content that looks like HTML attributes (has ``=``) is treated as a
+    # real tag; free-form prose (no ``=``) is treated as a custom story tag.
+    return '=' in stripped
+
+
 def _count_custom_tag_occurrences(text, include_angle=True, include_entities=True):
     """Return the total number of non-standard tag occurrences in `text`.
     
     Counts every hit (not unique names), in either angle-bracket or
     HTML-entity-encoded form. Namespaced tags like <epub:type> are
-    considered "standard" by their local name and excluded.
+    considered "standard" by their local name and excluded; so are real
+    HTML tags with valid-looking attributes. Entity-encoded or
+    angle-bracketed prose like ``&lt;I have many things&gt;`` *is* counted
+    even when the first word happens to match a standard tag name.
     """
     if not isinstance(text, str) or not text:
         return 0
     count = 0
     if include_angle:
         for m in _CUSTOM_TAG_ANGLE_RE.finditer(text):
-            if not _is_standard_tag(m.group(1)):
+            if not _is_standard_tag_match(m.group(1), m.group(2)):
                 count += 1
     if include_entities:
         for m in _CUSTOM_TAG_ENTITY_RE.finditer(text):
-            if not _is_standard_tag(m.group(1)):
+            if not _is_standard_tag_match(m.group(1), m.group(2)):
                 count += 1
     return count
 
@@ -5508,6 +5542,9 @@ def _collect_custom_tag_names(text, include_angle=True, include_entities=True, l
     Tag names are returned in first-seen order and capped at `limit` to
     keep the result compact (useful for displaying alongside counts).
     Names can be in any language (e.g. ASCII ``concept`` or CJK ``概念``).
+    Uses the same entity/angle classifier as
+    ``_count_custom_tag_occurrences`` so custom-tag prose such as
+    ``&lt;I have many things&gt;`` is collected under the tag name ``I``.
     """
     if not isinstance(text, str) or not text:
         return []
@@ -5532,7 +5569,7 @@ def _collect_custom_tag_names(text, include_angle=True, include_entities=True, l
     for it in iters:
         for m in it:
             raw = m.group(1)
-            if not _is_standard_tag(raw):
+            if not _is_standard_tag_match(raw, m.group(2)):
                 _add(raw)
                 if len(seen) >= limit:
                     return seen
@@ -6512,21 +6549,18 @@ def process_html_file_batch(args):
         if check_translation_artifacts:
             artifacts = detect_translation_artifacts(raw_text)
             
-            # Check for empty attribute tags in RAW content (these are tags, so stripped from raw_text)
-            # Regex allows for spaces around = (e.g. <tag attr = "">)
-            # Pattern: <tag attr=""> content </tag>
-            empty_tag_pattern = re.compile(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)\s*=\s*""\s*>(.*?)</\1>', re.IGNORECASE | re.DOTALL)
-            
-            # Only check if we have raw content (HTML mode)
+            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations
+            # in RAW HTML content (these are tags, so stripped from ``raw_text``).
+            # Delegates to ``_empty_attr_fix`` so detection and repair agree on
+            # which patterns count -- multi-attribute, punctuated attr names,
+            # single or double quotes, whitespace around ``=``, etc.
             if raw_file_content:
-                raw_content_matches = empty_tag_pattern.findall(raw_file_content)
-                
-                if raw_content_matches:
-                    # Format matches into readable strings
-                    formatted_examples = [f"<{tag} {attr}=\"\">{content}</{tag}>" for tag, attr, content in list(set(raw_content_matches))]
+                raw_content_count = count_empty_attr_tags(raw_file_content)
+                if raw_content_count:
+                    formatted_examples = find_empty_attr_tags(raw_file_content, limit=10)
                     artifacts.append({
                         'type': 'empty_attribute_tags',
-                        'count': len(raw_content_matches),
+                        'count': raw_content_count,
                         'examples': formatted_examples,
                         'severity': 'medium'
                     })

@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Callable
 from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from metadata_batch_translator import enhance_epub_compiler
+from _empty_attr_fix import fix_empty_attr_tags
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 # Import the lightweight compression worker for ProcessPoolExecutor.
@@ -759,43 +760,13 @@ class XHTMLConverter:
             # and DO NOT touch namespaced tags like <svg:rect>.
             allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
 
-            # NEW: Fix for "Empty Attribute Tags" (e.g. <unique ability=""></unique>)
-            # Transforms hallucinated patterns like <unique ability=""></unique> into <unique ability>
+            # Fix for "Empty Attribute Tags" / "LLM Token Fix" (e.g.
+            # <unique ability=""></unique>, <a a="" and="" ... thorough=""></a>).
+            # Delegates to the shared ``_empty_attr_fix`` helper so the
+            # BeautifulSoup post-process, html2text pre-process, and this
+            # EPUB-converter pass all use the same regex.
             if os.getenv('FIX_EMPTY_ATTR_TAGS_EPUB', '0') == '1':
-                def _escape_empty_attr_tags(text: str) -> str:
-                    # Known HTML tags to preserve
-                    known_tags = {
-                        'html','head','body','title','meta','link','style','script','noscript',
-                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
-                        'ul','ol','li','dl','dt','dd',
-                        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
-                        'table','thead','tbody','tr','td','th','caption','col','colgroup',
-                        'blockquote','q','cite',
-                        'section','article','header','footer','nav','main','aside','details','summary',
-                        'figure','figcaption',
-                        'form','input','button','select','option','textarea','label','fieldset','legend',
-                        'iframe','canvas','svg','math',
-                        'video','audio','source','track','embed','object','param',
-                        'map','area',
-                        'center', 'font', 'base'
-                    }
-                    
-                    # Transform: <Tag Attr="">Content</Tag>  -->  &lt;Tag Attr&gt;Content
-                    # This removes the empty attribute value and the closing tag, creating a visual "token" style representation
-                    def _repl_pair(m):
-                        tagname = m.group(1)
-                        if tagname.lower() in known_tags:
-                            return m.group(0)
-                        attrname = m.group(2)
-                        content = m.group(3)
-                        return f"&lt;{tagname} {attrname}&gt;{content}"
-                    
-                    # Match <Tag Attr=""></Tag> (allow whitespace and content)
-                    text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>(.*?)</\1>', _repl_pair, text, flags=re.DOTALL)
-                    
-                    return text
-                
-                html_content = _escape_empty_attr_tags(html_content)
+                html_content = fix_empty_attr_tags(html_content)
 
             def _escape_story_tag(match):
                 full_tag = match.group(0)   # Entire <...> or </...>

@@ -30,6 +30,8 @@ except ImportError:
     html2text = None
     raise ImportError("html2text is required. Install with: pip install html2text")
 
+from _empty_attr_fix import fix_empty_attr_tags
+
 
 class EnhancedTextExtractor:
     """Enhanced text extraction with proper Unicode and CJK handling"""
@@ -295,37 +297,14 @@ class EnhancedTextExtractor:
         return text
     
     def _protect_empty_attr_tags(self, text: str) -> str:
-        """Protect tags with empty attributes from being stripped by html2text"""
-        # Known HTML tags to preserve
-        known_tags = {
-            'html','head','body','title','meta','link','style','script','noscript',
-            'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
-            'ul','ol','li','dl','dt','dd',
-            'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
-            'table','thead','tbody','tr','td','th','caption','col','colgroup',
-            'blockquote','q','cite',
-            'section','article','header','footer','nav','main','aside','details','summary',
-            'figure','figcaption',
-            'form','input','button','select','option','textarea','label','fieldset','legend',
-            'iframe','canvas','svg','math',
-            'video','audio','source','track','embed','object','param',
-            'map','area',
-            'center', 'font', 'base'
-        }
-        
-        # Transform: <Tag Attr="">Content</Tag>  -->  &lt;Tag Attr&gt;Content
-        def _repl_pair(m):
-            tagname = m.group(1)
-            if tagname.lower() in known_tags:
-                return m.group(0)
-            attrname = m.group(2)
-            content = m.group(3)
-            return f"&lt;{tagname} {attrname}&gt;{content}"
-        
-        # Match <Tag Attr=""></Tag> (allow whitespace and content)
-        text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=\"\"\s*>(.*?)</\1>', _repl_pair, text, flags=re.DOTALL)
-        
-        return text
+        """Rewrite hallucinated empty-attribute tags to visible text so they
+        survive html2text's tag-stripping pass.
+
+        Delegates to the shared implementation in ``_empty_attr_fix`` so the
+        BeautifulSoup post-process, html2text pre-process, and EPUB-converter
+        pass all use the same regex.
+        """
+        return fix_empty_attr_tags(text)
     
     def _preprocess_html_for_quotes(self, html_content: str) -> str:
         """Pre-process HTML to protect quotes from conversion"""

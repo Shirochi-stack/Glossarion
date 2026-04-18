@@ -40,6 +40,7 @@ from typing import Dict, List, Tuple
 from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
+from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 import csv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
@@ -5599,7 +5600,10 @@ class BatchTranslationProcessor:
             
             # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
             # Pattern matches: &lt;img ... /&gt; where the tag ends with /
-            # Post-process: Fix empty attribute tags for BeautifulSoup mode
+            # Post-process: Fix empty attribute tags for BeautifulSoup mode.
+            # FIX_EMPTY_ATTR_TAGS_EXTRACT governs the html2text/enhanced path;
+            # this toggle must stay scoped to BS-mode output only so the two
+            # GUI switches remain independent.
             if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             
@@ -6235,7 +6239,12 @@ class BatchTranslationProcessor:
                 cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
                 cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
                 
-                # Post-process: Fix empty attribute tags for BeautifulSoup mode
+                # Post-process: Fix empty attribute tags for BeautifulSoup mode.
+                # FIX_EMPTY_ATTR_TAGS_EXTRACT governs the html2text/enhanced
+                # path; this toggle stays scoped to non-enhanced chapters so
+                # the two GUI switches remain independent. For a merged group
+                # we skip if ANY chapter was enhanced -- mirrors the per-chapter
+                # gate above.
                 if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1':
                     try:
                         enhanced_group_check = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
@@ -6852,38 +6861,11 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
     return ContentProcessor.emergency_restore_paragraphs(text, original_html, verbose)
 
 
-def _fix_empty_attr_tags_bs(text: str) -> str:
-    """Post-process: escape hallucinated empty-attribute tags in BeautifulSoup output.
-    
-    Transforms patterns like <Tag Attr="">Content</Tag> into &lt;Tag Attr&gt;Content
-    for non-standard HTML tags, preserving real HTML tags untouched.
-    """
-    known_tags = {
-        'html','head','body','title','meta','link','style','script','noscript',
-        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
-        'ul','ol','li','dl','dt','dd',
-        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
-        'table','thead','tbody','tr','td','th','caption','col','colgroup',
-        'blockquote','q','cite',
-        'section','article','header','footer','nav','main','aside','details','summary',
-        'figure','figcaption',
-        'form','input','button','select','option','textarea','label','fieldset','legend',
-        'iframe','canvas','svg','math',
-        'video','audio','source','track','embed','object','param',
-        'map','area',
-        'center', 'font', 'base'
-    }
-    
-    def _repl_pair(m):
-        tagname = m.group(1)
-        if tagname.lower() in known_tags:
-            return m.group(0)
-        attrname = m.group(2)
-        content = m.group(3)
-        return f"&lt;{tagname} {attrname}&gt;{content}"
-    
-    text = re.sub(r'<([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)=""\s*>(.*?)</\1>', _repl_pair, text, flags=re.DOTALL)
-    return text
+# _fix_empty_attr_tags_bs is imported at the top of this module from
+# ``_empty_attr_fix.fix_empty_attr_tags``. The old inline implementation
+# only matched single-attribute tags and was defeated by real-world LLM
+# hallucinations with many empty attributes and punctuated attribute
+# names -- see ``src/_empty_attr_fix.py`` for the replacement.
 
 def is_meaningful_text_content(html_content):
     """Check if chapter has meaningful text beyond just structure"""
@@ -13888,7 +13870,10 @@ def main(log_callback=None, stop_callback=None):
                 # Skip normal save since we handled it above and exit this translation run
                 continue
 
-            # Post-process: Fix empty attribute tags for BeautifulSoup mode
+            # Post-process: Fix empty attribute tags for BeautifulSoup mode.
+            # FIX_EMPTY_ATTR_TAGS_EXTRACT governs the html2text/enhanced path;
+            # this toggle must stay scoped to BS-mode output only so the two
+            # GUI switches remain independent.
             if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not c.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
 
