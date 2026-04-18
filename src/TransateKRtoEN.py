@@ -8972,7 +8972,21 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 _label += f" '{_chtitle}'" if _chtitle else ''
                 print(f"⚠️  [HTML-in-translation{_label}] Model '{_model}' returned HTML tags "
                       f"inside the translated text — stripped before markdown→HTML conversion.")
-            plain_text = _stripped
+            # SAFETY: only overwrite plain_text if html2text actually returned
+            # something. If it collapsed the payload to empty/whitespace (e.g.
+            # malformed HTML or image-only content it couldn't round-trip),
+            # keep the original translated text so the chapter isn't wiped.
+            if _stripped:
+                plain_text = _stripped
+            else:
+                _model  = os.getenv('MODEL', 'unknown-model')
+                _chnum  = chapter_info.get('chapter_num', '') if chapter_info else ''
+                _chtitle = chapter_info.get('title', '')      if chapter_info else ''
+                _label  = f" ch{_chnum}" if _chnum else ''
+                _label += f" '{_chtitle}'" if _chtitle else ''
+                print(f"⚠️  [HTML-in-translation{_label}] html2text pre-pass "
+                      f"produced empty output for model '{_model}'; "
+                      f"keeping the original translated text to avoid an empty chapter.")
         except ImportError:
             # html2text not available; fall through to the existing _escape_tag_like logic
             pass
@@ -8982,6 +8996,10 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # Pre-process: Convert angle-bracket "tag-like" sequences into HTML entities.
     # This prevents markdown converters from stripping/mangling them.
     # IMPORTANT: Preserve real anchor tags (<a ...> and </a>) so EPUB TOC links remain clickable.
+    # IMPORTANT: Preserve the 4 image-format tags (<img>, <svg>, <picture>, <figure>)
+    # so image-only chapters don't get their media escaped into visible entity text.
+    # These names are never prose, so allow-listing them is safe.
+    _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure")
     def _escape_tag_like(m):
         inner = m.group(1)  # e.g. 'a href="..."' or '/a'
         try:
@@ -8991,7 +9009,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             tag = ""
 
         # Allowlist: tags we must keep as real HTML in enhanced mode
-        if tag in ("a",):
+        if tag in _ALLOWED_TAGS:
             return "<" + inner + ">"
 
         return "&lt;" + inner + "&gt;"
@@ -9046,14 +9064,15 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # CRITICAL: Unescape img, svg, picture, figure, figcaption, canvas, map, area tags that were converted to HTML entities
                 # Logic:
                 # 1. Closing tags (e.g. </map>) -> Always unescape
-                # 2. Container tags (svg, picture, figure, figcaption) -> Unescape even if bare (often used without attrs)
-                # 3. Ambiguous tags (img, area, map, canvas, source, image) -> Unescape ONLY if they have attributes (space followed by content)
+                # 2. Container / img tags (img, svg, picture, figure, figcaption) -> Unescape even if bare
+                #    (img is included here because bare <img> is never prose and dropping it would blank out image-only chapters)
+                # 3. Ambiguous tags (area, map, canvas, source, image) -> Unescape ONLY if they have attributes (space followed by content)
                 #    This avoids false positives like "The <area> of effect" in fantasy text.
                 img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
                 # if img_count > 0:
                 #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown2)")
                 html = re.sub(
-                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
+                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:image|source|area|map|canvas)\s.*?))&gt;',
                     r'<\1>',
                     html,
                     flags=re.IGNORECASE | re.DOTALL
@@ -9115,13 +9134,14 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # CRITICAL: Unescape img, svg, picture, figure, figcaption, canvas, map, area tags that were converted to HTML entities
             # Logic:
             # 1. Closing tags (e.g. </map>) -> Always unescape
-            # 2. Container tags (svg, picture, figure, figcaption) -> Unescape even if bare
-            # 3. Ambiguous tags (img, area, map, canvas, source, image) -> Unescape ONLY if they have attributes
+            # 2. Container / img tags (img, svg, picture, figure, figcaption) -> Unescape even if bare
+            #    (img is included here because bare <img> is never prose and dropping it would blank out image-only chapters)
+            # 3. Ambiguous tags (area, map, canvas, source, image) -> Unescape ONLY if they have attributes
             img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
             # if img_count > 0:
             #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown)")
             html = re.sub(
-                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
+                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:image|source|area|map|canvas)\s.*?))&gt;',
                 r'<\1>',
                 html,
                 flags=re.IGNORECASE | re.DOTALL
@@ -9235,13 +9255,14 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # CRITICAL: Unescape img, svg, picture, figure, figcaption, canvas, map, area tags that were converted to HTML entities
     # Logic:
     # 1. Closing tags -> Always unescape
-    # 2. Container tags -> Unescape even if bare
-    # 3. Ambiguous tags -> Unescape ONLY if they have attributes
+    # 2. Container / img tags (img, svg, picture, figure, figcaption) -> Unescape even if bare
+    #    (img is included here because bare <img> is never prose and dropping it would blank out image-only chapters)
+    # 3. Ambiguous tags (area, map, canvas, source, image) -> Unescape ONLY if they have attributes
     img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
     # if img_count > 0:
     #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (fallback)")
     html = re.sub(
-        r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:img|image|source|area|map|canvas)\s.*?))&gt;',
+        r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:image|source|area|map|canvas)\s.*?))&gt;',
         r'<\1>',
         html,
         flags=re.IGNORECASE | re.DOTALL
