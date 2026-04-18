@@ -355,6 +355,8 @@ class QAScannerMixin:
             'auto_save_report': True,
             'check_missing_html_tag': True,
             'check_missing_header_tags': True,
+            'check_all_text_in_header': True,
+            'check_invalid_tag_mismatch': False,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
             'truncation_cheap_threshold': 12,
@@ -2927,6 +2929,46 @@ class QAScannerMixin:
         check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', True))
         additional_layout.addWidget(check_missing_header_tags_checkbox)
 
+        # Detect chapters where (almost) all text is wrapped in one header tag
+        check_all_text_in_header_checkbox = self._create_styled_checkbox(
+            "Detect chapters where all text is inside a single <h1>-<h6> tag"
+        )
+        check_all_text_in_header_checkbox.setChecked(qa_settings.get('check_all_text_in_header', True))
+        additional_layout.addWidget(check_all_text_in_header_checkbox)
+
+        all_text_in_header_desc = QLabel(
+            "Flags translations where the chapter body was collapsed into one huge heading,\n"
+            "e.g. the entire chapter text appears inside a single <h1>...</h1> wrapper."
+        )
+        all_text_in_header_desc.setFont(QFont('Arial', 9))
+        all_text_in_header_desc.setStyleSheet("color: gray;")
+        all_text_in_header_desc.setWordWrap(True)
+        all_text_in_header_desc.setMaximumWidth(700)
+        all_text_in_header_desc.setContentsMargins(20, 0, 0, 5)
+        additional_layout.addWidget(all_text_in_header_desc)
+
+        # Invalid / custom HTML tag mismatch check (e.g. <concept>)
+        check_invalid_tag_mismatch_checkbox = self._create_styled_checkbox(
+            "Detect invalid/custom HTML tags missing or invisible in translation"
+        )
+        check_invalid_tag_mismatch_checkbox.setChecked(qa_settings.get('check_invalid_tag_mismatch', False))
+        additional_layout.addWidget(check_invalid_tag_mismatch_checkbox)
+
+        invalid_tag_desc = QLabel(
+            "Compares source and translated HTML for non-standard tags like <concept>.\n"
+            "Flags two issues: (1) tags present in source but dropped from translation\n"
+            "(HTML entity forms such as &lt;concept&gt; still count as present),\n"
+            "and (2) tags that appear in the translation as raw angle brackets,\n"
+            "which are invisible to readers because browsers ignore unknown tags.\n"
+            "Requires the original source file (EPUB / word_count folder)."
+        )
+        invalid_tag_desc.setFont(QFont('Arial', 9))
+        invalid_tag_desc.setStyleSheet("color: gray;")
+        invalid_tag_desc.setWordWrap(True)
+        invalid_tag_desc.setMaximumWidth(700)
+        invalid_tag_desc.setContentsMargins(20, 0, 0, 5)
+        additional_layout.addWidget(invalid_tag_desc)
+
         # Invalid nesting check (separate toggle)
         check_invalid_nesting_checkbox = self._create_styled_checkbox("Check for invalid tag nesting")
         check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
@@ -4082,6 +4124,8 @@ class QAScannerMixin:
                     'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
                     'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
                     'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
+                    'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
+                    'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),
                     'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                     'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
                     'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
@@ -4435,6 +4479,8 @@ class QAScannerMixin:
                 warn_mismatch_checkbox.setChecked(True)
                 check_missing_html_tag_checkbox.setChecked(True)
                 check_missing_header_tags_checkbox.setChecked(True)
+                check_all_text_in_header_checkbox.setChecked(True)
+                check_invalid_tag_mismatch_checkbox.setChecked(False)
                 check_paragraph_structure_checkbox.setChecked(True)
                 check_invalid_nesting_checkbox.setChecked(False)
                 check_truncation_checkbox.setChecked(False)

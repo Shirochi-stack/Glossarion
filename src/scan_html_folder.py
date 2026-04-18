@@ -4744,6 +4744,11 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
                         
+                        # Non-standard (custom) tag names present in the source,
+                        # in either angle-bracket or HTML-entity form. Used by
+                        # the invalid-tag-mismatch check in the worker.
+                        custom_tags = sorted(_extract_custom_tag_names(content))
+                        
                         # Store using spine index as the authoritative chapter number
                         word_counts[spine_index] = {
                             'word_count': word_count,
@@ -4752,7 +4757,8 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'is_cjk': has_cjk,
                             'script': script_hint,
                             'spine_index': spine_index,
-                            'has_headers': has_headers
+                            'has_headers': has_headers,
+                            'custom_tags': custom_tags,
                         }
                         extracted_count += 1
                         
@@ -4802,9 +4808,14 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
                         
+                        # Non-standard tag names present in the source, used by
+                        # the invalid-tag-mismatch check in the worker.
+                        custom_tags = sorted(_extract_custom_tag_names(content))
+                        
                         word_counts[idx] = {
                             'word_count': word_count,
                             'has_headers': has_headers,
+                            'custom_tags': custom_tags,
                             'filename': os.path.basename(file_path),
                             'full_path': file_path,
                             'is_cjk': has_cjk,
@@ -5402,6 +5413,190 @@ def detect_multiple_headers(html_content):
         return True, len(headers), header_info
     
     return False, len(headers), []
+
+
+# Set of standard HTML / SVG / MathML / EPUB tag names. Used by the
+# invalid/custom tag detection helpers below to decide whether a tag is
+# "non-standard" (e.g., <concept>) and therefore invisible in a browser.
+STANDARD_HTML_TAGS = frozenset([
+    # Core HTML
+    'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio',
+    'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
+    'canvas', 'caption', 'cite', 'code', 'col', 'colgroup',
+    'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog',
+    'div', 'dl', 'dt', 'em', 'embed', 'fieldset', 'figcaption', 'figure',
+    'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+    'hgroup', 'hr', 'html', 'i', 'iframe', 'img', 'input', 'ins',
+    'kbd', 'label', 'legend', 'li', 'link', 'main', 'map', 'mark',
+    'menu', 'menuitem', 'meta', 'meter', 'nav', 'noscript', 'object', 'ol',
+    'optgroup', 'option', 'output', 'p', 'param', 'picture', 'pre',
+    'progress', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby', 's', 'samp', 'script',
+    'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style',
+    'sub', 'summary', 'sup', 'svg', 'table', 'tbody', 'td', 'template',
+    'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u',
+    'ul', 'var', 'video', 'wbr',
+    # Obsolete/legacy but still common in older content
+    'acronym', 'big', 'center', 'font', 'strike', 'tt', 'basefont', 'frame',
+    'frameset', 'noframes', 'marquee', 'blink',
+    # SVG / MathML (common subset)
+    'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt',
+    'image', 'defs', 'g', 'path', 'circle', 'rect', 'line', 'polygon',
+    'polyline', 'text', 'tspan', 'use', 'symbol', 'lineargradient',
+    'radialgradient', 'stop', 'filter', 'clippath', 'mask', 'pattern',
+    'feblend', 'fecolormatrix', 'fegaussianblur', 'fecomposite', 'feoffset',
+    # XML/Doctype artifacts
+    'doctype', '!doctype', 'xml', '?xml',
+    # Epub/XHTML namespaced helpers (basename only, namespaces are handled
+    # separately in the regex by splitting on ':')
+    'epub', 'ops', 'ncx', 'navmap', 'navpoint', 'navlabel', 'content',
+    # Common "unknown to HTML but used by EPUB tooling" tags we don't want
+    # to flag as translation leftovers
+    'cover', 'package', 'manifest', 'spine', 'itemref', 'item',
+])
+
+# Matches real angle-bracket tags like <concept> or <concept attr="x">
+# (opening or self-closing only; closing tags are filtered separately).
+_CUSTOM_TAG_ANGLE_RE = re.compile(r'<\s*/?\s*([a-zA-Z][a-zA-Z0-9_\-]*)\b[^>]*>')
+
+# Matches HTML-entity-encoded tags like &lt;concept&gt; or &lt;/concept&gt;
+_CUSTOM_TAG_ENTITY_RE = re.compile(
+    r'&lt;\s*/?\s*([a-zA-Z][a-zA-Z0-9_\-]*)\b[^&]*?&gt;',
+    re.IGNORECASE
+)
+
+
+def _extract_custom_tag_names(text, include_angle=True, include_entities=True):
+    """Return a set of lowercased non-standard tag names found in `text`.
+    
+    A tag is considered "non-standard" if its bare name (without namespace
+    prefix) is not in STANDARD_HTML_TAGS. Namespaced tags such as
+    <epub:type> are split on ':' and only the local name is checked.
+    """
+    if not isinstance(text, str) or not text:
+        return set()
+    
+    tag_names = set()
+    
+    def _norm(raw_name):
+        name = raw_name.lower()
+        # Strip namespace prefix (e.g., 'epub:type' -> 'type', 'svg:g' -> 'g')
+        if ':' in name:
+            name = name.split(':', 1)[1]
+        return name
+    
+    if include_angle:
+        for m in _CUSTOM_TAG_ANGLE_RE.finditer(text):
+            name = _norm(m.group(1))
+            if name and name not in STANDARD_HTML_TAGS:
+                tag_names.add(name)
+    
+    if include_entities:
+        for m in _CUSTOM_TAG_ENTITY_RE.finditer(text):
+            name = _norm(m.group(1))
+            if name and name not in STANDARD_HTML_TAGS:
+                tag_names.add(name)
+    
+    return tag_names
+
+
+def check_invalid_tag_mismatch(source_html, translated_html):
+    """Compare source and translated HTML for invalid/custom tag issues.
+    
+    Returns a dict:
+      {
+        'missing_tags': [tag, ...],    # in source but not in translation (any form)
+        'invisible_tags': [tag, ...],  # present in translation as angle brackets
+                                       # (these are invisible to readers because
+                                       # browsers silently ignore unknown tags)
+      }
+    
+    The comparison treats &lt;concept&gt; and <concept> as equivalent presence
+    of the tag, so translations that escape tags to entities are NOT flagged
+    as missing.
+    """
+    result = {'missing_tags': [], 'invisible_tags': []}
+    
+    if not isinstance(source_html, str) or not source_html:
+        return result
+    if not isinstance(translated_html, str):
+        translated_html = ''
+    
+    # Custom tags appearing in the source (either angle or entity form)
+    source_tags = _extract_custom_tag_names(source_html)
+    if not source_tags and not translated_html:
+        return result
+    
+    # Custom tags appearing in the translation, split by representation
+    trans_angle_tags = _extract_custom_tag_names(
+        translated_html, include_angle=True, include_entities=False
+    )
+    trans_entity_tags = _extract_custom_tag_names(
+        translated_html, include_angle=False, include_entities=True
+    )
+    trans_any_tags = trans_angle_tags | trans_entity_tags
+    
+    # Missing = present in source, not present in translation in any form
+    for tag in sorted(source_tags):
+        if tag not in trans_any_tags:
+            result['missing_tags'].append(tag)
+    
+    # Invisible = custom tags in the translation appearing as real angle
+    # brackets. These render as empty/invisible in browsers, so the content
+    # they once marked up (or the markers themselves) are effectively lost.
+    for tag in sorted(trans_angle_tags):
+        result['invisible_tags'].append(tag)
+    
+    return result
+
+
+def check_all_text_in_header(html_content, threshold=0.7, min_total_length=200):
+    """Detect whether (nearly) all textual content is nested inside a single
+    header (h1-h6) tag.
+    
+    This catches malformed chapters where the translator collapsed the entire
+    chapter body into a single `<h1>...</h1>` wrapper, which renders as one
+    gigantic heading.
+    
+    Args:
+        html_content: Raw HTML string to analyze.
+        threshold: Fraction of total text length (0-1) that must live inside
+            a single header tag to trigger the flag. Default 0.7 (70%).
+        min_total_length: Skip the check if the document has less than this
+            many characters of visible text (avoids noise on tiny files).
+    
+    Returns:
+        tuple (flagged: bool, details: dict | None). Details dict contains
+        'tag', 'ratio', 'text_length', 'total_length' when flagged.
+    """
+    if not isinstance(html_content, str) or not html_content.strip():
+        return False, None
+    
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+    except Exception:
+        return False, None
+    
+    total_text = soup.get_text(strip=True)
+    total_length = len(total_text)
+    if total_length < min_total_length:
+        return False, None
+    
+    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        for header in soup.find_all(tag_name):
+            header_text = header.get_text(strip=True)
+            header_length = len(header_text)
+            if header_length == 0:
+                continue
+            ratio = header_length / total_length
+            if ratio >= threshold:
+                return True, {
+                    'tag': tag_name,
+                    'ratio': ratio,
+                    'text_length': header_length,
+                    'total_length': total_length,
+                }
+    
+    return False, None
 
 
 def detect_dominant_script(text):
@@ -6694,6 +6889,95 @@ def process_html_file_batch(args):
             if has_multiple:
                 issues.append(f"multiple_headers_{header_count}_found")
         
+        # Check if (nearly) all chapter text is wrapped in a single header tag.
+        # Runs on the raw HTML file content because `raw_text` is already
+        # text-extracted and would report the full text regardless of wrapping.
+        check_all_in_header = qa_settings.get('check_all_text_in_header', True)
+        if check_all_in_header and filename.lower().endswith(('.html', '.xhtml', '.htm')) and raw_file_content:
+            try:
+                _hdr_threshold = float(qa_settings.get('all_text_in_header_threshold', 0.7))
+            except (TypeError, ValueError):
+                _hdr_threshold = 0.7
+            try:
+                hdr_flagged, hdr_details = check_all_text_in_header(
+                    raw_file_content, threshold=_hdr_threshold
+                )
+            except Exception:
+                hdr_flagged, hdr_details = False, None
+            if hdr_flagged and hdr_details:
+                pct = int(round(hdr_details['ratio'] * 100))
+                issues.append(
+                    f"all_text_in_{hdr_details['tag']}_{pct}pct"
+                )
+        
+        # Invalid / custom HTML tag mismatch check.
+        # Reuses the same source-file match that the word counter already
+        # performed (stored as 'custom_tags' in original_word_counts entries).
+        check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
+        if (check_invalid_tag_mismatch_setting
+                and original_word_counts
+                and filename.lower().endswith(('.html', '.xhtml', '.htm'))
+                and raw_file_content):
+            matched_source_entry = None
+            search_basename = os.path.splitext(filename.lower())[0]
+            if search_basename.startswith('response_'):
+                search_basename = search_basename[9:]
+            
+            if not text_file_mode:
+                # EPUB mode: entries are dicts keyed by spine index
+                for _key, value in original_word_counts.items():
+                    if isinstance(value, dict):
+                        orig_basename = os.path.splitext(value.get('filename', '').lower())[0]
+                        if orig_basename == search_basename:
+                            matched_source_entry = value
+                            break
+            else:
+                # Text mode: entries keyed by filename; only dict-valued
+                # entries carry custom_tags (HTML chunks, not plain .txt)
+                clean_filename = filename.lower()
+                if clean_filename.startswith('response_'):
+                    clean_filename = clean_filename[9:]
+                candidate = original_word_counts.get(clean_filename)
+                if isinstance(candidate, dict):
+                    matched_source_entry = candidate
+                else:
+                    base_name = os.path.splitext(clean_filename)[0]
+                    for key, value in original_word_counts.items():
+                        if isinstance(value, dict) and os.path.splitext(str(key))[0] == base_name:
+                            matched_source_entry = value
+                            break
+            
+            if matched_source_entry is not None:
+                source_custom_tags = set(matched_source_entry.get('custom_tags') or [])
+                # Build translation-side tag sets from the raw HTML we already
+                # loaded for this file — no extra file IO needed.
+                try:
+                    trans_angle_tags = _extract_custom_tag_names(
+                        raw_file_content, include_angle=True, include_entities=False
+                    )
+                    trans_entity_tags = _extract_custom_tag_names(
+                        raw_file_content, include_angle=False, include_entities=True
+                    )
+                except Exception:
+                    trans_angle_tags = set()
+                    trans_entity_tags = set()
+                trans_any_tags = trans_angle_tags | trans_entity_tags
+                
+                missing_tags = sorted(t for t in source_custom_tags if t not in trans_any_tags)
+                invisible_tags = sorted(trans_angle_tags)
+                
+                if missing_tags:
+                    preview = ', '.join(f"<{t}>" for t in missing_tags[:3])
+                    if len(missing_tags) > 3:
+                        preview += f" (+{len(missing_tags) - 3} more)"
+                    issues.append(f"source_custom_tags_missing: {preview}")
+                
+                if invisible_tags:
+                    preview = ', '.join(f"<{t}>" for t in invisible_tags[:3])
+                    if len(invisible_tags) > 3:
+                        preview += f" (+{len(invisible_tags) - 3} more)"
+                    issues.append(f"invisible_html_tags: {preview}")
+        
         # Check word count ratio
         word_count_check = None
         check_word_count = qa_settings.get('check_word_count_ratio', False)
@@ -7028,6 +7312,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     check_word_count = qa_settings.get('check_word_count_ratio', False)
     check_multiple_headers = qa_settings.get('check_multiple_headers', True)
+    # The invalid-tag-mismatch check reuses the same source metadata dict
+    # that the word counter populates, so we need the extraction to run
+    # when either of those checks is enabled.
+    check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
+    _need_source_word_counts = check_word_count or check_invalid_tag_mismatch_setting
     
     # Extract word counts, image info, and punctuation from original EPUB/text file if needed
     original_word_counts = {}
@@ -7167,7 +7456,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             check_truncation = False
             check_ai_truncation = False
 
-    if check_word_count:
+    if _need_source_word_counts:
         if text_file_mode:
             # For text-type sources, load word counts from individual chunks in word_count folder
             # The source is the epub_path parameter (which may be .txt or .pdf in this mode)
@@ -7375,6 +7664,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         counting_mode_str = "CHARACTER COUNT (sampled)"
     log(f"   ✓ Counting mode: {counting_mode_str}")
     log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")
+    log(f"   ✓ All-text-in-header check: {'ENABLED' if qa_settings.get('check_all_text_in_header', True) else 'DISABLED'}")
+    log(f"   ✓ Invalid/custom tag mismatch check: {'ENABLED' if qa_settings.get('check_invalid_tag_mismatch', False) else 'DISABLED'}")
     
     # Initialize configuration
     custom_settings = None
@@ -8315,7 +8606,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     os.environ.pop('BATCH_TRANSLATION', None)
 
             log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
-    
+
     # Clean up to save memory
     for result in results:
         result.pop('raw_text', None)
