@@ -8971,13 +8971,16 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
     plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
 
-    if _escape_fired[0]:
-        _model   = os.getenv('MODEL', 'unknown-model')
-        _chnum   = chapter_info.get('chapter_num', '') if chapter_info else ''
-        _chtitle = chapter_info.get('title', '')       if chapter_info else ''
-        _label   = (f" ch{_chnum}" if _chnum else '') + (f" '{_chtitle}'" if _chtitle else '')
-        print(f"⚠️  [HTML-in-translation{_label}] Model '{_model}' returned "
-              f"angle-bracket sequences — escaped before markdown→HTML conversion.")
+    # Disabled: the escape-pass above already handles these sequences, so this
+    # warning was confusing users who thought something went wrong. Left in
+    # place (commented out) in case we want to re-enable it later for debugging.
+    # if _escape_fired[0]:
+    #     _model   = os.getenv('MODEL', 'unknown-model')
+    #     _chnum   = chapter_info.get('chapter_num', '') if chapter_info else ''
+    #     _chtitle = chapter_info.get('title', '')       if chapter_info else ''
+    #     _label   = (f" ch{_chnum}" if _chnum else '') + (f" '{_chtitle}'" if _chtitle else '')
+    #     print(f"⚠️  [HTML-in-translation{_label}] Model '{_model}' returned "
+    #           f"angle-bracket sequences — escaped before markdown→HTML conversion.")
 
     # -------------------------------------------------------------------------
     # PRE-PASS: html2text strip pass — safety net for any non-allowed HTML that
