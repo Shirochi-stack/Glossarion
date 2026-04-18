@@ -8944,6 +8944,16 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # Logs a warning when the AI returned non-allowed angle-bracket content.
     # -------------------------------------------------------------------------
     _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure")
+    _HTML_TAG_NAMES = frozenset({
+        'b','i','u','s','em','strong','span','div','p','br','hr','pre','code',
+        'h1','h2','h3','h4','h5','h6','ul','ol','li','dl','dt','dd',
+        'table','tr','td','th','thead','tbody','tfoot','caption',
+        'blockquote','q','cite','del','ins','mark','small','sub','sup',
+        'header','footer','nav','main','section','article','aside',
+        'form','input','button','select','option','textarea','label',
+        'script','style','link','meta','head','body','html',
+        'center','font','strike','ruby','rt','wbr','details','summary',
+    })
     _escape_fired = [False]
 
     def _escape_tag_like(m):
@@ -8955,7 +8965,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             tag = ""
         if tag in _ALLOWED_TAGS:
             return "<" + inner + ">"
-        _escape_fired[0] = True
+        if tag in _HTML_TAG_NAMES:
+            _escape_fired[0] = True
         return "&lt;" + inner + "&gt;"
 
     plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
