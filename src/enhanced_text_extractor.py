@@ -287,9 +287,11 @@ class EnhancedTextExtractor:
     
     def _restore_cjk_angle_brackets(self, text: str) -> str:
         """Restore angle brackets from special markers."""
-        # Convert markers back to HTML entities for proper display
-        text = text.replace('‹', '&lt;')
-        text = text.replace('›', '&gt;')
+        # Restore as raw angle brackets — this text goes to the AI prompt,
+        # not directly to HTML. The output-side escape pass handles entity
+        # conversion after the AI responds.
+        text = text.replace('\u2039', '<')
+        text = text.replace('\u203a', '>')
         return text
     
     def _protect_empty_attr_tags(self, text: str) -> str:

@@ -8937,12 +8937,15 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
 
     # -------------------------------------------------------------------------
-    # ESCAPE PASS: Convert prose angle-bracket sequences to HTML entities FIRST
-    # so they survive the html2text strip pass below unchanged.
-    # e.g. <Alice's Nightmare> -> &lt;Alice's Nightmare&gt;
+    # ESCAPE PASS: Convert non-allowed angle-bracket sequences to HTML entities.
+    # Runs FIRST so prose like <Alice's Nightmare> and AI-injected HTML are
+    # safely escaped before anything else touches the text.
     # Allowed tags (a, img, svg, picture, figure) are kept as real HTML.
+    # Logs a warning when the AI returned non-allowed angle-bracket content.
     # -------------------------------------------------------------------------
     _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure")
+    _escape_fired = [False]
+
     def _escape_tag_like(m):
         inner = m.group(1)
         try:
@@ -8952,18 +8955,30 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             tag = ""
         if tag in _ALLOWED_TAGS:
             return "<" + inner + ">"
+        _escape_fired[0] = True
         return "&lt;" + inner + "&gt;"
 
     plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
 
+    if _escape_fired[0]:
+        _model   = os.getenv('MODEL', 'unknown-model')
+        _chnum   = chapter_info.get('chapter_num', '') if chapter_info else ''
+        _chtitle = chapter_info.get('title', '')       if chapter_info else ''
+        _label   = (f" ch{_chnum}" if _chnum else '') + (f" '{_chtitle}'" if _chtitle else '')
+        print(f"⚠️  [HTML-in-translation{_label}] Model '{_model}' returned "
+              f"angle-bracket sequences — escaped before markdown→HTML conversion.")
+
     # -------------------------------------------------------------------------
-    # PRE-PASS: Strip any HTML tags the AI injected into the translated output.
-    # We use html2text (same library/settings used during extraction) so that
-    # image/media tags are preserved exactly as during extraction.
-    # Only runs when html tags are actually detected; logs the model name so
-    # you can track which AI is ignoring the "no HTML" formatting instruction.
+    # PRE-PASS: html2text strip pass — safety net for any non-allowed HTML that
+    # somehow survived the escape pass. Explicitly excludes allowed tags so that
+    # an <img> or <a> in the text does NOT trigger this pass and collapse the
+    # markdown line structure.
     # -------------------------------------------------------------------------
-    _html_tag_re = re.compile(r'</?[a-zA-Z][^>]*>', re.DOTALL)
+    _allowed_alt = '|'.join(_ALLOWED_TAGS)
+    _html_tag_re = re.compile(
+        rf'</?(?!(?:{_allowed_alt})(?:[\s/>]))[a-zA-Z][^>]*>',
+        re.DOTALL | re.IGNORECASE
+    )
     if _html_tag_re.search(plain_text):
         try:
             import html2text as _html2text_mod
@@ -8988,14 +9003,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             _stripped = _h.handle(_wrapped).strip()
 
             if _stripped != plain_text.strip():
-                # Something was actually changed — log the offender
-                _model  = os.getenv('MODEL', 'unknown-model')
-                _chnum  = chapter_info.get('chapter_num', '') if chapter_info else ''
-                _chtitle = chapter_info.get('title', '')      if chapter_info else ''
-                _label  = f" ch{_chnum}" if _chnum else ''
-                _label += f" '{_chtitle}'" if _chtitle else ''
-                print(f"⚠️  [HTML-in-translation{_label}] Model '{_model}' returned HTML tags "
-                      f"inside the translated text — stripped before markdown→HTML conversion.")
+                pass  # Warning already logged by escape pass above
             # SAFETY: only overwrite plain_text if html2text actually returned
             # something. If it collapsed the payload to empty/whitespace (e.g.
             # malformed HTML or image-only content it couldn't round-trip),
