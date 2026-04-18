@@ -5604,16 +5604,18 @@ class BatchTranslationProcessor:
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             
             # Post-process: Add spaces between letters and numbers for subword tokenization bug
-            if os.getenv('NUMBER_SPACING_TOKEN_FIX', '0') == '1' and isinstance(cleaned, str):
-                cleaned, count = re.subn(
-                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』\u201c\u201d\u2018\u2019«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)',
-                    r'\1 \2',
-                    cleaned
+            _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
+            if _ns_mode in ('1', '2') and isinstance(cleaned, str):
+                _ns_pat = (
+                    r'(?<![a-zA-Z0-9])((?:[a-zA-Z]*[a-z][a-zA-Z]*|[A-Z]+)[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                    if _ns_mode == '2' else
+                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
                 )
+                cleaned, count = re.subn(_ns_pat, r'\1 \2', cleaned)
                 if count > 0:
                     print(f"🔧 Number Spacing Fix applied: separated {count} letter-number run-on(s)")
             
-            img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
+            img_count
             if img_count > 0:
                 print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (post-processing)")
             cleaned = re.sub(
@@ -6243,14 +6245,16 @@ class BatchTranslationProcessor:
                         cleaned = _fix_empty_attr_tags_bs(cleaned)
                 
                 # Post-process: Add spaces between letters and numbers for subword tokenization bug
-                if os.getenv('NUMBER_SPACING_TOKEN_FIX', '0') == '1' and isinstance(cleaned, str):
-                    cleaned, count = re.subn(
-                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』\u201c\u201d\u2018\u2019«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)',
-                    r'\1 \2',
-                    cleaned
-                )
-                if count > 0:
-                    print(f"🔧 Number Spacing Fix applied (merged): separated {count} letter-number run-on(s)")
+                _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
+                if _ns_mode in ('1', '2') and isinstance(cleaned, str):
+                    _ns_pat = (
+                        r'(?<![a-zA-Z0-9])((?:[a-zA-Z]*[a-z][a-zA-Z]*|[A-Z]+)[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                        if _ns_mode == '2' else
+                        r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                    )
+                    cleaned, count = re.subn(_ns_pat, r'\1 \2', cleaned)
+                    if count > 0:
+                        print(f"🔧 Number Spacing Fix applied (merged): separated {count} letter-number run-on(s)")
                 
                 # Get parent chapter info
                 parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
@@ -13868,14 +13872,16 @@ def main(log_callback=None, stop_callback=None):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
 
             # Post-process: Add spaces between letters and numbers for subword tokenization bug
-            if os.getenv('NUMBER_SPACING_TOKEN_FIX', '0') == '1' and isinstance(cleaned, str):
-                cleaned, count = re.subn(
-                r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』\u201c\u201d\u2018\u2019«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)',
-                r'\1 \2',
-                cleaned
-            )
-            if count > 0:
-                print(f"🔧 Number Spacing Fix applied: separated {count} letter-number run-on(s)")
+            _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
+            if _ns_mode in ('1', '2') and isinstance(cleaned, str):
+                _ns_pat = (
+                    r'(?<![a-zA-Z0-9])((?:[a-zA-Z]*[a-z][a-zA-Z]*|[A-Z]+)[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                    if _ns_mode == '2' else
+                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                )
+                cleaned, count = re.subn(_ns_pat, r'\1 \2', cleaned)
+                if count > 0:
+                    print(f"🔧 Number Spacing Fix applied: separated {count} letter-number run-on(s)")
 
             # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
             # Pattern matches: &lt;img ... /&gt; where the tag ends with /

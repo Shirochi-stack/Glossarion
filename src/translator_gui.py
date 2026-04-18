@@ -1695,12 +1695,15 @@ Text to analyze:
         self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
         self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
         self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
-        self.number_spacing_token_fix_var = self.config.get('number_spacing_token_fix', False)
+        _raw_ns = self.config.get('number_spacing_token_fix', '0')
+        if isinstance(_raw_ns, bool):
+            _raw_ns = '1' if _raw_ns else '0'
+        self.number_spacing_token_fix_var = str(_raw_ns)
         # Sync environment on startup for downstream components
         os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if self.fix_empty_attr_tags_bs_var else '0'
-        os.environ['NUMBER_SPACING_TOKEN_FIX'] = '1' if self.number_spacing_token_fix_var else '0'
+        os.environ['NUMBER_SPACING_TOKEN_FIX'] = self.number_spacing_token_fix_var
         
         # Graceful stop - wait for in-flight API calls to complete instead of aborting them
         self.graceful_stop_var = self.config.get('graceful_stop', True)

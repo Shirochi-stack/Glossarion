@@ -6867,25 +6867,36 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(empty_attr_epub_desc)
 
     # Number Spacing Tokenization Fix
-    number_spacing_cb = self._create_styled_checkbox("Number Spacing Tokenization Fix")
+    number_spacing_row = QHBoxLayout()
+    number_spacing_row.setContentsMargins(0, 2, 0, 0)
+    number_spacing_label = QLabel("Number Spacing Tokenization Fix")
+    number_spacing_combo = QComboBox()
+    number_spacing_combo.addItems(["Off", "On — Standard", "On — Standard + Caps"])
+    number_spacing_combo.setFixedWidth(210)
     try:
         if not hasattr(self, 'number_spacing_token_fix_var'):
-            self.number_spacing_token_fix_var = self.config.get('number_spacing_token_fix', False)
-        number_spacing_cb.setChecked(bool(self.number_spacing_token_fix_var))
+            raw = self.config.get('number_spacing_token_fix', '0')
+            if isinstance(raw, bool):
+                raw = '1' if raw else '0'
+            self.number_spacing_token_fix_var = str(raw)
+        number_spacing_combo.setCurrentIndex({'0': 0, '1': 1, '2': 2}.get(str(self.number_spacing_token_fix_var), 0))
     except Exception:
         pass
-    def _on_number_spacing_toggle(checked):
+    def _on_number_spacing_changed(idx):
         try:
-            self.number_spacing_token_fix_var = bool(checked)
-            self.config['number_spacing_token_fix'] = self.number_spacing_token_fix_var
-            os.environ['NUMBER_SPACING_TOKEN_FIX'] = '1' if checked else '0'
+            val = str(idx)
+            self.number_spacing_token_fix_var = val
+            self.config['number_spacing_token_fix'] = val
+            os.environ['NUMBER_SPACING_TOKEN_FIX'] = val
         except Exception:
             pass
-    number_spacing_cb.toggled.connect(_on_number_spacing_toggle)
-    number_spacing_cb.setContentsMargins(0, 2, 0, 0)
-    left_v.addWidget(number_spacing_cb)
-    
-    number_spacing_desc = QLabel("Adds spaces between letters and numbers to fix tokenizer bugs in some local LLMs.")
+    number_spacing_combo.currentIndexChanged.connect(_on_number_spacing_changed)
+    number_spacing_row.addWidget(number_spacing_label)
+    number_spacing_row.addStretch()
+    number_spacing_row.addWidget(number_spacing_combo)
+    left_v.addLayout(number_spacing_row)
+
+    number_spacing_desc = QLabel("Adds spaces between letters and numbers to fix tokenizer bugs in some local LLMs.\nStandard: mixed-case words only.  Standard + Caps: also matches ALL-CAPS acronyms.")
     number_spacing_desc.setStyleSheet("color: gray; font-size: 10pt;")
     number_spacing_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(number_spacing_desc)
