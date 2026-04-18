@@ -4744,10 +4744,11 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
                         
-                        # Non-standard (custom) tag names present in the source,
-                        # in either angle-bracket or HTML-entity form. Used by
-                        # the invalid-tag-mismatch check in the worker.
-                        custom_tags = sorted(_extract_custom_tag_names(content))
+                        # Count + sample of non-standard tag occurrences in the
+                        # source (either angle-bracket or HTML-entity form).
+                        # Used by the invalid-tag-mismatch check in the worker.
+                        custom_tags_count = _count_custom_tag_occurrences(content)
+                        custom_tag_names = _collect_custom_tag_names(content)
                         
                         # Store using spine index as the authoritative chapter number
                         word_counts[spine_index] = {
@@ -4758,7 +4759,8 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'script': script_hint,
                             'spine_index': spine_index,
                             'has_headers': has_headers,
-                            'custom_tags': custom_tags,
+                            'custom_tags_count': custom_tags_count,
+                            'custom_tag_names': custom_tag_names,
                         }
                         extracted_count += 1
                         
@@ -4808,14 +4810,16 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
                         
-                        # Non-standard tag names present in the source, used by
-                        # the invalid-tag-mismatch check in the worker.
-                        custom_tags = sorted(_extract_custom_tag_names(content))
+                        # Count + sample of non-standard tag occurrences used
+                        # by the invalid-tag-mismatch check in the worker.
+                        custom_tags_count = _count_custom_tag_occurrences(content)
+                        custom_tag_names = _collect_custom_tag_names(content)
                         
                         word_counts[idx] = {
                             'word_count': word_count,
                             'has_headers': has_headers,
-                            'custom_tags': custom_tags,
+                            'custom_tags_count': custom_tags_count,
+                            'custom_tag_names': custom_tag_names,
                             'filename': os.path.basename(file_path),
                             'full_path': file_path,
                             'is_cjk': has_cjk,
@@ -5454,99 +5458,85 @@ STANDARD_HTML_TAGS = frozenset([
     'cover', 'package', 'manifest', 'spine', 'itemref', 'item',
 ])
 
-# Matches real angle-bracket tags like <concept> or <concept attr="x">
-# (opening or self-closing only; closing tags are filtered separately).
-_CUSTOM_TAG_ANGLE_RE = re.compile(r'<\s*/?\s*([a-zA-Z][a-zA-Z0-9_\-]*)\b[^>]*>')
+# Matches real angle-bracket tags like <concept> or <概念>. Tag names can be
+# any run of characters that aren't whitespace, angle brackets, slash, equals,
+# quote or ampersand, so this also catches translated (non-ASCII) tag names.
+_CUSTOM_TAG_ANGLE_RE = re.compile(r'<\s*/?\s*([^\s<>/="\'&]+)(?:\s[^>]*)?/?\s*>')
 
-# Matches HTML-entity-encoded tags like &lt;concept&gt; or &lt;/concept&gt;
+# Matches HTML-entity-encoded tags like &lt;concept&gt; or &lt;概念&gt;.
 _CUSTOM_TAG_ENTITY_RE = re.compile(
-    r'&lt;\s*/?\s*([a-zA-Z][a-zA-Z0-9_\-]*)\b[^&]*?&gt;',
+    r'&lt;\s*/?\s*([^\s<>/="\'&;]+?)(?:\s[^&]*?)?/?\s*&gt;',
     re.IGNORECASE
 )
 
 
-def _extract_custom_tag_names(text, include_angle=True, include_entities=True):
-    """Return a set of lowercased non-standard tag names found in `text`.
+def _is_standard_tag(raw_name):
+    """Return True if `raw_name` is a standard HTML/SVG/EPUB tag."""
+    if not raw_name:
+        return True  # Treat empty as "not interesting"
+    name = raw_name.lower()
+    # Strip namespace prefix (e.g., 'epub:type' -> 'type', 'svg:g' -> 'g')
+    if ':' in name:
+        name = name.split(':', 1)[1]
+    return name in STANDARD_HTML_TAGS
+
+
+def _count_custom_tag_occurrences(text, include_angle=True, include_entities=True):
+    """Return the total number of non-standard tag occurrences in `text`.
     
-    A tag is considered "non-standard" if its bare name (without namespace
-    prefix) is not in STANDARD_HTML_TAGS. Namespaced tags such as
-    <epub:type> are split on ':' and only the local name is checked.
+    Counts every hit (not unique names), in either angle-bracket or
+    HTML-entity-encoded form. Namespaced tags like <epub:type> are
+    considered "standard" by their local name and excluded.
     """
     if not isinstance(text, str) or not text:
-        return set()
-    
-    tag_names = set()
-    
-    def _norm(raw_name):
-        name = raw_name.lower()
-        # Strip namespace prefix (e.g., 'epub:type' -> 'type', 'svg:g' -> 'g')
-        if ':' in name:
-            name = name.split(':', 1)[1]
-        return name
-    
+        return 0
+    count = 0
     if include_angle:
         for m in _CUSTOM_TAG_ANGLE_RE.finditer(text):
-            name = _norm(m.group(1))
-            if name and name not in STANDARD_HTML_TAGS:
-                tag_names.add(name)
-    
+            if not _is_standard_tag(m.group(1)):
+                count += 1
     if include_entities:
         for m in _CUSTOM_TAG_ENTITY_RE.finditer(text):
-            name = _norm(m.group(1))
-            if name and name not in STANDARD_HTML_TAGS:
-                tag_names.add(name)
-    
-    return tag_names
+            if not _is_standard_tag(m.group(1)):
+                count += 1
+    return count
 
 
-def check_invalid_tag_mismatch(source_html, translated_html):
-    """Compare source and translated HTML for invalid/custom tag issues.
+def _collect_custom_tag_names(text, include_angle=True, include_entities=True, limit=20):
+    """Return a list of unique non-standard tag names found in `text`.
     
-    Returns a dict:
-      {
-        'missing_tags': [tag, ...],    # in source but not in translation (any form)
-        'invisible_tags': [tag, ...],  # present in translation as angle brackets
-                                       # (these are invisible to readers because
-                                       # browsers silently ignore unknown tags)
-      }
-    
-    The comparison treats &lt;concept&gt; and <concept> as equivalent presence
-    of the tag, so translations that escape tags to entities are NOT flagged
-    as missing.
+    Tag names are returned in first-seen order and capped at `limit` to
+    keep the result compact (useful for displaying alongside counts).
+    Names can be in any language (e.g. ASCII ``concept`` or CJK ``概念``).
     """
-    result = {'missing_tags': [], 'invisible_tags': []}
+    if not isinstance(text, str) or not text:
+        return []
+    seen = []
+    seen_set = set()
     
-    if not isinstance(source_html, str) or not source_html:
-        return result
-    if not isinstance(translated_html, str):
-        translated_html = ''
+    def _add(raw_name):
+        # Preserve original casing/script for display, but dedupe
+        # case-insensitively so <Concept> and <concept> don't double-list.
+        key = raw_name.lower() if isinstance(raw_name, str) else raw_name
+        if key in seen_set:
+            return
+        seen_set.add(key)
+        seen.append(raw_name)
     
-    # Custom tags appearing in the source (either angle or entity form)
-    source_tags = _extract_custom_tag_names(source_html)
-    if not source_tags and not translated_html:
-        return result
+    iters = []
+    if include_angle:
+        iters.append(_CUSTOM_TAG_ANGLE_RE.finditer(text))
+    if include_entities:
+        iters.append(_CUSTOM_TAG_ENTITY_RE.finditer(text))
     
-    # Custom tags appearing in the translation, split by representation
-    trans_angle_tags = _extract_custom_tag_names(
-        translated_html, include_angle=True, include_entities=False
-    )
-    trans_entity_tags = _extract_custom_tag_names(
-        translated_html, include_angle=False, include_entities=True
-    )
-    trans_any_tags = trans_angle_tags | trans_entity_tags
-    
-    # Missing = present in source, not present in translation in any form
-    for tag in sorted(source_tags):
-        if tag not in trans_any_tags:
-            result['missing_tags'].append(tag)
-    
-    # Invisible = custom tags in the translation appearing as real angle
-    # brackets. These render as empty/invisible in browsers, so the content
-    # they once marked up (or the markers themselves) are effectively lost.
-    for tag in sorted(trans_angle_tags):
-        result['invisible_tags'].append(tag)
-    
-    return result
+    for it in iters:
+        for m in it:
+            raw = m.group(1)
+            if not _is_standard_tag(raw):
+                _add(raw)
+                if len(seen) >= limit:
+                    return seen
+    return seen
 
 
 def check_all_text_in_header(html_content, threshold=0.7, min_total_length=200):
@@ -6911,8 +6901,11 @@ def process_html_file_batch(args):
                 )
         
         # Invalid / custom HTML tag mismatch check.
-        # Reuses the same source-file match that the word counter already
-        # performed (stored as 'custom_tags' in original_word_counts entries).
+        # Reuses the same source-file match the word counter already performed;
+        # we only need the pre-computed count stashed alongside has_headers.
+        # Tag *names* are not tracked because source tags may be translated
+        # into a different language (e.g. <概念>), so name-wise comparisons
+        # would always flag everything as missing.
         check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
         if (check_invalid_tag_mismatch_setting
                 and original_word_counts
@@ -6933,7 +6926,7 @@ def process_html_file_batch(args):
                             break
             else:
                 # Text mode: entries keyed by filename; only dict-valued
-                # entries carry custom_tags (HTML chunks, not plain .txt)
+                # entries carry custom_tags_count (HTML chunks, not plain .txt)
                 clean_filename = filename.lower()
                 if clean_filename.startswith('response_'):
                     clean_filename = clean_filename[9:]
@@ -6948,35 +6941,55 @@ def process_html_file_batch(args):
                             break
             
             if matched_source_entry is not None:
-                source_custom_tags = set(matched_source_entry.get('custom_tags') or [])
-                # Build translation-side tag sets from the raw HTML we already
-                # loaded for this file — no extra file IO needed.
+                source_count = int(matched_source_entry.get('custom_tags_count') or 0)
+                source_tag_names = matched_source_entry.get('custom_tag_names') or []
                 try:
-                    trans_angle_tags = _extract_custom_tag_names(
+                    trans_angle_count = _count_custom_tag_occurrences(
                         raw_file_content, include_angle=True, include_entities=False
                     )
-                    trans_entity_tags = _extract_custom_tag_names(
+                    trans_entity_count = _count_custom_tag_occurrences(
                         raw_file_content, include_angle=False, include_entities=True
                     )
                 except Exception:
-                    trans_angle_tags = set()
-                    trans_entity_tags = set()
-                trans_any_tags = trans_angle_tags | trans_entity_tags
+                    trans_angle_count = 0
+                    trans_entity_count = 0
+                trans_any_count = trans_angle_count + trans_entity_count
                 
-                missing_tags = sorted(t for t in source_custom_tags if t not in trans_any_tags)
-                invisible_tags = sorted(trans_angle_tags)
+                missing_count = source_count - trans_any_count
+                if missing_count > 0:
+                    # Include a preview of the source tag names so the user
+                    # can see *what* is missing, not just how many.
+                    if source_tag_names:
+                        preview = ', '.join(f"<{t}>" for t in source_tag_names[:5])
+                        if len(source_tag_names) > 5:
+                            preview += f" (+{len(source_tag_names) - 5} more)"
+                        issues.append(
+                            f"source_custom_tags_missing_{missing_count}_of_{source_count}: {preview}"
+                        )
+                    else:
+                        issues.append(
+                            f"source_custom_tags_missing_{missing_count}_of_{source_count}"
+                        )
                 
-                if missing_tags:
-                    preview = ', '.join(f"<{t}>" for t in missing_tags[:3])
-                    if len(missing_tags) > 3:
-                        preview += f" (+{len(missing_tags) - 3} more)"
-                    issues.append(f"source_custom_tags_missing: {preview}")
-                
-                if invisible_tags:
-                    preview = ', '.join(f"<{t}>" for t in invisible_tags[:3])
-                    if len(invisible_tags) > 3:
-                        preview += f" (+{len(invisible_tags) - 3} more)"
-                    issues.append(f"invisible_html_tags: {preview}")
+                # Invisible tags: non-standard tags present in the translation
+                # as raw angle brackets. Browsers silently ignore them, so
+                # their content / markers are effectively lost to readers.
+                if trans_angle_count > 0:
+                    try:
+                        trans_angle_names = _collect_custom_tag_names(
+                            raw_file_content, include_angle=True, include_entities=False, limit=5
+                        )
+                    except Exception:
+                        trans_angle_names = []
+                    if trans_angle_names:
+                        preview = ', '.join(f"<{t}>" for t in trans_angle_names)
+                        issues.append(
+                            f"invisible_html_tags_{trans_angle_count}_found: {preview}"
+                        )
+                    else:
+                        issues.append(
+                            f"invisible_html_tags_{trans_angle_count}_found"
+                        )
         
         # Check word count ratio
         word_count_check = None
