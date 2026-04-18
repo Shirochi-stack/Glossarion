@@ -237,6 +237,7 @@ app_files = [
     ('glossary_process_worker.py', '.'),  # Glossary subprocess worker
     ('chapter_extraction_worker.py', '.'),  # Chapter extraction subprocess worker
     ('_compress_worker.py', '.'),  # Lightweight image compression worker
+    ('_empty_attr_fix.py', '.'),  # Shared LLM Token Fix (empty-attr) helper
     ('_pdf_worker.py', '.'),  # PDF generation subprocess worker
     ('pdf_generation_manager.py', '.'),  # PDF generation manager
     ('chapter_extraction_manager.py', '.'),  # Chapter extraction manager
@@ -352,6 +353,7 @@ app_modules = [
     'glossary_process_worker',  # Glossary subprocess worker
     'chapter_extraction_worker',  # Chapter extraction subprocess worker
     '_compress_worker',  # Lightweight image compression worker
+    '_empty_attr_fix',  # Shared LLM Token Fix (empty-attr) helper
     '_pdf_worker',  # PDF generation subprocess worker
     'pdf_generation_manager',  # PDF generation manager
     'chapter_extraction_manager',  # Chapter extraction manager

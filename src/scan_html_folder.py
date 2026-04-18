@@ -5500,6 +5500,14 @@ def _is_standard_tag_match(raw_name, trailing):
     would otherwise be read as the HTML italic tag and silently dropped
     from custom-tag counts.
     """
+    # Doctypes, XML declarations, comments, and other markup declarations
+    # (names starting with '!' or '?', e.g. ``<!DOCTYPE html>``,
+    # ``<!-- comment -->``, ``<?xml version="1.0"?>``) carry free-form
+    # tokens after the name by design and are never custom/story tags.
+    # This check runs BEFORE the standard-tags lookup because names like
+    # ``!--`` or ``![CDATA[`` wouldn't be in ``STANDARD_HTML_TAGS``.
+    if raw_name and raw_name[0] in ('!', '?'):
+        return True
     if not _is_standard_tag(raw_name):
         return False
     if trailing is None:
