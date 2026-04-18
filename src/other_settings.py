@@ -6870,9 +6870,11 @@ def _create_processing_options_section(self, parent):
     number_spacing_row = QHBoxLayout()
     number_spacing_row.setContentsMargins(0, 2, 0, 0)
     number_spacing_label = QLabel("Number Spacing Tokenization Fix")
-    number_spacing_combo = QComboBox()
+    class _NoWheelCombo(QComboBox):
+        def wheelEvent(self, e): e.ignore()
+    number_spacing_combo = _NoWheelCombo()
     number_spacing_combo.addItems(["Off", "On — Standard", "On — Standard + Caps"])
-    number_spacing_combo.setFixedWidth(210)
+    number_spacing_combo.setFixedWidth(180)
     try:
         if not hasattr(self, 'number_spacing_token_fix_var'):
             raw = self.config.get('number_spacing_token_fix', '0')
@@ -6892,8 +6894,9 @@ def _create_processing_options_section(self, parent):
             pass
     number_spacing_combo.currentIndexChanged.connect(_on_number_spacing_changed)
     number_spacing_row.addWidget(number_spacing_label)
-    number_spacing_row.addStretch()
+    number_spacing_row.addSpacing(8)
     number_spacing_row.addWidget(number_spacing_combo)
+    number_spacing_row.addStretch()
     left_v.addLayout(number_spacing_row)
 
     number_spacing_desc = QLabel("Adds spaces between letters and numbers to fix tokenizer bugs in some local LLMs.\nStandard: mixed-case words only.  Standard + Caps: also matches ALL-CAPS acronyms.")
