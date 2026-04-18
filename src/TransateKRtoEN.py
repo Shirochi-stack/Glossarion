@@ -5615,7 +5615,7 @@ class BatchTranslationProcessor:
                 if count > 0:
                     print(f"🔧 Number Spacing Fix applied: separated {count} letter-number run-on(s)")
             
-            img_count
+            img_count = len(re.findall(r'&lt;img\s[^>]*?/&gt;', cleaned, flags=re.IGNORECASE))
             if img_count > 0:
                 print(f"🖼️ Unescaping {img_count} img tag(s) from HTML entities (post-processing)")
             cleaned = re.sub(
