@@ -5851,6 +5851,39 @@ CRITICAL EXTRACTION RULES:
                 if not epub_paths:
                     return
 
+                # ----------------------------------------------------------
+                # Trigger the same auto-mapping the Append-Glossary toggle
+                # uses, so `manual_glossary_path` / `auto_loaded_glossary_path`
+                # are populated on the very first open of the editor (no need
+                # to toggle Balanced off/on to wake it up).
+                # ----------------------------------------------------------
+                try:
+                    _append_on = bool(getattr(self, 'append_glossary_var', False)) or bool(
+                        self.config.get('append_glossary', False)
+                    )
+                    _auto_load_on = bool(self.config.get('append_glossary_auto_load', False))
+                    if _append_on and _auto_load_on and hasattr(self, '_autofill_glossary_for_current_selection'):
+                        self._autofill_glossary_for_current_selection()
+                except Exception:
+                    pass
+
+                # Collect any paths that the main GUI has already resolved
+                # (via auto-mapping or manual load) so we always try them FIRST
+                # regardless of which branch we take below.
+                _already_mapped = []
+                try:
+                    for _attr in ('auto_loaded_glossary_path', 'manual_glossary_path'):
+                        _p = getattr(self, _attr, None)
+                        if _p and os.path.exists(_p):
+                            _already_mapped.append(_p)
+                    _mmap = getattr(self, 'manual_glossary_map', None) or {}
+                    if isinstance(_mmap, dict):
+                        for _p in _mmap.values():
+                            if _p and os.path.exists(_p) and _p not in _already_mapped:
+                                _already_mapped.append(_p)
+                except Exception:
+                    _already_mapped = []
+
                 ext_priority = ['.csv', '.json', '.txt', '.md']
                 mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
                 auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
@@ -5864,6 +5897,26 @@ CRITICAL EXTRACTION RULES:
                     base = os.path.splitext(os.path.basename(epub_path))[0]
 
                     candidates = []
+
+                    # Prefer any already-resolved path that looks associated
+                    # with THIS epub (same basename stem).
+                    _base_lc = base.lower()
+                    for _p in _already_mapped:
+                        try:
+                            _p_stem = os.path.splitext(os.path.basename(_p))[0].lower()
+                            _dir_name = os.path.basename(os.path.dirname(_p)).lower()
+                            if (_base_lc in _p_stem) or (_base_lc == _dir_name):
+                                if _p not in candidates:
+                                    candidates.append(_p)
+                        except Exception:
+                            pass
+                    # Also try single-selection case: any resolved path when
+                    # there is exactly one EPUB selected.
+                    if len(epub_paths) == 1:
+                        for _p in _already_mapped:
+                            if _p not in candidates:
+                                candidates.append(_p)
+
                     if override_dir and override_dir.strip():
                         abs_override = os.path.abspath(override_dir)
                         glossary_folder = os.path.join(abs_override, 'Glossary')
