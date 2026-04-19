@@ -10158,26 +10158,12 @@ class UnifiedClient:
                     # config_params, generation_config, etc.) — an interrupt is
                     # not an API failure.
                     # ---------------------------------------------------------------
+                    if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled":
+                        raise
                     if is_stop_requested():
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     if isinstance(e, KeyboardInterrupt):
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-
-                    # ---------------------------------------------------------------
-                    # FAST-PATH: structured UnifiedClientError raised by our own
-                    # inner Vertex code (prohibited_content from safety filters,
-                    # empty responses, content blocks, truncation markers, etc.).
-                    # These already carry the correct `error_type` that the outer
-                    # `_send_internal` wrapper relies on to trigger fallback keys /
-                    # truncation retries / safety-filter handling. Re-raise them
-                    # verbatim so:
-                    #   1. the noisy diagnostic dump doesn't fire (not an API failure)
-                    #   2. the final `raise UnifiedClientError(str(e)[:200])`
-                    #      fall-through doesn't strip `error_type` (which would
-                    #      break prohibited_content fallback + truncation retry).
-                    # ---------------------------------------------------------------
-                    if isinstance(e, UnifiedClientError):
-                        raise
 
                     # ---------------------------------------------------------------
                     # FAST-PATH: known-recoverable "maxOutputTokens out of range"
