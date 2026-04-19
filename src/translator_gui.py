@@ -5951,7 +5951,7 @@ Recent translations to summarize:
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = QComboBox()
-        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
+        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full"])
         # Add Halgakos icon to each item
         try:
             _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -5971,7 +5971,7 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
             "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
-            "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
+            "Manual Glossary Only: Off + disables Auto-Mapping (use the editor's Load Glossary button)\n"
             "No Glossary: Runs without glossary\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
@@ -16935,10 +16935,10 @@ Important rules:
                     "rec": None,
                 },
                 {
-                    "value": "off_no_automap", "emoji": "🔒", "title": "OFF (No Auto-Mapping)",
+                    "value": "off_no_automap", "emoji": "🔒", "title": "MANUAL GLOSSARY ONLY",
                     "subtitle": "Off + disables auto-mapping",
                     "features": ["✓ No automatic extraction", "✓ No auto-mapping",
-                                 "✓ Fully manual workflow"],
+                                 "✓ Use editor's Load Glossary button"],
                     "bg": "#261e2e", "hover": "#684888", "border": "#b090c8", "accent": "#d8c0f0",
                     "rec": None,
                 },
@@ -18602,6 +18602,107 @@ Important rules:
                 pass
 
             self.append_log(f"📑 Saved glossary mapping for {len(mapping)} EPUB(s)")
+
+            # Manual Glossary Only: physically copy each mapped glossary
+            # into its EPUB's output folder as glossary.csv so a subsequent
+            # translation run auto-picks it up (same shape as running the
+            # extraction during translation). Creates the output folder if
+            # it doesn't exist — mirrors Retranslation_GUI's auto-create.
+            try:
+                _mode_key = str(
+                    getattr(self, 'auto_glossary_mode_var', None)
+                    or (self.config.get('auto_glossary_mode', '') if hasattr(self, 'config') else '')
+                    or ''
+                ).lower()
+            except Exception:
+                _mode_key = ''
+            if _mode_key == 'off_no_automap' and mapping:
+                try:
+                    import shutil as _shutil
+                    import sys as _sys
+
+                    def _resolve_out_dir(_epub_path):
+                        """Same rules as translator / retranslation GUIs."""
+                        if not _epub_path:
+                            return None
+                        _base = os.path.splitext(os.path.basename(_epub_path))[0]
+                        _override = None
+                        for _c in (
+                            os.environ.get('OUTPUT_DIRECTORY'),
+                            os.environ.get('OUTPUT_DIR'),
+                            self.config.get('output_directory') if hasattr(self, 'config') else None,
+                        ):
+                            if _c is None:
+                                continue
+                            _c = str(_c).strip().strip('"')
+                            if _c:
+                                _override = _c
+                                break
+                        _out = os.path.join(os.path.abspath(_override), _base) if _override else _base
+                        if _sys.platform == 'darwin' and not os.path.isabs(_out):
+                            _out = os.path.join(os.path.dirname(os.path.abspath(_epub_path)), _out)
+                        if not os.path.exists(_out):
+                            try:
+                                os.makedirs(_out, exist_ok=True)
+                                _pf = os.path.join(_out, "translation_progress.json")
+                                if not os.path.exists(_pf):
+                                    with open(_pf, 'w', encoding='utf-8') as _f:
+                                        json.dump(
+                                            {"chapters": {}, "chapter_chunks": {}, "version": "2.1"},
+                                            _f, ensure_ascii=False, indent=2,
+                                        )
+                                self.append_log(f"\U0001F4C1 Created output folder: {_out}")
+                            except Exception as _e:
+                                self.append_log(f"\u26a0\ufe0f Failed to create output folder for {os.path.basename(_epub_path)}: {_e}")
+                                return None
+                        return _out
+
+                    def _target_name_for(_p):
+                        _ext = os.path.splitext(_p)[1].lower()
+                        if _ext in ('.csv', '.txt'):
+                            return 'glossary.csv'
+                        if _ext == '.md':
+                            return 'glossary.md'
+                        if _ext == '.json':
+                            return 'glossary.json'
+                        return 'glossary.csv'
+
+                    copied = 0
+                    skipped = 0
+                    failed = 0
+                    for _epub_path, _glossary_path in mapping.items():
+                        try:
+                            _out = _resolve_out_dir(_epub_path)
+                            if not _out:
+                                failed += 1
+                                continue
+                            _dest = os.path.join(_out, _target_name_for(_glossary_path))
+                            if os.path.abspath(_glossary_path) == os.path.abspath(_dest):
+                                self.append_log(f"\U0001F4CE Glossary already at output path: {_dest}")
+                                skipped += 1
+                                continue
+                            _shutil.copy2(_glossary_path, _dest)
+                            self.append_log(f"\U0001F4CE Copied glossary to EPUB output: {_dest}")
+                            copied += 1
+                        except Exception as _e:
+                            failed += 1
+                            self.append_log(
+                                f"\u26a0\ufe0f Copy failed for {os.path.basename(_epub_path)}: {_e}"
+                            )
+                    _parts = []
+                    if copied:
+                        _parts.append(f"{copied} copied")
+                    if skipped:
+                        _parts.append(f"{skipped} already in place")
+                    if failed:
+                        _parts.append(f"{failed} failed")
+                    _summary = ", ".join(_parts) if _parts else "no changes"
+                    self.append_log(
+                        f"\U0001F4DA Manual Glossary Only: mapping applied to {len(mapping)} EPUB output folder(s): {_summary}"
+                    )
+                except Exception as e:
+                    self.append_log(f"\u26a0\ufe0f Failed to copy mapped glossaries to output folders: {e}")
+
             try:
                 dialog.close()
             except Exception:
@@ -18864,6 +18965,130 @@ Important rules:
             except Exception:
                 pass
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
+        
+        # Immediately copy glossary into the output folder(s) for the currently
+        # selected input file(s) so users don't have to wait for Run Translation.
+        # Only do this when the user has selected the "Manual Glossary Only" auto
+        # glossary mode (off_no_automap) — in other modes the glossary is managed
+        # by the auto-glossary pipeline and we shouldn't pre-populate the output.
+        try:
+            _auto_mode = (
+                getattr(self, 'auto_glossary_mode_var', None)
+                or self.config.get('auto_glossary_mode', 'off')
+                or 'off'
+            )
+            if str(_auto_mode).lower() == 'off_no_automap':
+                self._copy_glossary_to_output_folders(path)
+            else:
+                self.append_log(
+                    "ℹ️ Skipping immediate glossary copy — only active in 'Manual Glossary Only' mode "
+                    f"(current mode: {_auto_mode})."
+                )
+        except Exception as _e:
+            self.append_log(f"⚠️ Could not copy glossary to output folder(s): {_e}")
+
+    def _copy_glossary_to_output_folders(self, glossary_path):
+        """Copy a loaded glossary into the output folder of every currently
+        selected input file, using the same target naming convention as the
+        translator (glossary.csv / glossary.md / glossary.json).
+        
+        Falls back to ``self.entry_epub.text()`` and uses the same output-folder
+        creation logic as Retranslation_GUI.py (creating an empty
+        ``translation_progress.json`` if none exists yet).
+        """
+        import shutil
+        import json as _json
+        if not glossary_path or not os.path.isfile(glossary_path):
+            return
+        
+        # Determine target filename based on extension (mirrors TransateKRtoEN.py logic)
+        ext = os.path.splitext(glossary_path)[1].lower()
+        if ext in ('.csv', '.txt'):
+            target_name = 'glossary.csv'
+        elif ext == '.md':
+            target_name = 'glossary.md'
+        elif ext == '.json':
+            target_name = 'glossary.json'
+        else:
+            target_name = 'glossary.csv'
+        
+        # Determine output directory override (matches translator behavior)
+        try:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        except Exception:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+        
+        # Resolve input files. Prefer selected_files; otherwise fall back to the
+        # path shown in entry_epub (same fallback Retranslation_GUI uses).
+        input_files = [p for p in (getattr(self, 'selected_files', []) or []) if p]
+        if not input_files:
+            try:
+                fallback = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ''
+            except Exception:
+                fallback = ''
+            if fallback and not fallback.startswith('No file selected') and 'files selected' not in fallback \
+                    and os.path.isfile(fallback):
+                input_files = [fallback]
+        
+        if not input_files:
+            self.append_log("ℹ️ No input file detected — cannot determine output folder for glossary.")
+            return
+        
+        copied = 0
+        seen_dirs = set()
+        for file_path in input_files:
+            try:
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                if override_dir:
+                    output_dir = os.path.join(override_dir, base_name)
+                else:
+                    output_dir = base_name
+                
+                # macOS .app bundles may have cwd='/'; resolve relative paths against the input file dir.
+                if sys.platform == 'darwin' and not os.path.isabs(output_dir):
+                    output_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), output_dir)
+                
+                # Avoid copying multiple times into the same destination
+                abs_out = os.path.abspath(output_dir)
+                if abs_out in seen_dirs:
+                    continue
+                seen_dirs.add(abs_out)
+                
+                # Use the same folder-creation flow as Retranslation_GUI:
+                # create the directory and seed an empty translation_progress.json
+                # if none exists yet so downstream tools see a real output folder.
+                folder_was_created = not os.path.exists(output_dir)
+                os.makedirs(output_dir, exist_ok=True)
+                progress_file_path = os.path.join(output_dir, "translation_progress.json")
+                if not os.path.exists(progress_file_path):
+                    try:
+                        empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+                        with open(progress_file_path, 'w', encoding='utf-8') as _pf:
+                            _json.dump(empty_prog, _pf, ensure_ascii=False, indent=2)
+                    except Exception as _pe:
+                        self.append_log(f"⚠️ Could not seed translation_progress.json in {output_dir}: {_pe}")
+                if folder_was_created:
+                    self.append_log(f"📁 Created output folder: {output_dir}")
+                    # Flash the PM button green if available (same UX as Retranslation_GUI)
+                    try:
+                        if hasattr(self, '_flash_pm_button_green'):
+                            self._flash_pm_button_green(output_dir)
+                    except Exception:
+                        pass
+                
+                target_path = os.path.join(output_dir, target_name)
+                if os.path.abspath(glossary_path) == os.path.abspath(target_path):
+                    self.append_log(f"📑 Glossary already in output: {target_path}")
+                    continue
+                
+                shutil.copy2(glossary_path, target_path)
+                self.append_log(f"📑 Copied glossary to output: {target_path}")
+                copied += 1
+            except Exception as e:
+                self.append_log(f"⚠️ Failed to copy glossary into output for '{file_path}': {e}")
+        
+        if copied:
+            self.append_log(f"✅ Glossary loaded into {copied} output folder(s)")
 
     def _comprehensive_json_fix(self, content):
         """Apply comprehensive JSON fixes."""

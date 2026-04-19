@@ -10196,7 +10196,31 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⚠️ Unknown glossary extension '{ext}', treating as CSV")
             
             target_path = os.path.join(out, target_name)
-            if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
+            
+            # In "Manual Glossary Only" mode (off_no_automap) the user may have edited
+            # the glossary in the in-app editor after loading it. Prefer whatever is
+            # already present in the output folder so we don't clobber those edits.
+            _auto_mode_env = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
+            _existing_in_output = find_glossary_file(out)
+            if (
+                _auto_mode_env == "off_no_automap"
+                and _existing_in_output
+                and os.path.isfile(_existing_in_output)
+                and _has_glossary_data(_existing_in_output)
+            ):
+                print(
+                    "📑 Manual Glossary Only mode: using existing glossary from output folder "
+                    f"(preserves editor changes): {_existing_in_output}"
+                )
+                # Repoint MANUAL_GLOSSARY to the in-output copy so downstream
+                # consumers (system-prompt append, emergency compliance, etc.)
+                # all see the user-edited version.
+                try:
+                    config.MANUAL_GLOSSARY = _existing_in_output
+                    os.environ["MANUAL_GLOSSARY"] = _existing_in_output
+                except Exception:
+                    pass
+            elif os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
                 shutil.copy(config.MANUAL_GLOSSARY, target_path)
                 print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
             else:

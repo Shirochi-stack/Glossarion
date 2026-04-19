@@ -1811,7 +1811,24 @@ def _stream_gemini_common(
     # Always emit "in progress" with thread name (visible even when streaming is off)
     import threading as _threading
     _model_name = body.get("model") or body.get("request", {}).get("model") or "?"
-    _log(f"📤 [{_threading.current_thread().name}] API call in progress")
+    # Build a Gemini-style thinking suffix (level for Gemini 3, budget for 2.x)
+    _think_suffix = ""
+    try:
+        if "thinkingLevel" in _tc:
+            _think_suffix = f" (thinking level: {_tc['thinkingLevel']})"
+        elif "thinkingBudget" in _tc:
+            _b = _tc["thinkingBudget"]
+            if _b == 0:
+                _think_suffix = " (thinking disabled)"
+            elif _b is None or _b < 0:
+                _think_suffix = " (dynamic thinking)"
+            else:
+                _think_suffix = f" (thinking budget: {_b:,})"
+        else:
+            _think_suffix = " (dynamic thinking)"
+    except Exception:
+        _think_suffix = ""
+    _log(f"📤 [{_threading.current_thread().name}] API call in progress{_think_suffix}")
 
     # Pre-flight: bail out immediately if a stop was already requested
     if _is_externally_stopped():

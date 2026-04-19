@@ -10058,6 +10058,111 @@ class UnifiedClient:
         
         return converted
 
+    def _get_thinking_status_label(self) -> str:
+        """Return a ' (…)' suffix describing the current model's thinking
+        configuration, for use in the 'API call in progress' logs.
+
+        Rules:
+          - Gemini / Gemma              → thinking level (Gemini 3) or thinking budget (2.x)
+          - vertex/ / authgem / authgem-vertex (+ numbered variants) → treated as Gemini
+          - GPT / OpenAI                → effort
+          - Anthropic                   → extended thinking (budget or adaptive effort)
+          - Other wrapper prefixes      → '' (authgpt*, authza*, antigravity, za/)
+          - Anything else               → ''
+        Returns an empty string when nothing should be displayed.
+        """
+        try:
+            model_lower = (getattr(self, 'model', '') or '').lower()
+        except Exception:
+            return ""
+        if not model_lower:
+            return ""
+
+        # Wrapper-auth prefixes that should still show Gemini thinking info.
+        # Covers: vertex/, authgem/, authgem-key/, authgem-vertex/, and their
+        # numbered variants (authgem1/, authgem-vertex2/, …).
+        import re as _re
+        _is_gemini_wrapper = bool(
+            model_lower.startswith('vertex/') or
+            model_lower.startswith('authgem') or
+            _re.match(r'^authgem(?:-vertex|-key)?\d*/', model_lower)
+        )
+
+        # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
+        _suppress_prefixes = ('authgpt', 'authza', 'antigravity', 'za/')
+        if not _is_gemini_wrapper:
+            for p in _suppress_prefixes:
+                if model_lower.startswith(p):
+                    return ""
+
+        # --- Gemini / Gemma family (or Gemini-backed wrapper prefixes) ---
+        if _is_gemini_wrapper or model_lower.startswith('gemini') or model_lower.startswith('gemma'):
+            # Strip wrapper prefix for Gemini-3 detection (e.g. "authgem/gemini-3-pro")
+            _model_for_detect = model_lower
+            if _is_gemini_wrapper and '/' in _model_for_detect:
+                _model_for_detect = _model_for_detect.split('/', 1)[1]
+            if _is_gemini_wrapper:
+                is_gemini_3 = 'gemini-3' in _model_for_detect
+            else:
+                try:
+                    is_gemini_3 = self._is_gemini_3_model()
+                except Exception:
+                    is_gemini_3 = 'gemini-3' in model_lower
+            if is_gemini_3:
+                level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
+                if level not in ('minimal', 'low', 'medium', 'high'):
+                    level = 'high'
+                return f" (thinking level: {level})"
+            # Gemini 2.x / Gemma: budget-based
+            try:
+                budget = int(os.getenv("THINKING_BUDGET", "-1"))
+            except Exception:
+                budget = -1
+            if os.getenv("ENABLE_GEMINI_THINKING", "1") == "0":
+                budget = 0
+            if budget == 0:
+                return " (thinking disabled)"
+            if budget == -1:
+                return " (dynamic thinking)"
+            if budget > 0:
+                return f" (thinking budget: {budget:,})"
+            return ""
+
+        # --- Anthropic family ---
+        _anthropic_prefixes = ('claude', 'sonnet', 'opus', 'haiku')
+        if any(model_lower.startswith(p) for p in _anthropic_prefixes):
+            if os.getenv('ENABLE_ANTHROPIC_THINKING', '0') != '1':
+                return ""
+            force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
+            is_opus_46 = ('opus-4-6' in model_lower) or ('opus-4.6' in model_lower)
+            if is_opus_46 or force_adaptive:
+                effort = (os.getenv('ANTHROPIC_EFFORT', 'medium') or 'medium').strip().lower()
+                if effort not in ('low', 'medium', 'high'):
+                    effort = 'medium'
+                return f" (extended thinking: adaptive, effort={effort})"
+            try:
+                budget = int(os.getenv('ANTHROPIC_THINKING_BUDGET', '10000'))
+            except Exception:
+                budget = 10000
+            if budget > 0:
+                return f" (extended thinking: budget={budget:,})"
+            return ""
+
+        # --- OpenAI / GPT family ---
+        _openai_prefixes = ('gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt')
+        if any(model_lower.startswith(p) for p in _openai_prefixes):
+            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
+                return ""
+            tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
+            if tokens_str.isdigit() and int(tokens_str) > 0:
+                return f" (reasoning tokens: {int(tokens_str):,})"
+            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+                effort = 'medium'
+            return f" (effort: {effort})"
+
+        return ""
+
     def _apply_api_call_stagger(self):
         """Stagger API calls to prevent simultaneous requests.
 
@@ -10147,15 +10252,16 @@ class UnifiedClient:
             except Exception:
                 label = 'request'
                 ctx = 'translation'
+            _think = self._get_thinking_status_label()
             if sleep_time > 0:
                 # Thread had to wait — show queued log before sleep already happened, now confirm in-progress
                 if sleep_time > api_delay + 0.5:
-                    self._debug_log(f"⏳ [{thread_name}] {label} API call in progress (queued {sleep_time:.1f}s)")
+                    self._debug_log(f"⏳ [{thread_name}] {label} API call in progress (queued {sleep_time:.1f}s){_think}")
                 else:
-                    self._debug_log(f"⏳ [{thread_name}] {label} API call in progress")
+                    self._debug_log(f"⏳ [{thread_name}] {label} API call in progress{_think}")
             else:
                 # No wait needed — goes immediately
-                self._debug_log(f"📤 [{thread_name}] {label} ({ctx}) API call in progress")
+                self._debug_log(f"📤 [{thread_name}] {label} ({ctx}) API call in progress{_think}")
 
 
     def _update_stagger_timestamp(self):
@@ -12732,7 +12838,8 @@ class UnifiedClient:
                     # Call OpenAI-compatible endpoint
                     import threading as _thr
                     if not self._is_stop_requested():
-                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model})")
+                        _think = self._get_thinking_status_label()
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model}){_think}")
 
                     response = self._send_openai_compatible(
                         messages=messages,
@@ -12871,7 +12978,8 @@ class UnifiedClient:
                     if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
                         import threading as _thr
-                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model})")
+                        _think = self._get_thinking_status_label()
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model}){_think}")
 
                     
                     try:
@@ -12943,7 +13051,8 @@ class UnifiedClient:
                     # Native Gemini API call
                     import threading as _thr
                     if not self._is_stop_requested():
-                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model})")
+                        _think = self._get_thinking_status_label()
+                        print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model}){_think}")
 
                     # Prepare content based on whether we have images
                     contents = []

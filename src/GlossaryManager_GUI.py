@@ -2067,7 +2067,7 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'auto_glossary_mode_combo'):
             from PySide6.QtWidgets import QComboBox
             self.auto_glossary_mode_combo = QComboBox()
-            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Off (No Auto-Mapping)", "No Glossary", "Minimal", "Balanced", "Full"])
+            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full"])
             # Add Halgakos icon to each item
             try:
                 _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -2088,7 +2088,7 @@ CRITICAL EXTRACTION RULES:
         self.auto_glossary_mode_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
             "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
-            "Off (No Auto-Mapping): Off + disables Auto-Mapping\n"
+            "Manual Glossary Only: Off + disables Auto-Mapping (use the editor's Load Glossary button)\n"
             "No Glossary: Runs without glossary (doesn't change toggle)\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
@@ -3179,8 +3179,11 @@ CRITICAL EXTRACTION RULES:
         def update_auto_glossary_state(*_args):
             mode_raw = self.auto_glossary_mode_combo.currentText() if hasattr(self, 'auto_glossary_mode_combo') else 'Off'
             # Map display text to internal mode key
+            # (Old label "Off (No Auto-Mapping)" still accepted for backward
+            # compatibility with saved configs / older builds.)
             _display_to_mode = {
                 'Off': 'off', 'Off (Fuzzy Mapping)': 'off_fuzzy_automap',
+                'Manual Glossary Only': 'off_no_automap',
                 'Off (No Auto-Mapping)': 'off_no_automap',
                 'No Glossary': 'no_glossary', 'Minimal': 'minimal',
                 'Balanced': 'balanced', 'Full': 'full',
@@ -3367,7 +3370,7 @@ CRITICAL EXTRACTION RULES:
                     if hasattr(self, 'append_glossary_auto_load_var'):
                         self.append_glossary_auto_load_var = False
 
-            # "Off (No Auto-Mapping)" / "Minimal" - lock auto-mapping OFF
+            # "Manual Glossary Only" / "Minimal" - lock auto-mapping OFF
             if mode in ('off_no_automap', 'minimal') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(False)
@@ -6250,6 +6253,269 @@ CRITICAL EXTRACTION RULES:
         browse_btn.clicked.connect(browse_glossary)
         browse_btn.setStyleSheet("background-color: #495057; color: white; padding: 8px; font-weight: bold;")
         file_layout.addWidget(browse_btn)
+
+        # Load-Glossary shortcut: mirrors the main toolbar's "Load Glossary"
+        # button but uses the currently browsed file instead of prompting for
+        # one. When Auto Glossary mode is "Manual Glossary Only", it also
+        # physically copies the glossary into the selected EPUB's output
+        # folder as glossary.csv — same shape that running translation
+        # produces — so the translator picks it up on next run.
+        def _resolve_epub_output_dir(epub_path):
+            """Return (output_dir, file_base) using the same rules as the
+            translator / retranslation GUI. Creates the folder when it
+            doesn't exist (mirrors Retranslation_GUI's auto-create logic).
+            """
+            if not epub_path:
+                return None, None
+            file_base = os.path.splitext(os.path.basename(epub_path))[0]
+            override_dir = None
+            try:
+                # Check every path used across the codebase:
+                #   - OUTPUT_DIRECTORY / OUTPUT_DIR env vars
+                #   - config['output_directory']
+                # Trim whitespace + treat empty strings as "no override".
+                _candidates = [
+                    os.environ.get('OUTPUT_DIRECTORY'),
+                    os.environ.get('OUTPUT_DIR'),
+                ]
+                if hasattr(self, 'config'):
+                    _candidates.append(self.config.get('output_directory'))
+                for _c in _candidates:
+                    if _c is None:
+                        continue
+                    _c = str(_c).strip().strip('"')
+                    if _c:
+                        override_dir = _c
+                        break
+            except Exception:
+                override_dir = None
+            if override_dir:
+                output_dir = os.path.join(os.path.abspath(override_dir), file_base)
+            else:
+                output_dir = file_base
+            # macOS .app bundles can run with cwd='/' (read-only). Anchor
+            # relative output paths against the source EPUB's directory in
+            # that case — matches Retranslation_GUI's behavior.
+            try:
+                import sys as _sys
+                if _sys.platform == 'darwin' and not os.path.isabs(output_dir):
+                    output_dir = os.path.join(os.path.dirname(os.path.abspath(epub_path)), output_dir)
+            except Exception:
+                pass
+            if not os.path.exists(output_dir):
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                    # Seed an empty progress file so the retranslation GUI
+                    # can discover this folder later without regenerating it.
+                    progress_file_path = os.path.join(output_dir, "translation_progress.json")
+                    if not os.path.exists(progress_file_path):
+                        empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+                        with open(progress_file_path, 'w', encoding='utf-8') as _f:
+                            json.dump(empty_prog, _f, ensure_ascii=False, indent=2)
+                    self.append_log(f"\U0001F4C1 Created output folder: {output_dir}")
+                except Exception as _e:
+                    self.append_log(f"\u26a0\ufe0f Failed to create output folder: {_e}")
+                    return None, file_base
+            return output_dir, file_base
+
+        def load_current_glossary_as_manual():
+            # Multi-EPUB case: never force one glossary onto all inputs —
+            # delegate to the existing per-EPUB mapping dialog so the user
+            # can map a different glossary to each EPUB. The mapping
+            # dialog's save callback handles the "Manual Glossary Only"
+            # output-folder copy when that mode is active (see
+            # _open_glossary_mapping_dialog).
+            try:
+                _selected_epubs = [
+                    p for p in (getattr(self, 'selected_files', []) or [])
+                    if str(p).lower().endswith('.epub')
+                ]
+            except Exception:
+                _selected_epubs = []
+            if len(_selected_epubs) > 1 and hasattr(self, '_open_glossary_mapping_dialog'):
+                try:
+                    self._open_glossary_mapping_dialog(_selected_epubs)
+                except Exception as _e:
+                    QMessageBox.critical(
+                        parent,
+                        "Error",
+                        f"Could not open glossary mapping dialog: {_e}",
+                    )
+                return
+
+            path = self.editor_file_entry.text()
+            if not path or not os.path.exists(path):
+                QMessageBox.warning(
+                    parent,
+                    "No Glossary Selected",
+                    "Please browse to a valid glossary file first.",
+                )
+                return
+
+            # Current auto-glossary mode drives the behavior. When the mode
+            # is "Manual Glossary Only" (off_no_automap) we *also* copy the
+            # glossary into the EPUB's output folder so a subsequent run
+            # picks it up exactly like one produced during translation.
+            _current_mode_key = ''
+            _current_mode_raw = ''
+            try:
+                _current_mode_raw = (
+                    self.auto_glossary_mode_combo.currentText()
+                    if hasattr(self, 'auto_glossary_mode_combo') else ''
+                )
+            except Exception:
+                _current_mode_raw = ''
+            try:
+                _current_mode_key = str(
+                    getattr(self, 'auto_glossary_mode_var', None)
+                    or (self.config.get('auto_glossary_mode', '') if hasattr(self, 'config') else '')
+                    or ''
+                ).lower()
+            except Exception:
+                _current_mode_key = ''
+            _is_manual_only = _current_mode_key == 'off_no_automap'
+
+            msg = QMessageBox(parent)
+            msg.setWindowTitle("Load Glossary")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText(
+                f"Load this glossary for translation?\n\n"
+                f"{os.path.basename(path)}"
+            )
+            # Normalize the displayed current-mode label so we never show
+            # the legacy "Off (No Auto-Mapping)" text even if a stale combo
+            # or saved config slipped it back in.
+            _display_mode = str(_current_mode_raw or '').strip()
+            if _is_manual_only or _display_mode.lower() in (
+                'off (no auto-mapping)', 'off_no_automap',
+            ):
+                _display_mode = 'Manual Glossary Only'
+            elif not _display_mode:
+                _display_mode = 'unknown'
+
+            if _is_manual_only:
+                msg.setInformativeText(
+                    "Auto Glossary mode is \"Manual Glossary Only\" \u2014 "
+                    "the file will be copied into the selected EPUB's output "
+                    "folder as glossary.csv so translation picks it up on "
+                    "next run. The output folder will be created if it "
+                    "doesn't exist.\n\n"
+                    f"Current mode: {_display_mode}"
+                )
+            else:
+                msg.setInformativeText(
+                    "For the loaded glossary to take effect, Auto Glossary "
+                    "mode must be set to \"Manual Glossary Only\" \u2014 "
+                    "otherwise auto-mapping may override this manual "
+                    "selection.\n\n"
+                    f"Current mode: {_display_mode}"
+                )
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+            msg.setDefaultButton(QMessageBox.Yes)
+            if msg.exec() != QMessageBox.Yes:
+                return
+
+            # Mirror translator_gui.load_glossary() behavior: clear auto-load
+            # tracking, mark manually loaded, enable append glossary, update
+            # status label, and persist config.
+            try:
+                self.auto_loaded_glossary_path = None
+                self.auto_loaded_glossary_for_file = None
+                self.manual_glossary_path = path
+                self.manual_glossary_manually_loaded = True
+                self.manual_glossary_file_extension = os.path.splitext(path)[1].lower()
+                self.append_glossary_var = True
+                self.config['append_glossary'] = True
+                os.environ['APPEND_GLOSSARY'] = '1'
+                self.config['manual_glossary_path'] = path
+                os.environ['MANUAL_GLOSSARY'] = path
+                if hasattr(self, 'append_glossary_checkbox'):
+                    try:
+                        self.append_glossary_checkbox.setChecked(True)
+                    except Exception:
+                        pass
+                if hasattr(self, '_update_manual_glossary_status'):
+                    try:
+                        self._update_manual_glossary_status()
+                    except Exception:
+                        pass
+                try:
+                    self.save_config(show_message=False)
+                except Exception:
+                    pass
+                self.append_log(f"\U0001F4D1 Loaded manual glossary: {path}")
+                self.append_log("\u2705 Automatically enabled 'Append Glossary to System Prompt'")
+            except Exception as e:
+                QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
+                return
+
+            # Manual Glossary Only: also copy the file to the single
+            # selected EPUB's output folder as glossary.csv so `run
+            # translation` auto-loads it. Multi-EPUB is handled earlier by
+            # delegating to _open_glossary_mapping_dialog; we only reach
+            # this code for the single-EPUB (or no-selection) path.
+            if _is_manual_only:
+                try:
+                    import shutil as _shutil
+                    # Try every source the main translator uses to know
+                    # which EPUB is "current":
+                    #   1. selected_files (a single EPUB)
+                    #   2. EPUB_PATH env var
+                    #   3. config['last_epub_path']
+                    epub_path = None
+                    try:
+                        selected = list(getattr(self, 'selected_files', []) or [])
+                        epubs = [p for p in selected if str(p).lower().endswith('.epub')]
+                        if len(epubs) == 1:
+                            epub_path = epubs[0]
+                        if not epub_path:
+                            _env_ep = os.environ.get('EPUB_PATH')
+                            if _env_ep and os.path.isfile(_env_ep) and _env_ep.lower().endswith('.epub'):
+                                epub_path = _env_ep
+                        if not epub_path:
+                            _last = self.config.get('last_epub_path') if hasattr(self, 'config') else None
+                            if _last and os.path.isfile(_last) and _last.lower().endswith('.epub'):
+                                epub_path = _last
+                    except Exception:
+                        pass
+                    if not epub_path:
+                        self.append_log(
+                            "\u26a0\ufe0f Manual Glossary Only: no EPUB selected — skipping output-folder copy."
+                        )
+                    else:
+                        out_dir, _base = _resolve_epub_output_dir(epub_path)
+                        if out_dir:
+                            dest = os.path.join(out_dir, "glossary.csv")
+                            if os.path.abspath(path) == os.path.abspath(dest):
+                                self.append_log(
+                                    f"\U0001F4CE Glossary already at output path: {dest}"
+                                )
+                            else:
+                                _shutil.copy2(path, dest)
+                                self.append_log(
+                                    f"\U0001F4CE Copied glossary to EPUB output: {dest}"
+                                )
+                except Exception as e:
+                    self.append_log(
+                        f"\u26a0\ufe0f Failed to copy glossary to EPUB output folder: {e}"
+                    )
+
+        load_btn = QPushButton("\U0001F4C4 Load")
+        load_btn.setFixedWidth(70)
+        load_btn.setToolTip(
+            "Load the currently browsed glossary as the active manual "
+            "glossary for translation. Auto Glossary mode must be set to "
+            "\"Manual Glossary Only\" for it to take effect. When that mode "
+            "is active, the glossary is also copied into the EPUB's output "
+            "folder as glossary.csv (folder is created if missing)."
+        )
+        load_btn.clicked.connect(load_current_glossary_as_manual)
+        load_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #c8c8d0; "
+            "border: 1px solid #555; border-radius: 3px; padding: 4px 8px; font-size: 9pt; } "
+            "QPushButton:hover { background-color: #2a2a3e; color: #fff; border-color: #f39c12; }"
+        )
+        file_layout.addWidget(load_btn)
 
         # Advanced editing toggle and button grid placed above the tree
         advanced_toggle_widget = QWidget()
