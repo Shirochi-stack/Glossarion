@@ -9996,6 +9996,8 @@ class UnifiedClient:
                     _summary = f"📡 Vertex: Response received in {_elapsed:.1f}s ({len(result_text)} chars, {_mode})"
                     if thinking_tokens > 0:
                         _summary += f" | 🧠 {thinking_tokens} thinking tokens used"
+                    if finish_reason == 'length':
+                        _summary += " | ✂️ finish_reason=length (MAX_TOKENS — output truncated)"
                     print(_summary)
                     
                     # Check for empty response - might be safety filter
@@ -10046,7 +10048,7 @@ class UnifiedClient:
                     
                     return UnifiedResponse(
                         content=result_text,
-                        finish_reason='stop',
+                        finish_reason=finish_reason,
                         raw_response=response
                     )
                     
@@ -10215,6 +10217,8 @@ class UnifiedClient:
                                 )
                                 if _tt > 0:
                                     _msg += f" | 🧠 {_tt} thinking tokens used"
+                                if finish_reason == 'length':
+                                    _msg += " | ✂️ finish_reason=length (MAX_TOKENS — output truncated)"
                                 print(_msg)
                             except Exception:
                                 pass
@@ -10380,6 +10384,9 @@ class UnifiedClient:
                                             pass
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                     last_response = _chunk
+                                    # Capture finish_reason from candidates so MAX_TOKENS
+                                    # propagates as 'length' to the outer retry layer.
+                                    _capture_candidate_meta(getattr(_chunk, 'candidates', None) or [])
                                     for _cand in (getattr(_chunk, 'candidates', None) or []):
                                         _co = getattr(_cand, 'content', None)
                                         if not _co:
@@ -10400,6 +10407,7 @@ class UnifiedClient:
                                     contents=contents,
                                     config=generation_config,
                                 )
+                                _capture_candidate_meta(getattr(response_retry, 'candidates', None) or [])
                                 for _cand in (getattr(response_retry, 'candidates', None) or []):
                                     _co = getattr(_cand, 'content', None)
                                     if not _co:
@@ -10430,6 +10438,8 @@ class UnifiedClient:
                                 )
                                 if _thinking_tokens > 0:
                                     _summary += f" | 🧠 {_thinking_tokens} thinking tokens used"
+                                if finish_reason == 'length':
+                                    _summary += " | ✂️ finish_reason=length (MAX_TOKENS — output truncated)"
                                 print(_summary)
                             except Exception:
                                 pass
