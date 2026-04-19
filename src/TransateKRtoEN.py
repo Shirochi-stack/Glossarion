@@ -8950,7 +8950,21 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         except Exception:
             tag = ""
         if tag in _ALLOWED_TAGS:
-            return "<" + inner + ">"
+            # Only treat an allowed-tag match as real HTML when it *looks*
+            # like real markup. Otherwise prose that happens to start with
+            # an allowed tag name (e.g. ``<A special reward ...>``,
+            # ``<Picture this scene>``) would be left as a raw angle-bracket
+            # sequence and then rendered as a broken <a>/<picture>/... tag.
+            stripped = inner.strip()
+            is_closing = stripped.startswith('/')
+            is_self_closing = stripped.endswith('/')
+            is_bare = stripped.lower() == tag
+            has_attr = '=' in inner
+            if is_closing or is_bare or has_attr or is_self_closing:
+                return "<" + inner + ">"
+            # Prose in angle brackets that happens to start with an allowed
+            # tag name -> escape it so the browser renders the literal text.
+            return "&lt;" + inner + "&gt;"
         if tag in _HTML_TAG_NAMES:
             _escape_fired[0] = True
         return "&lt;" + inner + "&gt;"
@@ -9082,8 +9096,15 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
                 # if img_count > 0:
                 #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown2)")
+                # Non-closing allowed tags only unescape when they are bare
+                # (``&lt;img&gt;``), self-closing (``&lt;img/&gt;``) or carry
+                # real attribute syntax (``&lt;img src="x"/&gt;``). Without
+                # the ``=`` requirement, prose like ``&lt;Picture this
+                # scene: a quiet room&gt;`` -- produced by the escape pass
+                # above on narrative-in-angle-brackets -- would be wrongly
+                # decoded back to ``<Picture this scene: ...>``.
                 html = re.sub(
-                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:image|source|area|map|canvas)\s.*?))&gt;',
+                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
                     r'<\1>',
                     html,
                     flags=re.IGNORECASE | re.DOTALL
@@ -9151,8 +9172,12 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
             # if img_count > 0:
             #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (markdown)")
+            # Same tightening as the markdown2 branch above: only unescape
+            # non-closing allowed tags when bare, self-closing, or carrying
+            # ``=``-based attribute syntax -- so prose like ``&lt;Picture
+            # this scene...&gt;`` isn't wrongly decoded back to a raw tag.
             html = re.sub(
-                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:image|source|area|map|canvas)\s.*?))&gt;',
+                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
                 r'<\1>',
                 html,
                 flags=re.IGNORECASE | re.DOTALL
@@ -9272,8 +9297,11 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     img_count = len(re.findall(r'&lt;/?(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)', html, flags=re.IGNORECASE))
     # if img_count > 0:
     #     print(f"🖼️ Unescaping {img_count} image-related tag(s) from HTML entities (fallback)")
+    # Same tightening as the markdown/markdown2 branches above: only
+    # unescape non-closing allowed tags when bare, self-closing, or
+    # carrying ``=``-based attribute syntax.
     html = re.sub(
-        r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s.*?)?)|(?:(?:image|source|area|map|canvas)\s.*?))&gt;',
+        r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
         r'<\1>',
         html,
         flags=re.IGNORECASE | re.DOTALL

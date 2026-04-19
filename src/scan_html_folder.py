@@ -5460,6 +5460,39 @@ STANDARD_HTML_TAGS = frozenset([
     'cover', 'package', 'manifest', 'spine', 'itemref', 'item',
 ])
 
+_HTML_LIKE_EXTENSIONS = ('.html', '.xhtml', '.htm')
+
+
+def _strip_html_like_extensions(name):
+    """Strip *all* trailing HTML-family extensions from ``name``.
+
+    ``os.path.splitext`` only removes the final extension, so compound
+    filenames such as ``Chapter103.html.xhtml`` or ``Chapter103.htm.html``
+    wouldn't match single-extension source names like ``Chapter103.xhtml``
+    during source/translation filename comparison, causing the scanner to
+    silently skip checks like ``invisible_html_tags_N_found`` and
+    ``source_custom_tags_missing_N_of_M``.
+
+    This helper repeatedly peels off any trailing ``.html``/``.xhtml``/
+    ``.htm`` suffix until none remain, so both sides normalize to the same
+    bare basename.
+    """
+    if not isinstance(name, str):
+        return name
+    result = name
+    lower = result.lower()
+    changed = True
+    while changed:
+        changed = False
+        for ext in _HTML_LIKE_EXTENSIONS:
+            if lower.endswith(ext):
+                result = result[:-len(ext)]
+                lower = result.lower()
+                changed = True
+                break
+    return result
+
+
 # Matches real angle-bracket tags like <concept> or <概念>. Tag names can be
 # any run of characters that aren't whitespace, angle brackets, slash, equals,
 # quote or ampersand, so this also catches translated (non-ASCII) tag names.
@@ -6851,7 +6884,7 @@ def process_html_file_batch(args):
                                 
                                 if not text_file_mode:
                                     # EPUB mode: match by filename
-                                    search_basename = os.path.splitext(filename.lower())[0]
+                                    search_basename = _strip_html_like_extensions(filename.lower())
                                     if search_basename.startswith('response_'):
                                         search_basename = search_basename[9:]
                                     
@@ -6859,7 +6892,7 @@ def process_html_file_batch(args):
                                     for key, value in original_word_counts.items():
                                         if isinstance(value, dict):
                                             orig_filename = value.get('filename', '').lower()
-                                            orig_basename = os.path.splitext(orig_filename)[0]
+                                            orig_basename = _strip_html_like_extensions(orig_filename)
                                             if orig_basename == search_basename:
                                                 matched_source = value
                                                 break
@@ -6877,10 +6910,10 @@ def process_html_file_batch(args):
                                         if isinstance(original_word_counts[clean_filename], dict):
                                             source_had_headers = original_word_counts[clean_filename].get('has_headers', True)
                                     else:
-                                        # Try basename match
-                                        base_name = os.path.splitext(clean_filename)[0]
+                                        # Try basename match (strip *all* HTML-family extensions)
+                                        base_name = _strip_html_like_extensions(clean_filename)
                                         for key, value in original_word_counts.items():
-                                            if os.path.splitext(key)[0] == base_name and isinstance(value, dict):
+                                            if _strip_html_like_extensions(str(key).lower()) == base_name and isinstance(value, dict):
                                                 source_had_headers = value.get('has_headers', True)
                                                 break
                                 else:
@@ -6951,10 +6984,13 @@ def process_html_file_batch(args):
         check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
         if (check_invalid_tag_mismatch_setting
                 and original_word_counts
-                and filename.lower().endswith(('.html', '.xhtml', '.htm'))
+                and filename.lower().endswith(_HTML_LIKE_EXTENSIONS)
                 and raw_file_content):
             matched_source_entry = None
-            search_basename = os.path.splitext(filename.lower())[0]
+            # Strip *all* HTML-family extensions so compound names like
+            # ``response_Chapter103.html.xhtml`` match the source's bare
+            # basename (``Chapter103`` from ``Chapter103.xhtml``).
+            search_basename = _strip_html_like_extensions(filename.lower())
             if search_basename.startswith('response_'):
                 search_basename = search_basename[9:]
             
@@ -6962,7 +6998,7 @@ def process_html_file_batch(args):
                 # EPUB mode: entries are dicts keyed by spine index
                 for _key, value in original_word_counts.items():
                     if isinstance(value, dict):
-                        orig_basename = os.path.splitext(value.get('filename', '').lower())[0]
+                        orig_basename = _strip_html_like_extensions(value.get('filename', '').lower())
                         if orig_basename == search_basename:
                             matched_source_entry = value
                             break
@@ -6976,9 +7012,9 @@ def process_html_file_batch(args):
                 if isinstance(candidate, dict):
                     matched_source_entry = candidate
                 else:
-                    base_name = os.path.splitext(clean_filename)[0]
+                    base_name = _strip_html_like_extensions(clean_filename)
                     for key, value in original_word_counts.items():
-                        if isinstance(value, dict) and os.path.splitext(str(key))[0] == base_name:
+                        if isinstance(value, dict) and _strip_html_like_extensions(str(key).lower()) == base_name:
                             matched_source_entry = value
                             break
             

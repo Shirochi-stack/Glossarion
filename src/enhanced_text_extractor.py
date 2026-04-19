@@ -32,6 +32,44 @@ except ImportError:
 
 from _empty_attr_fix import fix_empty_attr_tags
 
+# Standard HTML / SVG / MathML / common legacy tag names. Used by
+# ``_protect_non_html_angle_brackets`` to decide whether an angle-bracket
+# pattern is a real HTML element (leave alone) or a custom/story tag that
+# needs to be shielded from BeautifulSoup and html2text stripping.
+_STANDARD_HTML_TAG_NAMES = frozenset([
+    # Core HTML
+    'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio',
+    'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
+    'canvas', 'caption', 'cite', 'code', 'col', 'colgroup',
+    'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog',
+    'div', 'dl', 'dt', 'em', 'embed', 'fieldset', 'figcaption', 'figure',
+    'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+    'hgroup', 'hr', 'html', 'i', 'iframe', 'img', 'input', 'ins',
+    'kbd', 'label', 'legend', 'li', 'link', 'main', 'map', 'mark',
+    'menu', 'menuitem', 'meta', 'meter', 'nav', 'noscript', 'object', 'ol',
+    'optgroup', 'option', 'output', 'p', 'param', 'picture', 'pre',
+    'progress', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby', 's', 'samp', 'script',
+    'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style',
+    'sub', 'summary', 'sup', 'svg', 'table', 'tbody', 'td', 'template',
+    'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u',
+    'ul', 'var', 'video', 'wbr',
+    # Obsolete/legacy but still common in older ePubs
+    'acronym', 'big', 'center', 'font', 'strike', 'tt', 'basefont', 'frame',
+    'frameset', 'noframes', 'marquee', 'blink',
+    # SVG / MathML (common subset)
+    'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt',
+    'image', 'defs', 'g', 'path', 'circle', 'rect', 'line', 'polygon',
+    'polyline', 'text', 'tspan', 'use', 'symbol', 'lineargradient',
+    'radialgradient', 'stop', 'filter', 'clippath', 'mask', 'pattern',
+    # EPUB / NCX helpers (we compare the local name after namespace split)
+    'epub', 'ops', 'ncx', 'navmap', 'navpoint', 'navlabel', 'content',
+    'cover', 'package', 'manifest', 'spine', 'itemref', 'item',
+])
+
+# Pattern for angle-bracket content. Used by _protect_non_html_angle_brackets.
+_ANGLE_BRACKET_RE = re.compile(r'<([^<>]+)>')
+_TAG_NAME_TOKEN_RE = re.compile(r'([^\s>/]+)')
+
 
 class EnhancedTextExtractor:
     """Enhanced text extraction with proper Unicode and CJK handling"""
@@ -287,6 +325,51 @@ class EnhancedTextExtractor:
         
         return re.sub(bracket_pattern, replace_brackets, text)
     
+    def _protect_non_html_angle_brackets(self, text: str) -> str:
+        """Protect ``<...>`` patterns whose tag name is not a standard HTML
+        element, so they survive BeautifulSoup/html2text stripping.
+
+        Covers non-CJK custom/story tags that escape ``_protect_cjk_angle_brackets``,
+        e.g. ``<Alice-02.>``, ``<concept>``, ``<System>``. Without this, after
+        ``_decode_entities`` turns ``&lt;Alice-02.&gt;`` into ``<Alice-02.>``,
+        BeautifulSoup treats the latter as an unknown element and html2text
+        silently drops it.
+
+        Uses the same Unicode markers (``‹``/``›``) as
+        ``_protect_cjk_angle_brackets`` so ``_restore_cjk_angle_brackets``
+        handles restoration for both. Standard HTML tags, processing
+        instructions (``<?xml ...?>``), doctypes (``<!DOCTYPE ...>``) and
+        comments (``<!--...-->``) are left untouched.
+        """
+        def replace(m):
+            inner = m.group(1)
+            stripped = inner.strip()
+            if not stripped:
+                return m.group(0)
+            # Processing instructions, doctypes, comments, CDATA sections
+            # carry free-form content after the leading token by design.
+            if stripped[0] in ('!', '?'):
+                return m.group(0)
+            # Closing tag "/tagname..." -> skip the leading slash for
+            # standard-tag lookup.
+            if stripped.startswith('/'):
+                stripped = stripped[1:].lstrip()
+            if not stripped:
+                return m.group(0)
+            name_match = _TAG_NAME_TOKEN_RE.match(stripped)
+            if not name_match:
+                return m.group(0)
+            tagname = name_match.group(1).rstrip('/').lower()
+            # Strip namespace prefix (svg:rect -> rect, epub:type -> type).
+            if ':' in tagname:
+                tagname = tagname.split(':', 1)[1]
+            if tagname in _STANDARD_HTML_TAG_NAMES:
+                return m.group(0)
+            # Custom/story tag -> protect with the shared Unicode markers.
+            return f"‹{inner}›"
+        
+        return _ANGLE_BRACKET_RE.sub(replace, text)
+    
     def _restore_cjk_angle_brackets(self, text: str) -> str:
         """Restore angle brackets from special markers."""
         # Restore as raw angle brackets — this text goes to the AI prompt,
@@ -497,6 +580,9 @@ class EnhancedTextExtractor:
             # Without this, lxml re-encodes <Korean text> back to &lt;...&gt;
             # during serialisation, causing entities to leak into the AI prompt.
             html_content = self._protect_cjk_angle_brackets(html_content)
+            # Also protect non-CJK custom/story tags (e.g. <Alice-02.>, <concept>)
+            # that _decode_entities turned into real-looking HTML tags above.
+            html_content = self._protect_non_html_angle_brackets(html_content)
             
             # Detect language early (don't log - already logged in extraction summary)
             self.detected_language = self._detect_content_language(html_content)
@@ -577,6 +663,9 @@ class EnhancedTextExtractor:
             # Protect CJK text in angle brackets using special markers
             # that html2text won't interpret as HTML
             content_to_convert = self._protect_cjk_angle_brackets(content_to_convert)
+            # Also protect non-CJK custom/story tags (e.g. <Alice-02.>, <concept>)
+            # that would otherwise be parsed as unknown elements and stripped.
+            content_to_convert = self._protect_non_html_angle_brackets(content_to_convert)
             
             # Apply Empty Attribute Tag Fix if enabled
             if os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1':
