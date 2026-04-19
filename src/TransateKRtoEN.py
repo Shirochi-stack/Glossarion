@@ -5600,11 +5600,16 @@ class BatchTranslationProcessor:
             
             # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
             # Pattern matches: &lt;img ... /&gt; where the tag ends with /
-            # Post-process: Fix empty attribute tags for BeautifulSoup mode.
-            # FIX_EMPTY_ATTR_TAGS_EXTRACT governs the html2text/enhanced path;
-            # this toggle must stay scoped to BS-mode output only so the two
-            # GUI switches remain independent.
+            # Post-process: Fix empty attribute tags (LLM Token Fix).
+            # The BS toggle handles BS-mode output; the EXTRACT toggle also
+            # runs the same helper on html2text/enhanced-mode output so LLM
+            # hallucinations like <a a="" b=""></a> emitted by the model are
+            # cleaned regardless of which extractor fed the prompt. The two
+            # branches are mutually exclusive on the ``enhanced_extraction``
+            # flag so both toggles remain independent.
             if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
+                cleaned = _fix_empty_attr_tags_bs(cleaned)
+            elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and chapter.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             
             # Post-process: Add spaces between letters and numbers for subword tokenization bug
@@ -6239,19 +6244,18 @@ class BatchTranslationProcessor:
                 cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
                 cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
                 
-                # Post-process: Fix empty attribute tags for BeautifulSoup mode.
-                # FIX_EMPTY_ATTR_TAGS_EXTRACT governs the html2text/enhanced
-                # path; this toggle stays scoped to non-enhanced chapters so
-                # the two GUI switches remain independent. For a merged group
-                # we skip if ANY chapter was enhanced -- mirrors the per-chapter
-                # gate above.
-                if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1':
-                    try:
-                        enhanced_group_check = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
-                    except Exception:
-                        enhanced_group_check = False
-                    if not enhanced_group_check:
-                        cleaned = _fix_empty_attr_tags_bs(cleaned)
+                # Post-process: Fix empty attribute tags (LLM Token Fix).
+                # Mirror the per-chapter logic: BS toggle handles all-BS
+                # merged groups; EXTRACT toggle handles merged groups where
+                # at least one chapter was extracted in enhanced mode.
+                try:
+                    enhanced_group_check = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
+                except Exception:
+                    enhanced_group_check = False
+                if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not enhanced_group_check:
+                    cleaned = _fix_empty_attr_tags_bs(cleaned)
+                elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and enhanced_group_check:
+                    cleaned = _fix_empty_attr_tags_bs(cleaned)
                 
                 # Post-process: Add spaces between letters and numbers for subword tokenization bug
                 _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
@@ -13870,11 +13874,14 @@ def main(log_callback=None, stop_callback=None):
                 # Skip normal save since we handled it above and exit this translation run
                 continue
 
-            # Post-process: Fix empty attribute tags for BeautifulSoup mode.
-            # FIX_EMPTY_ATTR_TAGS_EXTRACT governs the html2text/enhanced path;
-            # this toggle must stay scoped to BS-mode output only so the two
-            # GUI switches remain independent.
+            # Post-process: Fix empty attribute tags (LLM Token Fix).
+            # BS toggle handles BS-mode output; EXTRACT toggle runs the same
+            # helper on html2text/enhanced-mode output so LLM hallucinations
+            # emitted by the model get cleaned here too. The two branches
+            # stay mutually exclusive on the ``enhanced_extraction`` flag.
             if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not c.get('enhanced_extraction', False):
+                cleaned = _fix_empty_attr_tags_bs(cleaned)
+            elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and c.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
 
             # Post-process: Add spaces between letters and numbers for subword tokenization bug
