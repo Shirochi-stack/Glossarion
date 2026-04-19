@@ -9903,21 +9903,100 @@ class UnifiedClient:
                                     log_buf.clear()
                         return True
 
+                    # Canonical FinishReason buckets (matches google-genai
+                    # types.FinishReason enum names, case-sensitive).
+                    _FR_LENGTH = {'MAX_TOKENS'}
+                    _FR_BLOCK = {
+                        # Content-safety terminations — all treated as a block.
+                        'SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT',
+                        'SPII', 'LANGUAGE',
+                        # Image-generation variants
+                        'IMAGE_SAFETY', 'IMAGE_RECITATION', 'IMAGE_PROHIBITED_CONTENT',
+                    }
+                    _FR_OTHER_ERROR = {
+                        'OTHER', 'MALFORMED_FUNCTION_CALL', 'UNEXPECTED_TOOL_CALL',
+                        'IMAGE_OTHER', 'NO_IMAGE',
+                    }
+                    _vertex_fr_logged = {'length': False, 'block': False}
+
+                    def _normalize_finish_reason(fr):
+                        """Return the canonical enum-name string (e.g. 'MAX_TOKENS')
+                        for any finish_reason shape the SDK might emit: enum, str,
+                        int, or None. Returns '' for unknown/empty.
+                        """
+                        if fr is None:
+                            return ''
+                        # Pydantic / enum objects expose .name; StrEnum also exposes .value
+                        _n = getattr(fr, 'name', None)
+                        if isinstance(_n, str) and _n:
+                            return _n.upper()
+                        _v = getattr(fr, 'value', None)
+                        if isinstance(_v, str) and _v:
+                            return _v.upper()
+                        if isinstance(fr, str):
+                            # Accept 'MAX_TOKENS', 'FinishReason.MAX_TOKENS', or mixed case
+                            s = fr.rsplit('.', 1)[-1].strip().upper()
+                            return s
+                        if isinstance(fr, int):
+                            # Best-effort integer → name map for older proto transports.
+                            # Matches the stable Vertex AI FinishReason ordering used by
+                            # the server (1..N). Unknown ints → ''.
+                            _int_map = {
+                                0: 'FINISH_REASON_UNSPECIFIED',
+                                1: 'STOP',
+                                2: 'MAX_TOKENS',
+                                3: 'SAFETY',
+                                4: 'RECITATION',
+                                5: 'LANGUAGE',
+                                6: 'OTHER',
+                                7: 'BLOCKLIST',
+                                8: 'PROHIBITED_CONTENT',
+                                9: 'SPII',
+                                10: 'MALFORMED_FUNCTION_CALL',
+                            }
+                            return _int_map.get(fr, '')
+                        # Fallback: str() and try to extract the tail token.
+                        return str(fr).rsplit('.', 1)[-1].strip().upper()
+
                     def _capture_candidate_meta(candidates):
                         nonlocal finish_reason
                         if not candidates:
                             return
                         for candidate in candidates:
-                            fr = getattr(candidate, 'finish_reason', None)
-                            if fr is not None:
-                                fr_str = str(fr)
-                                if 'SAFETY' in fr_str or 'PROHIBITED' in fr_str or 'BLOCKED' in fr_str:
-                                    raise UnifiedClientError(
-                                        "Content blocked by Vertex AI Gemini safety filter",
-                                        error_type="prohibited_content"
-                                    )
-                                elif 'MAX_TOKENS' in fr_str or 'LENGTH' in fr_str:
+                            fr_raw = getattr(candidate, 'finish_reason', None)
+                            fr_name = _normalize_finish_reason(fr_raw)
+                            if not fr_name or fr_name in ('STOP', 'FINISH_REASON_UNSPECIFIED'):
+                                continue
+                            if fr_name in _FR_BLOCK:
+                                # Content block — surface a precise message so
+                                # upstream retry/QA logic can distinguish causes.
+                                if not _vertex_fr_logged['block']:
+                                    print(f"🚫 Vertex finish_reason={fr_name} — content blocked by Vertex AI")
+                                    _vertex_fr_logged['block'] = True
+                                raise UnifiedClientError(
+                                    f"Content blocked by Vertex AI Gemini: {fr_name}",
+                                    error_type="prohibited_content",
+                                )
+                            if fr_name in _FR_LENGTH:
+                                # Mark as truncated so the outer retry layer
+                                # (RETRY_TRUNCATED) sees finish_reason='length'.
+                                if finish_reason != 'length':
                                     finish_reason = 'length'
+                                    if not _vertex_fr_logged['length']:
+                                        print("✂️ Vertex finish_reason=MAX_TOKENS — output truncated; upstream truncation retry may trigger")
+                                        _vertex_fr_logged['length'] = True
+                                continue
+                            if fr_name in _FR_OTHER_ERROR:
+                                # Not a block and not truncation — log once so
+                                # we have a trail if the response comes back empty.
+                                if not _vertex_fr_logged.get(fr_name):
+                                    print(f"⚠️ Vertex finish_reason={fr_name} — unexpected termination reason")
+                                    _vertex_fr_logged[fr_name] = True
+                                continue
+                            # Unknown / future enum value — log so we notice.
+                            if not _vertex_fr_logged.get(fr_name):
+                                print(f"ℹ️ Vertex finish_reason={fr_name} — unrecognized (treating as non-terminal)")
+                                _vertex_fr_logged[fr_name] = True
 
                     if _enable_streaming:
                         # Streaming path: iterate chunks in real time
