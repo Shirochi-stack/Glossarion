@@ -1092,14 +1092,15 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         header.extend(custom_fields)
                     except:
                         custom_fields = []
-                    # Detect description from entry dicts if not already in custom_fields
-                    include_description_legacy = (
-                        'description' not in [f.lower() for f in custom_fields] and
-                        (os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
-                         any(entry.get('description', '').strip() for entry in sorted_glossary))
-                    )
-                    if include_description_legacy:
-                        header.append('description')
+                    # Custom Fields veto: only emit description column when
+                    # the user has "description" in Custom Fields. Preserve
+                    # their original casing (e.g. "Description") for the
+                    # column header, and use case-insensitive lookup in the
+                    # entry dicts.
+                    legacy_desc_name = _find_description_field_casing(custom_fields)
+                    include_description_legacy = legacy_desc_name is not None
+                    if include_description_legacy and legacy_desc_name not in header:
+                        header.append(legacy_desc_name)
                     writer.writerow(header)
                     for entry in sorted_glossary:
                         entry_type = entry.get('type', 'term')
@@ -1110,7 +1111,12 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         for field in custom_fields:
                             row.append(entry.get(field, ''))
                         if include_description_legacy:
-                            row.append(entry.get('description', ''))
+                            _dv = ''
+                            for _ek, _ev in entry.items():
+                                if isinstance(_ek, str) and _ek.strip().lower() == 'description':
+                                    _dv = str(_ev or '')
+                                    break
+                            row.append(_dv)
                         expected_fields = 4 + len(custom_fields) + (1 if include_description_legacy else 0)
                         while len(row) > expected_fields and row[-1] == '':
                             row.pop()
@@ -1137,12 +1143,18 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 except:
                     custom_fields = []
                 
-                # Detect if any entries have a description field (AI returned it)
-                # or if the user explicitly enabled it via GLOSSARY_INCLUDE_DESCRIPTION
-                include_description = (
-                    os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
-                    any(entry.get('description', '').strip() for entry in sorted_glossary)
-                )
+                # Custom Fields is the authoritative source for whether description
+                # should appear in the output at all. Removing "description" from
+                # Custom Fields in the GUI must fully suppress the column even if
+                # GLOSSARY_INCLUDE_DESCRIPTION=1 or if the AI leaked description
+                # values into the entries (they'd already be stripped by the parser,
+                # but this is a second guarantee).
+                #
+                # Preserve the user's configured casing (e.g. "Description" vs
+                # "description") so the column header and dict lookups match
+                # what they typed in the GUI.
+                desc_field_name = _find_description_field_casing(custom_fields)
+                include_description = desc_field_name is not None
                 
                 with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, suffix='.tmp') as temp_f:
                     temp_path = temp_f.name
@@ -1153,13 +1165,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                     if has_gender:
                         column_headers.append('gender')
-                    # Description always comes right after gender (rendered as main body text)
-                    has_desc_in_custom = 'description' in [f.lower() for f in custom_fields]
-                    if include_description or has_desc_in_custom:
-                        column_headers.append('description')
+                    # Description always comes right after gender (rendered as main body text).
+                    # Use the user's original casing — ``desc_field_name`` is exactly
+                    # what they typed in Custom Fields (e.g. "Description").
+                    if include_description:
+                        column_headers.append(desc_field_name)
                     # Then remaining custom fields (rendered in parentheses)
                     for f in custom_fields:
-                        if f.lower() != 'description':
+                        if str(f).strip().lower() != 'description':
                             column_headers.append(f)
                     temp_f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
                     for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
@@ -1179,7 +1192,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             custom_field_parts = []
                             for field in custom_fields:
                                 # Skip description — it's handled separately below
-                                if field.lower() == 'description':
+                                if str(field).strip().lower() == 'description':
                                     continue
                                 value = entry.get(field, '').strip()
                                 if value:
@@ -1187,10 +1200,16 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                         custom_field_parts.append(f"{field}: {value}")
                                     else:
                                         custom_field_parts.append(f"{field}: {value}")
-                            # Write description (main body text after colon)
+                            # Write description (main body text after colon).
+                            # Case-insensitive dict-key lookup so we find the
+                            # value regardless of whether the AI returned it as
+                            # "description", "Description", "DESCRIPTION", etc.
                             desc_value = ''
                             if include_description:
-                                desc_value = entry.get('description', '').strip()
+                                for _ek, _ev in entry.items():
+                                    if isinstance(_ek, str) and _ek.strip().lower() == 'description':
+                                        desc_value = str(_ev or '').strip()
+                                        break
                             if desc_value:
                                 if custom_field_parts:
                                     line += f": {desc_value} ({', '.join(custom_field_parts)})"
@@ -1226,14 +1245,13 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             header.extend(custom_fields)
                         except:
                             custom_fields = []
-                        # Detect description from entry dicts if not already in custom_fields
-                        include_description_legacy = (
-                            'description' not in [f.lower() for f in custom_fields] and
-                            (os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
-                             any(entry.get('description', '').strip() for entry in sorted_glossary))
-                        )
-                        if include_description_legacy:
-                            header.append('description')
+                        # Custom Fields veto (fallback legacy writer path).
+                        # Preserves user's casing and is case-insensitive on
+                        # entry dict lookup.
+                        legacy_desc_name = _find_description_field_casing(custom_fields)
+                        include_description_legacy = legacy_desc_name is not None
+                        if include_description_legacy and legacy_desc_name not in header:
+                            header.append(legacy_desc_name)
                         writer.writerow(header)
                         for entry in sorted_glossary:
                             entry_type = entry.get('type', 'term')
@@ -1244,7 +1262,12 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             for field in custom_fields:
                                 row.append(entry.get(field, ''))
                             if include_description_legacy:
-                                row.append(entry.get('description', ''))
+                                _dv = ''
+                                for _ek, _ev in entry.items():
+                                    if isinstance(_ek, str) and _ek.strip().lower() == 'description':
+                                        _dv = str(_ev or '')
+                                        break
+                                row.append(_dv)
                             writer.writerow(row)
                 else:
                     grouped_entries = {}
@@ -1265,17 +1288,17 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                         if has_gender:
                             column_headers.append('gender')
-                        # Description always comes right after gender (rendered as main body text)
-                        include_desc_fallback = (
-                            os.getenv('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1' or
-                            any(entry.get('description', '').strip() for entry in sorted_glossary)
-                        )
-                        has_desc_in_custom = 'description' in [f.lower() for f in custom_fields_list]
-                        if include_desc_fallback or has_desc_in_custom:
-                            column_headers.append('description')
+                        # Custom Fields veto (fallback token-efficient writer path).
+                        # Preserves user's casing.
+                        fb_desc_field_name = _find_description_field_casing(custom_fields_list)
+                        if fb_desc_field_name is not None:
+                            include_desc_fallback = True
+                            column_headers.append(fb_desc_field_name)
+                        else:
+                            include_desc_fallback = False
                         # Then remaining custom fields (rendered in parentheses)
                         for f in custom_fields_list:
-                            if f.lower() != 'description':
+                            if str(f).strip().lower() != 'description':
                                 column_headers.append(f)
                         f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
                         for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
@@ -1293,12 +1316,18 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                         line += f" [{gender}]"
                                 custom_field_parts = []
                                 for field in custom_fields:
-                                    if field.lower() == 'description':
+                                    if str(field).strip().lower() == 'description':
                                         continue
                                     value = entry.get(field, '').strip()
                                     if value:
                                         custom_field_parts.append(f"{field}: {value}")
-                                desc_value = entry.get('description', '').strip() if include_desc_fallback else ''
+                                # Case-insensitive dict-key lookup for description
+                                desc_value = ''
+                                if include_desc_fallback:
+                                    for _ek, _ev in entry.items():
+                                        if isinstance(_ek, str) and _ek.strip().lower() == 'description':
+                                            desc_value = str(_ev or '').strip()
+                                            break
                                 if desc_value:
                                     if custom_field_parts:
                                         line += f": {desc_value} ({', '.join(custom_field_parts)})"
@@ -1697,6 +1726,60 @@ def _is_entry_type_accepted(entry_type, enabled_types):
     return False
 
 
+def _find_description_field_casing(custom_fields):
+    """Return the user's original casing of ``description`` in custom_fields.
+
+    Users can configure the field as ``description``, ``Description``,
+    ``DESCRIPTION``, etc. — whatever label they typed in the GUI. We want
+    the rest of the pipeline to preserve that casing in column headers
+    and dict-key lookups, so callers use this to discover the effective
+    name. Returns ``None`` when no description field is present.
+    """
+    if not custom_fields:
+        return None
+    for f in custom_fields:
+        try:
+            if str(f).strip().lower() == 'description':
+                return f
+        except Exception:
+            continue
+    return None
+
+
+def _strip_unwanted_description_keys(entries):
+    """Remove any description-shaped keys from each entry when description
+    is NOT an active custom field.
+
+    Case-insensitive — strips ``description``, ``Description``,
+    ``DESCRIPTION``, etc., because AI responses may vary in casing
+    regardless of what the prompt asked for.
+
+    Centralised so every return path of ``parse_api_response`` (JSON list,
+    JSON single-object, wrapper-object, and CSV) routes through the same
+    filter. Without this, AI responses that ignore the prompt and return
+    description values anyway would leak through on JSON-shaped responses
+    even though the user opted out via Custom Fields.
+    """
+    if not entries:
+        return entries
+    try:
+        if _glossary_description_active():
+            return entries
+    except Exception:
+        return entries
+    for _entry in entries:
+        if not isinstance(_entry, dict):
+            continue
+        # Collect matching keys first to avoid mutating dict during iteration.
+        keys_to_drop = [
+            k for k in list(_entry.keys())
+            if isinstance(k, str) and k.strip().lower() == 'description'
+        ]
+        for k in keys_to_drop:
+            _entry.pop(k, None)
+    return entries
+
+
 def parse_api_response(response_text: str) -> List[Dict]:
     """Parse API response to extract glossary entries - handles custom types"""
     entries = []
@@ -1766,17 +1849,19 @@ def parse_api_response(response_text: str) -> List[Dict]:
                             if _is_entry_type_accepted(entry_type, enabled_types):
                                 entries.append(item)
                 
-                return entries
+                return _strip_unwanted_description_keys(entries)
                 
             elif isinstance(data, dict):
                 # Handle single entry
                 entry_type = data.get('type', '').lower()
                 if _is_entry_type_accepted(entry_type, enabled_types):
-                    return [data]
+                    return _strip_unwanted_description_keys([data])
                 
                 # Check for wrapper
                 for key in ['entries', 'glossary', 'characters', 'terms', 'data']:
                     if key in data and isinstance(data[key], list):
+                        # Recursive call already routes through this function,
+                        # which will apply the strip at its own return point.
                         return parse_api_response(json.dumps(data[key]))
                 
                 return []
@@ -1937,16 +2022,12 @@ def parse_api_response(response_text: str) -> List[Dict]:
 
     # Post-filter: if the user did NOT include ``description`` in their
     # custom fields list, strip any description value the AI may have
-    # returned anyway. Pairs with the prompt-side ``{description_mandatory}`` /
-    # ``{description_detailed}`` placeholder strip — together they guarantee
-    # description data is absent both from what we ask for and from what we
-    # accept in downstream CSV / token-efficient output.
-    if not _glossary_description_active():
-        for _entry in entries:
-            if isinstance(_entry, dict) and 'description' in _entry:
-                _entry.pop('description', None)
-    
-    return entries
+    # returned anyway. Pairs with the prompt-side description-rule
+    # placeholder strips — together they guarantee description data is
+    # absent both from what we ask for and from what we accept in
+    # downstream CSV / token-efficient output. Uses the shared helper so
+    # every return path (JSON + CSV) applies the same filter.
+    return _strip_unwanted_description_keys(entries)
 
 def validate_extracted_entry(entry):
     """Validate that extracted entry has required fields and enabled type"""
