@@ -9607,10 +9607,21 @@ class UnifiedClient:
                     _cap_cache = getattr(self.__class__, '_vertex_max_tokens_cap', None) or {}
                     _cached_cap = _cap_cache.get(model_name)
                     if isinstance(_cached_cap, int) and _cached_cap > 0 and _requested_max > _cached_cap:
-                        print(
-                            f"📏 Using cached Vertex max_output_tokens cap for {model_name}: "
-                            f"{_requested_max} → {_cached_cap}"
-                        )
+                        # Only log this once per (model, cap) pair per session —
+                        # otherwise it spams the console on every single request.
+                        try:
+                            if not hasattr(self.__class__, '_vertex_cap_logged') or \
+                                    not isinstance(getattr(self.__class__, '_vertex_cap_logged', None), set):
+                                self.__class__._vertex_cap_logged = set()
+                            _cap_key = (model_name, _cached_cap)
+                            if _cap_key not in self.__class__._vertex_cap_logged:
+                                print(
+                                    f"📏 Using cached Vertex max_output_tokens cap for {model_name}: "
+                                    f"{_requested_max} → {_cached_cap}"
+                                )
+                                self.__class__._vertex_cap_logged.add(_cap_key)
+                        except Exception:
+                            pass
                         _requested_max = _cached_cap
                 except Exception:
                     pass
