@@ -56,6 +56,7 @@ def get_model_options() -> List[str]:
         "vertex/gemini-2.5-flash",
         "vertex/gemini-2.5-flash-lite",
         "vertex/gemini-3.1-pro-preview",
+        "vertex/gemini-3.1-flash-lite-preview",
         "vertex/gemini-3-flash-preview",
         "vertex/gemini-3-pro-image-preview",
 

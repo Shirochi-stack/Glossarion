@@ -9600,9 +9600,23 @@ class UnifiedClient:
                     print(f"🔧 Vertex AI Gemini: {model_name} | Region: {location} | Project: {project_id}")
                 
                 # Build generation config using google-genai SDK types
+                # Apply session-cached max_output_tokens cap (set after a previous
+                # 400 INVALID_ARGUMENT response told us the model's true limit).
+                _requested_max = max_tokens or 8167
+                try:
+                    _cap_cache = getattr(self.__class__, '_vertex_max_tokens_cap', None) or {}
+                    _cached_cap = _cap_cache.get(model_name)
+                    if isinstance(_cached_cap, int) and _cached_cap > 0 and _requested_max > _cached_cap:
+                        print(
+                            f"📏 Using cached Vertex max_output_tokens cap for {model_name}: "
+                            f"{_requested_max} → {_cached_cap}"
+                        )
+                        _requested_max = _cached_cap
+                except Exception:
+                    pass
                 config_params = {
                     "temperature": temperature,
-                    "max_output_tokens": max_tokens or 8192,
+                    "max_output_tokens": _requested_max,
                 }
                 
                 # Add response modalities for image generation
@@ -10040,6 +10054,187 @@ class UnifiedClient:
                     error_str = str(e)
 
                     # ---------------------------------------------------------------
+                    # FAST-PATH: known-recoverable "maxOutputTokens out of range"
+                    # 400 from Vertex. Detect it here — before the noisy diagnostic
+                    # dump fires — so we can silently cap, cache, and retry.
+                    # Matches any of:
+                    #   - e.response.text / e.message / str(e) containing
+                    #     'maxOutputTokens' + 'supported range'
+                    #   - generic token-limit keywords with a visible bound
+                    # ---------------------------------------------------------------
+                    _fastpath_text = error_str
+                    try:
+                        _resp = getattr(e, "response", None)
+                        if _resp is not None and hasattr(_resp, "text") and _resp.text:
+                            _fastpath_text = f"{_fastpath_text}\n{_resp.text}"
+                        _emsg = getattr(e, "message", None)
+                        if isinstance(_emsg, str) and _emsg:
+                            _fastpath_text = f"{_fastpath_text}\n{_emsg}"
+                    except Exception:
+                        pass
+                    _is_max_tokens_err = (
+                        ("maxOutputTokens" in _fastpath_text or "max_output_tokens" in _fastpath_text)
+                        and ("supported range" in _fastpath_text or "(exclusive)" in _fastpath_text)
+                    )
+                    if _is_max_tokens_err:
+                        import re as _re_mt
+                        _mt_match = _re_mt.search(r'to\s+(\d+)\s*\(exclusive\)', _fastpath_text)
+                        if _mt_match:
+                            _max_exclusive = int(_mt_match.group(1))
+                            _adjusted_max = max(1, _max_exclusive - 1)
+                        else:
+                            _adjusted_max = 65536
+
+                        if is_stop_requested():
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                        # Populate the session cache so every subsequent call uses it
+                        try:
+                            if not hasattr(self.__class__, '_vertex_max_tokens_cap') or \
+                                    not isinstance(getattr(self.__class__, '_vertex_max_tokens_cap', None), dict):
+                                self.__class__._vertex_max_tokens_cap = {}
+                            _prev_cap = self.__class__._vertex_max_tokens_cap.get(model_name)
+                            if _prev_cap is None or _adjusted_max < _prev_cap:
+                                self.__class__._vertex_max_tokens_cap[model_name] = _adjusted_max
+                            print(
+                                f"📏 Vertex max_output_tokens out of range for {model_name}; "
+                                f"capping to {_adjusted_max} and caching for this session"
+                            )
+                        except Exception:
+                            pass
+
+                        # Rebuild generation_config with the capped value and retry
+                        # through the same streaming / non-streaming path.
+                        #
+                        # IMPORTANT: route each chunk through _handle_part (defined
+                        # in the main try above) so the retry emits the same
+                        # real-time streaming / thought logs as the original call.
+                        # _handle_part mutates the outer-scope result_text /
+                        # image_data / got_first_text / thinking_* state via
+                        # `nonlocal`, so we reset those first.
+                        try:
+                            config_params["max_output_tokens"] = _adjusted_max
+                            generation_config = types.GenerateContentConfig(**config_params)
+                            if safety_settings:
+                                try:
+                                    generation_config.safety_settings = safety_settings
+                                except Exception:
+                                    pass
+
+                            # Reset streaming state so _handle_part logs the
+                            # retry output from scratch (first-token timing,
+                            # thinking markers, text chunks, etc.).
+                            result_text = ""
+                            image_data = None
+                            raw_usage = None
+                            last_response = None
+                            prompt_feedback = None
+                            thought_chunk_count = 0
+                            thinking_started = False
+                            thinking_ended = False
+                            thinking_start_ts = _time.time()
+                            log_buf.clear()
+                            thought_log_buf.clear()
+                            got_first_text = False
+                            _t_start = _time.time()
+
+                            if _enable_streaming:
+                                _stream_r = vertex_genai_client.models.generate_content_stream(
+                                    model=model_name,
+                                    contents=contents,
+                                    config=generation_config,
+                                )
+                                for _chunk in _stream_r:
+                                    if is_stop_requested():
+                                        try:
+                                            _stream_r.close()
+                                        except Exception:
+                                            pass
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    last_response = _chunk
+                                    if getattr(_chunk, 'prompt_feedback', None) is not None:
+                                        prompt_feedback = _chunk.prompt_feedback
+                                    _capture_candidate_meta(getattr(_chunk, 'candidates', None) or [])
+                                    for _cand in (getattr(_chunk, 'candidates', None) or []):
+                                        _co = getattr(_cand, 'content', None)
+                                        if not _co:
+                                            continue
+                                        for _p in (getattr(_co, 'parts', None) or []):
+                                            _handle_part(_p)
+                                    if getattr(_chunk, 'usage_metadata', None) is not None:
+                                        raw_usage = _chunk.usage_metadata
+                                # Flush buffered text tail
+                                if _log_stream and log_buf:
+                                    _tail = "".join(log_buf).replace('\x1f', '\\x1F')
+                                    if _tail:
+                                        print(_tail)
+                                    log_buf.clear()
+                                _rt_resp = last_response
+                            else:
+                                _rt_resp = vertex_genai_client.models.generate_content(
+                                    model=model_name,
+                                    contents=contents,
+                                    config=generation_config,
+                                )
+                                last_response = _rt_resp
+                                if getattr(_rt_resp, 'prompt_feedback', None) is not None:
+                                    prompt_feedback = _rt_resp.prompt_feedback
+                                _capture_candidate_meta(getattr(_rt_resp, 'candidates', None) or [])
+                                for _cand in (getattr(_rt_resp, 'candidates', None) or []):
+                                    _co = getattr(_cand, 'content', None)
+                                    if not _co:
+                                        continue
+                                    for _p in (getattr(_co, 'parts', None) or []):
+                                        _handle_part(_p)
+                                raw_usage = getattr(_rt_resp, 'usage_metadata', None)
+
+                            if prompt_feedback is not None:
+                                _br = getattr(prompt_feedback, 'block_reason', None)
+                                if _br:
+                                    raise UnifiedClientError(
+                                        f"Content blocked by Vertex AI: {_br}",
+                                        error_type="prohibited_content"
+                                    )
+
+                            if not result_text and not image_data:
+                                raise UnifiedClientError("Empty response after token adjustment")
+
+                            try:
+                                _tt = 0
+                                if raw_usage is not None:
+                                    for _attr in ("thoughts_token_count", "thought_token_count", "thoughtsTokenCount"):
+                                        _v = getattr(raw_usage, _attr, None)
+                                        if isinstance(_v, int) and _v > 0:
+                                            _tt = _v
+                                            break
+                                _elapsed_retry = _time.time() - _t_start
+                                _mode_r = "streaming" if _enable_streaming else "non-streaming"
+                                _msg = (
+                                    f"📡 Vertex: Response received in {_elapsed_retry:.1f}s after auto-cap retry "
+                                    f"({len(result_text)} chars, {_mode_r}, max_output_tokens={_adjusted_max})"
+                                )
+                                if _tt > 0:
+                                    _msg += f" | 🧠 {_tt} thinking tokens used"
+                                print(_msg)
+                            except Exception:
+                                pass
+
+                            return UnifiedResponse(
+                                content=result_text,
+                                finish_reason=finish_reason,
+                                raw_response=_rt_resp,
+                            )
+                        except UnifiedClientError:
+                            raise
+                        except Exception as _retry_err:
+                            # Retry itself failed — fall through to the normal
+                            # diagnostic dump + error reporting so the user can
+                            # see what went wrong the second time.
+                            print(f"⚠️ Auto-cap retry also failed: {type(_retry_err).__name__}: {str(_retry_err)[:300]}")
+                            e = _retry_err
+                            error_str = str(_retry_err)
+
+                    # ---------------------------------------------------------------
                     # Always dump Vertex AI request + full error payload on failure.
                     # The google-genai SDK wraps HTTP errors; the real Vertex
                     # error.message lives on e.response / e.response_json /
@@ -10119,43 +10314,137 @@ class UnifiedClient:
                         )
                     elif "maxOutputTokens" in error_str and "supported range" in error_str:
                         import re
-                        max_match = re.search(r'to (\d+) \(exclusive\)', error_str)
-                        if max_match:
-                            max_exclusive = int(max_match.group(1))
-                            adjusted_max = max_exclusive - 1
-                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            # If force stop is active, do NOT retry — abort immediately
-                            if not graceful_stop_active:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            # Check if stop was requested before retrying
-                            if is_stop_requested():
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            print(f"⚠️ {model_name} max_output_tokens exceeds limit, retrying with {adjusted_max}")
-                            try:
-                                config_params["max_output_tokens"] = adjusted_max
-                                generation_config = types.GenerateContentConfig(**config_params)
-                                response = vertex_genai_client.models.generate_content(
+                        # Extract the exclusive upper bound ("... to N (exclusive)")
+                        _max_match = re.search(r'to\s+(\d+)\s*\(exclusive\)', error_str)
+                        if _max_match:
+                            _max_exclusive = int(_max_match.group(1))
+                            _adjusted_max = max(1, _max_exclusive - 1)
+                        else:
+                            # Fallback to the common Gemini 3 flash-lite cap
+                            _adjusted_max = 65536
+
+                        # Abort if the user actually requested a hard stop
+                        if is_stop_requested():
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                        # Cache the cap on the class so every subsequent request
+                        # this session uses the corrected value automatically.
+                        try:
+                            if not hasattr(self.__class__, '_vertex_max_tokens_cap') or \
+                                    not isinstance(getattr(self.__class__, '_vertex_max_tokens_cap', None), dict):
+                                self.__class__._vertex_max_tokens_cap = {}
+                            _prev_cap = self.__class__._vertex_max_tokens_cap.get(model_name)
+                            # Keep the tightest (smallest) cap we've ever seen for this model
+                            if _prev_cap is None or _adjusted_max < _prev_cap:
+                                self.__class__._vertex_max_tokens_cap[model_name] = _adjusted_max
+                            print(
+                                f"📏 Caching Vertex max_output_tokens cap for {model_name}: {_adjusted_max} "
+                                f"(applies to all subsequent requests this session)"
+                            )
+                        except Exception:
+                            pass
+
+                        print(
+                            f"⚠️ {model_name} max_output_tokens exceeds limit, "
+                            f"retrying with {_adjusted_max}"
+                        )
+
+                        # Rebuild generation_config with the capped value and
+                        # retry through the same streaming / non-streaming path.
+                        try:
+                            config_params["max_output_tokens"] = _adjusted_max
+                            generation_config = types.GenerateContentConfig(**config_params)
+                            if safety_settings:
+                                try:
+                                    generation_config.safety_settings = safety_settings
+                                except Exception:
+                                    pass
+
+                            result_text = ""
+                            image_data = None
+                            finish_reason = 'stop'
+                            raw_usage = None
+                            last_response = None
+
+                            if _enable_streaming:
+                                _stream2 = vertex_genai_client.models.generate_content_stream(
                                     model=model_name,
                                     contents=contents,
-                                    config=generation_config
+                                    config=generation_config,
                                 )
-                                result_text = ""
-                                if hasattr(response, 'candidates') and response.candidates:
-                                    for candidate in response.candidates:
-                                        if hasattr(candidate, 'content') and candidate.content:
-                                            if hasattr(candidate.content, 'parts') and candidate.content.parts:
-                                                for part in candidate.content.parts:
-                                                    if hasattr(part, 'text') and part.text:
-                                                        result_text += part.text
-                                if not result_text:
-                                    raise UnifiedClientError("Empty response after token adjustment")
-                                return UnifiedResponse(
-                                    content=result_text,
-                                    finish_reason='stop',
-                                    raw_response=response
+                                for _chunk in _stream2:
+                                    if is_stop_requested():
+                                        try:
+                                            _stream2.close()
+                                        except Exception:
+                                            pass
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    last_response = _chunk
+                                    for _cand in (getattr(_chunk, 'candidates', None) or []):
+                                        _co = getattr(_cand, 'content', None)
+                                        if not _co:
+                                            continue
+                                        for _p in (getattr(_co, 'parts', None) or []):
+                                            if getattr(_p, 'text', None):
+                                                if not getattr(_p, 'thought', False):
+                                                    result_text += _p.text
+                                            elif getattr(_p, 'inline_data', None) is not None:
+                                                if hasattr(_p.inline_data, 'data'):
+                                                    image_data = _p.inline_data.data
+                                    if getattr(_chunk, 'usage_metadata', None) is not None:
+                                        raw_usage = _chunk.usage_metadata
+                                response_retry = last_response
+                            else:
+                                response_retry = vertex_genai_client.models.generate_content(
+                                    model=model_name,
+                                    contents=contents,
+                                    config=generation_config,
                                 )
-                            except Exception as retry_err:
-                                raise UnifiedClientError(f"Vertex AI Gemini error after token adjustment: {str(retry_err)[:200]}")
+                                for _cand in (getattr(response_retry, 'candidates', None) or []):
+                                    _co = getattr(_cand, 'content', None)
+                                    if not _co:
+                                        continue
+                                    for _p in (getattr(_co, 'parts', None) or []):
+                                        if getattr(_p, 'text', None) and not getattr(_p, 'thought', False):
+                                            result_text += _p.text
+                                        elif getattr(_p, 'inline_data', None) is not None:
+                                            if hasattr(_p.inline_data, 'data'):
+                                                image_data = _p.inline_data.data
+                                raw_usage = getattr(response_retry, 'usage_metadata', None)
+
+                            if not result_text and not image_data:
+                                raise UnifiedClientError("Empty response after token adjustment")
+
+                            # Summary line (mirrors the success path)
+                            try:
+                                _thinking_tokens = 0
+                                if raw_usage is not None:
+                                    for _attr in ("thoughts_token_count", "thought_token_count", "thoughtsTokenCount"):
+                                        _v = getattr(raw_usage, _attr, None)
+                                        if isinstance(_v, int) and _v > 0:
+                                            _thinking_tokens = _v
+                                            break
+                                _summary = (
+                                    f"📡 Vertex: Response received after retry "
+                                    f"({len(result_text)} chars, max_output_tokens={_adjusted_max})"
+                                )
+                                if _thinking_tokens > 0:
+                                    _summary += f" | 🧠 {_thinking_tokens} thinking tokens used"
+                                print(_summary)
+                            except Exception:
+                                pass
+
+                            return UnifiedResponse(
+                                content=result_text,
+                                finish_reason=finish_reason,
+                                raw_response=response_retry,
+                            )
+                        except UnifiedClientError:
+                            raise
+                        except Exception as retry_err:
+                            raise UnifiedClientError(
+                                f"Vertex AI Gemini error after token adjustment: {str(retry_err)[:300]}"
+                            )
                     raise UnifiedClientError(f"Vertex AI Gemini error: {str(e)[:200]}")
                 
         except UnifiedClientError:
