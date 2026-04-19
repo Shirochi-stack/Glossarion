@@ -5051,8 +5051,19 @@ def check_potential_truncation(raw_text):
 
     # Sentence-ending punctuation (covers Latin, CJK, and common Unicode)
     _ending_punct = set('.!?…。！？‥⋯')
-    # Characters that can follow ending punctuation (closing quotes, brackets, etc.)
-    _trailing_wrappers = set('"' + "'" + '「」『』【】)]〕〗〙〛»›' + chr(0x201c) + chr(0x201d) + chr(0x2018) + chr(0x2019))
+    # Characters that can follow ending punctuation (closing quotes, brackets,
+    # markdown emphasis/code wrappers, etc.). Adding ``*``, ``_``, and the
+    # backtick here means chapters ending in bold / italic / inline-code
+    # markdown (e.g. ``...great work.**``, ``...hello*``, ``...value`` ``)
+    # are correctly recognised as completed endings rather than being
+    # flagged as ``missing_ending_punctuation``. The peel loop below strips
+    # runs of these characters, so ``**bold.**`` → peels → core char = ``.``
+    # → ends_with_punctuation.
+    _trailing_wrappers = set(
+        '"' + "'" + '「」『』【】)]〕〗〙〛»›'
+        + chr(0x201c) + chr(0x201d) + chr(0x2018) + chr(0x2019)
+        + '*_`'  # markdown bold / italic / inline-code closers
+    )
     # Decorative / emote characters that are intentional stylistic endings (not truncation)
     _decorative_chars = set('♥♡❤❤️💕☆★♪♫♬~〜♠♣♦○●◇◆△▽▲▼')
 
@@ -5353,38 +5364,65 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             return result
 
         def _get_clean_tail(paras, target_chars):
+            """Collect trailing paragraphs until total length >= target_chars.
+
+            ``target_chars`` is a SOFT floor: we keep walking backwards and
+            adding whole paragraphs until the accumulated length reaches or
+            exceeds it. The paragraph that crosses the threshold is always
+            included in full, so a short dialogue run followed by a 2000-char
+            narrative paragraph won't be silently dropped just because it
+            would overshoot.
+
+            Previously this function enforced a 1.5x hard ceiling
+            (``curr_len + p_len > target_chars * 1.5``) which caused chapters
+            with long narrative paragraphs preceding short dialogue lines to
+            return only those short lines — e.g. 16 chars out of a 5k-char
+            chapter when the user asked for 400.
+
+            The only truncation that now happens is if a SINGLE paragraph
+            is by itself vastly larger than the target (e.g. a 20k-char
+            monolithic dump). In that case we keep the final ``target_chars``
+            of it so the tail remains readable for the AI check.
+            """
             tail_paras = []
             curr_len = 0
             for p in reversed(paras):
-                p_len = len(p)
-                # If adding this paragraph vastly exceeds the limit and we already have some, stop
-                if curr_len > 0 and curr_len + p_len > target_chars * 1.5:
-                    break
                 tail_paras.insert(0, p)
-                curr_len += p_len + 1
+                curr_len += len(p) + 1  # +1 for joining newline
                 if curr_len >= target_chars:
                     break
-            
+
             tail_text = "\n".join(tail_paras)
-            
-            # If it's still way too big (e.g. a single giant paragraph exceeded target_chars*1.5)
-            if len(tail_text) > target_chars * 1.5:
+
+            # Safety net: if the ONLY paragraph we collected is massively
+            # larger than the target on its own, trim its leading portion
+            # so the AI doesn't get a 20k-char message. We only engage when
+            # exactly one paragraph is present and it alone is well over the
+            # target — this avoids chopping away dialogue context that would
+            # legitimately sit across multiple short paragraphs.
+            if len(tail_paras) == 1 and len(tail_text) > target_chars * 3:
                 cut_idx = len(tail_text) - target_chars
-                # Find space to avoid mid-word cuts
                 space_idx = tail_text.find(' ', cut_idx)
                 if space_idx != -1 and space_idx < len(tail_text) - 50:
                     tail_text = "..." + tail_text[space_idx:]
                 else:
                     tail_text = "..." + tail_text[cut_idx:]
-            
+
             return tail_text
             
         source_tail = _get_clean_tail(source_paras, tail_chars)
         trans_tail = _get_clean_tail(trans_paras, tail_chars)
 
-        if len(trans_tail.strip()) < 20:
+        # Only bail when the translated tail is literally empty. The previous
+        # ``< 20`` guard auto-flagged chapters without ever calling the AI;
+        # combined with the old 1.5x hard ceiling in _get_clean_tail, it fired
+        # on 5k-char chapters whose final few paragraphs were short dialogue
+        # lines preceded by a long narrative paragraph. The tail builder now
+        # respects target_chars as a soft floor, so a near-empty tail here
+        # really does mean the translation is empty / unparseable.
+        if not trans_tail.strip():
             result['flagged'] = True
-            result['details'] = 'translated_tail_too_short'
+            result['details'] = 'translated_tail_empty'
             return result
 
         # Build messages for the AI
