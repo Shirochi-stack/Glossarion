@@ -1934,6 +1934,17 @@ def parse_api_response(response_text: str) -> List[Dict]:
             if not custom_fields:
                 print(f"[Warning] Malformed glossary line (IndexError): {line} -> {e}")
             continue
+
+    # Post-filter: if the user did NOT include ``description`` in their
+    # custom fields list, strip any description value the AI may have
+    # returned anyway. Pairs with the prompt-side ``{description_mandatory}`` /
+    # ``{description_detailed}`` placeholder strip — together they guarantee
+    # description data is absent both from what we ask for and from what we
+    # accept in downstream CSV / token-efficient output.
+    if not _glossary_description_active():
+        for _entry in entries:
+            if isinstance(_entry, dict) and 'description' in _entry:
+                _entry.pop('description', None)
     
     return entries
 
@@ -1964,6 +1975,104 @@ def validate_extracted_entry(entry):
             return False
     
     return True
+
+def _glossary_description_active(custom_fields=None):
+    """Return True when ``description`` is in the active custom fields list.
+
+    Reads ``GLOSSARY_CUSTOM_FIELDS`` env var when ``custom_fields`` is None.
+    Centralised so the prompt builder, AI-response parser, and any future
+    callers share one source of truth.
+    """
+    if custom_fields is None:
+        try:
+            custom_fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+        except Exception:
+            custom_fields = []
+    return any(
+        str(f).strip().lower() == 'description'
+        for f in (custom_fields or [])
+    )
+
+
+# Canonical replacements for the description-rule placeholders. When the
+# ``description`` custom field is active they expand to these strings; when
+# it is not, line-owning placeholders (and their owning line) are stripped
+# out entirely and inline placeholders are simply emptied, so the prompt
+# doesn't instruct the AI to emit description data the user didn't ask for.
+_DESCRIPTION_MANDATORY_TEXT = "The description column is mandatory and must be detailed"
+_DESCRIPTION_DETAILED_TEXT = "The description column must contain detailed context/explanation"
+# Inline placeholder — sits mid-sentence in the "Critical Requirement" line,
+# so it must be replaced in-place (not line-stripped). Expands to " and
+# description" (with the leading space) when active so the sentence reads
+# "The translated name and description column must be in ..." and reads
+# "The translated name column must be in ..." when stripped.
+_DESCRIPTION_IN_LANGUAGE_TEXT = " and description"
+# Inline placeholder — parenthetical note appended to the REJECT-starters
+# rule so the "Me / How / What / ... / But" exclusion rule doesn't
+# incorrectly reject description content. Stored with a leading space so
+# the rule line reads cleanly in both modes:
+#   active:   ..."But" (The description column is excluded from this restriction)
+#   inactive: ..."But"
+_DESCRIPTION_EXCLUDED_NOTE_TEXT = " (The description column is excluded from this restriction)"
+
+# Placeholders that occupy their own line in the prompt. When the description
+# field isn't active they get stripped along with the entire line (including
+# any leading ``- `` bullet) so we don't leave orphan bullets behind.
+_DESCRIPTION_LINE_PLACEHOLDERS = (
+    '{description_mandatory}',
+    '{description_detailed}',
+)
+# Placeholders that appear inline within a larger sentence. When inactive
+# they must be replaced with an empty string — NOT stripped by line —
+# otherwise the enclosing sentence would be destroyed.
+_DESCRIPTION_INLINE_PLACEHOLDERS = (
+    '{description_in_language}',
+    '{description_excluded_note}',
+)
+
+
+def _apply_description_rule_placeholders(prompt_text, custom_fields=None):
+    """Replace the three description-rule placeholders.
+
+    Line-owning placeholders (`{description_mandatory}`, `{description_detailed}`):
+    removed with their entire line when description is inactive.
+
+    Inline placeholder (`{description_in_language}`):
+    replaced with "" when inactive (sentence stays intact).
+
+    When description is active, each placeholder is replaced with its
+    canonical text.
+    """
+    if not isinstance(prompt_text, str):
+        return prompt_text
+    all_placeholders = _DESCRIPTION_LINE_PLACEHOLDERS + _DESCRIPTION_INLINE_PLACEHOLDERS
+    if not any(p in prompt_text for p in all_placeholders):
+        return prompt_text
+    active = _glossary_description_active(custom_fields)
+    if active:
+        result = prompt_text
+        result = result.replace('{description_mandatory}', _DESCRIPTION_MANDATORY_TEXT)
+        result = result.replace('{description_detailed}', _DESCRIPTION_DETAILED_TEXT)
+        result = result.replace('{description_in_language}', _DESCRIPTION_IN_LANGUAGE_TEXT)
+        result = result.replace('{description_excluded_note}', _DESCRIPTION_EXCLUDED_NOTE_TEXT)
+        return result
+    # Inactive path: strip line-owners by line, empty inline placeholders.
+    import re as _re_dr
+    cleaned = prompt_text
+    for placeholder in _DESCRIPTION_LINE_PLACEHOLDERS:
+        cleaned = _re_dr.sub(
+            r'^[ \t]*-?[ \t]*'
+            + _re_dr.escape(placeholder)
+            + r'[ \t]*\r?\n?',
+            '',
+            cleaned,
+            flags=_re_dr.MULTILINE,
+        )
+    for placeholder in _DESCRIPTION_INLINE_PLACEHOLDERS:
+        cleaned = cleaned.replace(placeholder, '')
+    cleaned = _re_dr.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned
+
 
 def build_prompt(chapter_text: str) -> tuple:
     """Build the extraction prompt with custom types - returns (system_prompt, user_prompt)"""
@@ -2007,10 +2116,10 @@ Columns and entry types in this exact order provided:
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
-The description column is mandatory and must be detailed
+{description_mandatory}
 IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
-Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
+Critical Requirement: The translated name{description_in_language} column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
@@ -2022,19 +2131,24 @@ CRITICAL EXTRACTION RULES:
 - Extract All {entries}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
+- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"{description_excluded_note}
 - Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
 - REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
 - If unsure whether something is a proper noun/name, skip it
-- The description column must contain detailed context/explanation
-- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
+- {description_detailed}
+- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "女学生" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
     # Replace {entries} placeholder now that we have the enabled custom entry types
     custom_prompt = custom_prompt.replace('{entries}', entries_str)
     custom_prompt = custom_prompt.replace('{{entries}}', entries_str)
+
+    # Expand (or strip) the description-rule placeholders. Done BEFORE the
+    # {fields}/{fields1} expansion so no subsequent regex or format op can
+    # accidentally touch a stripped region.
+    custom_prompt = _apply_description_rule_placeholders(custom_prompt)
 
     # Check if the prompt contains {fields} or {fields1} placeholders
     has_fields = '{fields}' in custom_prompt

@@ -5313,7 +5313,12 @@ class GlossarionWeb:
                                     )
                                     
                                     extraction_prompt = gr.Textbox(
-                                        label="Extraction Template (Use placeholders: {language}, {min_frequency}, {max_names}, {max_titles})",
+                                        label=(
+                                            "Extraction Template (Use placeholders: {language}, {min_frequency}, "
+                                            "{max_names}, {max_titles}, {description_mandatory}, "
+                                            "{description_detailed}, {description_in_language}, "
+                                            "{description_excluded_note})"
+                                        ),
                                         lines=10,
                                         value=self.get_config_value('manual_glossary_prompt3',
                                             """You are a novel glossary extraction assistant.
@@ -5325,10 +5330,10 @@ Columns and entry types in this exact order provided:
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
-The description column is mandatory and must be detailed
+{description_mandatory}
 IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
 
-Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
+Critical Requirement: The translated name{description_in_language} column must be in {language}, While the raw name column must the same as the source language.
 
 For example:
 character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
@@ -5338,10 +5343,10 @@ CRITICAL EXTRACTION RULES:
 - Extract All {entries}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
+- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist".{description_excluded_note}
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
-- The description column must contain detailed context/explanation
+- {description_detailed}
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
                                     )
                                     
