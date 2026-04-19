@@ -1854,14 +1854,79 @@ def _stream_gemini_common(
         elapsed = time.time() - t_start
         status = resp.status_code
         if status != 200:
-            err_text = resp.text[:500] if hasattr(resp, 'text') else str(resp.content[:500])
+            # Grab the full response body so we can extract the structured error
+            try:
+                err_text_full = resp.text if hasattr(resp, 'text') else resp.content.decode('utf-8', errors='replace')
+            except Exception:
+                err_text_full = ""
+
+            # Vertex returns a JSON envelope: {"error": {"code": 400, "message": "...",
+            # "status": "INVALID_ARGUMENT", "details": [...]}}.  The message field is
+            # what actually tells you which request field was rejected.
+            err_message = err_text_full
+            err_status = ""
+            err_details = None
+            try:
+                _parsed = json.loads(err_text_full) if err_text_full else {}
+                _err_obj = _parsed.get("error", {}) if isinstance(_parsed, dict) else {}
+                err_message = _err_obj.get("message", err_text_full) or err_text_full
+                err_status = _err_obj.get("status", "") or ""
+                err_details = _err_obj.get("details")
+            except Exception:
+                pass
+
+            # On any 4xx, dump a redacted request summary so the caller can see
+            # which field Vertex is rejecting.  We avoid logging the full message
+            # bodies (possibly sensitive user content) unless AUTHGEM_DEBUG_PAYLOAD=1.
+            if 400 <= status < 500:
+                try:
+                    _inner = body.get("request", body) if isinstance(body, dict) else {}
+                    _gc = _inner.get("generateContentConfig") or _inner.get("generationConfig") or {}
+                    _contents = _inner.get("contents") or []
+                    _tools = _inner.get("tools")
+                    _tool_cfg = _inner.get("toolConfig")
+                    _sys_inst = _inner.get("systemInstruction") or _inner.get("system_instruction")
+                    _roles = []
+                    for _c in _contents if isinstance(_contents, list) else []:
+                        if isinstance(_c, dict):
+                            _parts_count = len(_c.get("parts", []) or [])
+                            _roles.append(f"{_c.get('role', '?')}(parts={_parts_count})")
+                    _log(f"❌ AuthGem HTTP {status} ({err_status}) url={url.split('?')[0]}")
+                    _log(f"   error.message: {err_message}")
+                    if err_details:
+                        try:
+                            _log(f"   error.details: {json.dumps(err_details)[:2000]}")
+                        except Exception:
+                            _log(f"   error.details: {err_details!r}")
+                    _log(f"   request keys: {list(_inner.keys())}")
+                    _log(f"   contents roles: {_roles}")
+                    try:
+                        _log(f"   generationConfig: {json.dumps(_gc)[:1500]}")
+                    except Exception:
+                        _log(f"   generationConfig: {_gc!r}")
+                    if _tools is not None:
+                        _log(f"   tools: present ({len(_tools) if isinstance(_tools, list) else 'non-list'})")
+                    if _tool_cfg is not None:
+                        _log(f"   toolConfig: {_tool_cfg!r}")
+                    if _sys_inst is not None:
+                        _log(f"   systemInstruction: present")
+                    # Always dump the full request body on 4xx so the failing field is visible
+                    try:
+                        _log(f"   FULL REQUEST BODY: {json.dumps(body)}")
+                    except Exception:
+                        _log(f"   FULL REQUEST BODY (repr): {body!r}")
+                except Exception as _diag_exc:
+                    _log(f"   (diagnostic dump failed: {_diag_exc})")
+
             # 403 — check for verification URL and open browser
             if status == 403:
-                _handle_403_verification(err_text, _log, account_id=account_id)
+                _handle_403_verification(err_text_full, _log, account_id=account_id)
             # Clarify misleading "No capacity" 429 — it's temporary server overload, not quota exhaustion
-            if status == 429 and "No capacity" in err_text:
-                raise RuntimeError(f"AuthGem HTTP 429. Server busy — no capacity for this model right now, retrying")
-            raise RuntimeError(f"AuthGem HTTP {status}. {err_text}")
+            if status == 429 and "No capacity" in err_text_full:
+                raise RuntimeError("AuthGem HTTP 429. Server busy — no capacity for this model right now, retrying")
+            # Include the full (un-truncated) Vertex error message in the exception
+            # so it propagates up to the retry/UI layer instead of being cut at 500 chars.
+            raise RuntimeError(f"AuthGem HTTP {status} ({err_status}). {err_message}")
 
         data = resp.json()
 

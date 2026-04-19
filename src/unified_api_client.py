@@ -9637,7 +9637,86 @@ class UnifiedClient:
                         top_k = int(top_k_raw)
                         if top_k > 0:
                             config_params["top_k"] = top_k
-                
+
+                # ------------------------------------------------------------------
+                # Thinking configuration (Gemini 2.5 budget / Gemini 3 level).
+                # Previously this block only set a display label but never actually
+                # passed ThinkingConfig to the API, so the model defaulted to
+                # minimal thinking regardless of the GEMINI_THINKING_LEVEL /
+                # THINKING_BUDGET env vars.
+                # ------------------------------------------------------------------
+                _supports_thinking_vertex = self._supports_thinking()
+                _is_gemini_3_vertex = self._is_gemini_3_model()
+                _model_lower_vertex = (model_name or "").lower()
+                if _supports_thinking_vertex and not enable_image_output:
+                    # Thinking budget (Gemini 2.x)
+                    try:
+                        _thinking_budget_v = int(os.getenv("THINKING_BUDGET", "-1"))
+                    except Exception:
+                        _thinking_budget_v = -1
+                    if os.getenv("ENABLE_GEMINI_THINKING", "1") == "0":
+                        _thinking_budget_v = 0
+
+                    # Thinking level (Gemini 3)
+                    _thinking_level_v = (os.getenv("GEMINI_THINKING_LEVEL", "high") or "high").strip().lower()
+                    if _thinking_level_v not in ("minimal", "low", "medium", "high"):
+                        _thinking_level_v = "high"
+
+                    # Gemini 3 Pro (non-flash) does not accept thinking_level=minimal
+                    if ("gemini-3" in _model_lower_vertex
+                            and "pro" in _model_lower_vertex
+                            and "flash" not in _model_lower_vertex
+                            and _thinking_level_v == "minimal"):
+                        _thinking_level_v = "low"
+
+                    # Gemini 2.5 Pro cannot fully disable thinking (budget=0 → error)
+                    if "gemini-2.5-pro" in _model_lower_vertex and _thinking_budget_v == 0:
+                        _thinking_budget_v = 128
+
+                    # Emit thought parts in the response when the user has
+                    # enabled thinking streaming (mirrors _send_gemini).
+                    _include_thoughts_v = (
+                        os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                        or str(os.getenv("ENABLE_THOUGHTS", "")).strip().lower() in ("1", "true", "yes", "on")
+                    )
+
+                    try:
+                        if _is_gemini_3_vertex:
+                            _tc = types.ThinkingConfig(
+                                include_thoughts=_include_thoughts_v,
+                                thinking_level=_thinking_level_v,
+                            )
+                        else:
+                            _tc = types.ThinkingConfig(
+                                thinking_budget=_thinking_budget_v,
+                                include_thoughts=_include_thoughts_v,
+                            )
+                        config_params["thinking_config"] = _tc
+                        if not self._is_stop_requested():
+                            if _is_gemini_3_vertex:
+                                print(f"🧠 Vertex thinking: level={_thinking_level_v}, include_thoughts={_include_thoughts_v}")
+                            else:
+                                _b_desc = (
+                                    "disabled" if _thinking_budget_v == 0
+                                    else ("dynamic" if _thinking_budget_v < 0 else f"{_thinking_budget_v:,}")
+                                )
+                                print(f"🧠 Vertex thinking: budget={_b_desc}, include_thoughts={_include_thoughts_v}")
+                    except TypeError as _tc_err:
+                        # Older SDK versions may not accept one of the kwargs —
+                        # retry with reduced kwargs so the request still goes through.
+                        try:
+                            if _is_gemini_3_vertex:
+                                config_params["thinking_config"] = types.ThinkingConfig(
+                                    thinking_level=_thinking_level_v
+                                )
+                            else:
+                                config_params["thinking_config"] = types.ThinkingConfig(
+                                    thinking_budget=_thinking_budget_v
+                                )
+                            print(f"⚠️ Vertex thinking: SDK signature mismatch ({_tc_err}); used minimal ThinkingConfig")
+                        except Exception as _tc_err2:
+                            print(f"⚠️ Could not build Vertex ThinkingConfig: {_tc_err2}")
+
                 generation_config = types.GenerateContentConfig(**config_params)
                 
                 # Configure safety settings using google-genai SDK
@@ -9704,56 +9783,206 @@ class UnifiedClient:
                 
                 # Save configuration to file with thread isolation
                 self._save_gemini_safety_config(config_data, response_name)
-                
+
+                # ------------------------------------------------------------------
+                # Emit the "API call in progress" line AFTER the config summary,
+                # so the per-request log block ends with it (matches authgem path).
+                # ------------------------------------------------------------------
+                _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
+                _log_stream = _enable_streaming and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+                if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                    _log_stream = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+                _stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                _thread_name = threading.current_thread().name
+                _think_suffix = self._get_thinking_status_label()
                 try:
-                    # Make API call using google-genai SDK
-                    response = vertex_genai_client.models.generate_content(
-                        model=model_name,
-                        contents=contents,
-                        config=generation_config
-                    )
-                    
-                    # Check for blocked content in response
+                    _tls = self._get_thread_local_client()
+                    _label = getattr(_tls, 'current_request_label', None) or 'request'
+                    _ctx = getattr(_tls, 'current_request_context', None) or 'translation'
+                except Exception:
+                    _label, _ctx = 'request', 'translation'
+                if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                    print(f"📤 [{_thread_name}] {_label} ({_ctx}) API call in progress{_think_suffix}")
+
+                try:
+                    import time as _time
+                    _t_start = _time.time()
+                    result_text = ""
+                    image_data = None
                     finish_reason = 'stop'
-                    if hasattr(response, 'candidates') and response.candidates:
-                        for candidate in response.candidates:
-                            if hasattr(candidate, 'finish_reason'):
-                                finish_reason_str = str(candidate.finish_reason)
-                                if 'SAFETY' in finish_reason_str or 'PROHIBITED' in finish_reason_str or 'BLOCKED' in finish_reason_str:
+                    raw_usage = None
+                    last_response = None
+                    prompt_feedback = None
+                    thought_chunk_count = 0
+                    thinking_started = False
+                    thinking_ended = False
+                    thinking_start_ts = _t_start
+                    log_buf = []
+                    thought_log_buf = []
+                    got_first_text = False
+
+                    def _handle_part(part):
+                        """Handle a single response part (text / thought / inline_data).
+                        Returns True if a text chunk was appended."""
+                        nonlocal result_text, image_data, thought_chunk_count
+                        nonlocal thinking_started, thinking_ended, thought_log_buf, log_buf, got_first_text
+                        # Image
+                        if getattr(part, 'inline_data', None) is not None:
+                            if hasattr(part.inline_data, 'data'):
+                                image_data = part.inline_data.data
+                                mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
+                                print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type})")
+                            return False
+                        text = getattr(part, 'text', '') or ''
+                        if not text:
+                            return False
+                        is_thought = bool(getattr(part, 'thought', False))
+                        if is_thought:
+                            thought_chunk_count += 1
+                            if _stream_thinking and _log_stream:
+                                if not thinking_started:
+                                    thinking_started = True
+                                    print(f"🧠 [vertex] Thinking...")
+                                _clean = text.replace("\\n", "\n")
+                                thought_log_buf.append(_clean)
+                                combined = "".join(thought_log_buf)
+                                if "\n" in combined:
+                                    parts_t = combined.split("\n")
+                                    for p in parts_t[:-1]:
+                                        if p.strip().startswith("**") and thought_chunk_count > 1:
+                                            print("\u200b")
+                                        print(f"    {p}")
+                                    thought_log_buf = [parts_t[-1]]
+                            return False
+                        # Regular output text
+                        result_text += text
+                        # Separator when transitioning from thinking to text
+                        if thinking_started and not thinking_ended:
+                            thinking_ended = True
+                            if _stream_thinking and _log_stream:
+                                remainder = "".join(thought_log_buf).rstrip("\n")
+                                if remainder:
+                                    for p in remainder.split("\n"):
+                                        print(f"    {p}")
+                                thought_log_buf.clear()
+                                dur = _time.time() - thinking_start_ts
+                                print(f"🧠 [vertex] Thinking complete ({thought_chunk_count} chunks, {dur:.1f}s)")
+                                print("─" * 50)
+                                print("📡 Text streaming...")
+                        if _log_stream:
+                            if not got_first_text:
+                                got_first_text = True
+                                _ttft = _time.time() - _t_start
+                                print(f"📡 Vertex: First token in {_ttft:.1f}s, streaming…")
+                            combined = "".join(log_buf) + text
+                            for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
+                                combined = combined.replace(tag, tag + '\n')
+                            if "\n" in combined:
+                                parts = combined.split("\n")
+                                for p in parts[:-1]:
+                                    print(p.replace('\x1f', '\\x1F'))
+                                log_buf[:] = [parts[-1]]
+                            else:
+                                log_buf.append(text)
+                                if len("".join(log_buf)) > 150:
+                                    print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                    log_buf.clear()
+                        return True
+
+                    def _capture_candidate_meta(candidates):
+                        nonlocal finish_reason
+                        if not candidates:
+                            return
+                        for candidate in candidates:
+                            fr = getattr(candidate, 'finish_reason', None)
+                            if fr is not None:
+                                fr_str = str(fr)
+                                if 'SAFETY' in fr_str or 'PROHIBITED' in fr_str or 'BLOCKED' in fr_str:
                                     raise UnifiedClientError(
                                         "Content blocked by Vertex AI Gemini safety filter",
                                         error_type="prohibited_content"
                                     )
-                                elif 'MAX_TOKENS' in finish_reason_str or 'LENGTH' in finish_reason_str:
+                                elif 'MAX_TOKENS' in fr_str or 'LENGTH' in fr_str:
                                     finish_reason = 'length'
-                    
+
+                    if _enable_streaming:
+                        # Streaming path: iterate chunks in real time
+                        _stream = vertex_genai_client.models.generate_content_stream(
+                            model=model_name,
+                            contents=contents,
+                            config=generation_config
+                        )
+                        for chunk in _stream:
+                            if is_stop_requested():
+                                try:
+                                    _stream.close()
+                                except Exception:
+                                    pass
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            last_response = chunk
+                            if getattr(chunk, 'prompt_feedback', None) is not None:
+                                prompt_feedback = chunk.prompt_feedback
+                            _capture_candidate_meta(getattr(chunk, 'candidates', None) or [])
+                            for candidate in (getattr(chunk, 'candidates', None) or []):
+                                content_obj = getattr(candidate, 'content', None)
+                                if not content_obj:
+                                    continue
+                                parts = getattr(content_obj, 'parts', None) or []
+                                for part in parts:
+                                    _handle_part(part)
+                            if getattr(chunk, 'usage_metadata', None) is not None:
+                                raw_usage = chunk.usage_metadata
+                        # Flush any buffered log tails
+                        if _log_stream and log_buf:
+                            tail = "".join(log_buf).replace('\x1f', '\\x1F')
+                            if tail:
+                                print(tail)
+                            log_buf.clear()
+                        response = last_response
+                    else:
+                        # Non-streaming path (single call)
+                        response = vertex_genai_client.models.generate_content(
+                            model=model_name,
+                            contents=contents,
+                            config=generation_config
+                        )
+                        last_response = response
+                        if getattr(response, 'prompt_feedback', None) is not None:
+                            prompt_feedback = response.prompt_feedback
+                        _capture_candidate_meta(getattr(response, 'candidates', None) or [])
+                        for candidate in (getattr(response, 'candidates', None) or []):
+                            content_obj = getattr(candidate, 'content', None)
+                            if not content_obj:
+                                continue
+                            parts = getattr(content_obj, 'parts', None) or []
+                            for part in parts:
+                                _handle_part(part)
+                        if getattr(response, 'usage_metadata', None) is not None:
+                            raw_usage = response.usage_metadata
+
                     # Check prompt_feedback for blocks
-                    if hasattr(response, 'prompt_feedback'):
-                        feedback = response.prompt_feedback
-                        if hasattr(feedback, 'block_reason') and feedback.block_reason:
+                    if prompt_feedback is not None:
+                        block_reason = getattr(prompt_feedback, 'block_reason', None)
+                        if block_reason:
                             raise UnifiedClientError(
-                                f"Content blocked by Vertex AI: {feedback.block_reason}",
+                                f"Content blocked by Vertex AI: {block_reason}",
                                 error_type="prohibited_content"
                             )
-                    
-                    # Extract text and image from response
-                    result_text = ""
-                    image_data = None
-                    
-                    if hasattr(response, 'candidates') and response.candidates:
-                        for candidate in response.candidates:
-                            if hasattr(candidate, 'content') and candidate.content:
-                                if hasattr(candidate.content, 'parts') and candidate.content.parts is not None:
-                                    for part in candidate.content.parts:
-                                        # Extract text
-                                        if hasattr(part, 'text') and part.text:
-                                            result_text += part.text
-                                        # Extract image data if present
-                                        elif hasattr(part, 'inline_data') and part.inline_data:
-                                            if hasattr(part.inline_data, 'data'):
-                                                image_data = part.inline_data.data
-                                                mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
-                                                print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type})")
+
+                    # Report response summary + thinking tokens (same style as authgem)
+                    _elapsed = _time.time() - _t_start
+                    thinking_tokens = 0
+                    if raw_usage is not None:
+                        for _attr in ("thoughts_token_count", "thought_token_count", "thoughtsTokenCount"):
+                            _v = getattr(raw_usage, _attr, None)
+                            if isinstance(_v, int) and _v > 0:
+                                thinking_tokens = _v
+                                break
+                    _mode = "streaming" if _enable_streaming else "non-streaming"
+                    _summary = f"📡 Vertex: Response received in {_elapsed:.1f}s ({len(result_text)} chars, {_mode})"
+                    if thinking_tokens > 0:
+                        _summary += f" | 🧠 {thinking_tokens} thinking tokens used"
+                    print(_summary)
                     
                     # Check for empty response - might be safety filter
                     if not result_text and not image_data:
@@ -9809,6 +10038,75 @@ class UnifiedClient:
                     
                 except Exception as e:
                     error_str = str(e)
+
+                    # ---------------------------------------------------------------
+                    # Always dump Vertex AI request + full error payload on failure.
+                    # The google-genai SDK wraps HTTP errors; the real Vertex
+                    # error.message lives on e.response / e.response_json /
+                    # e.details, depending on SDK version.
+                    # ---------------------------------------------------------------
+                    try:
+                        print(f"❌ Vertex AI Gemini request failed: {type(e).__name__}: {error_str}")
+                        # Try every known attribute on the SDK exception
+                        for _attr in ("response_json", "response", "details", "message", "code", "status"):
+                            if hasattr(e, _attr):
+                                try:
+                                    _val = getattr(e, _attr)
+                                    if _attr == "response" and _val is not None and hasattr(_val, "text"):
+                                        print(f"   e.response.status_code: {getattr(_val, 'status_code', '?')}")
+                                        try:
+                                            print(f"   e.response.text: {_val.text}")
+                                        except Exception:
+                                            pass
+                                    else:
+                                        print(f"   e.{_attr}: {_val}")
+                                except Exception:
+                                    pass
+                        # Dump the request we sent so the offending field is visible
+                        try:
+                            _contents_dump = []
+                            for _c in contents:
+                                _role = getattr(_c, "role", "?")
+                                _parts_summary = []
+                                for _p in (getattr(_c, "parts", []) or []):
+                                    if getattr(_p, "text", None) is not None:
+                                        _t = _p.text or ""
+                                        _parts_summary.append(f"text(len={len(_t)})")
+                                    elif getattr(_p, "inline_data", None) is not None:
+                                        _id = _p.inline_data
+                                        _mt = getattr(_id, "mime_type", "?")
+                                        _data = getattr(_id, "data", b"") or b""
+                                        _parts_summary.append(f"inline_data(mime={_mt}, bytes={len(_data)})")
+                                    else:
+                                        _parts_summary.append(type(_p).__name__)
+                                _contents_dump.append(f"{_role}: [{', '.join(_parts_summary)}]")
+                            print("   REQUEST contents:")
+                            for _line in _contents_dump:
+                                print(f"     - {_line}")
+                        except Exception as _de:
+                            print(f"   (contents dump failed: {_de})")
+                        try:
+                            print(f"   REQUEST config_params: {config_params}")
+                        except Exception:
+                            pass
+                        try:
+                            # Convert GenerateContentConfig to dict if possible
+                            _gc_dict = None
+                            for _m in ("model_dump", "to_dict", "dict"):
+                                if hasattr(generation_config, _m):
+                                    try:
+                                        _gc_dict = getattr(generation_config, _m)()
+                                        break
+                                    except Exception:
+                                        continue
+                            if _gc_dict is not None:
+                                print(f"   REQUEST generation_config: {_gc_dict}")
+                        except Exception:
+                            pass
+                        print(f"   REQUEST model: {model_name}, location: {location}, project: {project_id}")
+                    except Exception as _outer_diag:
+                        print(f"   (Vertex diagnostic dump failed: {_outer_diag})")
+
                     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                         raise UnifiedClientError(
                             f"Quota exceeded for Vertex AI Gemini model: {model_name}\n\n"
@@ -10240,11 +10538,17 @@ class UnifiedClient:
                 elapsed += dt
         
         # Log stagger status — shows queued+delay or immediate in-progress
-        # (Skip for authgem and native gemini providers — they emit this after their own config summary)
+        # (Skip for authgem, native gemini, and vertex/ providers — they emit
+        # this after their own config summary so the "API call in progress"
+        # line appears at the end of the per-request log block.)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_native_gemini = _model_lower.startswith('gemini')
-        if not _is_authgem and not _is_native_gemini and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+        _is_vertex = (
+            _model_lower.startswith('vertex/') or
+            _model_lower.startswith('vertex_ai/')
+        )
+        if not _is_authgem and not _is_native_gemini and not _is_vertex and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'

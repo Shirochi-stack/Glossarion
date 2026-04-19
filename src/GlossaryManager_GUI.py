@@ -5587,21 +5587,105 @@ CRITICAL EXTRACTION RULES:
                 if lower_name in excluded_names:
                     continue
                 try:
-                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
+                    # Read as bytes so we do not mutate line endings or strip
+                    # invalid bytes on round-trip (earlier errors='ignore' text
+                    # mode could silently drop bytes, making the write look
+                    # like a no-op replacement).
+                    with open(path, 'rb') as f:
+                        raw_bytes = f.read()
+                    try:
+                        content = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_bytes.decode('utf-8', errors='replace')
+
+                    # Apply replacements, tracking per-pair counts so the log
+                    # reflects what was *actually* replaced (not what happened
+                    # to exist in the original content for other pairs).
                     new_content = content
+                    per_pair_counts = []
                     for old, new in changes:
-                        if old and new and old in new_content:
-                            new_content = new_content.replace(old, new)
-                    if new_content != content:
-                        with open(path, 'w', encoding='utf-8') as f:
-                            f.write(new_content)
+                        if not old or not new or old == new:
+                            continue
+                        before_count = new_content.count(old)
+                        if before_count == 0:
+                            continue
+                        new_content = new_content.replace(old, new)
+                        per_pair_counts.append((old, new, before_count))
+
+                    if new_content == content:
+                        continue
+
+                    # Capture mtime/size before so we can confirm the OS
+                    # actually accepted our write (OneDrive / antivirus can
+                    # silently revert).
+                    try:
+                        stat_before = os.stat(path)
+                        mtime_before = stat_before.st_mtime
+                        size_before = stat_before.st_size
+                    except Exception:
+                        mtime_before, size_before = None, None
+
+                    # Write in binary mode to avoid CRLF translation and to
+                    # guarantee exactly the bytes we computed land on disk.
+                    new_bytes = new_content.encode('utf-8')
+                    with open(path, 'wb') as f:
+                        f.write(new_bytes)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except Exception:
+                            pass
+
+                    # Post-write verification: re-read and confirm old strings
+                    # are gone and file size matches what we intended.
+                    try:
+                        with open(path, 'rb') as f:
+                            verify_bytes = f.read()
+                        stat_after = os.stat(path)
+                        mtime_after = stat_after.st_mtime
+                        size_after = stat_after.st_size
+                    except Exception as ve:
+                        self.append_log(f"⚠️ Could not verify write of {path}: {ve}")
+                        verify_bytes = None
+                        mtime_after, size_after = None, None
+
+                    replaced_here = sum(c for _o, _n, c in per_pair_counts)
+                    total_replacements += replaced_here
+
+                    write_landed = (verify_bytes == new_bytes)
+                    if write_landed:
                         files_updated += 1
-                        replaced_here = 0
-                        for old, new in changes:
-                            replaced_here += content.count(old)
-                        total_replacements += replaced_here
-                        self.append_log(f"Updated file: {path} ({replaced_here} replacements)")
+                        self.append_log(
+                            f"Updated file: {path} ({replaced_here} replacements, "
+                            f"{size_before} → {size_after} bytes)"
+                        )
+                    else:
+                        # Write did not persist as expected — tell the user
+                        # what is still there so they can diagnose.
+                        resolved = os.path.realpath(path)
+                        self.append_log(
+                            f"❌ Write did NOT persist for {path}"
+                            + (f" (realpath: {resolved})" if resolved != path else "")
+                        )
+                        self.append_log(
+                            f"   expected {len(new_bytes)} bytes, found {size_after} bytes"
+                            + (f" (mtime {mtime_before} → {mtime_after})" if mtime_before is not None else "")
+                        )
+                        if verify_bytes is not None:
+                            try:
+                                verify_text = verify_bytes.decode('utf-8', errors='replace')
+                                for old, new, cnt in per_pair_counts:
+                                    still = verify_text.count(old)
+                                    if still:
+                                        self.append_log(
+                                            f"   • '{old}' still present {still} time(s) (expected 0)"
+                                        )
+                            except Exception:
+                                pass
+                        self.append_log(
+                            "   Likely causes: file locked by another app, OneDrive/antivirus revert, "
+                            "or read-only attribute. Try closing viewers and retry."
+                        )
                 except Exception as e:
                     self.append_log(f"⚠️ Failed to update {path}: {e}")
             return files_updated, total_replacements
