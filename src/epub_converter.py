@@ -768,6 +768,29 @@ class XHTMLConverter:
             if os.getenv('FIX_EMPTY_ATTR_TAGS_EPUB', '0') == '1':
                 html_content = fix_empty_attr_tags(html_content)
 
+            # Number Spacing Tokenization Fix (also applied during translation).
+            # Rerunning it here is idempotent (the (?<![a-zA-Z0-9]) lookbehind
+            # prevents double-spacing), but it lets users:
+            #   - Re-compile an already-translated project with the toggle ON
+            #   - Fix output produced when the toggle was previously OFF
+            # The (?![^<]*>) lookahead keeps the rewrite out of tag attributes.
+            #   Mode '1' (Standard):        mixed-case words only (e.g. "Chapter7" -> "Chapter 7")
+            #   Mode '2' (Standard + Caps): also ALL-CAPS acronyms (e.g. "MP3" -> "MP 3")
+            _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
+            if _ns_mode in ('1', '2') and isinstance(html_content, str):
+                _ns_pat = (
+                    r'(?<![a-zA-Z0-9])((?:[a-zA-Z]*[a-z][a-zA-Z]*|[A-Z]+)[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                    if _ns_mode == '2' else
+                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                )
+                html_content, _ns_count = re.subn(_ns_pat, r'\1 \2', html_content)
+                if _ns_count > 0:
+                    # Avoid log flooding when compiling large books: print once per call.
+                    try:
+                        print(f"🔧 EPUB Number Spacing Fix: separated {_ns_count} letter-number run-on(s)")
+                    except Exception:
+                        pass
+
             def _escape_story_tag(match):
                 full_tag = match.group(0)   # Entire <...> or </...>
                 tag_name = match.group(1)   # The tag name possibly containing ':'
