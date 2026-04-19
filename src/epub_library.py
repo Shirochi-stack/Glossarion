@@ -1409,6 +1409,7 @@ class EpubReaderDialog(QDialog):
         self._font_size = self._config.get('epub_reader_font_size', 14)
         self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
         self._theme_index = self._config.get('epub_reader_theme', 0)
+        self._font_family = self._config.get('epub_reader_font_family', 'Georgia')
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
         self._current_row = 0
@@ -1447,6 +1448,14 @@ class EpubReaderDialog(QDialog):
         else:
             self._spacing_combo.setCurrentText(spacing_str)
         self._spacing_combo.blockSignals(False)
+        # Restore font family combo
+        fam_idx = self._font_combo.findText(self._font_family)
+        self._font_combo.blockSignals(True)
+        if fam_idx >= 0:
+            self._font_combo.setCurrentIndex(fam_idx)
+        else:
+            self._font_combo.setCurrentText(self._font_family)
+        self._font_combo.blockSignals(False)
         self._start_loading()
 
     def _setup_ui(self):
@@ -1525,6 +1534,64 @@ class EpubReaderDialog(QDialog):
         self._spacing_combo.setFocusPolicy(Qt.StrongFocus)
         self._spacing_combo.installEventFilter(self)
         toolbar.addWidget(self._spacing_combo)
+
+        toolbar.addSpacing(8)
+
+        # Font family dropdown (system fonts, editable for custom families)
+        font_family_lbl = QLabel("𝑨")
+        font_family_lbl.setStyleSheet("color: #888; font-size: 12pt; padding: 0 2px;")
+        font_family_lbl.setToolTip("Font family")
+        toolbar.addWidget(font_family_lbl)
+
+        self._font_combo = QComboBox()
+        self._font_combo.setEditable(True)
+        self._font_combo.setInsertPolicy(QComboBox.NoInsert)
+        self._font_combo.setFixedWidth(150)
+        self._font_combo.setCursor(Qt.PointingHandCursor)
+        self._font_combo.setToolTip("Text font family")
+        # Populate with smoothly-scalable system font families (same pattern
+        # used in review_dialog.py). Pin common reading fonts to the top.
+        try:
+            from PySide6.QtGui import QFontDatabase
+            families = sorted({
+                f for f in QFontDatabase.families()
+                if QFontDatabase.isSmoothlyScalable(f)
+            })
+        except Exception:
+            families = []
+        _pinned = ["Georgia", "Noto Serif", "Segoe UI", "Cambria", "Times New Roman",
+                   "Garamond", "Palatino Linotype", "Arial", "Verdana", "Tahoma",
+                   "Consolas"]
+        _added: set[str] = set()
+        for fam in _pinned:
+            if not families or fam in families:
+                self._font_combo.addItem(fam)
+                _added.add(fam)
+        if families:
+            self._font_combo.insertSeparator(self._font_combo.count())
+            for fam in families:
+                if fam not in _added:
+                    self._font_combo.addItem(fam)
+        self._font_combo.setStyleSheet("""
+            QComboBox {
+                background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 8px;
+            }
+            QComboBox:hover { border-color: #6c63ff; }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
+            QComboBox QAbstractItemView {
+                background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
+                border: 1px solid #3a3a5e;
+            }
+        """)
+        self._font_combo.activated.connect(
+            lambda idx: self._on_font_family_changed(self._font_combo.itemText(idx)))
+        self._font_combo.lineEdit().editingFinished.connect(
+            lambda: self._on_font_family_changed(self._font_combo.currentText()))
+        self._font_combo.setFocusPolicy(Qt.StrongFocus)
+        self._font_combo.installEventFilter(self)
+        toolbar.addWidget(self._font_combo)
 
         toolbar.addSpacing(8)
 
@@ -2011,6 +2078,24 @@ class EpubReaderDialog(QDialog):
                 self._reader.page().runJavaScript(_hide)
         self._render_current()
 
+    def _on_font_family_changed(self, family):
+        """Update reader font family and re-render."""
+        family = (family or "").strip()
+        if not family or family == self._font_family:
+            return
+        self._font_family = family
+        self._chapter_page_cache.clear()
+        self._loaded_chapter = -1
+        # Hide content before re-render to prevent flash
+        _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
+        if _HAS_WEBENGINE:
+            if self._layout_mode == LAYOUT_DOUBLE:
+                self._reader_left.page().runJavaScript(_hide)
+                self._reader_right.page().runJavaScript(_hide)
+            else:
+                self._reader.page().runJavaScript(_hide)
+        self._render_current()
+
     def _on_spacing_changed(self, text):
         try:
             val = float(text)
@@ -2374,6 +2459,7 @@ class EpubReaderDialog(QDialog):
         self._config['epub_reader_line_spacing'] = self._line_spacing
         self._config['epub_reader_theme'] = self._theme_index
         self._config['epub_reader_layout'] = self._layout_mode
+        self._config['epub_reader_font_family'] = self._font_family
         super().closeEvent(event)
 
     # ── Chapter rendering ──────────────────────────────────────────────────
@@ -2460,6 +2546,15 @@ class EpubReaderDialog(QDialog):
           #content  — inner padding for readability
         """
         t = self._get_theme()
+        # Build a CSS font stack: user-selected family first, then common
+        # fallbacks so missing fonts degrade gracefully. Any embedded single
+        # quotes in the family name are stripped to keep the stylesheet valid.
+        _fam = (self._font_family or 'Georgia').replace("'", "").strip() or 'Georgia'
+        _is_mono = _fam.lower() in {'consolas', 'courier new', 'courier', 'menlo',
+                                    'monaco', 'lucida console', 'cascadia mono',
+                                    'cascadia code', 'source code pro', 'fira code'}
+        _generic = 'monospace' if _is_mono else 'serif'
+        _font_stack = f"'{_fam}', 'Georgia', 'Noto Serif', {_generic}"
         if paginated:
             return (
                 f"<html><head><style>"
@@ -2478,7 +2573,7 @@ class EpubReaderDialog(QDialog):
                 # layer so text isn't re-rasterized at fractional offsets.
                 f"will-change: transform; backface-visibility: hidden; "
                 f"transform: translate3d(0, 0, 0); "
-                f"font-family: 'Georgia', 'Noto Serif', serif; "
+                f"font-family: {_font_stack}; "
                 f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 0 40px; }}"
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
@@ -2533,8 +2628,11 @@ class EpubReaderDialog(QDialog):
             return (
                 f"<html><head><style>"
                 f"body {{ background: {t['bg']}; color: {t['fg']}; "
-                f"font-family: 'Georgia', 'Noto Serif', serif; "
+                f"font-family: {_font_stack}; "
                 f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
+                f"-webkit-font-smoothing: antialiased; "
+                f"-moz-osx-font-smoothing: grayscale; "
+                f"text-rendering: optimizeLegibility; "
                 f"padding: 10px 20px; margin: 0 auto; }}"
                 f"h1, h2, h3 {{ color: {t['heading']}; }}"
                 f"img {{ display: block; max-width: 100%; height: auto; "
