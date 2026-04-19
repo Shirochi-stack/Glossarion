@@ -2010,17 +2010,17 @@ class EpubReaderDialog(QDialog):
             # stays blurry until the user toggles modes.
             saved_mode = self._layout_mode
             if saved_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                # Hide the reader stack during the prime swap so the
+                # brief scroll-mode render never becomes visible. The
+                # dialog background (theme bg) shows through instead.
+                self._reader_stack.hide()
+                self._priming_initial_render = True
+                self._prime_saved_mode = saved_mode
                 self._layout_mode = LAYOUT_SCROLL
+                # The swap-back is triggered event-driven the moment the
+                # scroll-mode load finishes (see _on_reader_load_finished),
+                # avoiding an arbitrary fixed delay.
                 self._render_current()
-
-                def _restore_paginated_mode():
-                    self._layout_mode = saved_mode
-                    self._loaded_chapter = -1
-                    self._chapter_page_cache.clear()
-                    self._render_current()
-                # 180 ms gives the scroll-mode load enough time to flush
-                # the previous GPU layer before we rebuild in paginated mode.
-                QTimer.singleShot(180, _restore_paginated_mode)
             else:
                 self._render_current()
         else:
@@ -2377,7 +2377,20 @@ class EpubReaderDialog(QDialog):
 
     def _on_reader_load_finished(self, ok):
         """Called when QWebEngineView finishes loading HTML."""
-        if not ok or self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+        if not ok:
+            return
+        # Prime phase: the scroll-mode render has just completed. Swap
+        # back to the configured paginated mode immediately — this is the
+        # event-driven replacement for the previous fixed-delay timer.
+        if (getattr(self, '_priming_initial_render', False)
+                and self._layout_mode == LAYOUT_SCROLL
+                and self.sender() is self._reader):
+            self._layout_mode = getattr(self, '_prime_saved_mode', LAYOUT_SINGLE)
+            self._loaded_chapter = -1
+            self._chapter_page_cache.clear()
+            self._render_current()
+            return
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             return
         # The signal fires from whichever browser finished loading; route
         # based on the sender rather than layout alone so stale loads from
@@ -2467,6 +2480,7 @@ class EpubReaderDialog(QDialog):
             self._js_scroll_to(self._reader, self._current_page, animate=False)
             self._js_reveal(self._reader)
             self._update_nav_buttons()
+            self._reveal_reader_stack_after_prime()
         self._js_page_count(self._reader, on_count)
 
     def _finalize_double_page(self):
@@ -2478,7 +2492,17 @@ class EpubReaderDialog(QDialog):
             self._js_reveal(self._reader_left)
             self._js_reveal(self._reader_right)
             self._update_nav_buttons()
+            self._reveal_reader_stack_after_prime()
         self._js_page_count(self._reader_left, on_count)
+
+    def _reveal_reader_stack_after_prime(self):
+        """Reveal the reader stack after the post-prime paginated render
+        completes. No-op if the prime sequence wasn't used.
+        """
+        if not getattr(self, '_priming_initial_render', False):
+            return
+        self._priming_initial_render = False
+        self._reader_stack.show()
 
     def _scroll_to_page_single(self):
         """Navigate single-page reader to current page."""
