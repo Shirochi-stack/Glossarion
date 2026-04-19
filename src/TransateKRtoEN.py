@@ -8912,6 +8912,145 @@ def is_prohibited_failure(content, failure_reason=None):
         pass
     return False
     
+def _fix_img_p_nesting(html):
+    """Post-process markdown-to-HTML output to fix <p><img/></p> artifacts.
+
+    The markdown libraries wrap any line containing an <img> in <p>...</p>,
+    even when the input already has <p><img/></p>. That produces invalid HTML
+    like ``<p><p><img/></p>trailing text</p>`` which browsers auto-repair
+    destructively (empty leading <p>, orphaned text outside any paragraph,
+    XHTML validators reject it).
+
+    This helper:
+      1. Unwraps any <p> whose only meaningful child is an <img> (or <img>
+         siblings). Images don't need a paragraph wrapper — they are phrasing
+         content and render correctly as direct children of the body/div.
+      2. Flattens any remaining nested <p> tags by splitting the outer
+         around the inner.
+      3. Also collapses consecutive ``<p>...</p><p>...</p>`` that the splitter
+         might create with empty content.
+
+    Uses BeautifulSoup with html.parser (lenient) so malformed input doesn't
+    crash. Returns the original html string unchanged if BeautifulSoup isn't
+    available.
+    """
+    try:
+        from bs4 import BeautifulSoup, NavigableString
+    except Exception:
+        return html
+    if not isinstance(html, str):
+        return html
+    # Skip work only when there is definitely nothing to do: no <p> and no
+    # image-like tag at all. (Previously skipped on missing <p>, which meant
+    # <p><svg/></p> fragments passed through — but <svg/> by itself is fine.)
+    if '<p' not in html.lower():
+        return html
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Step 1: unwrap <p> whose only meaningful content is an image-like
+        # element. Covers all formats the translator might encounter:
+        #
+        #   <img>      any raster/vector format via src= (png/jpg/webp/svg/avif/gif/bmp…)
+        #   <svg>      inline SVG
+        #   <picture>  responsive <picture><source/><img/></picture>
+        #   <figure>   semantic image block (ALSO required: <p> cannot legally
+        #              contain <figure> per the HTML spec, it's flow content)
+        #   <canvas>   rendered canvases
+        #   <video>, <audio>  media elements
+        #   <object>, <embed>, <iframe>  embedded media
+        _IMAGE_LIKE_TAGS = frozenset({
+            'img', 'svg', 'picture', 'figure', 'canvas',
+            'video', 'audio', 'object', 'embed', 'iframe',
+        })
+
+        def _is_image_only(p_tag):
+            # Strip whitespace-only text nodes and <br> for the check.
+            meaningful_children = [
+                c for c in p_tag.children
+                if not (isinstance(c, NavigableString) and not c.strip())
+                and not (hasattr(c, 'name') and c.name == 'br')
+            ]
+            if not meaningful_children:
+                return False
+            return all(
+                hasattr(c, 'name') and c.name in _IMAGE_LIKE_TAGS
+                for c in meaningful_children
+            )
+
+        for p in list(soup.find_all('p')):
+            try:
+                if _is_image_only(p):
+                    p.unwrap()
+            except Exception:
+                continue
+
+        # Step 2: flatten nested <p>. Iterate until a pass makes no changes so
+        # deeply-nested structures get fully flattened.
+        max_passes = 10
+        for _ in range(max_passes):
+            changed = False
+            for outer in list(soup.find_all('p')):
+                inner = outer.find('p')
+                if inner is None:
+                    continue
+                parent = outer.parent
+                if parent is None:
+                    continue
+                # Find outer's index within its parent's contents.
+                try:
+                    outer_idx = list(parent.contents).index(outer)
+                except ValueError:
+                    continue
+
+                before = []
+                after = []
+                seen_inner = False
+                for child in list(outer.contents):
+                    if child is inner:
+                        seen_inner = True
+                        continue
+                    extracted = child.extract()
+                    (after if seen_inner else before).append(extracted)
+
+                inner_extracted = inner.extract()
+                outer.extract()
+
+                def _has_content(nodes):
+                    for n in nodes:
+                        if isinstance(n, NavigableString):
+                            if n.strip():
+                                return True
+                        else:
+                            if n.get_text(strip=True) or n.name in ('img', 'br', 'hr'):
+                                return True
+                    return False
+
+                new_nodes = []
+                if _has_content(before):
+                    new_p = soup.new_tag('p')
+                    for n in before:
+                        new_p.append(n)
+                    new_nodes.append(new_p)
+                new_nodes.append(inner_extracted)
+                if _has_content(after):
+                    new_p = soup.new_tag('p')
+                    for n in after:
+                        new_p.append(n)
+                    new_nodes.append(new_p)
+
+                for i, n in enumerate(new_nodes):
+                    parent.insert(outer_idx + i, n)
+                changed = True
+                break  # restart iteration; indices have shifted
+            if not changed:
+                break
+
+        return str(soup)
+    except Exception:
+        return html
+
+
 def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     """Convert markdown/plain text back to HTML after translation (for enhanced mode)
     
@@ -9110,6 +9249,10 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                     flags=re.IGNORECASE | re.DOTALL
                 )
                 
+                # Post-process: strip <p> wrappers around <img> and flatten
+                # nested <p> that markdown2 creates from pre-existing <p><img/></p>.
+                html = _fix_img_p_nesting(html)
+
                 return html
         except ImportError:
             print("⚠️ markdown2 not available, falling back to markdown library")
@@ -9183,6 +9326,10 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 flags=re.IGNORECASE | re.DOTALL
             )
             
+            # Post-process: strip <p> wrappers around <img> and flatten
+            # nested <p> that markdown creates from pre-existing <p><img/></p>.
+            html = _fix_img_p_nesting(html)
+
             return html
             
     except ImportError:
@@ -9306,6 +9453,10 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         html,
         flags=re.IGNORECASE | re.DOTALL
     )
+
+    # Post-process: strip <p> wrappers around <img> and flatten nested <p>
+    # (fallback manual path).
+    html = _fix_img_p_nesting(html)
 
     return html
 # =====================================================
