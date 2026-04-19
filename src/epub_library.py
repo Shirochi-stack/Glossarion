@@ -1993,7 +1993,36 @@ class EpubReaderDialog(QDialog):
         self._content_widget.show()
 
         if self._chapters:
+            # Select first chapter silently — the priming sequence below
+            # drives the initial render so we don't want setCurrentRow to
+            # also fire _on_chapter_selected.
+            self._toc_list.blockSignals(True)
             self._toc_list.setCurrentRow(0)
+            self._toc_list.blockSignals(False)
+            self._current_row = 0
+            self._current_page = 0
+
+            # Prime the reader: if we're opening in a paginated mode
+            # (single/double), first render in scroll mode and then switch
+            # back to the configured mode. This replicates the manual
+            # layout-toggle workaround — without it, QtWebEngine caches the
+            # GPU-composited #columns layer at the wrong DPR and text
+            # stays blurry until the user toggles modes.
+            saved_mode = self._layout_mode
+            if saved_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                self._layout_mode = LAYOUT_SCROLL
+                self._render_current()
+
+                def _restore_paginated_mode():
+                    self._layout_mode = saved_mode
+                    self._loaded_chapter = -1
+                    self._chapter_page_cache.clear()
+                    self._render_current()
+                # 180 ms gives the scroll-mode load enough time to flush
+                # the previous GPU layer before we rebuild in paginated mode.
+                QTimer.singleShot(180, _restore_paginated_mode)
+            else:
+                self._render_current()
         else:
             self._reader_stack.setCurrentIndex(0)
             self._reader.setHtml(
@@ -2697,18 +2726,23 @@ class EpubReaderDialog(QDialog):
                                     'cascadia code', 'source code pro', 'fira code'}
         _generic = 'monospace' if _is_mono else 'serif'
         _font_stack = f"'{_fam}', 'Georgia', 'Noto Serif', {_generic}"
+        # Use px units (integer device pixels) for sharper glyph rasterization.
+        # 1pt = 1/72 inch, 1px = 1/96 inch → px = pt * 96/72.
+        _font_px = int(round(self._font_size * 96 / 72))
         if paginated:
             return (
                 f"<html><head><style>"
                 f"* {{ box-sizing: border-box; }}"
                 # Grayscale AA + geometricPrecision kill the subpixel LCD
                 # fringing ("red shift") that appears on text inside a
-                # GPU-composited transformed layer.
+                # GPU-composited transformed layer. This trade-off is
+                # intentional for paginated modes; see _js_scroll_to.
                 f"html, body {{ margin: 0; padding: 10px 0; overflow: hidden; "
                 f"background: {t['bg']}; color: {t['fg']}; "
                 f"-webkit-font-smoothing: antialiased; "
                 f"-moz-osx-font-smoothing: grayscale; "
-                f"text-rendering: optimizeLegibility; }}"
+                f"text-rendering: geometricPrecision; "
+                f"-webkit-text-size-adjust: 100%; }}"
                 f"#columns {{ column-fill: auto; column-gap: 0; "
                 f"transition: transform 0.3s ease; opacity: 0; "
                 # will-change + backface-visibility stabilize the compositor
@@ -2716,7 +2750,7 @@ class EpubReaderDialog(QDialog):
                 f"will-change: transform; backface-visibility: hidden; "
                 f"transform: translate3d(0, 0, 0); "
                 f"font-family: {_font_stack}; "
-                f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
+                f"font-size: {_font_px}px; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 0 40px; }}"
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
@@ -2781,14 +2815,19 @@ class EpubReaderDialog(QDialog):
                 f"</body></html>"
             )
         else:
+            # Non-paginated (scroll / all) modes: no GPU-composited transform,
+            # so we let Chromium use native OS rendering (ClearType subpixel
+            # AA on Windows) which is noticeably sharper than forced
+            # grayscale AA.
             return (
                 f"<html><head><style>"
                 f"body {{ background: {t['bg']}; color: {t['fg']}; "
                 f"font-family: {_font_stack}; "
-                f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; "
-                f"-webkit-font-smoothing: antialiased; "
-                f"-moz-osx-font-smoothing: grayscale; "
+                f"font-size: {_font_px}px; line-height: {self._line_spacing}; "
+                f"-webkit-font-smoothing: auto; "
+                f"-moz-osx-font-smoothing: auto; "
                 f"text-rendering: optimizeLegibility; "
+                f"-webkit-text-size-adjust: 100%; "
                 f"padding: 10px 20px; margin: 0 auto; }}"
                 f"h1, h2, h3 {{ color: {t['heading']}; }}"
                 f"img {{ display: block; max-width: 100%; height: auto; "
