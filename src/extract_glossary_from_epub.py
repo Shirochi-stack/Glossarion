@@ -2000,23 +2000,23 @@ def build_prompt(chapter_text: str) -> tuple:
         # If no custom prompt, create a default
         custom_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (written as \\x1F).
+You must strictly return ONLY CSV format with columns separated by commas.
 Columns and entry types in this exact order provided:
 
-{fields1}
+{fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
-IMPORTANT: Do NOT use commas, tabs, or pipes as field separators. Use ONLY the Unit Separator character \\x1F between columns. Commas may appear freely within field values.
+IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
-character\x1fᫀ이히리ᄐ 나애\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character\x1fᫀ뢔사난\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
-term\x1fᫀ간편헤\x1fGale Hardest\x1f\x1fA legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
+character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
+character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
+term,간편헤,Gale Hardest,,"A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion"
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}

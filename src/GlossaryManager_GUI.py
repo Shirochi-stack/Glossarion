@@ -1634,22 +1634,22 @@ class GlossaryManagerMixin:
         # Treat empty strings as missing so users always get a usable default.
         default_manual_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+You must strictly return ONLY CSV format with columns separated by commas.
 Columns and entry types in this exact order provided:
 
-{fields1}
+{fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
-IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
+IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
-characterᫀ이히리ᄐ 나애Dihirit AdefemaleThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-characterᫀ뢔사난Kim Sang-hyumaleA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
+character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
@@ -3107,19 +3107,19 @@ CRITICAL EXTRACTION RULES:
         # Default unified prompt (combines system + extraction instructions)
         default_unified_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (written as \x1F).
-Columns in this exact order: type\x1fraw_name\x1ftranslated_name\x1fgender\x1fdescription
+You must strictly return ONLY CSV format with columns separated by commas.
+Columns in this exact order: type,raw_name,translated_name,gender,description
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-IMPORTANT: Do NOT use commas, tabs, or pipes as field separators. Use ONLY the Unit Separator character \x1F between columns. Commas may appear freely within field values.
+IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
-character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
+character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks

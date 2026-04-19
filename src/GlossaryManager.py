@@ -50,22 +50,22 @@ def _build_header(*extra_cols):
 
 # Default unified auto-glossary prompt (used when AUTO_GLOSSARY_PROMPT is unset/empty).
 # NOTE: This matches the GUI's default_unified_prompt in GlossaryManager_GUI.py.
-# IMPORTANT: Examples use the Unit Separator character (\x1F) between fields.
-DEFAULT_AUTO_GLOSARY_PROMPT3 = f"""You are a novel glossary extraction assistant.
+# IMPORTANT: Examples use commas as field separators.
+DEFAULT_AUTO_GLOSARY_PROMPT3 = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
-Columns in this exact order: type{GLOSSARY_SEP}raw_name{GLOSSARY_SEP}translated_name{GLOSSARY_SEP}gender{GLOSSARY_SEP}description
+You must strictly return ONLY CSV format with columns separated by commas.
+Columns in this exact order: type,raw_name,translated_name,gender,description
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
+IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
-Critical Requirement: The translated name and description column must be in {{language}}, While the raw name column must the same as the source language.
+Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
-character{GLOSSARY_SEP}ᫀ이히리ᐐ 나애{GLOSSARY_SEP}Dihirit Ade{GLOSSARY_SEP}female{GLOSSARY_SEP}The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character{GLOSSARY_SEP}ᫀ뢤사난{GLOSSARY_SEP}Kim Sang-hyu{GLOSSARY_SEP}male{GLOSSARY_SEP}A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
+character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
