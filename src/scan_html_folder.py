@@ -5519,19 +5519,58 @@ def _is_standard_tag(raw_name):
     return name in STANDARD_HTML_TAGS
 
 
+# Sentence-punctuation markers that strongly indicate prose (rather than
+# a real or custom tag). Mixes Latin, CJK, and ellipsis glyphs so East
+# Asian angle-bracket quotations get classified correctly regardless of
+# which punctuation style the author used.
+_PROSE_PUNCTUATION = '.!?…。！？,、'
+
+
+def _looks_like_prose_content(trailing):
+    """Return True if `trailing` looks like sentence prose, not HTML attrs.
+
+    Heuristic used to exclude angle-bracketed prose from custom-tag
+    counts. Example: Korean/Japanese novels commonly use ``<...>`` or
+    ``&lt;...&gt;`` as a stylistic quotation bracket around whole
+    sentences (``<마력 없는 사람에게 쓰면 안 된다니까요?>``). The regex
+    would otherwise read the first word as a tag name and flag the
+    entire phrase as a missing custom tag.
+
+    A ``trailing`` string is classified as prose when it:
+      * contains NO ``=`` (which would indicate real HTML attributes), and
+      * either contains sentence-ending punctuation, OR is a multi-word
+        run longer than a typical attribute list.
+    """
+    if not trailing:
+        return False
+    s = trailing.strip()
+    if not s or s == '/' or '=' in s:
+        return False
+    if any(ch in s for ch in _PROSE_PUNCTUATION):
+        return True
+    # Multi-word run with no attribute-like ``=`` — treat as prose.
+    if ' ' in s and len(s) > 12:
+        return True
+    return False
+
+
 def _is_standard_tag_match(raw_name, trailing):
     """Classify a tag match as a real HTML tag vs. a custom/story tag.
 
-    Returns True only if BOTH conditions hold:
-      * the tag name is a known HTML/SVG/EPUB element, AND
-      * the content between the name and the closing bracket is either
-        empty, a lone self-closing slash, or looks like HTML attributes
-        (i.e. contains an ``=`` sign).
+    Returns True when the match should be IGNORED by custom-tag counts,
+    i.e. when it represents:
+      * a markup declaration (doctype / comment / PI), or
+      * genuine sentence prose wrapped in angle brackets, or
+      * a real HTML/SVG/EPUB tag (including those with attributes).
 
-    This prevents mis-classifying story/translation tags whose first word
-    happens to be a standard tag name -- e.g. ``&lt;I have many things&gt;``
-    would otherwise be read as the HTML italic tag and silently dropped
-    from custom-tag counts.
+    Returns False only for actual non-standard story/translation tags
+    like ``<concept>``, ``<概念>``, or ``&lt;mana&gt;``.
+
+    The prose-detection step is important for Asian-language EPUBs where
+    angle brackets are frequently used as quotation markers around whole
+    sentences — without it the scanner reports false ``source_custom_
+    tags_missing_*`` issues whenever a translator rewrites such passages
+    as plain dialogue.
     """
     # Doctypes, XML declarations, comments, and other markup declarations
     # (names starting with '!' or '?', e.g. ``<!DOCTYPE html>``,
@@ -5540,6 +5579,11 @@ def _is_standard_tag_match(raw_name, trailing):
     # This check runs BEFORE the standard-tags lookup because names like
     # ``!--`` or ``![CDATA[`` wouldn't be in ``STANDARD_HTML_TAGS``.
     if raw_name and raw_name[0] in ('!', '?'):
+        return True
+    # Sentence prose wrapped in angle brackets (common Asian-novel
+    # quotation style). Skip regardless of whether the first word happens
+    # to look like a standard tag name.
+    if _looks_like_prose_content(trailing):
         return True
     if not _is_standard_tag(raw_name):
         return False
