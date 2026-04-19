@@ -10147,12 +10147,26 @@ class UnifiedClient:
                     # config_params, generation_config, etc.) — an interrupt is
                     # not an API failure.
                     # ---------------------------------------------------------------
-                    if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled":
-                        raise
                     if is_stop_requested():
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     if isinstance(e, KeyboardInterrupt):
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                    # ---------------------------------------------------------------
+                    # FAST-PATH: structured UnifiedClientError raised by our own
+                    # inner Vertex code (prohibited_content from safety filters,
+                    # empty responses, content blocks, truncation markers, etc.).
+                    # These already carry the correct `error_type` that the outer
+                    # `_send_internal` wrapper relies on to trigger fallback keys /
+                    # truncation retries / safety-filter handling. Re-raise them
+                    # verbatim so:
+                    #   1. the noisy diagnostic dump doesn't fire (not an API failure)
+                    #   2. the final `raise UnifiedClientError(str(e)[:200])`
+                    #      fall-through doesn't strip `error_type` (which would
+                    #      break prohibited_content fallback + truncation retry).
+                    # ---------------------------------------------------------------
+                    if isinstance(e, UnifiedClientError):
+                        raise
 
                     # ---------------------------------------------------------------
                     # FAST-PATH: known-recoverable "maxOutputTokens out of range"
@@ -10362,48 +10376,56 @@ class UnifiedClient:
                                         print(f"   e.{_attr}: {_val}")
                                 except Exception:
                                     pass
-                        # Dump the request we sent so the offending field is visible
-                        try:
-                            _contents_dump = []
-                            for _c in contents:
-                                _role = getattr(_c, "role", "?")
-                                _parts_summary = []
-                                for _p in (getattr(_c, "parts", []) or []):
-                                    if getattr(_p, "text", None) is not None:
-                                        _t = _p.text or ""
-                                        _parts_summary.append(f"text(len={len(_t)})")
-                                    elif getattr(_p, "inline_data", None) is not None:
-                                        _id = _p.inline_data
-                                        _mt = getattr(_id, "mime_type", "?")
-                                        _data = getattr(_id, "data", b"") or b""
-                                        _parts_summary.append(f"inline_data(mime={_mt}, bytes={len(_data)})")
-                                    else:
-                                        _parts_summary.append(type(_p).__name__)
-                                _contents_dump.append(f"{_role}: [{', '.join(_parts_summary)}]")
-                            print("   REQUEST contents:")
-                            for _line in _contents_dump:
-                                print(f"     - {_line}")
-                        except Exception as _de:
-                            print(f"   (contents dump failed: {_de})")
-                        try:
-                            print(f"   REQUEST config_params: {config_params}")
-                        except Exception:
-                            pass
-                        try:
-                            # Convert GenerateContentConfig to dict if possible
-                            _gc_dict = None
-                            for _m in ("model_dump", "to_dict", "dict"):
-                                if hasattr(generation_config, _m):
-                                    try:
-                                        _gc_dict = getattr(generation_config, _m)()
-                                        break
-                                    except Exception:
-                                        continue
-                            if _gc_dict is not None:
-                                print(f"   REQUEST generation_config: {_gc_dict}")
-                        except Exception:
-                            pass
-                        print(f"   REQUEST model: {model_name}, location: {location}, project: {project_id}")
+                        # ---------------------------------------------------------------
+                        # Noisy REQUEST dump disabled — for transient TransportError /
+                        # timeout / 5xx failures, logging the entire request payload,
+                        # config_params, generation_config, and model on every failed
+                        # attempt just spams the console before the outer retry layer
+                        # handles it. The summary line above (❌ Vertex AI Gemini
+                        # request failed: ...) plus e.response.text / e.details are
+                        # enough to diagnose real issues. Uncomment to re-enable.
+                        # ---------------------------------------------------------------
+                        # try:
+                        #     _contents_dump = []
+                        #     for _c in contents:
+                        #         _role = getattr(_c, "role", "?")
+                        #         _parts_summary = []
+                        #         for _p in (getattr(_c, "parts", []) or []):
+                        #             if getattr(_p, "text", None) is not None:
+                        #                 _t = _p.text or ""
+                        #                 _parts_summary.append(f"text(len={len(_t)})")
+                        #             elif getattr(_p, "inline_data", None) is not None:
+                        #                 _id = _p.inline_data
+                        #                 _mt = getattr(_id, "mime_type", "?")
+                        #                 _data = getattr(_id, "data", b"") or b""
+                        #                 _parts_summary.append(f"inline_data(mime={_mt}, bytes={len(_data)})")
+                        #             else:
+                        #                 _parts_summary.append(type(_p).__name__)
+                        #         _contents_dump.append(f"{_role}: [{', '.join(_parts_summary)}]")
+                        #     print("   REQUEST contents:")
+                        #     for _line in _contents_dump:
+                        #         print(f"     - {_line}")
+                        # except Exception as _de:
+                        #     print(f"   (contents dump failed: {_de})")
+                        # try:
+                        #     print(f"   REQUEST config_params: {config_params}")
+                        # except Exception:
+                        #     pass
+                        # try:
+                        #     # Convert GenerateContentConfig to dict if possible
+                        #     _gc_dict = None
+                        #     for _m in ("model_dump", "to_dict", "dict"):
+                        #         if hasattr(generation_config, _m):
+                        #             try:
+                        #                 _gc_dict = getattr(generation_config, _m)()
+                        #                 break
+                        #             except Exception:
+                        #                 continue
+                        #     if _gc_dict is not None:
+                        #         print(f"   REQUEST generation_config: {_gc_dict}")
+                        # except Exception:
+                        #     pass
+                        # print(f"   REQUEST model: {model_name}, location: {location}, project: {project_id}")
                     except Exception as _outer_diag:
                         print(f"   (Vertex diagnostic dump failed: {_outer_diag})")
 
