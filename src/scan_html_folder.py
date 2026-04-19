@@ -5585,6 +5585,14 @@ def _is_standard_tag_match(raw_name, trailing):
     # to look like a standard tag name.
     if _looks_like_prose_content(trailing):
         return True
+    # The regex captures everything up to the first space as the "tag
+    # name", so a single-word phrase ending in punctuation like
+    # ``<이거라면….>`` or ``<마석은요?>`` arrives here with no
+    # trailing content but sentence punctuation embedded in the name
+    # itself. Real HTML/custom tag names never contain ``. ! ? …``, so
+    # this is a reliable prose signal.
+    if raw_name and any(ch in raw_name for ch in _PROSE_PUNCTUATION):
+        return True
     if not _is_standard_tag(raw_name):
         return False
     if trailing is None:
