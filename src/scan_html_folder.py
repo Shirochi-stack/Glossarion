@@ -5017,6 +5017,25 @@ def check_potential_truncation(raw_text):
     # raw_text is already plain text (BeautifulSoup get_text), but defensively
     # decode any leftover HTML entities and collapse whitespace
     cleaned = raw_text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    # Strip invisible / zero-width characters that str.split() ignores but
+    # rstrip() does NOT strip — these appear at chapter ends as paragraph
+    # separators and would otherwise be treated as the "last character",
+    # incorrectly triggering the truncation heuristic.
+    #   U+200B  ZERO WIDTH SPACE
+    #   U+200C  ZERO WIDTH NON-JOINER
+    #   U+200D  ZERO WIDTH JOINER
+    #   U+2060  WORD JOINER
+    #   U+FEFF  ZERO WIDTH NO-BREAK SPACE (BOM)
+    #   U+00A0  NO-BREAK SPACE (treated as space)
+    _zw_translate = {
+        0x200B: None,
+        0x200C: None,
+        0x200D: None,
+        0x2060: None,
+        0xFEFF: None,
+        0x00A0: ord(' '),
+    }
+    cleaned = cleaned.translate(_zw_translate)
     cleaned = ' '.join(cleaned.split())
 
     if not cleaned or len(cleaned) < 10:
