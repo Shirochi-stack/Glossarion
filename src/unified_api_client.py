@@ -10206,12 +10206,24 @@ class UnifiedClient:
                                     not isinstance(getattr(self.__class__, '_vertex_max_tokens_cap', None), dict):
                                 self.__class__._vertex_max_tokens_cap = {}
                             _prev_cap = self.__class__._vertex_max_tokens_cap.get(model_name)
-                            if _prev_cap is None or _adjusted_max < _prev_cap:
+                            _is_new_or_tighter_cap = (_prev_cap is None or _adjusted_max < _prev_cap)
+                            if _is_new_or_tighter_cap:
                                 self.__class__._vertex_max_tokens_cap[model_name] = _adjusted_max
-                            print(
-                                f"📏 Vertex max_output_tokens out of range for {model_name}; "
-                                f"capping to {_adjusted_max} and caching for this session"
-                            )
+                            # Only log once per (model, cap) pair per session — this
+                            # fast-path runs on every failing request until the cap
+                            # is cached, and on subsequent requests when the SDK
+                            # still raises the same error, so logging every time
+                            # just spams the console.
+                            if not hasattr(self.__class__, '_vertex_cap_logged') or \
+                                    not isinstance(getattr(self.__class__, '_vertex_cap_logged', None), set):
+                                self.__class__._vertex_cap_logged = set()
+                            _cap_key = (model_name, _adjusted_max)
+                            if _cap_key not in self.__class__._vertex_cap_logged:
+                                print(
+                                    f"📏 Vertex max_output_tokens out of range for {model_name}; "
+                                    f"capping to {_adjusted_max} and caching for this session"
+                                )
+                                self.__class__._vertex_cap_logged.add(_cap_key)
                         except Exception:
                             pass
 
@@ -10461,17 +10473,35 @@ class UnifiedClient:
                             # Keep the tightest (smallest) cap we've ever seen for this model
                             if _prev_cap is None or _adjusted_max < _prev_cap:
                                 self.__class__._vertex_max_tokens_cap[model_name] = _adjusted_max
-                            print(
-                                f"📏 Caching Vertex max_output_tokens cap for {model_name}: {_adjusted_max} "
-                                f"(applies to all subsequent requests this session)"
-                            )
+                            # Only log once per (model, cap) per session — shared
+                            # with the fast-path set so we don't double-print.
+                            if not hasattr(self.__class__, '_vertex_cap_logged') or \
+                                    not isinstance(getattr(self.__class__, '_vertex_cap_logged', None), set):
+                                self.__class__._vertex_cap_logged = set()
+                            _cap_key = (model_name, _adjusted_max)
+                            if _cap_key not in self.__class__._vertex_cap_logged:
+                                print(
+                                    f"📏 Caching Vertex max_output_tokens cap for {model_name}: {_adjusted_max} "
+                                    f"(applies to all subsequent requests this session)"
+                                )
+                                self.__class__._vertex_cap_logged.add(_cap_key)
                         except Exception:
                             pass
 
-                        print(
-                            f"⚠️ {model_name} max_output_tokens exceeds limit, "
-                            f"retrying with {_adjusted_max}"
-                        )
+                        # Only log the retry notice once per (model, cap) pair too
+                        try:
+                            if not hasattr(self.__class__, '_vertex_cap_retry_logged') or \
+                                    not isinstance(getattr(self.__class__, '_vertex_cap_retry_logged', None), set):
+                                self.__class__._vertex_cap_retry_logged = set()
+                            _retry_key = (model_name, _adjusted_max)
+                            if _retry_key not in self.__class__._vertex_cap_retry_logged:
+                                print(
+                                    f"⚠️ {model_name} max_output_tokens exceeds limit, "
+                                    f"retrying with {_adjusted_max}"
+                                )
+                                self.__class__._vertex_cap_retry_logged.add(_retry_key)
+                        except Exception:
+                            pass
 
                         # Rebuild generation_config with the capped value and
                         # retry through the same streaming / non-streaming path.
