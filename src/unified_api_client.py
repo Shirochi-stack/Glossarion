@@ -10064,16 +10064,23 @@ class UnifiedClient:
 
                     # Report response summary + thinking tokens (same style as authgem)
                     _elapsed = _time.time() - _t_start
+                    # Always extract thinking tokens when usage metadata is
+                    # present, even when the value is zero. Accept ``0`` as a
+                    # valid reported value (previously we only captured > 0,
+                    # which suppressed the "0 thinking tokens used" line).
                     thinking_tokens = 0
                     if raw_usage is not None:
                         for _attr in ("thoughts_token_count", "thought_token_count", "thoughtsTokenCount"):
                             _v = getattr(raw_usage, _attr, None)
-                            if isinstance(_v, int) and _v > 0:
+                            if isinstance(_v, int):
                                 thinking_tokens = _v
                                 break
                     _mode = "streaming" if _enable_streaming else "non-streaming"
                     _summary = f"📡 Vertex: Response received in {_elapsed:.1f}s ({len(result_text)} chars, {_mode})"
-                    if thinking_tokens > 0:
+                    # Always show the thinking-tokens count when we have usage
+                    # info — including 0 — so the user can see when a request
+                    # skipped thinking (e.g. thinking disabled / minimal level).
+                    if raw_usage is not None:
                         _summary += f" | 🧠 {thinking_tokens} thinking tokens used"
                     if finish_reason == 'length':
                         _summary += " | ✂️ finish_reason=length (MAX_TOKENS — output truncated)"
@@ -10285,7 +10292,7 @@ class UnifiedClient:
                                 if raw_usage is not None:
                                     for _attr in ("thoughts_token_count", "thought_token_count", "thoughtsTokenCount"):
                                         _v = getattr(raw_usage, _attr, None)
-                                        if isinstance(_v, int) and _v > 0:
+                                        if isinstance(_v, int):
                                             _tt = _v
                                             break
                                 _elapsed_retry = _time.time() - _t_start
@@ -10294,7 +10301,9 @@ class UnifiedClient:
                                     f"📡 Vertex: Response received in {_elapsed_retry:.1f}s after auto-cap retry "
                                     f"({len(result_text)} chars, {_mode_r}, max_output_tokens={_adjusted_max})"
                                 )
-                                if _tt > 0:
+                                # Always show the thinking-tokens count when we have
+                                # usage info — including 0.
+                                if raw_usage is not None:
                                     _msg += f" | 🧠 {_tt} thinking tokens used"
                                 if finish_reason == 'length':
                                     _msg += " | ✂️ finish_reason=length (MAX_TOKENS — output truncated)"
@@ -10508,14 +10517,16 @@ class UnifiedClient:
                                 if raw_usage is not None:
                                     for _attr in ("thoughts_token_count", "thought_token_count", "thoughtsTokenCount"):
                                         _v = getattr(raw_usage, _attr, None)
-                                        if isinstance(_v, int) and _v > 0:
+                                        if isinstance(_v, int):
                                             _thinking_tokens = _v
                                             break
                                 _summary = (
                                     f"📡 Vertex: Response received after retry "
                                     f"({len(result_text)} chars, max_output_tokens={_adjusted_max})"
                                 )
-                                if _thinking_tokens > 0:
+                                # Always show the thinking-tokens count when we
+                                # have usage info — including 0.
+                                if raw_usage is not None:
                                     _summary += f" | 🧠 {_thinking_tokens} thinking tokens used"
                                 if finish_reason == 'length':
                                     _summary += " | ✂️ finish_reason=length (MAX_TOKENS — output truncated)"
