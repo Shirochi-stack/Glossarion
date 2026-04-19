@@ -4414,13 +4414,34 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             chapter_info["status"] = "qa_failed"
             chapter_info["qa_issues"] = True
             chapter_info["qa_timestamp"] = time.time()
-            chapter_info["qa_issues_found"] = faulty_row.get("issues", [])
+            _incoming_issues = faulty_row.get("issues", [])
+            chapter_info["qa_issues_found"] = _incoming_issues
             chapter_info["duplicate_confidence"] = faulty_row.get("duplicate_confidence", 0)
-            
+
             # Ensure output_file is set (use faulty_filename if null)
             if not chapter_info.get("output_file"):
                 chapter_info["output_file"] = faulty_filename
-            
+
+            # DUPLICATE ENTRIES FIX: A progress file can end up with multiple
+            # entries pointing to the same output_file (e.g. ``'536'`` and
+            # ``'special_Chapter536'`` both pointing at ``Chapter536.xhtml``).
+            # Without this, updating one leaves the other with stale
+            # ``qa_issues_found`` from a previous scan. Mirror the current
+            # scan's QA fields onto every sibling entry that shares the
+            # output_file so the progress file can't disagree with itself.
+            _target_output = chapter_info.get("output_file")
+            if _target_output:
+                for _sib_key, _sib in prog["chapters"].items():
+                    if _sib_key == chapter_key or not isinstance(_sib, dict):
+                        continue
+                    if _sib.get("output_file") != _target_output:
+                        continue
+                    _sib["status"] = "qa_failed"
+                    _sib["qa_issues"] = True
+                    _sib["qa_timestamp"] = chapter_info["qa_timestamp"]
+                    _sib["qa_issues_found"] = list(_incoming_issues)
+                    _sib["duplicate_confidence"] = chapter_info["duplicate_confidence"]
+
             updated_count += 1
             
             # Use chapter_num from faulty_row if available, otherwise fall back to actual_num
@@ -4535,6 +4556,32 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             chapter_info["qa_timestamp"] = time.time()
             chapter_info["duplicate_confidence"] = resolved_row.get("duplicate_confidence", 0)
             # Keep content_hash/output_file untouched
+
+            # DUPLICATE ENTRIES FIX: mirror the cleared QA fields onto any
+            # other progress entries that point at the same output_file
+            # (e.g. ``'536'`` + ``'special_Chapter536'``). Otherwise the
+            # duplicate keeps its stale ``qa_failed`` + ``qa_issues_found``
+            # and the GUI still shows the chapter as failed.
+            _target_output = chapter_info.get("output_file")
+            if _target_output:
+                for _sib_key, _sib in prog["chapters"].items():
+                    if _sib_key == chapter_key or not isinstance(_sib, dict):
+                        continue
+                    if _sib.get("output_file") != _target_output:
+                        continue
+                    # Respect protected issues on the sibling, same as above.
+                    _sib_issues = _sib.get("qa_issues_found", []) or []
+                    _sib_protected = any(
+                        (i.get("type") if isinstance(i, dict) else str(i)) in PROTECTED_ISSUES
+                        for i in _sib_issues
+                    )
+                    if _sib_protected:
+                        continue
+                    _sib["status"] = "completed"
+                    _sib["qa_issues"] = False
+                    _sib["qa_issues_found"] = []
+                    _sib["qa_timestamp"] = chapter_info["qa_timestamp"]
+                    _sib["duplicate_confidence"] = chapter_info["duplicate_confidence"]
 
             resolved_count += 1
             chapter_num = _choose_log_num(
@@ -7084,7 +7131,7 @@ def process_html_file_batch(args):
                     trans_angle_count = 0
                     trans_entity_count = 0
                 trans_any_count = trans_angle_count + trans_entity_count
-                
+
                 missing_count = source_count - trans_any_count
                 if missing_count > 0:
                     # Include a preview of the source tag names so the user
