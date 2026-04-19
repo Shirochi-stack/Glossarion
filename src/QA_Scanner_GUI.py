@@ -3838,6 +3838,39 @@ class QAScannerMixin:
         cache_enabled_checkbox = self._create_styled_checkbox("Enable performance cache (speeds up duplicate detection)")
         cache_enabled_checkbox.setChecked(qa_settings.get('cache_enabled', True))
         cache_layout.addWidget(cache_enabled_checkbox)
+
+        # ------------------------------------------------------------------
+        # Thread vs Process executor toggle.
+        #
+        # Default (OFF): ProcessPoolExecutor — each worker is a separate
+        # Python process. Best CPU parallelism but on Windows every worker
+        # pays a large spawn cost (re-import all modules). In dev mode this
+        # can add tens of seconds of startup per scan; the bundled .exe
+        # doesn't suffer because its PYZ archive loads pre-compiled
+        # bytecode.
+        #
+        # When enabled: ThreadPoolExecutor — workers share the interpreter,
+        # zero spawn cost. Great for dev runs and for small scans where
+        # startup dominates. Slightly slower on CPU-bound duplicate
+        # detection for very large scans because of the GIL, but HTML
+        # parsing / I/O dominates most workloads.
+        # ------------------------------------------------------------------
+        use_threads_checkbox = self._create_styled_checkbox(
+            "Use threads instead of processes (faster cold start, good for dev mode)"
+        )
+        use_threads_checkbox.setChecked(
+            bool(qa_settings.get('use_thread_executor', False))
+        )
+        cache_layout.addWidget(use_threads_checkbox)
+        use_threads_hint = QLabel(
+            "Avoids the ProcessPoolExecutor spawn overhead (each child re-imports every module).\n"
+            "Recommended ON when running from source; .exe builds are fast either way."
+        )
+        use_threads_hint.setFont(QFont('Arial', 9))
+        use_threads_hint.setStyleSheet("color: gray;")
+        use_threads_hint.setContentsMargins(20, 0, 0, 0)
+        cache_layout.addWidget(use_threads_hint)
+
         cache_layout.addSpacing(10)
         
         # Cache size settings
@@ -4218,6 +4251,19 @@ class QAScannerMixin:
                         self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
                     if failed_cache_vars:
                         self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
+                # Save the thread-vs-process executor toggle so scan_html_folder
+                # can pick it up without relying on env vars (env may be stripped
+                # by subprocess isolation in some runs).
+                try:
+                    qa_settings['use_thread_executor'] = bool(use_threads_checkbox.isChecked())
+                    if debug_mode:
+                        self.append_log(
+                            f"🔍 [DEBUG] QA use_thread_executor: {qa_settings['use_thread_executor']}"
+                        )
+                except Exception as _e:
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] Failed to save use_thread_executor: {_e}")
+
                 # Save word count multipliers
                 try:
                     # Save auto toggle state
@@ -4348,6 +4394,8 @@ class QAScannerMixin:
                         ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
                         ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
                         ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                        # Thread-vs-process executor for the scan
+                        ('QA_USE_THREAD_EXECUTOR', '1' if qa_settings.get('use_thread_executor', False) else '0'),
                         ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 1))),
                         # Counting mode: set env vars based on selection
                         ('QA_USE_WORD_COUNT', '1' if qa_settings.get('counting_mode') == 'word' else '0'),
@@ -4503,6 +4551,12 @@ class QAScannerMixin:
                 cache_enabled_checkbox.setChecked(True)
                 auto_size_checkbox.setChecked(False)
                 show_stats_checkbox.setChecked(False)
+
+                # Thread-vs-process executor toggle resets to OFF
+                # (ProcessPoolExecutor is the historical default and is
+                # optimal for .exe builds; users running from source can
+                # re-enable threads manually).
+                use_threads_checkbox.setChecked(False)
 
                 # Reset cache sizes to defaults
                 for cache_name, default_value in cache_defaults.items():

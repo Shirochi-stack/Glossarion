@@ -2748,8 +2748,30 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batch = chapter_comparisons[i:i + batch_size]
             batches.append(('chapter_comparison', batch, worker_data))
         
-        # Process with ProcessPoolExecutor
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
+        # Executor selection for enhanced duplicate detection (honours the
+        # same QA-setting toggle as the main scan).
+        try:
+            _load_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            _cfg_use_threads = False
+            if os.path.exists(_load_path):
+                with open(_load_path, 'r', encoding='utf-8') as _cf:
+                    _cfg_use_threads = bool(
+                        json.load(_cf).get('qa_scanner_settings', {}).get('use_thread_executor', False)
+                    )
+        except Exception:
+            _cfg_use_threads = False
+        _use_thread_pool_enh = bool(
+            _cfg_use_threads
+            or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+        )
+        if _use_thread_pool_enh:
+            _ExecCls = concurrent.futures.ThreadPoolExecutor
+            _kw = {'max_workers': max_workers}
+            log("   🧵 Using ThreadPoolExecutor for enhanced detection")
+        else:
+            _ExecCls = concurrent.futures.ProcessPoolExecutor
+            _kw = {'max_workers': max_workers, 'initializer': _init_worker_process}
+        with _ExecCls(**_kw) as executor:
             futures = []
             
             for batch_args in batches:
@@ -8075,11 +8097,27 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info)
         worker_args.append(args)
     
+    # Executor selection: thread pool avoids the ProcessPoolExecutor spawn
+    # cost on Windows (each child re-imports all modules, including PySide6
+    # when launched from the GUI). The toggle lives in QA Scanner settings
+    # and is mirrored into QA_USE_THREAD_EXECUTOR; qa_settings wins.
+    _use_thread_pool = bool(
+        qa_settings.get('use_thread_executor', False)
+        or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+    )
+    if _use_thread_pool:
+        _ExecutorCls = concurrent.futures.ThreadPoolExecutor
+        _exec_kwargs = {'max_workers': max_workers}
+        log("   🧵 Using ThreadPoolExecutor (no spawn overhead)")
+    else:
+        _ExecutorCls = concurrent.futures.ProcessPoolExecutor
+        _exec_kwargs = {'max_workers': max_workers, 'initializer': _init_worker_process}
+    
     # Process files in parallel
     results = []
     processed_count = 0
     
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
+    with _ExecutorCls(**_exec_kwargs) as executor:
         # Submit all batches
         futures = []
         
