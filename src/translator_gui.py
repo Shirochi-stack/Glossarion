@@ -16748,7 +16748,8 @@ Important rules:
         try:
             from epub_library import EpubLibraryDialog
             dlg = getattr(self, '_epub_library_dialog', None)
-            if dlg is None:
+            first_creation = dlg is None
+            if first_creation:
                 dlg = EpubLibraryDialog(config=self.config, parent=self)
                 dlg.setModal(False)
                 self._epub_library_dialog = dlg
@@ -16756,7 +16757,11 @@ Important rules:
                 dlg.raise_()
                 dlg.activateWindow()
             else:
-                dlg._auto_refresh()  # lightweight — only reloads if file list changed
+                # On first creation the dialog already schedules a deferred
+                # scan; calling _auto_refresh here would force a synchronous
+                # re-scan and negate the instant-open optimization.
+                if not first_creation:
+                    dlg._auto_refresh()  # lightweight — only reloads if file list changed
                 dlg.show()
                 dlg.raise_()
                 dlg.activateWindow()

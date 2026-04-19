@@ -679,12 +679,17 @@ class EpubLibraryDialog(QDialog):
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
         self._setup_ui()
-        self._load_books()
-        # Auto-refresh library every 2 seconds
+        # Defer the filesystem scan so the dialog paints immediately;
+        # on large libraries scan_for_epubs() + cover-thread spawn can otherwise
+        # block the UI for a noticeable fraction of a second on first open.
+        self._empty_label.setText("Scanning library…")
+        self._empty_label.show()
+        QTimer.singleShot(0, self._load_books)
+        # Auto-refresh library every 2 seconds (start after initial load)
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(2000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh)
-        self._auto_refresh_timer.start()
+        QTimer.singleShot(2500, self._auto_refresh_timer.start)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
@@ -1978,6 +1983,11 @@ class EpubReaderDialog(QDialog):
             # Show TOC: restore saved width
             w = getattr(self, '_toc_saved_width', 220)
             self._splitter.setSizes([w, max(1, sizes[1] - w)])
+        # The reader viewport width just changed but the dialog's resizeEvent
+        # won't fire from a splitter-only change. In paginated modes the CSS
+        # column widths (and translateX offset) must be recomputed or the
+        # content appears shifted/cropped to the left.
+        self._refresh_pagination_viewport()
 
     def _change_font_size(self, delta):
         self._font_size = max(8, min(32, self._font_size + delta))
@@ -2199,46 +2209,58 @@ class EpubReaderDialog(QDialog):
     def resizeEvent(self, event):
         """Invalidate page cache on resize, preserving reading position."""
         super().resizeEvent(event)
+        self._refresh_pagination_viewport(delay=100)
+
+    def _refresh_pagination_viewport(self, delay: int = 120):
+        """Recompute paginated layout after viewport width changes.
+
+        Used by resizeEvent and TOC toggle — anything that changes the
+        reader widget's width without rebuilding the HTML.
+        """
         if not hasattr(self, '_chapter_page_cache'):
+            return
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        if not self._chapters:
             return
         # Save scroll proportion before clearing cache
         old_count = self._chapter_page_cache.get(self._current_row, 0)
         old_page = self._current_page
         self._chapter_page_cache.clear()
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and self._chapters:
-            # Proportion-based: map old position to new page count
-            proportion = old_page / max(1, old_count) if old_count > 0 else 0
-            # Hide content immediately to prevent image flash during resize
-            _hide_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'none'; c.style.opacity = '0'; }"
-            _reveal_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'transform 0.25s ease'; c.style.opacity = '1'; }"
+        # Proportion-based: map old position to new page count
+        proportion = old_page / max(1, old_count) if old_count > 0 else 0
+        # Hide content immediately to prevent image flash during resize
+        _hide_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'none'; c.style.opacity = '0'; }"
+        _reveal_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'transform 0.25s ease'; c.style.opacity = '1'; }"
+        if self._layout_mode == LAYOUT_SINGLE:
+            self._reader.page().runJavaScript(_hide_js)
+        else:
+            self._reader_left.page().runJavaScript(_hide_js)
+            self._reader_right.page().runJavaScript(_hide_js)
+
+        def _on_resize_recount():
             if self._layout_mode == LAYOUT_SINGLE:
-                self._reader.page().runJavaScript(_hide_js)
+                def on_count(count):
+                    count = int(count)
+                    self._chapter_page_cache[self._current_row] = count
+                    self._current_page = min(max(0, round(proportion * count)), count - 1)
+                    self._js_scroll_to(self._reader, self._current_page)
+                    # Reveal after scroll
+                    QTimer.singleShot(30, lambda: self._reader.page().runJavaScript(_reveal_js))
+                    self._update_nav_buttons()
+                self._js_page_count(self._reader, on_count)
             else:
-                self._reader_left.page().runJavaScript(_hide_js)
-                self._reader_right.page().runJavaScript(_hide_js)
-            def _on_resize_recount():
-                if self._layout_mode == LAYOUT_SINGLE:
-                    def on_count(count):
-                        count = int(count)
-                        self._chapter_page_cache[self._current_row] = count
-                        self._current_page = min(max(0, round(proportion * count)), count - 1)
-                        self._js_scroll_to(self._reader, self._current_page)
-                        # Reveal after scroll
-                        QTimer.singleShot(30, lambda: self._reader.page().runJavaScript(_reveal_js))
-                        self._update_nav_buttons()
-                    self._js_page_count(self._reader, on_count)
-                else:
-                    def on_count(count):
-                        count = int(count)
-                        self._chapter_page_cache[self._current_row] = count
-                        self._current_page = min(max(0, round(proportion * count)), count - 1)
-                        self._js_scroll_to(self._reader_left, self._current_page)
-                        self._js_scroll_to(self._reader_right, self._current_page + 1)
-                        QTimer.singleShot(30, lambda: [br.page().runJavaScript(_reveal_js)
-                            for br in (self._reader_left, self._reader_right)])
-                        self._update_nav_buttons()
-                    self._js_page_count(self._reader_left, on_count)
-            QTimer.singleShot(100, _on_resize_recount)
+                def on_count(count):
+                    count = int(count)
+                    self._chapter_page_cache[self._current_row] = count
+                    self._current_page = min(max(0, round(proportion * count)), count - 1)
+                    self._js_scroll_to(self._reader_left, self._current_page)
+                    self._js_scroll_to(self._reader_right, self._current_page + 1)
+                    QTimer.singleShot(30, lambda: [br.page().runJavaScript(_reveal_js)
+                        for br in (self._reader_left, self._reader_right)])
+                    self._update_nav_buttons()
+                self._js_page_count(self._reader_left, on_count)
+        QTimer.singleShot(delay, _on_resize_recount)
 
     def _update_nav_buttons(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
