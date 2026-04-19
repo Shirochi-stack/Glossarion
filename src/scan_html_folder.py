@@ -5592,20 +5592,50 @@ def _is_standard_tag(raw_name):
 _PROSE_PUNCTUATION = '.!?…。！？,、'
 
 
+# CJK Unicode ranges: Korean Hangul, Japanese Hiragana/Katakana, CJK ideographs
+_CJK_RANGES = (
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+    (0x3400, 0x4DBF),  # CJK Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0xAC00, 0xD7AF),  # Hangul Syllables
+    (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+    (0xFF00, 0xFFEF),  # Halfwidth / Fullwidth Forms
+)
+
+
+def _has_cjk(s):
+    """Return True if `s` contains any CJK character."""
+    if not s:
+        return False
+    for ch in s:
+        cp = ord(ch)
+        for lo, hi in _CJK_RANGES:
+            if lo <= cp <= hi:
+                return True
+    return False
+
+
 def _looks_like_prose_content(trailing):
     """Return True if `trailing` looks like sentence prose, not HTML attrs.
 
     Heuristic used to exclude angle-bracketed prose from custom-tag
     counts. Example: Korean/Japanese novels commonly use ``<...>`` or
     ``&lt;...&gt;`` as a stylistic quotation bracket around whole
-    sentences (``<마력 없는 사람에게 쓰면 안 된다니까요?>``). The regex
-    would otherwise read the first word as a tag name and flag the
-    entire phrase as a missing custom tag.
+    sentences (``<마력 없는 사람에게 쓰면 안 된다니까요?>``) *and* shorter
+    noun-phrase titles like ``<내통자의 정체>`` ("The Traitor's
+    Identity"). The regex would otherwise read the first word as a tag
+    name and flag the entire phrase as a missing custom tag.
 
     A ``trailing`` string is classified as prose when it:
       * contains NO ``=`` (which would indicate real HTML attributes), and
-      * either contains sentence-ending punctuation, OR is a multi-word
-        run longer than a typical attribute list.
+      * either contains sentence-ending punctuation,
+      * OR is multi-word (has whitespace). Real HTML tags without ``=``
+        are single-token attribute names (e.g. ``<input disabled>``); any
+        internal whitespace in an attribute-less tag is a strong prose
+        signal, especially for CJK languages where a 2-3 word title like
+        ``내통자의 정체`` (6 chars) is far shorter than the former
+        Latin-biased 12-char threshold.
     """
     if not trailing:
         return False
@@ -5614,8 +5644,19 @@ def _looks_like_prose_content(trailing):
         return False
     if any(ch in s for ch in _PROSE_PUNCTUATION):
         return True
-    # Multi-word run with no attribute-like ``=`` — treat as prose.
-    if ' ' in s and len(s) > 12:
+    # Multi-word run with no attribute-like ``=``.
+    # Previous rule required len(s) > 12 which miscategorised short CJK
+    # titles (``내통자의 정체``, ``앱리스의 악몽``) as custom tags.
+    # Any whitespace inside an attribute-less angle-bracket is a prose
+    # signal — real HTML boolean attributes are single-token.
+    if ' ' in s:
+        return True
+    # CJK signal: real HTML/XHTML tags and attributes never contain CJK
+    # characters. If the trailing content is CJK (even a single word like
+    # “정체” in ``<내통자의 정체>``), it's a quotation
+    # bracket, not a tag. The regex already split the match on the first
+    # whitespace, so a non-empty CJK trailing implies a multi-token phrase.
+    if _has_cjk(s):
         return True
     return False
 
