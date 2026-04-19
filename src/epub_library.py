@@ -2157,11 +2157,46 @@ class EpubReaderDialog(QDialog):
             # Show TOC: restore saved width
             w = getattr(self, '_toc_saved_width', 220)
             self._splitter.setSizes([w, max(1, sizes[1] - w)])
-        # The reader viewport width just changed but the dialog's resizeEvent
-        # won't fire from a splitter-only change. In paginated modes the CSS
-        # column widths (and translateX offset) must be recomputed or the
-        # content appears shifted/cropped to the left.
-        self._refresh_pagination_viewport()
+        # The reader viewport width just changed. The in-page _setupColumns
+        # resize handler re-anchors the transform to _CURRENT_PAGE atomically,
+        # so no opacity flash is needed here — we only need to refresh the
+        # Python-side page-count cache that drives nav-button state.
+        self._resync_page_count()
+
+    def _resync_page_count(self):
+        """Requery page count after a viewport width change (no flash)."""
+        if not hasattr(self, '_chapter_page_cache'):
+            return
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        if not self._chapters:
+            return
+        self._chapter_page_cache.clear()
+
+        def on_count(count):
+            count = int(count)
+            self._chapter_page_cache[self._current_row] = count
+            # Clamp if the current page is now past the end (e.g. column
+            # count shrank) and silently jump to the clamped position.
+            step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
+            max_page = max(0, count - step)
+            if self._current_page > max_page:
+                self._current_page = max_page
+                if self._layout_mode == LAYOUT_SINGLE:
+                    self._js_scroll_to(self._reader, self._current_page, animate=False)
+                else:
+                    self._js_scroll_to(self._reader_left, self._current_page, animate=False)
+                    self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
+            self._update_nav_buttons()
+
+        # Give the browser a tick to process the splitter-driven resize
+        # before we query the new scrollWidth-based page count.
+        def _do():
+            if self._layout_mode == LAYOUT_SINGLE:
+                self._js_page_count(self._reader, on_count)
+            else:
+                self._js_page_count(self._reader_left, on_count)
+        QTimer.singleShot(60, _do)
 
     def _change_font_size(self, delta):
         self._font_size = max(8, min(32, self._font_size + delta))
@@ -2347,14 +2382,20 @@ class EpubReaderDialog(QDialog):
             if animate:
                 js = (
                     "var c = document.getElementById('columns');"
-                    "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
-                    f"if (c) c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
+                    "if (c) {"
+                    "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
+                    # Record the target page so _setupColumns can re-anchor
+                    # the transform on the next viewport-width change.
+                    f"  _CURRENT_PAGE = {page_num};"
+                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
+                    "}"
                 )
             else:
                 js = (
                     "var c = document.getElementById('columns');"
                     "if (c) {"
                     "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
+                    f"  _CURRENT_PAGE = {page_num};"
                     "  var _t = c.style.transition;"
                     "  c.style.transition = 'none';"
                     f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
@@ -2698,6 +2739,12 @@ class EpubReaderDialog(QDialog):
                 f"</style>"
                 f"<script>"
                 f"var _PAGE_W = 0;"
+                # _CURRENT_PAGE is maintained by _js_scroll_to so that
+                # _setupColumns() can re-anchor the transform whenever the
+                # viewport width changes (window resize, TOC toggle). Without
+                # this, changing column widths left the old translateX offset
+                # stale and required hiding/revealing content to mask the jump.
+                f"var _CURRENT_PAGE = 0;"
                 f"function _setupColumns() {{"
                 f"  var c = document.getElementById('columns');"
                 f"  if (!c) return;"
@@ -2707,6 +2754,14 @@ class EpubReaderDialog(QDialog):
                 f"  _PAGE_W = Math.floor(window.innerWidth);"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
+                # Re-apply the current page offset to the new column width
+                # atomically (with transition suppressed) so the user never
+                # sees a stale/mis-aligned frame.
+                f"  var _t = c.style.transition;"
+                f"  c.style.transition = 'none';"
+                f"  c.style.transform = 'translate3d(' + Math.round(-_CURRENT_PAGE * _PAGE_W) + 'px, 0, 0)';"
+                f"  void c.offsetHeight;"
+                f"  c.style.transition = _t || 'transform 0.3s ease';"
                 f"  /* Clean up whitespace between consecutive full-page images */"
                 f"  var imgs = c.querySelectorAll('.full-page-img');"
                 f"  imgs.forEach(function(el) {{"
