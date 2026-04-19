@@ -10142,6 +10142,19 @@ class UnifiedClient:
                     error_str = str(e)
 
                     # ---------------------------------------------------------------
+                    # FAST-PATH: user cancellation. Re-raise immediately without
+                    # printing the noisy Vertex diagnostic dump (request contents,
+                    # config_params, generation_config, etc.) — an interrupt is
+                    # not an API failure.
+                    # ---------------------------------------------------------------
+                    if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled":
+                        raise
+                    if is_stop_requested():
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                    if isinstance(e, KeyboardInterrupt):
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                    # ---------------------------------------------------------------
                     # FAST-PATH: known-recoverable "maxOutputTokens out of range"
                     # 400 from Vertex. Detect it here — before the noisy diagnostic
                     # dump fires — so we can silently cap, cache, and retry.
