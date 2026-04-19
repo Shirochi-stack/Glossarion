@@ -1473,7 +1473,7 @@ class EpubReaderDialog(QDialog):
 
         # Layout mode dropdown
         self._layout_combo = QComboBox()
-        self._layout_combo.addItems(["📄 Single Page", "📖 Double Page (broken)", "📜 Scroll", "📃 Scroll All"])
+        self._layout_combo.addItems(["📄 Single Page", "📖 Double Page", "📜 Scroll", "📃 Scroll All"])
         self._layout_combo.setFixedWidth(145)
         self._layout_combo.setCursor(Qt.PointingHandCursor)
         self._layout_combo.setStyleSheet("""
@@ -1665,6 +1665,12 @@ class EpubReaderDialog(QDialog):
         double_layout.setSpacing(2)
         self._reader_left = _make_reader_widget()
         self._reader_right = _make_reader_widget()
+        # Hook loadFinished on both panes so _finalize_double_page actually runs.
+        # Without this, the panes never get scrolled to their target pages and
+        # stay frozen at the start of the chapter.
+        if _HAS_WEBENGINE:
+            self._reader_left.loadFinished.connect(self._on_reader_load_finished)
+            self._reader_right.loadFinished.connect(self._on_reader_load_finished)
         double_layout.addWidget(self._reader_left)
         double_layout.addWidget(self._reader_right)
         self._reader_stack.addWidget(double_widget)
@@ -2123,9 +2129,16 @@ class EpubReaderDialog(QDialog):
         """Called when QWebEngineView finishes loading HTML."""
         if not ok or self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             return
+        # The signal fires from whichever browser finished loading; route
+        # based on the sender rather than layout alone so stale loads from
+        # the single-reader don't confuse the double-page pending counter.
+        sender = self.sender()
         if self._layout_mode == LAYOUT_SINGLE:
-            self._finalize_single_page()
+            if sender is self._reader:
+                self._finalize_single_page()
         elif self._layout_mode == LAYOUT_DOUBLE:
+            if sender not in (self._reader_left, self._reader_right):
+                return
             # Wait for both panes to finish loading
             pending = getattr(self, '_double_loads_pending', 0)
             if pending > 1:
@@ -2134,14 +2147,35 @@ class EpubReaderDialog(QDialog):
             self._double_loads_pending = 0
             self._finalize_double_page()
 
-    def _js_scroll_to(self, browser, page_num):
-        """Navigate to a CSS column page by translating the #columns wrapper."""
+    def _js_scroll_to(self, browser, page_num, animate: bool = True):
+        """Navigate to a CSS column page by translating the #columns wrapper.
+
+        When *animate* is False, the CSS transition is suppressed for the
+        jump (used right after a load so the page doesn't visibly slide in
+        from position 0). Translate values are rounded to whole pixels and
+        use translate3d to keep text on a stable GPU layer — otherwise
+        fractional offsets produce subpixel LCD-antialiasing fringing
+        that looks like a red/colored shift on the text.
+        """
         if _HAS_WEBENGINE:
-            js = (
-                f"var c = document.getElementById('columns');"
-                f"var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
-                f"if (c) c.style.transform = 'translateX(' + (-{page_num} * w) + 'px)';"
-            )
+            if animate:
+                js = (
+                    "var c = document.getElementById('columns');"
+                    "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
+                    f"if (c) c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
+                )
+            else:
+                js = (
+                    "var c = document.getElementById('columns');"
+                    "if (c) {"
+                    "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
+                    "  var _t = c.style.transition;"
+                    "  c.style.transition = 'none';"
+                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
+                    "  void c.offsetHeight;"  # force reflow so the jump is committed w/o transition
+                    "  c.style.transition = _t || 'transform 0.3s ease';"
+                    "}"
+                )
             browser.page().runJavaScript(js)
         else:
             vp = browser.viewport()
@@ -2172,7 +2206,9 @@ class EpubReaderDialog(QDialog):
         """After HTML load: get page count and scroll to current page."""
         def on_count(count):
             self._chapter_page_cache[self._current_row] = int(count)
-            self._js_scroll_to(self._reader, self._current_page)
+            # animate=False: jump instantly so the reader doesn't visibly
+            # slide from page 1 to the current page on theme/chapter change.
+            self._js_scroll_to(self._reader, self._current_page, animate=False)
             self._js_reveal(self._reader)
             self._update_nav_buttons()
         self._js_page_count(self._reader, on_count)
@@ -2181,8 +2217,8 @@ class EpubReaderDialog(QDialog):
         """After HTML load: get page count and position both panes."""
         def on_count(count):
             self._chapter_page_cache[self._current_row] = int(count)
-            self._js_scroll_to(self._reader_left, self._current_page)
-            self._js_scroll_to(self._reader_right, self._current_page + 1)
+            self._js_scroll_to(self._reader_left, self._current_page, animate=False)
+            self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
             self._js_reveal(self._reader_left)
             self._js_reveal(self._reader_right)
             self._update_nav_buttons()
@@ -2428,10 +2464,20 @@ class EpubReaderDialog(QDialog):
             return (
                 f"<html><head><style>"
                 f"* {{ box-sizing: border-box; }}"
+                # Grayscale AA + geometricPrecision kill the subpixel LCD
+                # fringing ("red shift") that appears on text inside a
+                # GPU-composited transformed layer.
                 f"html, body {{ margin: 0; padding: 10px 0; overflow: hidden; "
-                f"background: {t['bg']}; color: {t['fg']}; }}"
+                f"background: {t['bg']}; color: {t['fg']}; "
+                f"-webkit-font-smoothing: antialiased; "
+                f"-moz-osx-font-smoothing: grayscale; "
+                f"text-rendering: optimizeLegibility; }}"
                 f"#columns {{ column-fill: auto; column-gap: 0; "
                 f"transition: transform 0.3s ease; opacity: 0; "
+                # will-change + backface-visibility stabilize the compositor
+                # layer so text isn't re-rasterized at fractional offsets.
+                f"will-change: transform; backface-visibility: hidden; "
+                f"transform: translate3d(0, 0, 0); "
                 f"font-family: 'Georgia', 'Noto Serif', serif; "
                 f"font-size: {self._font_size}pt; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 0 40px; }}"
@@ -2459,7 +2505,10 @@ class EpubReaderDialog(QDialog):
                 f"function _setupColumns() {{"
                 f"  var c = document.getElementById('columns');"
                 f"  if (!c) return;"
-                f"  _PAGE_W = window.innerWidth;"
+                # Floor to integer pixels so column boundaries and the
+                # translate offset (page * _PAGE_W) always land on whole
+                # pixels — prevents subpixel text rendering shifts.
+                f"  _PAGE_W = Math.floor(window.innerWidth);"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
                 f"  /* Clean up whitespace between consecutive full-page images */"
