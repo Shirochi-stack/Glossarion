@@ -533,6 +533,28 @@ def _find_folder_cover(file_path: str, config: dict | None = None, original_path
     return None
 
 
+class _LibraryScannerThread(QThread):
+    """Run scan_for_epubs() off the UI thread so the loading spinner animates.
+
+    The library's filesystem walk can take several hundred milliseconds on
+    large output directories — long enough to freeze the UI and prevent
+    the Halgakos spinner from painting if run synchronously.
+    """
+    finished = Signal(list)
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self._config = config or {}
+
+    def run(self):
+        try:
+            results = scan_for_epubs(self._config)
+        except Exception:
+            logger.debug("Library scan failed: %s", traceback.format_exc())
+            results = []
+        self.finished.emit(results)
+
+
 class _CoverLoader(QThread):
     finished = Signal(str, str)
 
@@ -678,12 +700,11 @@ class EpubLibraryDialog(QDialog):
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
+        self._scanner_thread: _LibraryScannerThread | None = None
         self._setup_ui()
         # Defer the filesystem scan so the dialog paints immediately;
         # on large libraries scan_for_epubs() + cover-thread spawn can otherwise
         # block the UI for a noticeable fraction of a second on first open.
-        self._empty_label.setText("Scanning library…")
-        self._empty_label.show()
         QTimer.singleShot(0, self._load_books)
         # Auto-refresh library every 2 seconds (start after initial load)
         self._auto_refresh_timer = QTimer(self)
@@ -892,9 +913,9 @@ class EpubLibraryDialog(QDialog):
         self._relocate_banner.hide()
         root.addWidget(self._relocate_banner)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(
             "QScrollArea { border: none; background: transparent; }"
             "QScrollBar:vertical { width: 8px; background: #1a1a2e; }"
             "QScrollBar::handle:vertical { background: #3a3a5e; border-radius: 4px; }")
@@ -903,8 +924,8 @@ class EpubLibraryDialog(QDialog):
         self._grid_layout.setContentsMargins(1, 1, 1, 1)
         self._grid_spacer = QWidget()
         self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        scroll.setWidget(self._grid_container)
-        root.addWidget(scroll, 1)
+        self._scroll.setWidget(self._grid_container)
+        root.addWidget(self._scroll, 1)
 
         self._empty_label = QLabel("No files found.\nTranslate a novel to see it here!")
         self._empty_label.setAlignment(Qt.AlignCenter)
@@ -912,7 +933,73 @@ class EpubLibraryDialog(QDialog):
         self._empty_label.hide()
         root.addWidget(self._empty_label)
 
+        # ── Loading overlay (mirrors EpubReaderDialog's spinner pattern) ──
+        self._loading_widget = QWidget()
+        loading_layout = QVBoxLayout(self._loading_widget)
+        loading_layout.setAlignment(Qt.AlignCenter)
+        loading_layout.setContentsMargins(0, 20, 0, 20)
+        loading_layout.setSpacing(8)
+        self._spin_label = QLabel()
+        icon_path = _find_halgakos_icon()
+        self._spin_pixmap = None
+        if icon_path:
+            pm = QPixmap(icon_path)
+            if not pm.isNull():
+                self._spin_pixmap = pm.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._spin_label.setPixmap(self._spin_pixmap)
+        if not self._spin_pixmap:
+            self._spin_label.setText("📚")
+            self._spin_label.setStyleSheet("font-size: 32pt; color: #e0e0e0;")
+        self._spin_label.setAlignment(Qt.AlignCenter)
+        self._spin_label.setFixedSize(72, 72)
+        loading_layout.addWidget(self._spin_label, 0, Qt.AlignCenter)
+        self._spin_angle = 0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(25)  # ~40 fps
+        self._spin_timer.timeout.connect(self._rotate_spinner)
+        loading_text = QLabel("Scanning library…")
+        loading_text.setAlignment(Qt.AlignCenter)
+        loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 4px;")
+        loading_layout.addWidget(loading_text, 0, Qt.AlignCenter)
+        from PySide6.QtWidgets import QProgressBar
+        self._loading_bar = QProgressBar()
+        self._loading_bar.setRange(0, 0)  # indeterminate
+        self._loading_bar.setFixedWidth(220)
+        self._loading_bar.setFixedHeight(6)
+        self._loading_bar.setTextVisible(False)
+        self._loading_bar.setStyleSheet("""
+            QProgressBar { background: #2a2a2a; border: none; border-radius: 3px; }
+            QProgressBar::chunk { background: #6c63ff; border-radius: 3px; }
+        """)
+        loading_layout.addWidget(self._loading_bar, 0, Qt.AlignCenter)
+        self._loading_widget.setStyleSheet("background: transparent;")
+        self._loading_widget.hide()
+        root.addWidget(self._loading_widget, 1)
+
         self.setStyleSheet("QDialog { background: #12121e; }")
+
+    def _rotate_spinner(self):
+        """Rotate the Halgakos icon by 15° each tick (matches reader)."""
+        if self._spin_pixmap:
+            self._spin_angle = (self._spin_angle + 15) % 360
+            t = QTransform().rotate(self._spin_angle)
+            rotated = self._spin_pixmap.transformed(t, Qt.FastTransformation)
+            self._spin_label.setPixmap(rotated)
+
+    def _show_loading(self):
+        """Show the spinner overlay and hide grid/empty-state widgets."""
+        self._spin_angle = 0
+        self._spin_timer.start()
+        self._scroll.hide()
+        self._empty_label.hide()
+        self._relocate_banner.hide()
+        self._loading_widget.show()
+
+    def _hide_loading(self):
+        """Hide the spinner overlay and restore the grid."""
+        self._spin_timer.stop()
+        self._loading_widget.hide()
+        self._scroll.show()
 
     def _set_sort(self, mode):
         self._sort_mode = mode
@@ -960,17 +1047,21 @@ class EpubLibraryDialog(QDialog):
 
     def _auto_refresh(self):
         """Lightweight auto-refresh: only reload if file list changed."""
-        try:
-            new_books = scan_for_epubs(self._config)
-            new_paths = {b["path"] for b in new_books}
-            old_paths = {b["path"] for b in self._books}
-            if new_paths != old_paths:
-                self._books = new_books
-                self._refresh_view()
-        except Exception:
-            pass
+        if self._scanner_thread and self._scanner_thread.isRunning():
+            return
+        self._scanner_thread = _LibraryScannerThread(self._config, self)
+        self._scanner_thread.finished.connect(self._on_auto_scan_done)
+        self._scanner_thread.start()
+
+    def _on_auto_scan_done(self, books):
+        new_paths = {b["path"] for b in books}
+        old_paths = {b["path"] for b in self._books}
+        if new_paths != old_paths:
+            self._books = books
+            self._refresh_view()
 
     def _load_books(self):
+        """Kick off an async scan and show the loading spinner."""
         for t in self._cover_threads:
             try:
                 t.quit()
@@ -978,7 +1069,17 @@ class EpubLibraryDialog(QDialog):
             except Exception:
                 pass
         self._cover_threads.clear()
-        self._books = scan_for_epubs(self._config)
+        # If a scan is already in flight, don't spawn another
+        if self._scanner_thread and self._scanner_thread.isRunning():
+            return
+        self._show_loading()
+        self._scanner_thread = _LibraryScannerThread(self._config, self)
+        self._scanner_thread.finished.connect(self._on_initial_scan_done)
+        self._scanner_thread.start()
+
+    def _on_initial_scan_done(self, books):
+        self._books = books
+        self._hide_loading()
         self._refresh_view()
 
     def _populate_grid(self, books):
