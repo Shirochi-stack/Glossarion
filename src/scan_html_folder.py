@@ -5087,7 +5087,22 @@ def check_potential_truncation(raw_text):
         + '*_`'  # markdown bold / italic / inline-code closers
     )
     # Decorative / emote characters that are intentional stylistic endings (not truncation)
-    _decorative_chars = set('♥♡❤❤️💕☆★♪♫♬~〜♠♣♦○●◇◆△▽▲▼')
+    # Includes:
+    #   ``^``   — emoticon endings like ``^^``, ``^_^``, ``^.^``, ``^-^``
+    #            (very common in Korean / Japanese web novels)
+    #   ``>``   — arrow / scene-transition endings like ``->``, ``=>``,
+    #            ``>>``, ``>>>`` (``===`` is still separately handled by
+    #            the 3+ separator regex below for long bars)
+    #   ``<``   — mirror of ``>`` and emoticon tails like ``>_<``, ``<_<``
+    #   ``=``   — short equals-bar endings like ``==``, ``=======`` (the
+    #            separator regex already covers 3+, this extends coverage
+    #            to any length)
+    # The peel loop below strips runs of these characters, so ``^^`` →
+    # empty core → returns ``ends_with_decorative``.
+    _decorative_chars = set(
+        '♥♡❤❤️💕☆★♪♫♬~〜♠♣♦○●◇◆△▽▲▼'
+        '^><='
+    )
 
     # Walk backwards past trailing wrappers to find the core ending character
     text = cleaned.rstrip()
@@ -7611,7 +7626,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
-            'check_potential_truncation': True,
+            'check_potential_truncation': False,
             'check_ai_truncation_detection': False,
             'ai_truncation_tail_chars': 400,
             'paragraph_threshold': 0.3,

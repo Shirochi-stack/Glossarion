@@ -348,7 +348,7 @@ class QAScannerMixin:
             'flag_excess_punctuation': False,
             'excess_punctuation_threshold': 49,
             'check_glossary_leakage': True,
-            'check_potential_truncation': True,
+            'check_potential_truncation': False,
             'check_missing_images': True,
             'min_file_length': 0,
             'report_format': 'detailed',
@@ -2523,7 +2523,7 @@ class QAScannerMixin:
         detection_layout.addWidget(check_glossary_checkbox)
         
         check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential truncation (last sentence missing ending punctuation)")
-        check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', True))
+        check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', False))
         detection_layout.addWidget(check_potential_truncation_checkbox)
         
         scroll_layout.addSpacing(20)
@@ -4516,7 +4516,7 @@ class QAScannerMixin:
                         widget.setValue(int(default_val * 100))
 
                 check_glossary_checkbox.setChecked(True)
-                check_potential_truncation_checkbox.setChecked(True)
+                check_potential_truncation_checkbox.setChecked(False)
                 check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)
                 # Set 'detailed' radio button as checked
