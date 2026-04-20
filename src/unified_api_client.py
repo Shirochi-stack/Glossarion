@@ -11749,13 +11749,55 @@ class UnifiedClient:
             except Exception:
                 return "<payload summary failed>"
 
+    def _describe_exception_chain(self, err: Optional[BaseException], *, limit: int = 4) -> str:
+        """Walk __cause__/__context__ and return a short chain description.
+
+        The OpenAI SDK masks transport failures behind a bare "Connection error."
+        message while the real httpx exception lives in __cause__. This unwraps
+        that chain so we log the actual reason (ReadError, RemoteProtocolError,
+        ConnectError, SSL handshake failure, etc.).
+        """
+        chain: List[str] = []
+        seen: set = set()
+        cur: Optional[BaseException] = err
+        depth = 0
+        while cur is not None and depth < int(max(1, limit)):
+            if id(cur) in seen:
+                break
+            seen.add(id(cur))
+            try:
+                tname = type(cur).__name__
+            except Exception:
+                tname = "Exception"
+            try:
+                msg = str(cur)
+            except Exception:
+                msg = ""
+            msg = msg.strip().splitlines()[0] if msg else ""
+            if len(msg) > 160:
+                msg = msg[:160].rstrip() + "…"
+            if msg:
+                chain.append(f"{tname}: {msg}")
+            else:
+                chain.append(tname)
+            nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+            cur = nxt
+            depth += 1
+        return " <- ".join(chain) if chain else ""
+
     def _log_zhipu_400_diagnostics(self, provider: str, label_part: str,
-                                   call_kwargs: Optional[dict], err_str: str) -> None:
-        """Print extra diagnostics for Zhipu/Z.AI 400 parameter errors.
+                                   call_kwargs: Optional[dict], err_str: str,
+                                   sdk_err: Optional[BaseException] = None,
+                                   reason: str = "param") -> None:
+        """Print extra diagnostics for Zhipu/Z.AI request failures.
 
         Zhipu's error body for code 1210 is just "API 调用参数有误" with no
-        detail about WHICH parameter is wrong. This helper dumps what we
-        actually sent (sanitized) and points at the most common causes.
+        detail about WHICH parameter is wrong, and the OpenAI SDK hides
+        transport-layer failures behind a bare "Connection error.". This helper
+        dumps what we actually sent (sanitized) plus the real underlying
+        exception chain and points at the most common causes.
+
+        ``reason`` is one of: 'param' (HTTP 400 / 1210), 'connection'.
         """
         try:
             summary = self._summarize_request_payload(call_kwargs)
@@ -11766,6 +11808,15 @@ class UnifiedClient:
         except Exception:
             pass
 
+        # Unwrap the real transport exception for connection errors
+        if sdk_err is not None:
+            try:
+                chain = self._describe_exception_chain(sdk_err)
+                if chain:
+                    print(f"   ↳ exception chain: {chain}")
+            except Exception:
+                pass
+
         # Targeted hints based on the current payload
         hints: List[str] = []
         try:
@@ -11773,6 +11824,7 @@ class UnifiedClient:
             msgs = (call_kwargs or {}).get("messages") or []
             has_images = False
             bad_roles: List[str] = []
+            total_img_bytes = 0
             for m in msgs:
                 if not isinstance(m, dict):
                     continue
@@ -11784,44 +11836,96 @@ class UnifiedClient:
                     for p in c:
                         if isinstance(p, dict) and p.get("type") == "image_url":
                             has_images = True
-                            break
+                            iu = p.get("image_url")
+                            url = iu.get("url") if isinstance(iu, dict) else iu
+                            if isinstance(url, str) and url.startswith("data:"):
+                                try:
+                                    b64 = url.split(",", 1)[1]
+                                    total_img_bytes += len(b64) * 3 // 4
+                                except Exception:
+                                    pass
 
             model_l = model.lower()
-            is_vision_model = (
-                "v" in model_l.split("glm-", 1)[-1].split("-", 1)[0]
-                if model_l.startswith("glm-") else False
-            )
-            # Be more conservative: explicit known vision variants
             known_vision_markers = (
                 "glm-4.6v", "glm-4.5v", "glm-4.1v", "glm-4v", "-vision",
                 "cogvlm", "cogview",
             )
-            is_vision_model = is_vision_model or any(mk in model_l for mk in known_vision_markers)
+            is_vision_model = any(mk in model_l for mk in known_vision_markers)
 
-            if has_images and not is_vision_model:
+            # Model-name casing: Zhipu's OpenAPI enums use lowercase model ids
+            # (e.g. glm-4.6v, glm-5). Uppercase names can be rejected or
+            # silently mis-routed by edge caches depending on account/region.
+            if model and model != model_l and (model.startswith("GLM") or model.startswith("glm") is False):
                 hints.append(
-                    f"the request contains image_url parts but model {model!r} is not a known "
-                    f"Zhipu vision variant. Use a multimodal GLM model (e.g. GLM-4.6V, "
-                    f"GLM-4.6V-Flash, GLM-4.5V, GLM-4.1V-Thinking) for image input."
+                    f"model {model!r} is not lowercase; Zhipu’s API documents model ids "
+                    f"as lowercase (e.g. {model_l!r}). Try the lowercase variant."
                 )
 
-            if bad_roles:
-                hints.append(
-                    f"unsupported message role(s) {sorted(set(bad_roles))}; Zhipu accepts only "
-                    f"'system', 'user', 'assistant' (and 'tool' for tool calls)."
-                )
+            if reason == "param":
+                if has_images and not is_vision_model:
+                    hints.append(
+                        f"the request contains image_url parts but model {model!r} is not a known "
+                        f"Zhipu vision variant. Use a multimodal GLM model (e.g. GLM-4.6V, "
+                        f"GLM-4.6V-Flash, GLM-4.5V, GLM-4.1V-Thinking) for image input."
+                    )
 
-            # 1214 is documented as '${field} 参数非法' — pass that through directly if present
-            if "1214" in err_str:
-                hints.append("Zhipu error 1214 indicates a specific field is invalid — check content-part types and image_url format (data:image/{jpeg|png};base64,...).")
-            elif "1211" in err_str:
-                hints.append("Zhipu error 1211 indicates the model code does not exist — verify the model spelling/case.")
-            elif "1212" in err_str:
-                hints.append("Zhipu error 1212 indicates the model does not support this call method — the selected model may be text-only.")
-            elif "1213" in err_str:
-                hints.append("Zhipu error 1213 indicates a required field was not received — check required parameters for this endpoint.")
-            elif "1215" in err_str:
-                hints.append("Zhipu error 1215 indicates two mutually exclusive fields were set together — check the docs for conflicting parameters.")
+                if bad_roles:
+                    hints.append(
+                        f"unsupported message role(s) {sorted(set(bad_roles))}; Zhipu accepts only "
+                        f"'system', 'user', 'assistant' (and 'tool' for tool calls)."
+                    )
+
+                # 1214 is documented as '${field} 参数非法' — pass that through directly if present
+                if "1214" in err_str:
+                    hints.append("Zhipu error 1214 indicates a specific field is invalid — check content-part types and image_url format (data:image/{jpeg|png};base64,...).")
+                elif "1211" in err_str:
+                    hints.append("Zhipu error 1211 indicates the model code does not exist — verify the model spelling/case.")
+                elif "1212" in err_str:
+                    hints.append("Zhipu error 1212 indicates the model does not support this call method — the selected model may be text-only.")
+                elif "1213" in err_str:
+                    hints.append("Zhipu error 1213 indicates a required field was not received — check required parameters for this endpoint.")
+                elif "1215" in err_str:
+                    hints.append("Zhipu error 1215 indicates two mutually exclusive fields were set together — check the docs for conflicting parameters.")
+                elif "1210" in err_str:
+                    # 1210 is Zhipu's generic catch-all parameter error. The server
+                    # does not tell us WHICH parameter is wrong, so we can only
+                    # guess. Empirically the most common trigger for users hitting
+                    # 1210 is max_tokens exceeding the model's (undocumented)
+                    # output cap, so surface that as the leading suspect.
+                    tok_val = None
+                    try:
+                        tok_val = (call_kwargs or {}).get("max_tokens") or (call_kwargs or {}).get("max_completion_tokens")
+                    except Exception:
+                        tok_val = None
+                    tok_part = f" (currently {tok_val})" if tok_val else ""
+                    hints.append(
+                        "Zhipu error 1210 is a generic 'invalid parameter' — the server does not "
+                        f"say which field is wrong. The most likely cause is that max_tokens{tok_part} "
+                        "is too high for this model's output cap; try lowering it. Other possibilities "
+                        "include an unsupported parameter for this model or an out-of-range value."
+                    )
+            elif reason == "connection":
+                # Connection-level failures: surface likely causes
+                if has_images:
+                    hints.append(
+                        "connection dropped while sending an image request. Zhipu's edge can reset oversized "
+                        "or slow uploads; try (a) downscaling/recompressing the image, (b) hosting the image "
+                        "and passing a URL in image_url.url instead of a data: base64 payload, or "
+                        "(c) disabling streaming for image calls."
+                    )
+                    if total_img_bytes:
+                        hints.append(
+                            f"total inline image payload ≈ {total_img_bytes} bytes "
+                            f"(≈ {total_img_bytes/1024:.0f} KiB); keep under ~5 MiB per image."
+                        )
+                if (call_kwargs or {}).get("stream"):
+                    hints.append(
+                        "stream=True is enabled. If the image upload is large, some Zhipu edges drop the "
+                        "SSE connection before the first chunk. Try ENABLE_STREAMING=0 for vision calls."
+                    )
+                hints.append(
+                    "verify outbound HTTPS to open.bigmodel.cn works from this host (no proxy/firewall/SSL MITM)."
+                )
         except Exception:
             pass
 
@@ -16466,11 +16570,11 @@ class UnifiedClient:
                                     # Some providers return full HTML pages for 5xx errors (e.g., 504); condense them.
                                     if not self._is_stop_requested():
                                         print(f"🛑 [{provider}]{label_part} SDK call failed: {self._summarize_exception(sdk_err)}")
-                                        # Zhipu/Z.AI return a generic `1210 API 调用参数有误` for every
-                                        # parameter error without saying which field is wrong. Dump a
-                                        # sanitized summary of what we sent plus targeted hints so the
-                                        # user can tell whether the issue is e.g. an image sent to a
-                                        # text-only GLM model.
+                                        # Zhipu/Z.AI: the SDK hides both parameter errors (generic
+                                        # `1210 API 调用参数有误`) and transport failures ("Connection
+                                        # error.") behind a one-line message. Dump a sanitized summary
+                                        # of what we sent plus the real underlying exception chain
+                                        # and targeted hints.
                                         try:
                                             if provider in ('zhipu', 'za'):
                                                 http_status_dbg = None
@@ -16478,15 +16582,29 @@ class UnifiedClient:
                                                     http_status_dbg = self._extract_http_status_from_exception(sdk_err)
                                                 except Exception:
                                                     http_status_dbg = None
+                                                err_l = err_str.lower()
                                                 is_param_error = (
                                                     http_status_dbg == 400
                                                     or "'code': '1210'" in err_str
                                                     or '"code": "1210"' in err_str
-                                                    or "code 400" in err_str.lower()
+                                                    or "code 400" in err_l
+                                                )
+                                                is_conn_error = (
+                                                    "connection error" in err_l
+                                                    or "apiconnectionerror" in type(sdk_err).__name__.lower()
+                                                    or "remoteprotocolerror" in err_l
+                                                    or "readerror" in err_l
+                                                    or "connecterror" in err_l
                                                 )
                                                 if is_param_error:
                                                     self._log_zhipu_400_diagnostics(
                                                         provider, label_part, call_kwargs, err_str,
+                                                        sdk_err=sdk_err, reason="param",
+                                                    )
+                                                elif is_conn_error:
+                                                    self._log_zhipu_400_diagnostics(
+                                                        provider, label_part, call_kwargs, err_str,
+                                                        sdk_err=sdk_err, reason="connection",
                                                     )
                                         except Exception:
                                             pass
