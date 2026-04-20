@@ -3783,11 +3783,37 @@ class EpubLibraryDialog(QDialog):
         self._scanner_thread.start()
 
     def _on_auto_scan_done(self, in_progress: list[dict], completed: list[dict]):
-        ip_new = {b["path"] for b in in_progress}
-        ip_old = {b["path"] for b in self._in_progress_books}
-        comp_new = {b["path"] for b in completed}
-        comp_old = {b["path"] for b in self._completed_books}
-        if ip_new != ip_old or comp_new != comp_old:
+        """Receive auto-refresh scan; rebuild cards if anything visible changed.
+
+        Previously we diffed only the set of ``book['path']`` values,
+        which meant an in-progress book whose chapter count advanced
+        (e.g. 0 → 3 translated) kept the same card signature and never
+        re-rendered — so the user saw "Not started" / "0 KB" frozen on
+        disk long after the translator had made real progress. We now
+        diff a richer per-book signature covering progress counts,
+        translation state, mtime, and resolved raw-source path so any
+        visible field drift triggers a refresh.
+        """
+        def _sig(books):
+            return {
+                (b.get("path", "") or ""): (
+                    int(b.get("completed_chapters", 0) or 0),
+                    int(b.get("total_chapters", 0) or 0),
+                    int(b.get("failed_chapters", 0) or 0),
+                    int(b.get("pending_chapters", 0) or 0),
+                    str(b.get("translation_state", "") or ""),
+                    bool(b.get("has_compiled_output", False)),
+                    str(b.get("raw_source_path", "") or ""),
+                    float(b.get("mtime", 0) or 0),
+                    int(b.get("size", 0) or 0),
+                )
+                for b in books
+            }
+        ip_new_sig = _sig(in_progress)
+        ip_old_sig = _sig(self._in_progress_books)
+        comp_new_sig = _sig(completed)
+        comp_old_sig = _sig(self._completed_books)
+        if ip_new_sig != ip_old_sig or comp_new_sig != comp_old_sig:
             self._in_progress_books = in_progress
             self._completed_books = completed
             self._refresh_view()
@@ -5158,6 +5184,15 @@ class BookDetailsDialog(QDialog):
 
         self._setup_ui()
         self._start_loading()
+        # Auto-refresh details every 2s so chapter status + progress
+        # strip catch up with the translator as it writes new
+        # ``response_*.html`` files. The timer pauses while a loader
+        # is already running or the dialog is hidden — see
+        # :meth:`_auto_refresh_details`.
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(2000)
+        self._auto_refresh_timer.timeout.connect(self._auto_refresh_details)
+        QTimer.singleShot(2500, self._auto_refresh_timer.start)
 
     # -- UI construction ----------------------------------------------------
 
@@ -5490,10 +5525,41 @@ class BookDetailsDialog(QDialog):
         # activity while the (slower) spine parse is running in the
         # background. Replaced in :meth:`_on_details_ready` with real rows.
         self._show_chapter_placeholder()
+        self._is_auto_refreshing = False
         self._loader = _BookDetailsLoader(self._book, self)
         # ``preview_ready`` fires first with cover + metadata so the hero
         # paints immediately; ``done`` follows with the full chapter list.
         self._loader.preview_ready.connect(self._on_preview_ready)
+        self._loader.done.connect(self._on_details_ready)
+        self._loader.error.connect(self._on_details_error)
+        self._loader.start()
+
+    def _auto_refresh_details(self):
+        """Re-run the details loader so per-chapter status catches up.
+
+        Skipped when the dialog is hidden (no point paying for disk I/O
+        when the user can't see it) or a loader is already mid-flight.
+        The refresh runs a silent :meth:`_BookDetailsLoader` pass that
+        does NOT show the loading placeholder — we reuse the existing
+        hero + chapter rows and swap them in place only when a
+        per-chapter status signature actually changed.
+        """
+        try:
+            if not self.isVisible():
+                return
+        except Exception:
+            pass
+        if self._loader is not None:
+            try:
+                if self._loader.isRunning():
+                    return
+            except Exception:
+                pass
+        self._is_auto_refreshing = True
+        self._loader = _BookDetailsLoader(self._book, self)
+        # Only subscribe to ``done`` — ``preview_ready`` is only useful
+        # for the initial paint and would re-flash the cover + synopsis
+        # with every tick otherwise.
         self._loader.done.connect(self._on_details_ready)
         self._loader.error.connect(self._on_details_error)
         self._loader.start()
@@ -5716,11 +5782,30 @@ class BookDetailsDialog(QDialog):
 
     @Slot(dict)
     def _on_details_ready(self, payload: dict):
-        self._chapters_info = payload.get("chapters_info", []) or []
+        new_chapters_info = payload.get("chapters_info", []) or []
+        auto = bool(getattr(self, "_is_auto_refreshing", False))
+        # On an auto-refresh, skip the expensive TOC rebuild when every
+        # per-chapter signal is unchanged — otherwise we'd pointlessly
+        # tear down + re-add hundreds of rows every 2 seconds.
+        old_sig = [
+            (c.get("index"), c.get("status"),
+             c.get("translated_path") or "",
+             c.get("translated_title") or "")
+            for c in self._chapters_info
+        ]
+        new_sig = [
+            (c.get("index"), c.get("status"),
+             c.get("translated_path") or "",
+             c.get("translated_title") or "")
+            for c in new_chapters_info
+        ]
+        chapters_changed = old_sig != new_sig
+        self._chapters_info = new_chapters_info
         # Re-apply the hero with the richer details returned by Phase 2
         # (OPF now includes real chapter titles, metadata_json may have
         # been re-loaded). Hero widgets are idempotent so this is safe.
-        self._apply_hero_payload(payload)
+        if not auto:
+            self._apply_hero_payload(payload)
 
         # In-progress strip + reader-entry-point relabeling
         has_translated = any(c.get("translated_path") for c in self._chapters_info)
@@ -5758,9 +5843,12 @@ class BookDetailsDialog(QDialog):
         # loading placeholder is up, so ``isVisible()`` would spuriously
         # report "collapsed" here and the checkbox would never surface.
         section_expanded = bool(getattr(self, "_chap_section_expanded", True))
-        self._raw_titles_cb.setVisible(
-            raw_titles_applicable and section_expanded
-        )
+        # Skip toggling checkbox visibility during a silent auto-refresh
+        # (the user may be interacting with it right now).
+        if not auto:
+            self._raw_titles_cb.setVisible(
+                raw_titles_applicable and section_expanded
+            )
         # Keep the flag accurate: if the toggle becomes inapplicable after
         # a refresh we don't want the checkbox state to stay "checked"
         # invisibly and force raw rendering on an unrelated book.
@@ -5769,11 +5857,17 @@ class BookDetailsDialog(QDialog):
                 self._show_raw_titles = False
                 self._raw_titles_cb.setChecked(False)
 
-        # Chapter rows
-        self._populate_chapters()
+        # Chapter rows: on the initial load always rebuild; on a silent
+        # auto-refresh only rebuild if the per-chapter signature drifted.
+        if not auto or chapters_changed:
+            self._populate_chapters(silent=auto)
         # Button availability is handled inside :meth:`_apply_hero_payload`
         # so both the preview and the final pass enable / disable actions
         # consistently. No extra work needed here.
+        # Reset the auto-refresh flag so the next loader call (triggered
+        # by anything other than :meth:`_auto_refresh_details`) goes
+        # through the full reveal path.
+        self._is_auto_refreshing = False
 
     def _update_progress_strip(self):
         """Refresh the "Translation in progress" strip.
@@ -5856,7 +5950,7 @@ class BookDetailsDialog(QDialog):
     # enough that a 700-chapter book finishes in a handful of ticks.
     _POPULATE_BATCH_SIZE = 40
 
-    def _populate_chapters(self):
+    def _populate_chapters(self, silent: bool = False):
         """Rebuild the chapter row list, yielding between batches.
 
         A compiled EPUB with hundreds of chapters used to freeze the
@@ -5864,13 +5958,20 @@ class BookDetailsDialog(QDialog):
         was constructed synchronously. We now build the rows in batches
         of :data:`_POPULATE_BATCH_SIZE` per tick via a zero-interval
         ``QTimer``, so the Qt event loop keeps dispatching in between.
-        The chapter container stays hidden behind the
-        "⏳  Loading chapters…" placeholder while the batches land, so
-        the user sees one steady loading state that flips to the fully
-        built list in a single swap — rather than watching rows pop in
-        over multiple seconds. Any pre-existing batch timer is
-        cancelled first so a toggle flip (e.g. Show raw titles)
-        doesn't double-render.
+
+        In **initial** (non-silent) mode, the chapter container stays
+        hidden behind the "⏳  Loading chapters…" placeholder while the
+        batches land, so the user sees one steady loading state that
+        flips to the fully built list in a single swap.
+
+        In **silent** mode (auto-refresh), the loading placeholder is
+        NOT shown — the existing rows stay visible while the new
+        batches render on top. This avoids a visible flash every 2
+        seconds when the auto-refresh timer ticks, and the user's
+        scroll position / selection stays intact.
+
+        Any pre-existing batch timer is cancelled first so a toggle
+        flip (e.g. Show raw titles) doesn't double-render.
         """
         # Tear down before rebuilding and disable activation for the window
         # of time while we're mutating the list — this flag is read from
@@ -5891,16 +5992,21 @@ class BookDetailsDialog(QDialog):
         # Hide the container while we clear + rebuild it, and show the
         # sibling loading placeholder in its slot so the user isn't
         # staring at an empty space or flickering rows.
-        try:
-            self._chap_container.hide()
-        except Exception:
-            pass
-        if getattr(self, "_chap_loading_lbl", None) is not None:
-            # Only show the placeholder when the user currently expects
-            # the chapter section to be visible. For a collapsed TOC we
-            # leave it hidden too — otherwise clicking Refresh would
-            # surprise the user with an unwanted reveal.
-            self._chap_loading_lbl.setVisible(bool(target_visible))
+        # In silent mode (auto-refresh), keep the container visible so
+        # the user doesn't see the existing rows disappear + the
+        # placeholder flash between every 2s tick — they just see the
+        # new rows replace the old ones in place.
+        if not silent:
+            try:
+                self._chap_container.hide()
+            except Exception:
+                pass
+            if getattr(self, "_chap_loading_lbl", None) is not None:
+                # Only show the placeholder when the user currently expects
+                # the chapter section to be visible. For a collapsed TOC we
+                # leave it hidden too — otherwise clicking Refresh would
+                # surprise the user with an unwanted reveal.
+                self._chap_loading_lbl.setVisible(bool(target_visible))
         # Clear previous rows (placeholder now lives outside this layout).
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
@@ -5915,6 +6021,7 @@ class BookDetailsDialog(QDialog):
         self._populate_idx = 0
         self._populate_show_raw_title = bool(self._show_raw_titles)
         self._populate_target_visible = bool(target_visible)
+        self._populate_silent = bool(silent)
 
         if not self._populate_infos:
             self._chap_layout.addStretch()
@@ -5922,10 +6029,11 @@ class BookDetailsDialog(QDialog):
             self._update_toc_toggle_label()
             # Nothing to build — flip the loading placeholder back off
             # and reveal the (empty) container if the user expects it.
-            if getattr(self, "_chap_loading_lbl", None) is not None:
-                self._chap_loading_lbl.hide()
-            if target_visible:
-                self._chap_container.show()
+            if not silent:
+                if getattr(self, "_chap_loading_lbl", None) is not None:
+                    self._chap_loading_lbl.hide()
+                if target_visible:
+                    self._chap_container.show()
             self._chapters_loaded = True
             return
 
@@ -5980,10 +6088,13 @@ class BookDetailsDialog(QDialog):
             # Swap: hide the loading placeholder and reveal the fully
             # built chapter container in one go, so the user sees the
             # whole list appear at once instead of the per-batch pop-in.
-            if getattr(self, "_chap_loading_lbl", None) is not None:
-                self._chap_loading_lbl.hide()
-            if getattr(self, "_populate_target_visible", True):
-                self._chap_container.show()
+            # For silent auto-refresh runs the container was never hidden
+            # and the placeholder was never shown, so the reveal is a no-op.
+            if not bool(getattr(self, "_populate_silent", False)):
+                if getattr(self, "_chap_loading_lbl", None) is not None:
+                    self._chap_loading_lbl.hide()
+                if getattr(self, "_populate_target_visible", True):
+                    self._chap_container.show()
             self._chapters_loaded = True
 
     def _on_chapter_clicked(self, idx: int):
