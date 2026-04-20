@@ -1923,6 +1923,13 @@ class _BookDetailsLoader(QThread):
                 if of:
                     prog_by_output.setdefault(_norm(of), info)
 
+            # If we could neither load a progress file nor see an output
+            # folder on disk, there is no translation context for this book
+            # at all — we leave ``status`` empty so the UI renders no badge
+            # (instead of misleadingly labeling every chapter "Pending").
+            has_progress_context = bool(prog is not None
+                                         or (output_folder and os.path.isdir(output_folder)))
+
             import re as _re
             for idx, ch in enumerate(details.get("chapters", [])):
                 filename = ch["filename"]
@@ -1958,7 +1965,10 @@ class _BookDetailsLoader(QThread):
                     if translated_path:
                         translated_title = _read_translated_chapter_title(translated_path)
                 if not status:
-                    status = "pending"
+                    # Only mark as pending when we actually have a progress
+                    # context against which "pending" is meaningful. Without
+                    # one, leave status empty so the row shows no badge.
+                    status = "pending" if has_progress_context else ""
                 chapters_info.append({
                     "index": idx,
                     "filename": filename,
@@ -2506,10 +2516,21 @@ class BookDetailsDialog(QDialog):
         done = sum(1 for c in items if c.get("status") == "completed")
         return done, total
 
+    def _has_progress_context(self) -> bool:
+        """True when at least one chapter has a non-empty translation status."""
+        return any((c.get("status") or "") for c in self._chapters_info)
+
     def _update_toc_toggle_label(self):
         done, total = self._visible_counts()
         prefix = "\u25bc  Chapters" if self._chap_container.isVisible() else "\u25b6  Chapters"
-        suffix = f"  ({done}/{total})" if total else "  (\u2014)"
+        if not total:
+            suffix = "  (\u2014)"
+        elif self._has_progress_context():
+            suffix = f"  ({done}/{total})"
+        else:
+            # No progress file anywhere — just show the total count without a
+            # misleading completed/total fraction.
+            suffix = f"  ({total})"
         self._toc_toggle.setText(prefix + suffix)
 
     def _apply_chapter_filter(self, text: str):
@@ -2680,7 +2701,7 @@ class _ChapterRow(QFrame):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        status = info.get("status", "pending")
+        status = info.get("status", "") or ""
         translated = info.get("translated_title") or ""
         raw = info.get("raw_title") or ""
         if translated and status == "completed":
@@ -2700,6 +2721,7 @@ class _ChapterRow(QFrame):
         text_col.addWidget(sub)
         layout.addLayout(text_col, 1)
 
+        badge = None
         if status == "completed":
             badge = QLabel("\u2714 Translated")
             badge.setStyleSheet(
@@ -2721,14 +2743,16 @@ class _ChapterRow(QFrame):
                 " border: 1px solid #ffd166; border-radius: 10px;"
                 " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
             )
-        else:
+        elif status == "pending":
             badge = QLabel("Pending")
             badge.setStyleSheet(
                 "color: #7a8599; background: #2a2a3e;"
                 " border: 1px solid #3a3a5e; border-radius: 10px;"
                 " padding: 2px 10px; font-size: 8pt;"
             )
-        layout.addWidget(badge, 0, Qt.AlignRight)
+        # Empty/unknown status → no badge at all (book has no progress context).
+        if badge is not None:
+            layout.addWidget(badge, 0, Qt.AlignRight)
 
     def mousePressEvent(self, event):
         self.activated.emit(int(self.info.get("index", 0)))
