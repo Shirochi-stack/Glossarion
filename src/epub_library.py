@@ -77,6 +77,52 @@ def get_library_translated_dir() -> str:
     return str(trans)
 
 
+def _migrate_legacy_library_layout() -> None:
+    """One-time migration: move any EPUBs sitting in ``Library/`` root into
+    ``Library/Translated/``.
+
+    Older builds stored organized EPUBs directly under ``Library/``. The
+    new layout reserves that folder for the ``Raw/`` and ``Translated/``
+    subfolders plus the origins registry. Running this on every library
+    scan is idempotent — once there are no root-level EPUBs left, it's a
+    no-op. Each moved file is recorded in ``origins['translated']`` so the
+    user can reverse it via the Undo Move button.
+    """
+    lib = get_library_dir()
+    trans = get_library_translated_dir()
+    try:
+        entries = list(os.scandir(lib))
+    except (PermissionError, OSError):
+        return
+    origins = _load_origins()
+    trans_origins = dict(origins.get("translated", {}) or {})
+    moved_any = False
+    for entry in entries:
+        if not entry.is_file(follow_symlinks=False):
+            continue
+        if not entry.name.lower().endswith(".epub"):
+            continue  # keep origins file + other stray text files intact
+        src = entry.path
+        dst = os.path.join(trans, entry.name)
+        if os.path.normcase(os.path.normpath(os.path.abspath(src))) == \
+                os.path.normcase(os.path.normpath(os.path.abspath(dst))):
+            continue
+        if os.path.isfile(dst):
+            # Don't clobber an existing Translated copy.
+            logger.debug("Legacy migration skipped (dst exists): %s", dst)
+            continue
+        try:
+            shutil.move(src, dst)
+            trans_origins[entry.name] = os.path.abspath(src)
+            moved_any = True
+            logger.info("Legacy library migration: %s -> %s", src, dst)
+        except OSError as exc:
+            logger.debug("Legacy migration move failed for %s: %s", src, exc)
+    if moved_any:
+        origins["translated"] = trans_origins
+        _save_origins(origins)
+
+
 def get_library_raw_inputs_file() -> str:
     """Return ``Library/Raw/library_raw_inputs.txt`` — one path per line.
 
@@ -508,6 +554,95 @@ def _read_progress_summary(progress_file: str) -> dict | None:
     }
 
 
+# Process-level cache for EPUB spine-item counts, keyed by ``path|mtime``.
+_SPINE_COUNT_CACHE: dict[str, int] = {}
+
+
+def _count_epub_spine_items(epub_path: str) -> int:
+    """Return the number of itemrefs in the EPUB's spine (0 on failure).
+
+    Cheap: reads only ``META-INF/container.xml`` + the OPF, never the
+    chapter HTML. Results are memoised per ``(path, mtime)`` so repeated
+    scans don't re-open the zip. This is the authoritative chapter count
+    for EPUB workspaces — ``translation_progress.json`` only tracks
+    chapters the translator has actually processed, so it under-reports
+    the real length for freshly imported / early-progress novels.
+    """
+    if not epub_path or not os.path.isfile(epub_path):
+        return 0
+    try:
+        key = _epub_cache_key(epub_path)
+    except Exception:
+        key = ""
+    if key and key in _SPINE_COUNT_CACHE:
+        return _SPINE_COUNT_CACHE[key]
+    count = 0
+    try:
+        import zipfile
+        from xml.etree import ElementTree as ET
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            names = zf.namelist()
+            names_set = set(names)
+            opf_path = None
+            if "META-INF/container.xml" in names_set:
+                try:
+                    container_xml = zf.read("META-INF/container.xml").decode(
+                        "utf-8", errors="replace")
+                    tree = ET.fromstring(container_xml)
+                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+                    rootfile = tree.find(".//c:rootfile", ns)
+                    if rootfile is not None:
+                        opf_path = rootfile.get("full-path")
+                except Exception:
+                    pass
+            if not opf_path:
+                for zname in names:
+                    if zname.lower().endswith(".opf"):
+                        opf_path = zname
+                        break
+            if opf_path and opf_path in names_set:
+                try:
+                    opf_xml = zf.read(opf_path).decode("utf-8", errors="replace")
+                    tree = ET.fromstring(opf_xml)
+                    OPF = "http://www.idpf.org/2007/opf"
+                    spine = tree.find(f".//{{{OPF}}}spine")
+                    if spine is not None:
+                        count = len(spine.findall(f"{{{OPF}}}itemref"))
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("Spine count failed for %s: %s",
+                     epub_path, traceback.format_exc())
+    if key:
+        _SPINE_COUNT_CACHE[key] = count
+    return count
+
+
+def _count_translated_response_files(folder: str) -> int:
+    """Count ``response_*.{html,xhtml,htm,txt}`` files inside *folder*.
+
+    Acts as a filesystem-based "done" count so in-progress cards reflect
+    real translation progress even when ``translation_progress.json``
+    lags behind the on-disk outputs (common during chunked writes or
+    after a crashed run whose sidecar never flushed ``status=completed``).
+    """
+    if not folder or not os.path.isdir(folder):
+        return 0
+    count = 0
+    try:
+        for entry in os.scandir(folder):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            lower = entry.name.lower()
+            if not lower.startswith("response_"):
+                continue
+            if lower.endswith((".html", ".xhtml", ".htm", ".txt")):
+                count += 1
+    except (PermissionError, OSError):
+        return 0
+    return count
+
+
 def _folder_has_output_epub(folder: str) -> str | None:
     """Return the path to the first .epub in *folder* or None."""
     try:
@@ -724,10 +859,12 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
     """Scan ``Library/Translated`` for completed EPUBs.
 
     The Translated subfolder is a curated shelf: every EPUB inside is treated
-    as a finished work with no translation context. The legacy Library root
-    (``Library/*.epub``) is also scanned so pre-refactor layouts still work,
-    but Translated takes priority.
+    as a finished work with no translation context. Before scanning we run
+    a one-time migration that moves any EPUBs still sitting in the legacy
+    Library root into ``Translated/`` so pre-refactor layouts aren't lost.
     """
+    # Legacy layout support — idempotent, safe to call every scan.
+    _migrate_legacy_library_layout()
     library_dir = os.path.normpath(os.path.abspath(get_library_translated_dir()))
     results: list[dict] = []
     seen: set[str] = set()
@@ -823,26 +960,68 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 # progress file (created when the user loaded a glossary but
                 # never ran a translation) apart from an active one.
                 summary = _read_progress_summary(progress_file) if has_progress else None
-                total = summary["total"] if summary else 0
-                done = summary["completed"] if summary else 0
+                progress_total = summary["total"] if summary else 0
+                progress_done = summary["completed"] if summary else 0
                 failed = summary["failed"] if summary else 0
 
-                # A folder qualifies as a real translation workspace when
-                # there's a compiled output (epub/pdf/txt/html) inside OR the
-                # progress file records at least one chapter. The bare
-                # 68-byte seed ``{"chapters": {}, ...}`` written during
-                # glossary import is deliberately excluded.
-                if not compiled and total <= 0:
-                    continue
-
-                # Mandatory: a raw source file must be resolvable for the
-                # In Progress tab. Folders whose source EPUB is missing
-                # (moved, deleted, on a disconnected drive) are hidden
-                # rather than shown as ghost cards. Completed entries
-                # (with a compiled output) are always kept.
+                # Raw source must be resolvable for the In Progress tab.
+                # Cards whose source EPUB is missing (moved/deleted/offline)
+                # are hidden rather than shown as ghost cards.
                 raw_source_path = _find_raw_source_for_folder(folder)
+                raw_abs = os.path.normcase(os.path.normpath(
+                    os.path.abspath(get_library_raw_dir())))
+                raw_in_library = bool(raw_source_path) and (
+                    os.path.normcase(os.path.normpath(
+                        os.path.abspath(os.path.dirname(raw_source_path)))) == raw_abs
+                )
+
+                # Enrich the card fraction with richer data sources than
+                # translation_progress.json alone:
+                #   * total = authoritative spine count from the source EPUB's
+                #             content.opf (the progress file only tracks
+                #             chapters the translator has processed, so it
+                #             under-reports for fresh / early-progress novels).
+                #   * done  = max(progress file completed, filesystem
+                #             response_*.html/xhtml/txt count) so chunked
+                #             writes that haven't been reflected in the
+                #             sidecar yet still count as done.
+                fs_done = _count_translated_response_files(folder)
+                spine_total = 0
+                if raw_source_path and raw_source_path.lower().endswith(".epub"):
+                    spine_total = _count_epub_spine_items(raw_source_path)
+                total = max(progress_total, spine_total)
+                done = max(progress_done, fs_done)
+
+                # Workspace must prove it's a real translation candidate.
+                # Filter order:
+                #   * compiled output present                                  → keep (Completed).
+                #   * at least one chapter recorded in progress file          → keep.
+                #   * ``Library/Raw`` contains the raw source for this folder → keep
+                #     as "Not started" so freshly imported EPUBs surface even
+                #     though their progress file is a 68-byte seed.
+                #   * otherwise → skip (stray/abandoned folder).
+                if not compiled and progress_total <= 0 and not raw_in_library:
+                    continue
+                # A resolvable raw source is required even for the fresh
+                # imports above; without it we can't render any meaningful
+                # content for the card.
                 if not compiled and not raw_source_path:
                     continue
+
+                # Compute translation_state for the UI. This decides whether
+                # the card shows a "Not started" pill or an "In progress"
+                # fraction in :class:`_BookCard`. Base the not-started
+                # signal on the *raw* progress file contents (before spine /
+                # filesystem enrichment) so freshly imported EPUBs whose
+                # spine count is now non-zero still read as "not_started".
+                if compiled:
+                    translation_state = "completed"
+                elif progress_total <= 0 and fs_done == 0:
+                    translation_state = "not_started"
+                elif done >= total and total > 0:
+                    translation_state = "completed"
+                else:
+                    translation_state = "in_progress"
 
                 # Classify source kind (epub / txt / pdf / image / other) so
                 # the card can show a meaningful type badge. We prefer the
@@ -905,6 +1084,9 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     # the compiled output kind). Used by the card to pick
                     # the right badge for in-progress folders.
                     "workspace_kind": workspace_kind,
+                    # Translation lifecycle: not_started / in_progress /
+                    # completed. Drives the pill label on the card.
+                    "translation_state": translation_state,
                     "is_in_progress": is_in_progress,
                     "output_folder": folder,
                     "progress_file": progress_file if has_progress else "",
@@ -1462,33 +1644,52 @@ class _BookCard(QFrame):
         info_row.addStretch()
         layout.addLayout(info_row)
 
-        # In-progress indicator: small percent pill + overlay ribbon on the cover
+        # In-progress indicator: small status pill + overlay ribbon on the cover
         if book.get("is_in_progress"):
             total = int(book.get("total_chapters", 0) or 0)
             done = int(book.get("completed_chapters", 0) or 0)
+            state = book.get("translation_state") or (
+                "in_progress" if total else "not_started"
+            )
             pct = int(round((done / total) * 100)) if total else 0
             progress_row = QHBoxLayout()
             progress_row.setContentsMargins(0, 0, 0, 0)
             progress_row.setSpacing(4)
-            pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
-            pill.setToolTip(f"Translation in progress \u2014 {pct}% ({done}/{total} chapters)")
-            pill.setStyleSheet(
-                "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
-                "border: 1px solid #6c63ff; border-radius: 3px; "
-                "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
-            )
-            progress_row.addWidget(pill)
-            if total:
-                pct_lbl = QLabel(f"{pct}%")
-                pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold;")
-                progress_row.addWidget(pct_lbl)
+            if state == "not_started":
+                pill = QLabel("\U0001f195 Not started")
+                pill.setToolTip("Imported into Library/Raw, translation not started yet.")
+                pill.setStyleSheet(
+                    "color: #8ab4d0; background: rgba(138, 180, 208, 0.15); "
+                    "border: 1px solid #8ab4d0; border-radius: 3px; "
+                    "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                )
+                progress_row.addWidget(pill)
+                ribbon_text = "NOT STARTED"
+                ribbon_bg = "rgba(138, 180, 208, 0.92)"
+            else:
+                pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
+                pill.setToolTip(
+                    f"Translation in progress \u2014 {pct}% ({done}/{total} chapters)"
+                )
+                pill.setStyleSheet(
+                    "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
+                    "border: 1px solid #6c63ff; border-radius: 3px; "
+                    "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                )
+                progress_row.addWidget(pill)
+                if total:
+                    pct_lbl = QLabel(f"{pct}%")
+                    pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold;")
+                    progress_row.addWidget(pct_lbl)
+                ribbon_text = "IN PROGRESS"
+                ribbon_bg = "rgba(108, 99, 255, 0.92)"
             progress_row.addStretch()
             layout.addLayout(progress_row)
 
             # Corner ribbon on the cover label (absolutely positioned child)
-            self._progress_ribbon = QLabel("IN PROGRESS", self.cover_label)
+            self._progress_ribbon = QLabel(ribbon_text, self.cover_label)
             self._progress_ribbon.setStyleSheet(
-                "color: #fff; background: rgba(108, 99, 255, 0.92); "
+                f"color: #fff; background: {ribbon_bg}; "
                 "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
                 "border-bottom-right-radius: 3px;"
             )
@@ -2820,14 +3021,23 @@ class _BookDetailsLoader(QThread):
             source_epub = ""
             if book_type == "in_progress":
                 output_folder = output_folder or book_path
+                # Prefer the raw_source_path already resolved by the scanner
+                # (validated via source_epub.txt, Library/Raw lookup, and the
+                # raw-inputs registry). Freshly imported Not Started cards
+                # whose output folder only has the sidecar can still surface
+                # a cover + full spine this way.
+                raw_source = self._book.get("raw_source_path") or ""
+                if raw_source and os.path.isfile(raw_source):
+                    source_epub = raw_source
                 if output_folder and os.path.isdir(output_folder):
                     progress_file = progress_file or os.path.join(
                         output_folder, "translation_progress.json")
-                    # Authoritative pointer file first, then any .epub in
+                    # Authoritative pointer file second, then any .epub in
                     # the folder (which may be the compiled output).
-                    pointed = _read_source_epub_pointer(output_folder)
-                    if pointed:
-                        source_epub = pointed
+                    if not source_epub:
+                        pointed = _read_source_epub_pointer(output_folder)
+                        if pointed:
+                            source_epub = pointed
                     if not source_epub:
                         for entry in os.scandir(output_folder):
                             if (entry.is_file(follow_symlinks=False)
@@ -2844,12 +3054,22 @@ class _BookDetailsLoader(QThread):
                             progress_file = progress_file or candidate_pf
                             output_folder = output_folder or parent_dir
 
-            details = _parse_epub_details(source_epub) if source_epub else {
+            # Only treat the resolved source as an EPUB when its extension
+            # actually matches — TXT/PDF raw sources should skip the
+            # zip-based parsing so they don't produce empty details silently.
+            source_is_epub = (bool(source_epub)
+                              and source_epub.lower().endswith(".epub")
+                              and os.path.isfile(source_epub))
+            details = _parse_epub_details(source_epub) if source_is_epub else {
                 "title": "", "authors": [], "publisher": "", "language": "",
                 "date": "", "description": "", "subjects": [], "identifier": "",
                 "chapters": [],
             }
-            cover = _extract_cover(source_epub) if source_epub else None
+            cover = _extract_cover(source_epub) if source_is_epub else None
+            # Broaden cover search so TXT/PDF workspaces that keep a cover
+            # next to their compiled output still get a real thumbnail, and
+            # so EPUBs whose embedded cover extraction somehow fails fall
+            # back to any image the output folder has on disk.
             if not cover and output_folder and os.path.isdir(output_folder):
                 cover = _find_cover_in_dir(output_folder)
             prog = None
@@ -3598,50 +3818,144 @@ class BookDetailsDialog(QDialog):
         return overlay, extra_dirs
 
     def _open_reader(self, initial_chapter: int | None = None, raw_only: bool = False):
+        """Dispatch to the appropriate viewer based on the resolved source type.
+
+        EPUB sources use the integrated :class:`EpubReaderDialog` with the
+        optional translated overlay. TXT / PDF / HTML / image sources are
+        handed off to the OS default viewer, mirroring the dispatch used by
+        :meth:`EpubLibraryDialog._on_card_clicked`.
+        """
         try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            QApplication.processEvents()
-            overlay: dict[str, dict] = {}
-            extra_dirs: list[str] = []
-            window_title = None
-            # Only offer the translated overlay when the book is actually an
-            # in-progress novel with at least one translated chapter on disk.
-            if not raw_only and self._book.get("is_in_progress"):
-                overlay, extra_dirs = self._build_translated_overlay()
-                if overlay:
-                    # Derive the displayed title from the metadata.json /
-                    # OPF title, falling back to the book's name.
-                    window_title = (self._metadata_json.get("title")
-                                    or self._details.get("title")
-                                    or self._book.get("name"))
-                    if window_title:
-                        window_title = f"{window_title} (Translated)"
-            # Translate the spine-index initial_chapter into a filename so the
-            # reader resolves it against its own (manifest-ordered) chapter
-            # list. This also prevents off-by-one jumps when the source EPUB
-            # has nav/toc items that are skipped by the reader's loader.
-            initial_filename = None
-            if isinstance(initial_chapter, int) and 0 <= initial_chapter < len(self._chapters_info):
-                initial_filename = self._chapters_info[initial_chapter].get("filename") or None
-            reader = EpubReaderDialog(
-                self._book["path"],
-                config=self._config,
-                parent=self,
-                initial_chapter=initial_chapter,
-                initial_chapter_filename=initial_filename,
-                translated_overlay=overlay or None,
-                extra_image_dirs=extra_dirs or None,
-                window_title=window_title,
-            )
-            QApplication.restoreOverrideCursor()
-            reader.setModal(False)
-            reader.setAttribute(Qt.WA_DeleteOnClose)
-            self._active_reader = reader
-            reader.show()
+            book_path = self._book.get("path", "") or ""
+            raw_source = self._book.get("raw_source_path", "") or ""
+            compiled = self._book.get("compiled_output_path", "") or ""
+            book_path_is_file = bool(book_path) and os.path.isfile(book_path)
+            book_path_is_epub = book_path_is_file and book_path.lower().endswith(".epub")
+
+            # EPUB sources keep the rich integrated reader with overlay +
+            # initial-chapter support. Everything else falls through to the
+            # system viewer below.
+            if book_path_is_epub:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+                overlay: dict[str, dict] = {}
+                extra_dirs: list[str] = []
+                window_title = None
+                # Only offer the translated overlay when the book is actually an
+                # in-progress novel with at least one translated chapter on disk.
+                if not raw_only and self._book.get("is_in_progress"):
+                    overlay, extra_dirs = self._build_translated_overlay()
+                    if overlay:
+                        # Derive the displayed title from the metadata.json /
+                        # OPF title, falling back to the book's name.
+                        window_title = (self._metadata_json.get("title")
+                                        or self._details.get("title")
+                                        or self._book.get("name"))
+                        if window_title:
+                            window_title = f"{window_title} (Translated)"
+                # Translate the spine-index initial_chapter into a filename so the
+                # reader resolves it against its own (manifest-ordered) chapter
+                # list. This also prevents off-by-one jumps when the source EPUB
+                # has nav/toc items that are skipped by the reader's loader.
+                initial_filename = None
+                if isinstance(initial_chapter, int) and 0 <= initial_chapter < len(self._chapters_info):
+                    initial_filename = self._chapters_info[initial_chapter].get("filename") or None
+                reader = EpubReaderDialog(
+                    book_path,
+                    config=self._config,
+                    parent=self,
+                    initial_chapter=initial_chapter,
+                    initial_chapter_filename=initial_filename,
+                    translated_overlay=overlay or None,
+                    extra_image_dirs=extra_dirs or None,
+                    window_title=window_title,
+                )
+                QApplication.restoreOverrideCursor()
+                reader.setModal(False)
+                reader.setAttribute(Qt.WA_DeleteOnClose)
+                self._active_reader = reader
+                reader.show()
+                return
+
+            # Non-EPUB dispatch: resolve a concrete file to hand off to the
+            # system viewer. Never pass ``book_path`` through when it points
+            # at an in-progress output folder — that's what caused the
+            # EpubReaderDialog crash on TXT/PDF workspaces.
+            chapter_translated = ""
+            if (not raw_only
+                    and isinstance(initial_chapter, int)
+                    and 0 <= initial_chapter < len(self._chapters_info)):
+                tp = self._chapters_info[initial_chapter].get("translated_path", "") or ""
+                if tp and os.path.isfile(tp):
+                    chapter_translated = tp
+
+            target = ""
+            if raw_only:
+                if raw_source and os.path.isfile(raw_source):
+                    target = raw_source
+                elif book_path_is_file:
+                    target = book_path
+            else:
+                if chapter_translated:
+                    target = chapter_translated
+                elif compiled and os.path.isfile(compiled):
+                    target = compiled
+                elif book_path_is_file:
+                    target = book_path
+                elif raw_source and os.path.isfile(raw_source):
+                    target = raw_source
+
+            if not target or not os.path.isfile(target):
+                QMessageBox.warning(
+                    self, "Error",
+                    "No readable file is available for this book.",
+                )
+                return
+
+            self._open_with_system_viewer(target)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             logger.error("Could not open reader from details: %s\n%s", exc, traceback.format_exc())
-            QMessageBox.warning(self, "Error", f"Could not open EPUB reader:\n{exc}")
+            QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
+
+    def _open_with_system_viewer(self, path: str):
+        """Open *path* with the OS default handler.
+
+        Mirrors the PDF/TXT branch inside
+        :meth:`EpubLibraryDialog._on_card_clicked` so the two entry points
+        stay behaviorally consistent.
+        """
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        try:
+            if sys.platform == "win32":
+                if ext == "txt":
+                    _npp_paths = [
+                        r"C:\Program Files\Notepad++\notepad++.exe",
+                        r"C:\Program Files (x86)\Notepad++\notepad++.exe",
+                    ]
+                    _npp = next((p for p in _npp_paths if os.path.exists(p)), None)
+                    if _npp:
+                        subprocess.Popen([_npp, path], creationflags=_no_window)
+                    else:
+                        subprocess.Popen(["notepad.exe", path], creationflags=_no_window)
+                else:
+                    os.startfile(path)
+            elif sys.platform == "darwin":
+                if ext == "txt" and shutil.which("code"):
+                    subprocess.Popen(["code", path])
+                else:
+                    subprocess.Popen(["open", path])
+            else:
+                if ext == "txt":
+                    _editors = ["gedit", "kate", "code", "mousepad", "xed", "pluma"]
+                    _editor = next((e for e in _editors if shutil.which(e)), "xdg-open")
+                    subprocess.Popen([_editor, path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            logger.error("Could not open file %s: %s\n%s", path, exc, traceback.format_exc())
+            QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
 
     def _open_output_folder(self):
         folder = self._book.get("output_folder") or os.path.dirname(self._book.get("path", ""))
