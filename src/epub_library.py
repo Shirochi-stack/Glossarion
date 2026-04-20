@@ -1906,15 +1906,21 @@ class _BookCard(QFrame):
     # (Ctrl-click toggles, plain click replaces). Payload: (book, modifiers).
     select_requested = Signal(dict, object)
 
+    # Selectors target the widget by object name (rather than its Python
+    # class name via a type selector) because Qt's metaobject className for
+    # PySide6-subclassed QFrames isn't always reliable — an ID selector is
+    # the one form guaranteed to match exactly this widget. The border is
+    # kept at 2 px in both states so the content area doesn't reflow on
+    # selection (which previously caused visually stuck hover rendering).
     _BASE_STYLE = (
-        "_BookCard { background: #1e1e2e; border: 1px solid #2a2a3e;"
+        "QFrame#bookCard { background: #1e1e2e; border: 2px solid #2a2a3e;"
         " border-radius: 6px; }"
-        "_BookCard:hover { border: 1px solid #6c63ff; background: #252540; }"
+        "QFrame#bookCard:hover { border: 2px solid #6c63ff; background: #252540; }"
     )
     _SELECTED_STYLE = (
-        "_BookCard { background: #2a2d5a; border: 2px solid #8078ff;"
+        "QFrame#bookCard { background: #2a2d5a; border: 2px solid #a097ff;"
         " border-radius: 6px; }"
-        "_BookCard:hover { border: 2px solid #a097ff; background: #343670; }"
+        "QFrame#bookCard:hover { border: 2px solid #c0b8ff; background: #343670; }"
     )
 
     def __init__(self, book: dict, preset: dict | None = None, parent=None):
@@ -1926,6 +1932,7 @@ class _BookCard(QFrame):
         self._has_cover = False
         self._selected = False
 
+        self.setObjectName("bookCard")
         self.setFixedWidth(self._card_w)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(self._BASE_STYLE)
@@ -2096,12 +2103,8 @@ class _BookCard(QFrame):
             return
         self._selected = new_value
         self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
-        # A stylesheet swap on a QFrame whose children override background /
-        # attribute properties doesn't always trigger the hover-state
-        # recomputation on its own — force a polish + repaint so the new
-        # border / background shows immediately on click.
-        self.style().unpolish(self)
-        self.style().polish(self)
+        # Force an immediate repaint so the stylesheet swap is painted on
+        # the current tick rather than waiting for the next synthetic event.
         self.update()
 
     @property
@@ -2133,19 +2136,38 @@ class _BookCard(QFrame):
             logger.debug("Set cover failed: %s", traceback.format_exc())
 
     def mouseDoubleClickEvent(self, event):
-        self.clicked.emit(self.book)
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.book)
+            event.accept()
+            return
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             # Forward to the parent dialog so it can update multi-selection
             # state. Ctrl/Shift modifiers extend or toggle the selection;
-            # plain click replaces it with just this card.
+            # plain click replaces it with just this card. We MUST accept
+            # the event so it doesn't propagate to the enclosing
+            # :class:`_SelectableGrid`, which would otherwise record a
+            # drag origin and fire ``empty_clicked`` on the matching
+            # release — clearing the selection we just set.
             self.select_requested.emit(self.book, event.modifiers())
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # Consume the release for the same reason as mousePressEvent: if
+        # the event reaches :class:`_SelectableGrid` with no drag movement
+        # it triggers the "empty space click" path and wipes the selection.
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):
         self.context_menu_requested.emit(self.book, event.globalPos())
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -5500,19 +5522,23 @@ class _ChapterRow(QFrame):
     # selecting a row doesn't also open the reader.
     clicked = Signal(int)
 
+    # Object-name selectors for the same reason as :class:`_BookCard`:
+    # they match this exact widget reliably across Qt/PySide versions.
+    # Borders are 2 px in both states to avoid layout shift on selection.
     _BASE_STYLE = (
-        "_ChapterRow { background: #1a1a2a; border: 1px solid #242438; border-radius: 6px; }"
-        "_ChapterRow:hover { border: 1px solid #6c63ff; background: #232340; }"
+        "QFrame#chapterRow { background: #1a1a2a; border: 2px solid #242438; border-radius: 6px; }"
+        "QFrame#chapterRow:hover { border: 2px solid #6c63ff; background: #232340; }"
     )
     _SELECTED_STYLE = (
-        "_ChapterRow { background: #2a2d5a; border: 2px solid #8078ff; border-radius: 6px; }"
-        "_ChapterRow:hover { border: 2px solid #a097ff; background: #343670; }"
+        "QFrame#chapterRow { background: #2a2d5a; border: 2px solid #a097ff; border-radius: 6px; }"
+        "QFrame#chapterRow:hover { border: 2px solid #c0b8ff; background: #343670; }"
     )
 
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
         self.info = info
         self._selected = False
+        self.setObjectName("chapterRow")
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(
             "Click to select — double-click to open this chapter in the reader"
@@ -5590,10 +5616,6 @@ class _ChapterRow(QFrame):
             return
         self._selected = new_value
         self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
-        # Same polish + repaint dance as :class:`_BookCard` so the stylesheet
-        # swap takes effect immediately even though hover rules are live.
-        self.style().unpolish(self)
-        self.style().polish(self)
         self.update()
 
     @property
