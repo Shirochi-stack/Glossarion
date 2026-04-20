@@ -5575,23 +5575,22 @@ class BookDetailsDialog(QDialog):
         # obvious why the action isn't usable. (Previously only computed in
         # _on_details_ready; moved to the shared hero pass so the preview
         # already enables / disables the actions correctly.)
-        out_folder = self._book.get("output_folder") or ""
-        folder_ok = bool(out_folder) and os.path.isdir(out_folder)
+        resolved_out = self._resolve_output_folder_target()
+        folder_ok = bool(resolved_out) and os.path.isdir(resolved_out)
         self._folder_btn.setEnabled(folder_ok)
         self._folder_btn.setCursor(Qt.PointingHandCursor if folder_ok else Qt.ForbiddenCursor)
         self._folder_btn_opacity.setOpacity(1.0 if folder_ok else 0.35)
         self._folder_btn.setToolTip(
-            "Open output folder in file explorer" if folder_ok
+            f"Open output folder:\n{resolved_out}" if folder_ok
             else "Output folder not available for this book"
         )
-        src_path = (self._book.get("raw_source_path", "")
-                    or self._book.get("path", "") or "")
-        source_ok = bool(src_path) and os.path.isfile(src_path)
+        resolved_src = self._resolve_source_file_target()
+        source_ok = bool(resolved_src) and os.path.isfile(resolved_src)
         self._source_btn.setEnabled(source_ok)
         self._source_btn.setCursor(Qt.PointingHandCursor if source_ok else Qt.ForbiddenCursor)
         self._source_btn_opacity.setOpacity(1.0 if source_ok else 0.35)
         self._source_btn.setToolTip(
-            "Reveal source file" if source_ok
+            f"Reveal source file:\n{resolved_src}" if source_ok
             else "Source file not found on disk"
         )
 
@@ -6096,16 +6095,19 @@ class BookDetailsDialog(QDialog):
             logger.error("Could not open file %s: %s\n%s", path, exc, traceback.format_exc())
             QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
 
-    def _open_output_folder(self):
-        """Open the book's output folder in the system file explorer.
+    def _resolve_output_folder_target(self) -> str:
+        """Return the output-folder path the 📁 button should open, or "".
 
-        Resolution order (stops at the first directory that exists on disk):
-          1. ``book['output_folder']`` — set by ``scan_output_folders`` for
-             in-progress + promoted-compiled cards.
+        Shared by both the button's enable / tooltip state and the click
+        handler so the two can't disagree (previously the click path had
+        a richer fallback chain than the enable check, leaving the button
+        dim even when an openable folder existed). Resolution order:
+          1. ``book['output_folder']`` — ``scan_output_folders`` sets
+             this for in-progress + promoted-compiled cards.
           2. ``library_origins['translated']`` — for Library/Translated
-             entries this points at the pre-organize path, whose parent
-             is the original output folder. That folder usually still
-             exists after organize (only the compiled EPUB was moved out).
+             entries the stored "pre-organize" path's parent is the
+             original output folder (usually still on disk — only the
+             compiled EPUB was moved out).
           3. ``os.path.dirname(book['path'])`` — last resort (opens
              Library/Translated for organized books).
         """
@@ -6131,40 +6133,48 @@ class BookDetailsDialog(QDialog):
             candidates.append(fallback)
         for folder in candidates:
             if folder and os.path.isdir(folder):
-                _open_folder_in_explorer(folder)
-                return
+                return folder
+        return ""
 
-    def _reveal_source(self):
-        """Reveal the raw source file in the system file explorer.
+    def _resolve_source_file_target(self) -> str:
+        """Return the raw source file path the 🔗 button should reveal.
 
-        Falls back through progressively weaker signals so organized
-        library entries whose book dict pre-dates the ``pairs`` registry
-        still land on the correct raw file:
-          1. ``book['raw_source_path']`` — populated by the scanners when
-             they can resolve it directly.
-          2. ``_find_raw_source_for_library_epub`` — re-runs the full
-             lookup (pairs → stem match → origins) for library entries
-             whose cached dict was built before the pair was written.
-          3. ``book['path']`` — last resort for non-EPUB / non-library
-             cards; for in-progress cards this is the output folder,
-             which the OS viewer will open as a directory.
+        Mirrors the enable / click path for the source button: consult
+        ``book['raw_source_path']`` first, then re-run
+        :func:`_find_raw_source_for_library_epub` for library entries
+        whose cached dict was built before ``origins['pairs']`` was
+        populated. Caches any fresh resolution back onto ``self._book``
+        so the reader's Raw toggle and other actions in the same dialog
+        pick it up without re-computing.
         """
         path = self._book.get("raw_source_path", "") or ""
-        if (not path or not os.path.isfile(path)) and self._book.get("in_library"):
+        if path and os.path.isfile(path):
+            return path
+        if self._book.get("in_library"):
             lib_path = self._book.get("path", "") or ""
             try:
                 resolved = _find_raw_source_for_library_epub(lib_path)
             except Exception:
                 resolved = ""
-                logger.debug("Reveal-source library lookup failed: %s",
+                logger.debug("Source-file library lookup failed: %s",
                              traceback.format_exc())
             if resolved and os.path.isfile(resolved):
-                # Cache on the book dict so subsequent actions in this
-                # dialog (e.g. the reader's Raw toggle) pick it up too.
                 self._book["raw_source_path"] = resolved
-                path = resolved
-        if not path or not os.path.isfile(path):
-            path = self._book.get("path", "") or ""
+                return resolved
+        fallback = self._book.get("path", "") or ""
+        if fallback and os.path.isfile(fallback):
+            return fallback
+        return ""
+
+    def _open_output_folder(self):
+        """Open the book's output folder in the system file explorer."""
+        folder = self._resolve_output_folder_target()
+        if folder and os.path.isdir(folder):
+            _open_folder_in_explorer(folder)
+
+    def _reveal_source(self):
+        """Reveal the raw source file in the system file explorer."""
+        path = self._resolve_source_file_target()
         if path and os.path.isfile(path):
             _open_folder_in_explorer(path)
 
