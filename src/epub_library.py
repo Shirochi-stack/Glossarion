@@ -566,27 +566,35 @@ def _read_progress_summary(progress_file: str) -> dict | None:
 _SPINE_COUNT_CACHE: dict[str, int] = {}
 
 
-def _count_epub_spine_items(epub_path: str) -> int:
+def _count_epub_spine_items(epub_path: str, exclude_special: bool = False) -> int:
     """Return the number of itemrefs in the EPUB's spine (0 on failure).
 
     Cheap: reads only ``META-INF/container.xml`` + the OPF, never the
-    chapter HTML. Results are memoised per ``(path, mtime)`` so repeated
-    scans don't re-open the zip. This is the authoritative chapter count
-    for EPUB workspaces — ``translation_progress.json`` only tracks
-    chapters the translator has actually processed, so it under-reports
-    the real length for freshly imported / early-progress novels.
+    chapter HTML. Results are memoised per ``(path, mtime, exclude_special)``
+    so repeated scans don't re-open the zip. This is the authoritative
+    chapter count for EPUB workspaces — ``translation_progress.json`` only
+    tracks chapters the translator has actually processed, so it
+    under-reports the real length for freshly imported / early-progress
+    novels.
+
+    When *exclude_special* is True, spine items whose manifest href has no
+    digit in its basename (cover, nav, toc, info, message, …) are skipped,
+    matching the translator's default behavior of not translating special
+    files unless ``translate_special_files`` is explicitly enabled.
     """
     if not epub_path or not os.path.isfile(epub_path):
         return 0
     try:
-        key = _epub_cache_key(epub_path)
+        base_key = _epub_cache_key(epub_path)
     except Exception:
-        key = ""
-    if key and key in _SPINE_COUNT_CACHE:
-        return _SPINE_COUNT_CACHE[key]
+        base_key = ""
+    cache_key = f"{base_key}|excl={int(bool(exclude_special))}" if base_key else ""
+    if cache_key and cache_key in _SPINE_COUNT_CACHE:
+        return _SPINE_COUNT_CACHE[cache_key]
     count = 0
     try:
         import zipfile
+        import re as _re
         from xml.etree import ElementTree as ET
         with zipfile.ZipFile(epub_path, "r") as zf:
             names = zf.namelist()
@@ -613,17 +621,45 @@ def _count_epub_spine_items(epub_path: str) -> int:
                     opf_xml = zf.read(opf_path).decode("utf-8", errors="replace")
                     tree = ET.fromstring(opf_xml)
                     OPF = "http://www.idpf.org/2007/opf"
+                    manifest: dict[str, str] = {}
+                    for item in tree.findall(f".//{{{OPF}}}item"):
+                        item_id = item.get("id", "")
+                        href = item.get("href", "")
+                        if item_id and href:
+                            manifest[item_id] = href
                     spine = tree.find(f".//{{{OPF}}}spine")
                     if spine is not None:
-                        count = len(spine.findall(f"{{{OPF}}}itemref"))
+                        for itemref in spine.findall(f"{{{OPF}}}itemref"):
+                            idref = itemref.get("idref") or ""
+                            if exclude_special:
+                                href = manifest.get(idref, "")
+                                basename = os.path.basename(href)
+                                if not _re.search(r"\d", basename):
+                                    continue
+                            count += 1
                 except Exception:
                     pass
     except Exception:
         logger.debug("Spine count failed for %s: %s",
                      epub_path, traceback.format_exc())
-    if key:
-        _SPINE_COUNT_CACHE[key] = count
+    if cache_key:
+        _SPINE_COUNT_CACHE[cache_key] = count
     return count
+
+
+def _resolve_translate_special_files(config: dict | None) -> bool:
+    """Return the effective ``translate_special_files`` setting.
+
+    Environment variable ``TRANSLATE_SPECIAL_FILES`` takes precedence over
+    the config dict so runtime overrides used by the translator work for
+    the library scanner too.
+    """
+    env = os.environ.get("TRANSLATE_SPECIAL_FILES", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    return bool((config or {}).get("translate_special_files", False))
 
 
 def _count_translated_response_files(folder: str) -> int:
@@ -934,9 +970,15 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
     :func:`split_output_folders_by_status` to partition the two lists.
     """
     import json as _json
+    config = config or {}
     roots = _resolve_output_roots(config)
     if not roots:
         return []
+    # Honor the "translate special files" toggle: when OFF (default), special
+    # files (cover/nav/toc/info/…) are never translated, so they shouldn't
+    # count toward the card's total. Otherwise a fully-translated EPUB sits
+    # at 98/100 forever because two special files were skipped by design.
+    exclude_special = not _resolve_translate_special_files(config)
 
     results: list[dict] = []
     seen_folders: set[str] = set()
@@ -996,7 +1038,8 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 fs_done = _count_translated_response_files(folder)
                 spine_total = 0
                 if raw_source_path and raw_source_path.lower().endswith(".epub"):
-                    spine_total = _count_epub_spine_items(raw_source_path)
+                    spine_total = _count_epub_spine_items(
+                        raw_source_path, exclude_special=exclude_special)
                 total = max(progress_total, spine_total)
                 done = max(progress_done, fs_done)
 
@@ -2803,18 +2846,23 @@ class EpubLibraryDialog(QDialog):
             # Always expose "Open in Reader" when an EPUB source is
             # resolvable — either the raw source (Not Started / mid-
             # translation cards) or a compiled translated EPUB.
+            # NOTE: ``QAction.triggered`` emits a ``bool checked`` argument
+            # which Qt binds to lambda *default* parameters, so we MUST close
+            # over the loop-free locals without using ``lambda x=local: …``
+            # (otherwise ``x`` gets overwritten with the checked bool and
+            # subsequent ``x.get(…)`` calls crash with AttributeError).
             raw_src = book.get("raw_source_path") or ""
             out_epub = book.get("output_epub_path") or ""
             if (raw_src and raw_src.lower().endswith(".epub")
                     and os.path.isfile(raw_src)):
                 raw_reader_action = menu.addAction("\U0001f4d6  Open in Reader")
                 raw_reader_action.triggered.connect(
-                    lambda p=raw_src: self._open_reader_direct({"path": p, "type": "epub"})
+                    lambda: self._open_reader_direct({"path": raw_src, "type": "epub"})
                 )
             if out_epub and os.path.isfile(out_epub):
                 reader_action = menu.addAction("\U0001f4d6  Open Translated EPUB")
                 reader_action.triggered.connect(
-                    lambda p=out_epub: self._open_reader_direct({"path": p, "type": "epub"})
+                    lambda: self._open_reader_direct({"path": out_epub, "type": "epub"})
                 )
         elif file_type == "epub":
             details_action = menu.addAction("\U0001f4d1  Open Book Details")
@@ -2833,7 +2881,9 @@ class EpubLibraryDialog(QDialog):
             menu.addSeparator()
             load_action = menu.addAction("\U0001f501  Load for translation")
             load_action.setToolTip("Set this file as the translator's current input.")
-            load_action.triggered.connect(lambda b=book: self._load_for_translation(b))
+            # See "NOTE" above — close over ``book`` without a default arg
+            # so Qt's ``checked`` bool can't overwrite it.
+            load_action.triggered.connect(lambda: self._load_for_translation(book))
         menu.addSeparator()
         folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
         # For in-progress cards the card "path" IS the output folder; for
@@ -3477,8 +3527,11 @@ class BookDetailsDialog(QDialog):
         self._meta_grid.setHorizontalSpacing(14)
         # Bumped vertical spacing keeps wrapped value labels from visually
         # colliding with the next row's key label (e.g. multi-line "Title"
-        # running into "Author" on Qt's conservative sizeHint path).
-        self._meta_grid.setVerticalSpacing(14)
+        # running into "Author" on Qt's conservative sizeHint path). Bumped
+        # further to give long Korean / CJK titles enough upward headroom
+        # to render without clipping their ascenders into the METADATA
+        # heading above.
+        self._meta_grid.setVerticalSpacing(22)
         # Let the second column stretch so long titles wrap across more
         # horizontal space instead of clipping vertically.
         self._meta_grid.setColumnStretch(0, 0)
@@ -3510,9 +3563,10 @@ class BookDetailsDialog(QDialog):
         meta_wrapper = QWidget()
         meta_wrapper.setLayout(meta_col)
         # Wider column so long titles / author names don't wrap aggressively
-        # and collide with the next metadata row.
-        meta_wrapper.setMinimumWidth(320)
-        meta_wrapper.setMaximumWidth(380)
+        # and collide with the next metadata row. Bumped from 380 so the
+        # common CJK novel title fits on one line in the Title row.
+        meta_wrapper.setMinimumWidth(360)
+        meta_wrapper.setMaximumWidth(480)
         hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
         body_layout.addLayout(hero)
 
@@ -3691,8 +3745,19 @@ class BookDetailsDialog(QDialog):
         # In-progress strip + reader-entry-point relabeling
         has_translated = any(c.get("translated_path") for c in self._chapters_info)
         if self._book.get("is_in_progress"):
-            done = sum(1 for c in self._chapters_info if c["status"] == "completed")
-            total = len(self._chapters_info) or int(self._book.get("total_chapters", 0) or 0)
+            # Respect the "translate special files" toggle so a book whose
+            # only un-translated entries are special files (nav / toc /
+            # cover / …) doesn't stall the progress bar at 98%. When the
+            # toggle is off (default), those files are never translated by
+            # design and shouldn't count toward the denominator.
+            translate_special = _resolve_translate_special_files(self._config)
+            if translate_special:
+                progress_items = self._chapters_info
+            else:
+                progress_items = [c for c in self._chapters_info
+                                  if not c.get("is_special")]
+            done = sum(1 for c in progress_items if c["status"] == "completed")
+            total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
             if total:
                 pct = int(round((done / total) * 100))
                 self._progress_strip.setText(
