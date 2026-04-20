@@ -662,16 +662,23 @@ def _resolve_translate_special_files(config: dict | None) -> bool:
     return bool((config or {}).get("translate_special_files", False))
 
 
-def _count_translated_response_files(folder: str) -> int:
+def _count_translated_response_files(folder: str, exclude_special: bool = False) -> int:
     """Count ``response_*.{html,xhtml,htm,txt}`` files inside *folder*.
 
-    Acts as a filesystem-based "done" count so in-progress cards reflect
-    real translation progress even when ``translation_progress.json``
-    lags behind the on-disk outputs (common during chunked writes or
-    after a crashed run whose sidecar never flushed ``status=completed``).
+    Acts as a filesystem-based "done" count fallback for cards whose
+    ``translation_progress.json`` is missing / empty (e.g. a crashed run
+    that never flushed ``status=completed`` to the sidecar).
+
+    When *exclude_special* is True, response files whose stem has no
+    digit — ``response_cover.html``, ``response_nav.xhtml``, … — are
+    skipped, matching the same heuristic used by
+    :func:`_count_epub_spine_items`. This keeps the denominator and the
+    numerator consistent when the "translate special files" toggle is
+    off.
     """
     if not folder or not os.path.isdir(folder):
         return 0
+    import re as _re
     count = 0
     try:
         for entry in os.scandir(folder):
@@ -680,8 +687,13 @@ def _count_translated_response_files(folder: str) -> int:
             lower = entry.name.lower()
             if not lower.startswith("response_"):
                 continue
-            if lower.endswith((".html", ".xhtml", ".htm", ".txt")):
-                count += 1
+            if not lower.endswith((".html", ".xhtml", ".htm", ".txt")):
+                continue
+            if exclude_special:
+                stem = os.path.splitext(lower[len("response_"):])[0]
+                if not _re.search(r"\d", stem):
+                    continue
+            count += 1
     except (PermissionError, OSError):
         return 0
     return count
@@ -1031,17 +1043,32 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 #             content.opf (the progress file only tracks
                 #             chapters the translator has processed, so it
                 #             under-reports for fresh / early-progress novels).
-                #   * done  = max(progress file completed, filesystem
-                #             response_*.html/xhtml/txt count) so chunked
-                #             writes that haven't been reflected in the
-                #             sidecar yet still count as done.
-                fs_done = _count_translated_response_files(folder)
+                #   * done  = progress file's "completed" count when the
+                #             sidecar has real entries (authoritative —
+                #             status="in_progress" entries don't count as
+                #             done, which is what the user expects for
+                #             specials still being translated). Filesystem
+                #             response_*.html count is only used as a
+                #             fallback when the progress file is missing or
+                #             empty. The filesystem count also respects
+                #             exclude_special so partial stub files for
+                #             skipped specials can't inflate the fraction.
+                fs_done = _count_translated_response_files(
+                    folder, exclude_special=exclude_special)
                 spine_total = 0
                 if raw_source_path and raw_source_path.lower().endswith(".epub"):
                     spine_total = _count_epub_spine_items(
                         raw_source_path, exclude_special=exclude_special)
                 total = max(progress_total, spine_total)
-                done = max(progress_done, fs_done)
+                if progress_total > 0:
+                    # Progress file is authoritative — in-progress specials
+                    # have ``status="in_progress"`` and don't get counted
+                    # here, so a book whose only pending chapters are
+                    # specials stays below 100% until they're done (when
+                    # ``translate_special_files`` is on).
+                    done = progress_done
+                else:
+                    done = fs_done
 
                 # Workspace must prove it's a real translation candidate.
                 # Filter order:
@@ -2139,6 +2166,68 @@ class EpubLibraryDialog(QDialog):
         toolbar.addWidget(self._count_label)
         root.addLayout(toolbar)
 
+        # Global actions row (above the tabs): "More actions" toggle +
+        # Organize / Undo batch buttons. Placed here so they're visible
+        # regardless of which tab is active, and so the tab-local action
+        # rows stay focused on their own concerns (Import EPUB, Open
+        # Library Folder). Both Organize and Undo start hidden behind the
+        # "⋯" toggle — most users won't need them day-to-day.
+        self._more_actions_visible = bool(
+            self._config.get("epub_library_show_more", False))
+        global_actions_row = QHBoxLayout()
+        global_actions_row.setContentsMargins(0, 0, 0, 0)
+        global_actions_row.setSpacing(6)
+        global_actions_row.addStretch()
+        self._more_actions_btn = QPushButton("\u22ef")
+        self._more_actions_btn.setCursor(Qt.PointingHandCursor)
+        self._more_actions_btn.setCheckable(True)
+        self._more_actions_btn.setChecked(self._more_actions_visible)
+        self._more_actions_btn.setToolTip(
+            "Show / hide the Organize + Undo batch actions."
+        )
+        self._more_actions_btn.setFixedSize(32, 28)
+        self._more_actions_btn.setStyleSheet(
+            "QPushButton { background: #2a2a3e; color: #b0b0c0; "
+            "border: 1px solid #3a3a5e; border-radius: 4px; "
+            "font-size: 13pt; font-weight: bold; padding: 0; }"
+            "QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }"
+            "QPushButton:checked { background: #6c63ff; border-color: #7c73ff; "
+            "color: #fff; }"
+        )
+        self._more_actions_btn.toggled.connect(self._on_more_actions_toggled)
+        global_actions_row.addWidget(self._more_actions_btn)
+
+        self._organize_btn = QPushButton("\U0001f4e5  Organize Files into Library")
+        self._organize_btn.setCursor(Qt.PointingHandCursor)
+        self._organize_btn.setToolTip(
+            "Move every resolvable raw source into Library/Raw and every "
+            "compiled EPUB into Library/Translated. Each move is recorded "
+            "so it can be reversed by Undo Move."
+        )
+        self._organize_btn.setStyleSheet(
+            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #4a6a8a; }")
+        self._organize_btn.clicked.connect(self._organize_into_library)
+        self._organize_btn.setVisible(self._more_actions_visible)
+        global_actions_row.addWidget(self._organize_btn)
+
+        self._undo_btn = QPushButton("\u21a9  Undo Move")
+        self._undo_btn.setCursor(Qt.PointingHandCursor)
+        self._undo_btn.setToolTip(
+            "Restore previously organized files back to their original "
+            "locations. You'll be asked whether to undo Raw, Translated, "
+            "or All."
+        )
+        self._undo_btn.setStyleSheet(
+            "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #5a32a3; }")
+        self._undo_btn.clicked.connect(self._undo_organize_prompt)
+        self._undo_btn.setVisible(self._more_actions_visible)
+        global_actions_row.addWidget(self._undo_btn)
+        root.addLayout(global_actions_row)
+
         # Per-tab action bar: each tab gets its own extra button row with
         # context-specific actions (Import EPUB for In Progress, Open Library
         # Folder for Completed). The shared sort/size toolbar above applies
@@ -2169,34 +2258,8 @@ class EpubLibraryDialog(QDialog):
         self._ip_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         ip_action_row.addWidget(self._ip_count_label)
         ip_action_row.addStretch()
-        self._organize_btn = QPushButton("\U0001f4e5  Organize Files into Library")
-        self._organize_btn.setCursor(Qt.PointingHandCursor)
-        self._organize_btn.setToolTip(
-            "Move every resolvable raw source into Library/Raw and every "
-            "compiled EPUB into Library/Translated. Each move is recorded "
-            "so it can be reversed by Undo Move."
-        )
-        self._organize_btn.setStyleSheet(
-            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
-            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #4a6a8a; }")
-        self._organize_btn.clicked.connect(self._organize_into_library)
-        ip_action_row.addWidget(self._organize_btn)
-
-        self._undo_btn = QPushButton("\u21a9  Undo Move")
-        self._undo_btn.setCursor(Qt.PointingHandCursor)
-        self._undo_btn.setToolTip(
-            "Restore previously organized files back to their original "
-            "locations. You'll be asked whether to undo Raw, Translated, "
-            "or All."
-        )
-        self._undo_btn.setStyleSheet(
-            "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
-            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #5a32a3; }")
-        self._undo_btn.clicked.connect(self._undo_organize_prompt)
-        ip_action_row.addWidget(self._undo_btn)
-
+        # Organize / Undo live in the global-actions row above the tab
+        # widget (see ``_setup_ui``). Only Import EPUB is tab-local here.
         self._import_btn = QPushButton("\u2795  Import EPUB")
         self._import_btn.setCursor(Qt.PointingHandCursor)
         self._import_btn.setToolTip(
@@ -2387,6 +2450,23 @@ class EpubLibraryDialog(QDialog):
         except OSError:
             pass
         _open_folder_in_explorer(lib)
+
+    def _on_more_actions_toggled(self, checked: bool):
+        """Show / hide the Organize + Undo batch-operation buttons.
+
+        Persisted via ``config['epub_library_show_more']`` so the user's
+        preference survives library-dialog reopens.
+        """
+        self._more_actions_visible = bool(checked)
+        try:
+            self._organize_btn.setVisible(self._more_actions_visible)
+            self._undo_btn.setVisible(self._more_actions_visible)
+        except Exception:
+            pass
+        try:
+            self._config["epub_library_show_more"] = self._more_actions_visible
+        except Exception:
+            pass
 
     def _import_epub(self):
         """Pick raw source EPUB(s), copy them into Library/Raw, and scaffold
