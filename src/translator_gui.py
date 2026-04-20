@@ -16764,7 +16764,7 @@ Important rules:
                pass
 
     def _open_epub_library(self):
-        """Open the Library dialog — reuses existing instance (show/hide pattern)."""
+        """Open the Library dialog \u2014 reuses existing instance (show/hide pattern)."""
         try:
             from epub_library import EpubLibraryDialog
             dlg = getattr(self, '_epub_library_dialog', None)
@@ -16772,6 +16772,13 @@ Important rules:
             if first_creation:
                 dlg = EpubLibraryDialog(config=self.config, parent=self)
                 dlg.setModal(False)
+                # Hook the "Import EPUB" action on the In Progress tab up to
+                # the translator's input field so the user can queue a new
+                # source file for translation without leaving the library.
+                try:
+                    dlg.import_epub_requested.connect(self._handle_library_import_epub)
+                except Exception:
+                    pass
                 self._epub_library_dialog = dlg
             if dlg.isVisible():
                 dlg.raise_()
@@ -16781,13 +16788,51 @@ Important rules:
                 # scan; calling _auto_refresh here would force a synchronous
                 # re-scan and negate the instant-open optimization.
                 if not first_creation:
-                    dlg._auto_refresh()  # lightweight — only reloads if file list changed
+                    dlg._auto_refresh()  # lightweight \u2014 only reloads if file list changed
                 dlg.show()
                 dlg.raise_()
                 dlg.activateWindow()
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Library Error", f"Could not open Library:\n{e}")
+
+    def _handle_library_import_epub(self, path: str):
+        """Library \u2192 Import EPUB: set the picked file as the current input.
+
+        Mirrors the "Select File" button's effect: populates the EPUB entry,
+        updates ``selected_files`` / ``current_file_index``, and brings the
+        main window forward so the user can hit Run.
+        """
+        try:
+            if not path or not os.path.isfile(path):
+                return
+            path = os.path.abspath(path)
+            # Populate the EPUB entry text field if present.
+            try:
+                if hasattr(self, 'entry_epub') and self.entry_epub is not None:
+                    self.entry_epub.setText(path)
+            except Exception:
+                pass
+            # Track the selection in the same list the rest of the GUI uses.
+            try:
+                self.selected_files = [path]
+                self.current_file_index = 0
+            except Exception:
+                pass
+            try:
+                self.append_log(f"\U0001f4d6 Loaded from library: {os.path.basename(path)}")
+            except Exception:
+                pass
+            # Raise the main window so the user sees the new selection.
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Import EPUB",
+                                f"Could not import EPUB:\n{e}")
 
     def _on_library_closed(self):
         """Persist config when library/reader dialogs close."""

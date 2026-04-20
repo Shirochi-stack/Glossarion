@@ -441,6 +441,212 @@ def _read_source_epub_pointer(folder: str) -> str | None:
     return os.path.normpath(candidate) if os.path.isfile(candidate) else None
 
 
+# ---------------------------------------------------------------------------
+# Cover helpers
+# ---------------------------------------------------------------------------
+
+def _find_cover_in_dir(folder: str) -> str | None:
+    """Look for a cover image inside *folder* (or its ``images/`` subfolders).
+
+    Preference order:
+      1. *cover* images directly in the folder.
+      2. Any image in the folder.
+      3. *cover* images in ``images/`` or ``translated_images/``.
+      4. The smallest-numbered image in ``images/``.
+    """
+    import re as _re
+    _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+    def _natural_key(p):
+        name = os.path.basename(p).lower()
+        nums = _re.findall(r"\d+", name)
+        return int(nums[0]) if nums else 0
+
+    def _scan(dir_path: str) -> str | None:
+        if not dir_path or not os.path.isdir(dir_path):
+            return None
+        covers: list[str] = []
+        any_imgs: list[str] = []
+        try:
+            for entry in os.scandir(dir_path):
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                nl = entry.name.lower()
+                ext = os.path.splitext(nl)[1]
+                if ext not in _IMG_EXTS:
+                    continue
+                if "cover" in nl:
+                    covers.append(entry.path)
+                any_imgs.append(entry.path)
+        except (PermissionError, OSError):
+            return None
+        if covers:
+            covers.sort(key=_natural_key)
+            return covers[0]
+        if any_imgs:
+            any_imgs.sort(key=_natural_key)
+            return any_imgs[0]
+        return None
+
+    direct = _scan(folder)
+    if direct:
+        return direct
+    for sub in ("images", "translated_images"):
+        r = _scan(os.path.join(folder, sub))
+        if r:
+            return r
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Tab scanners: Completed (Library) and In Progress (output folders)
+# ---------------------------------------------------------------------------
+
+def scan_library_completed(config: dict | None = None) -> list[dict]:
+    """Scan the Library folder for completed EPUBs.
+
+    The Library folder (``Documents/Glossarion/Library``) is a curated shelf:
+    all EPUBs inside are treated as finished works with no translation context.
+    """
+    library_dir = os.path.normpath(os.path.abspath(get_library_dir()))
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    def _walk(root: str, max_depth: int = 4, depth: int = 0):
+        if depth > max_depth:
+            return
+        try:
+            with os.scandir(root) as it:
+                for entry in it:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            lower = entry.name.lower()
+                            if not lower.endswith(".epub"):
+                                continue
+                            norm = os.path.normpath(os.path.abspath(entry.path))
+                            if norm in seen:
+                                continue
+                            seen.add(norm)
+                            try:
+                                stat = os.stat(entry.path)
+                            except OSError:
+                                continue
+                            results.append({
+                                "name": os.path.splitext(entry.name)[0],
+                                "path": entry.path,
+                                "size": stat.st_size,
+                                "mtime": stat.st_mtime,
+                                "in_library": True,
+                                "type": "epub",
+                            })
+                        elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                            _walk(entry.path, max_depth, depth + 1)
+                    except (PermissionError, OSError):
+                        pass
+        except (PermissionError, OSError):
+            pass
+
+    if os.path.isdir(library_dir):
+        _walk(library_dir)
+    results.sort(key=lambda r: r["mtime"], reverse=True)
+    return results
+
+
+def scan_output_folders(config: dict | None = None) -> list[dict]:
+    """Scan the output root(s) for translation folders (one card per folder).
+
+    Honors the OUTPUT_DIRECTORY override strictly via :func:`_resolve_output_roots`.
+    A folder qualifies when it has at least one of:
+      * ``translation_progress.json``
+      * ``metadata.json``
+      * a compiled ``.epub``
+
+    Each result carries ``metadata_json`` (already loaded) so the card/details
+    dialog can render without a second filesystem hit.
+    """
+    import json as _json
+    roots = _resolve_output_roots(config)
+    if not roots:
+        return []
+
+    results: list[dict] = []
+    seen_folders: set[str] = set()
+    for root in roots:
+        try:
+            it = os.scandir(root)
+        except (PermissionError, OSError):
+            continue
+        with it:
+            for entry in it:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                folder = entry.path
+                key = os.path.normcase(os.path.normpath(folder))
+                if key in seen_folders:
+                    continue
+                seen_folders.add(key)
+
+                progress_file = os.path.join(folder, "translation_progress.json")
+                metadata_file = os.path.join(folder, "metadata.json")
+                output_epub = _folder_has_output_epub(folder)
+                has_progress = os.path.isfile(progress_file)
+                has_metadata = os.path.isfile(metadata_file)
+                # Must look like a translation workspace — otherwise random
+                # sibling directories of the output root would flood the tab.
+                if not has_progress and not has_metadata and not output_epub:
+                    continue
+
+                metadata_json: dict = {}
+                if has_metadata:
+                    try:
+                        with open(metadata_file, "r", encoding="utf-8") as f:
+                            loaded = _json.load(f)
+                        if isinstance(loaded, dict):
+                            metadata_json = loaded
+                    except (OSError, _json.JSONDecodeError):
+                        metadata_json = {}
+
+                summary = _read_progress_summary(progress_file) if has_progress else None
+                total = summary["total"] if summary else 0
+                done = summary["completed"] if summary else 0
+                failed = summary["failed"] if summary else 0
+
+                # Title precedence: metadata.json title → folder basename.
+                raw_title = (metadata_json.get("title")
+                             or metadata_json.get("original_title")
+                             or entry.name)
+
+                try:
+                    stat = os.stat(folder)
+                except OSError:
+                    continue
+
+                results.append({
+                    "name": raw_title,
+                    "folder_name": entry.name,
+                    # Use the folder itself as the card's identifying path so
+                    # downstream code can locate progress artifacts trivially.
+                    "path": folder,
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                    "in_library": False,
+                    "type": "in_progress",
+                    "is_in_progress": True,
+                    "output_folder": folder,
+                    "progress_file": progress_file if has_progress else "",
+                    "metadata_json_path": metadata_file if has_metadata else "",
+                    "metadata_json": metadata_json,
+                    "total_chapters": total,
+                    "completed_chapters": done,
+                    "failed_chapters": failed,
+                    "pending_chapters": max(0, total - done),
+                    "has_output_epub": bool(output_epub),
+                    "output_epub_path": output_epub or "",
+                })
+    results.sort(key=lambda r: r["mtime"], reverse=True)
+    return results
+
+
 def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
     """Locate novels whose translation is in progress (no output EPUB yet).
 
@@ -780,9 +986,9 @@ def _find_folder_cover(file_path: str, config: dict | None = None, original_path
 class _LibraryScannerThread(QThread):
     """Run scan_for_epubs() off the UI thread so the loading spinner animates.
 
-    The library's filesystem walk can take several hundred milliseconds on
-    large output directories — long enough to freeze the UI and prevent
-    the Halgakos spinner from painting if run synchronously.
+    Retained for backward compatibility — external callers (e.g. android UI)
+    still depend on the merged scan. The tabbed dialog uses
+    :class:`_DualScannerThread` instead.
     """
     finished = Signal(list)
 
@@ -799,6 +1005,32 @@ class _LibraryScannerThread(QThread):
         self.finished.emit(results)
 
 
+class _DualScannerThread(QThread):
+    """Scan Library (Completed) and output roots (In Progress) in one shot.
+
+    Emits ``(in_progress_list, completed_list)`` so the tabbed dialog can
+    refresh both panes from a single worker run.
+    """
+    finished = Signal(list, list)
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self._config = config or {}
+
+    def run(self):
+        try:
+            in_progress = scan_output_folders(self._config)
+        except Exception:
+            logger.debug("In-progress scan failed: %s", traceback.format_exc())
+            in_progress = []
+        try:
+            completed = scan_library_completed(self._config)
+        except Exception:
+            logger.debug("Completed scan failed: %s", traceback.format_exc())
+            completed = []
+        self.finished.emit(in_progress, completed)
+
+
 class _CoverLoader(QThread):
     finished = Signal(str, str)
 
@@ -813,6 +1045,21 @@ class _CoverLoader(QThread):
     def run(self):
         if self._file_type == "epub":
             cover = _extract_cover(self._file_path)
+        elif self._file_type == "in_progress":
+            # For an in-progress card the "path" is the output folder itself.
+            cover = _find_cover_in_dir(self._file_path)
+            # As a secondary pass, try the compiled output EPUB (if any) so
+            # finished-but-not-organized novels still show a real cover.
+            if not cover:
+                try:
+                    for entry in os.scandir(self._file_path):
+                        if (entry.is_file(follow_symlinks=False)
+                                and entry.name.lower().endswith(".epub")):
+                            cover = _extract_cover(entry.path)
+                            if cover:
+                                break
+                except (PermissionError, OSError):
+                    pass
         else:
             cover = _find_folder_cover(self._file_path, config=self._config,
                                        original_path=self._original_path)
@@ -866,7 +1113,12 @@ class _BookCard(QFrame):
 
         # Size + file type badge on same row
         file_type = book.get("type", "epub")
-        type_info = {"epub": ("\U0001f4d5EPUB", "#6c63ff"), "pdf": ("\U0001f4c4PDF", "#e74c3c"), "txt": ("\U0001f4d7TXT", "#2ecc71")}
+        type_info = {
+            "epub": ("\U0001f4d5EPUB", "#6c63ff"),
+            "pdf": ("\U0001f4c4PDF", "#e74c3c"),
+            "txt": ("\U0001f4d7TXT", "#2ecc71"),
+            "in_progress": ("\U0001f4c1FOLDER", "#ffd166"),
+        }
         badge_text, badge_color = type_info.get(file_type, ("\U0001f4d5EPUB", "#6c63ff"))
         size_mb = book["size"] / (1024 * 1024)
         size_str = f"{size_mb:.1f} MB" if size_mb >= 1 else f"{book['size'] / 1024:.0f} KB"
@@ -955,10 +1207,13 @@ class _BookCard(QFrame):
 # ---------------------------------------------------------------------------
 
 class EpubLibraryDialog(QDialog):
+    # Emitted when the user imports a new EPUB from the "In Progress" tab.
+    # Parents (e.g. TranslatorGUI) can connect to set it as the input file.
+    import_epub_requested = Signal(str)
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📚 Glossarion Library")
+        self.setWindowTitle("\U0001f4da Glossarion Library")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         # Ratio-based sizing relative to screen
         screen = self.screen()
@@ -970,14 +1225,18 @@ class EpubLibraryDialog(QDialog):
             self.resize(900, 650)
             self.setMinimumSize(500, 400)
         self._config = config or {}
-        self._books: list[dict] = []
-        self._cards: list[_BookCard] = []
+        # Per-tab data. "In Progress" comes from the output root (strict
+        # OUTPUT_DIRECTORY override); "Completed" comes from the Library folder.
+        self._in_progress_books: list[dict] = []
+        self._completed_books: list[dict] = []
+        self._ip_cards: list[_BookCard] = []
+        self._comp_cards: list[_BookCard] = []
         self._cover_threads: list[_CoverLoader] = []
         # Restore persisted settings
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
-        self._last_move_log: list[tuple[str, str]] = []  # [(src, dst), ...] for undo
-        self._scanner_thread: _LibraryScannerThread | None = None
+        self._current_tab = self._config.get('epub_library_tab', 0)
+        self._scanner_thread: _DualScannerThread | None = None
         self._setup_ui()
         # Defer the filesystem scan so the dialog paints immediately;
         # on large libraries scan_for_epubs() + cover-thread spawn can otherwise
@@ -1056,6 +1315,7 @@ class EpubLibraryDialog(QDialog):
         return btn
 
     def _setup_ui(self):
+        from PySide6.QtWidgets import QTabWidget
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(6)
@@ -1076,7 +1336,7 @@ class EpubLibraryDialog(QDialog):
                 icon_lbl.setPixmap(scaled)
                 icon_lbl.setFixedSize(logical_size + 2, logical_size + 2)
                 header.addWidget(icon_lbl)
-        title = QLabel("📚  Glossarion Library")
+        title = QLabel("\U0001f4da  Glossarion Library")
         title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #e0e0e0;")
         header.addWidget(title)
         header.addStretch()
@@ -1091,7 +1351,7 @@ class EpubLibraryDialog(QDialog):
         self._search.textChanged.connect(self._apply_filter)
         header.addWidget(self._search)
 
-        refresh_btn = QPushButton("🔄  Refresh")
+        refresh_btn = QPushButton("\U0001f504  Refresh")
         refresh_btn.setToolTip("Refresh library")
         refresh_btn.setFixedHeight(28)
         refresh_btn.setCursor(Qt.PointingHandCursor)
@@ -1101,18 +1361,6 @@ class EpubLibraryDialog(QDialog):
             "QPushButton:hover { color: #e0e0e0; }")
         refresh_btn.clicked.connect(self._load_books)
         header.addWidget(refresh_btn)
-
-        # Toggle to show/hide the organize banner
-        self._banner_toggle = QPushButton("↕")
-        self._banner_toggle.setToolTip("Show/hide the organize & undo banner")
-        self._banner_toggle.setFixedSize(28, 28)
-        self._banner_toggle.setCursor(Qt.PointingHandCursor)
-        self._banner_toggle.setStyleSheet(
-            "QPushButton { background: transparent; border: none; font-size: 12pt; "
-            "color: #aaa; padding: 0; }"
-            "QPushButton:hover { color: #e0e0e0; }")
-        self._banner_toggle.clicked.connect(self._toggle_banner)
-        header.addWidget(self._banner_toggle)
 
         root.addLayout(header)
         root.addSpacing(6)
@@ -1156,61 +1404,113 @@ class EpubLibraryDialog(QDialog):
         toolbar.addWidget(self._count_label)
         root.addLayout(toolbar)
 
-        # Suggestion banner (gentle tone)
-        self._relocate_banner = QFrame()
-        self._relocate_banner.setStyleSheet(
-            "QFrame { background: #1a2a3a; border: 1px solid #2a4a6a; border-radius: 6px; }")
-        banner_layout = QHBoxLayout(self._relocate_banner)
-        banner_layout.setContentsMargins(10, 6, 10, 6)
-        self._banner_lbl = QLabel("")
-        self._banner_lbl.setStyleSheet("color: #8ab4d0; font-size: 8.5pt;")
-        banner_layout.addWidget(self._banner_lbl)
-        banner_layout.addStretch()
-        self._organize_btn = QPushButton("Organize into Library")
-        self._organize_btn.setCursor(Qt.PointingHandCursor)
-        self._organize_btn.setToolTip("Copy these files into your Library folder for easy access")
-        self._organize_btn.setStyleSheet(
-            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
-            "padding: 3px 10px; font-size: 8.5pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #4a6a8a; }")
-        self._organize_btn.clicked.connect(self._relocate_to_library)
-        self._organize_btn.hide()
-        banner_layout.addWidget(self._organize_btn)
-        # Undo button (hidden by default, shown after a move)
-        self._undo_btn = QPushButton("↩ Undo Move")
-        self._undo_btn.setCursor(Qt.PointingHandCursor)
-        self._undo_btn.setToolTip("Move the files back to their original locations")
-        self._undo_btn.setStyleSheet(
-            "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
-            "padding: 3px 10px; font-size: 8.5pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #5a32a3; }")
-        self._undo_btn.clicked.connect(self._undo_relocate)
-        self._undo_btn.hide()
-        banner_layout.addWidget(self._undo_btn)
-        self._relocate_banner.hide()
-        root.addWidget(self._relocate_banner)
+        # Per-tab action bar: each tab gets its own extra button row with
+        # context-specific actions (Import EPUB for In Progress, Open Library
+        # Folder for Completed). The shared sort/size toolbar above applies
+        # to whichever tab is currently active.
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #2a2a3e; border-radius: 6px;
+                                background: #12121e; top: -1px; }
+            QTabBar::tab { background: #1e1e2e; color: #b0b0c0;
+                            border: 1px solid #2a2a3e; border-bottom: none;
+                            border-top-left-radius: 6px; border-top-right-radius: 6px;
+                            padding: 6px 16px; font-size: 9.5pt; font-weight: bold;
+                            margin-right: 2px; min-width: 110px; }
+            QTabBar::tab:selected { background: #12121e; color: #e0e0e0;
+                                     border-color: #2a2a3e; }
+            QTabBar::tab:hover:!selected { background: #252540; color: #e0e0e0; }
+        """)
 
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setStyleSheet(
+        # --- In Progress tab ---
+        self._ip_tab = QWidget()
+        self._ip_tab.setStyleSheet("background: #12121e;")
+        ip_layout = QVBoxLayout(self._ip_tab)
+        ip_layout.setContentsMargins(6, 8, 6, 6)
+        ip_layout.setSpacing(6)
+        ip_action_row = QHBoxLayout()
+        ip_action_row.setSpacing(6)
+        self._ip_count_label = QLabel("")
+        self._ip_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
+        ip_action_row.addWidget(self._ip_count_label)
+        ip_action_row.addStretch()
+        self._import_btn = QPushButton("\u2795  Import EPUB")
+        self._import_btn.setCursor(Qt.PointingHandCursor)
+        self._import_btn.setToolTip(
+            "Pick a source EPUB to load into Glossarion for translation."
+        )
+        self._import_btn.setStyleSheet(
+            "QPushButton { background: #6c63ff; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #8078ff; }")
+        self._import_btn.clicked.connect(self._import_epub)
+        ip_action_row.addWidget(self._import_btn)
+        ip_layout.addLayout(ip_action_row)
+        self._ip_scroll = QScrollArea()
+        self._ip_scroll.setWidgetResizable(True)
+        self._ip_scroll.setStyleSheet(
             "QScrollArea { border: none; background: transparent; }"
             "QScrollBar:vertical { width: 8px; background: #1a1a2e; }"
             "QScrollBar::handle:vertical { background: #3a3a5e; border-radius: 4px; }")
-        self._grid_container = QWidget()
-        self._grid_layout = QGridLayout(self._grid_container)
-        self._grid_layout.setContentsMargins(1, 1, 1, 1)
-        self._grid_spacer = QWidget()
-        self._grid_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._scroll.setWidget(self._grid_container)
-        root.addWidget(self._scroll, 1)
+        self._ip_grid_container = QWidget()
+        self._ip_grid_layout = QGridLayout(self._ip_grid_container)
+        self._ip_grid_layout.setContentsMargins(1, 1, 1, 1)
+        self._ip_scroll.setWidget(self._ip_grid_container)
+        ip_layout.addWidget(self._ip_scroll, 1)
+        self._ip_empty_label = QLabel(
+            "No translations in progress.\nUse \u201cImport EPUB\u201d to start one.")
+        self._ip_empty_label.setAlignment(Qt.AlignCenter)
+        self._ip_empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
+        self._ip_empty_label.hide()
+        ip_layout.addWidget(self._ip_empty_label)
 
-        self._empty_label = QLabel("No files found.\nTranslate a novel to see it here!")
-        self._empty_label.setAlignment(Qt.AlignCenter)
-        self._empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
-        self._empty_label.hide()
-        root.addWidget(self._empty_label)
+        # --- Completed (Library) tab ---
+        self._comp_tab = QWidget()
+        self._comp_tab.setStyleSheet("background: #12121e;")
+        comp_layout = QVBoxLayout(self._comp_tab)
+        comp_layout.setContentsMargins(6, 8, 6, 6)
+        comp_layout.setSpacing(6)
+        comp_action_row = QHBoxLayout()
+        comp_action_row.setSpacing(6)
+        self._comp_count_label = QLabel("")
+        self._comp_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
+        comp_action_row.addWidget(self._comp_count_label)
+        comp_action_row.addStretch()
+        self._open_library_btn = QPushButton("\U0001f4c1  Open Library Folder")
+        self._open_library_btn.setCursor(Qt.PointingHandCursor)
+        self._open_library_btn.setToolTip(f"Open {get_library_dir()} in the system file explorer.")
+        self._open_library_btn.setStyleSheet(
+            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #4a6a8a; }")
+        self._open_library_btn.clicked.connect(self._open_library_folder)
+        comp_action_row.addWidget(self._open_library_btn)
+        comp_layout.addLayout(comp_action_row)
+        self._comp_scroll = QScrollArea()
+        self._comp_scroll.setWidgetResizable(True)
+        self._comp_scroll.setStyleSheet(self._ip_scroll.styleSheet())
+        self._comp_grid_container = QWidget()
+        self._comp_grid_layout = QGridLayout(self._comp_grid_container)
+        self._comp_grid_layout.setContentsMargins(1, 1, 1, 1)
+        self._comp_scroll.setWidget(self._comp_grid_container)
+        comp_layout.addWidget(self._comp_scroll, 1)
+        self._comp_empty_label = QLabel(
+            "Your Library is empty.\nOrganize finished EPUBs into this folder to see them here.")
+        self._comp_empty_label.setAlignment(Qt.AlignCenter)
+        self._comp_empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
+        self._comp_empty_label.hide()
+        comp_layout.addWidget(self._comp_empty_label)
 
-        # ── Loading overlay (mirrors EpubReaderDialog's spinner pattern) ──
+        self._tabs.addTab(self._ip_tab, "\u23f3  In Progress")
+        self._tabs.addTab(self._comp_tab, "\u2705  Completed")
+        try:
+            self._tabs.setCurrentIndex(int(self._current_tab) or 0)
+        except (TypeError, ValueError):
+            self._tabs.setCurrentIndex(0)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        root.addWidget(self._tabs, 1)
+
+        # ── Loading overlay (shared spinner shown over the current tab) ──
         self._loading_widget = QWidget()
         loading_layout = QVBoxLayout(self._loading_widget)
         loading_layout.setAlignment(Qt.AlignCenter)
@@ -1225,7 +1525,7 @@ class EpubLibraryDialog(QDialog):
                 self._spin_pixmap = pm.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self._spin_label.setPixmap(self._spin_pixmap)
         if not self._spin_pixmap:
-            self._spin_label.setText("📚")
+            self._spin_label.setText("\U0001f4da")
             self._spin_label.setStyleSheet("font-size: 32pt; color: #e0e0e0;")
         self._spin_label.setAlignment(Qt.AlignCenter)
         self._spin_label.setFixedSize(72, 72)
@@ -1234,7 +1534,7 @@ class EpubLibraryDialog(QDialog):
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(25)  # ~40 fps
         self._spin_timer.timeout.connect(self._rotate_spinner)
-        loading_text = QLabel("Scanning library…")
+        loading_text = QLabel("Scanning library\u2026")
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 4px;")
         loading_layout.addWidget(loading_text, 0, Qt.AlignCenter)
@@ -1255,6 +1555,8 @@ class EpubLibraryDialog(QDialog):
 
         self.setStyleSheet("QDialog { background: #12121e; }")
 
+    # -- Tab / scan / render helpers ----------------------------------------
+
     def _rotate_spinner(self):
         """Rotate the Halgakos icon by 15° each tick (matches reader)."""
         if self._spin_pixmap:
@@ -1264,19 +1566,19 @@ class EpubLibraryDialog(QDialog):
             self._spin_label.setPixmap(rotated)
 
     def _show_loading(self):
-        """Show the spinner overlay and hide grid/empty-state widgets."""
+        """Show the spinner overlay and hide both tab grids."""
         self._spin_angle = 0
         self._spin_timer.start()
-        self._scroll.hide()
-        self._empty_label.hide()
-        self._relocate_banner.hide()
+        self._tabs.hide()
+        self._ip_empty_label.hide()
+        self._comp_empty_label.hide()
         self._loading_widget.show()
 
     def _hide_loading(self):
-        """Hide the spinner overlay and restore the grid."""
+        """Hide the spinner overlay and restore the tab widget."""
         self._spin_timer.stop()
         self._loading_widget.hide()
-        self._scroll.show()
+        self._tabs.show()
 
     def _set_sort(self, mode):
         self._sort_mode = mode
@@ -1297,48 +1599,81 @@ class EpubLibraryDialog(QDialog):
             return sorted(books, key=lambda b: b["size"], reverse=True)
         return sorted(books, key=lambda b: b["mtime"], reverse=True)
 
-    def _toggle_banner(self):
-        """Force-toggle the organize banner visibility."""
-        if self._relocate_banner.isVisible():
-            self._relocate_banner.hide()
-        else:
-            outside = [b for b in self._books if not b.get("in_library")]
-            has_origins = bool(self._last_move_log) or bool(_load_origins())
-            if outside:
-                self._banner_lbl.setText(
-                    f"💡  {len(outside)} file{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
-            elif has_origins:
-                self._banner_lbl.setText(f"✅  Files moved to Library.")
-            else:
-                self._banner_lbl.setText("📁  All files are already in your Library folder.")
-            self._organize_btn.setVisible(bool(outside))
-            self._undo_btn.setVisible(has_origins)
-            self._relocate_banner.show()
+    def _on_tab_changed(self, index: int):
+        self._current_tab = index
+        self._config["epub_library_tab"] = index
+
+    # -- Actions ------------------------------------------------------------
+
+    def _open_library_folder(self):
+        """Open the Glossarion Library folder in the system file explorer."""
+        lib = get_library_dir()
+        try:
+            os.makedirs(lib, exist_ok=True)
+        except OSError:
+            pass
+        _open_folder_in_explorer(lib)
+
+    def _import_epub(self):
+        """Let the user pick a source EPUB; forward it to the parent GUI."""
+        from PySide6.QtWidgets import QFileDialog
+        start_dir = str(Path.home() / "Downloads")
+        if not os.path.isdir(start_dir):
+            start_dir = str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import EPUB to translate", start_dir,
+            "EPUB files (*.epub);;All files (*.*)",
+        )
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "Import EPUB", "Selected path is not a file.")
+            return
+        # Let the parent GUI (TranslatorGUI) pick it up; fall back to just
+        # opening the file's folder if no consumer is connected.
+        try:
+            self.import_epub_requested.emit(path)
+        except Exception:
+            logger.debug("Failed to emit import_epub_requested: %s", traceback.format_exc())
+        # Give the user a confirmation that the import was accepted.
+        QMessageBox.information(
+            self, "Import EPUB",
+            f"Loaded for translation:\n{os.path.basename(path)}\n\n"
+            f"Start the translation from the main window to see it here.",
+        )
 
     def _refresh_view(self):
+        """Re-filter + re-render both tab grids from the cached scan data."""
+        self._populate_in_progress(self._filtered(self._in_progress_books))
+        self._populate_completed(self._filtered(self._completed_books))
+
+    def _filtered(self, books: list[dict]) -> list[dict]:
         query = self._search.text().strip().lower()
-        books = self._books
         if query:
-            books = [b for b in books if query in b["name"].lower()]
-        self._populate_grid(self._sorted_books(books))
+            books = [b for b in books if query in str(b.get("name", "")).lower()]
+        return self._sorted_books(books)
 
     def _auto_refresh(self):
-        """Lightweight auto-refresh: only reload if file list changed."""
+        """Lightweight auto-refresh: only reload if either tab changed."""
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
-        self._scanner_thread = _LibraryScannerThread(self._config, self)
+        self._scanner_thread = _DualScannerThread(self._config, self)
         self._scanner_thread.finished.connect(self._on_auto_scan_done)
         self._scanner_thread.start()
 
-    def _on_auto_scan_done(self, books):
-        new_paths = {b["path"] for b in books}
-        old_paths = {b["path"] for b in self._books}
-        if new_paths != old_paths:
-            self._books = books
+    def _on_auto_scan_done(self, in_progress: list[dict], completed: list[dict]):
+        ip_new = {b["path"] for b in in_progress}
+        ip_old = {b["path"] for b in self._in_progress_books}
+        comp_new = {b["path"] for b in completed}
+        comp_old = {b["path"] for b in self._completed_books}
+        if ip_new != ip_old or comp_new != comp_old:
+            self._in_progress_books = in_progress
+            self._completed_books = completed
             self._refresh_view()
 
     def _load_books(self):
-        """Kick off an async scan and show the loading spinner."""
+        """Kick off an async scan of both tabs and show the loading spinner."""
         for t in self._cover_threads:
             try:
                 t.quit()
@@ -1346,97 +1681,101 @@ class EpubLibraryDialog(QDialog):
             except Exception:
                 pass
         self._cover_threads.clear()
-        # If a scan is already in flight, don't spawn another
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
         self._show_loading()
-        self._scanner_thread = _LibraryScannerThread(self._config, self)
+        self._scanner_thread = _DualScannerThread(self._config, self)
         self._scanner_thread.finished.connect(self._on_initial_scan_done)
         self._scanner_thread.start()
 
-    def _on_initial_scan_done(self, books):
-        self._books = books
+    def _on_initial_scan_done(self, in_progress: list[dict], completed: list[dict]):
+        self._in_progress_books = in_progress
+        self._completed_books = completed
         self._hide_loading()
         self._refresh_view()
 
-    def _populate_grid(self, books):
-        for card in self._cards:
+    def _populate_grid_common(
+        self,
+        books: list[dict],
+        grid_layout: QGridLayout,
+        card_list: list[_BookCard],
+        count_label: QLabel,
+        empty_label: QLabel,
+        count_word: str,
+    ):
+        """Shared render pipeline used by both tabs."""
+        for card in card_list:
             try:
                 card.setParent(None)
                 card.deleteLater()
             except Exception:
                 pass
-        self._cards.clear()
+        card_list.clear()
 
-        while self._grid_layout.count():
-            item = self._grid_layout.takeAt(0)
+        while grid_layout.count():
+            item = grid_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.setParent(None)
 
         if not books:
-            self._empty_label.show()
-            self._count_label.setText("")
-            self._relocate_banner.hide()
+            empty_label.show()
+            count_label.setText("")
             return
 
-        self._empty_label.hide()
-        self._count_label.setText(f"{len(books)} file{'s' if len(books) != 1 else ''}")
-
-        # Suggestion banner — show count of outside files or recent move
-        outside = [b for b in self._books if not b.get("in_library")]
-        has_origins = bool(self._last_move_log) or bool(_load_origins())
-        show_banner = bool(outside) or bool(self._last_move_log)
-        if show_banner:
-            if outside:
-                self._banner_lbl.setText(
-                    f"💡  {len(outside)} file{'s' if len(outside) != 1 else ''} could be organized into your Library folder.")
-            elif self._last_move_log:
-                self._banner_lbl.setText(f"✅  Files moved to Library.")
-            self._organize_btn.setVisible(bool(outside))
-            self._undo_btn.setVisible(has_origins)
-            self._relocate_banner.show()
-        else:
-            self._relocate_banner.hide()
+        empty_label.hide()
+        count_label.setText(
+            f"{len(books)} {count_word}{'s' if len(books) != 1 else ''}"
+        )
 
         preset = _SIZE_PRESETS[self._card_size]
         card_w = preset["card_w"]
         spacing = preset["spacing"]
-        self._grid_layout.setHorizontalSpacing(spacing)
-        self._grid_layout.setVerticalSpacing(spacing + 2)
-        cols = max(1, (self.width() - 20) // (card_w + spacing))
+        grid_layout.setHorizontalSpacing(spacing)
+        grid_layout.setVerticalSpacing(spacing + 2)
+        cols = max(1, (self.width() - 40) // (card_w + spacing))
 
         for idx, book in enumerate(books):
             card = _BookCard(book, preset=preset)
             card.clicked.connect(self._on_card_clicked)
             card.context_menu_requested.connect(self._show_context_menu)
-            self._cards.append(card)
+            card_list.append(card)
             row, col = divmod(idx, cols)
-            self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
+            grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
 
-            # Load covers for all file types
-            loader = _CoverLoader(book["path"], file_type=book.get("type", "epub"),
-                                   config=self._config, original_path=book.get("original_path"),
-                                   parent=self)
+            loader = _CoverLoader(
+                book["path"],
+                file_type=book.get("type", "epub"),
+                config=self._config,
+                original_path=book.get("original_path"),
+                parent=self,
+            )
             loader.finished.connect(self._on_cover_loaded)
             self._cover_threads.append(loader)
             loader.start()
 
-        # Force card columns to their natural width; extra space goes to a trailing stretch column
-        for c in range(self._grid_layout.columnCount()):
-            self._grid_layout.setColumnStretch(c, 0)
-        self._grid_layout.setColumnStretch(cols, 1)
+        for c in range(grid_layout.columnCount()):
+            grid_layout.setColumnStretch(c, 0)
+        grid_layout.setColumnStretch(cols, 1)
 
-        # Reposition the persistent spacer
-        self._grid_layout.addWidget(self._grid_spacer, (len(books) - 1) // cols + 1, 0)
+    def _populate_in_progress(self, books: list[dict]):
+        self._populate_grid_common(
+            books, self._ip_grid_layout, self._ip_cards,
+            self._ip_count_label, self._ip_empty_label, "novel",
+        )
 
-    def _on_cover_loaded(self, epub_path, cover_path):
+    def _populate_completed(self, books: list[dict]):
+        self._populate_grid_common(
+            books, self._comp_grid_layout, self._comp_cards,
+            self._comp_count_label, self._comp_empty_label, "book",
+        )
+
+    def _on_cover_loaded(self, book_path: str, cover_path: str):
         if not cover_path:
             return
-        for card in self._cards:
-            if card.book["path"] == epub_path:
+        for card in (*self._ip_cards, *self._comp_cards):
+            if card.book.get("path") == book_path:
                 card.set_cover(cover_path)
-                break
 
     def _apply_filter(self, text):
         self._refresh_view()
@@ -1521,8 +1860,17 @@ class EpubLibraryDialog(QDialog):
             QMenu::item { padding: 6px 20px; border-radius: 3px; }
             QMenu::item:selected { background: #3a3a5e; }
         """)
-        is_epub = book.get("type", "epub") == "epub"
-        if is_epub:
+        file_type = book.get("type", "epub")
+        if file_type == "in_progress":
+            details_action = menu.addAction("\U0001f4d1  Open Book Details")
+            details_action.triggered.connect(lambda: self._on_card_clicked(book))
+            out_epub = book.get("output_epub_path") or ""
+            if out_epub and os.path.isfile(out_epub):
+                reader_action = menu.addAction("\U0001f4d6  Open Translated EPUB")
+                reader_action.triggered.connect(
+                    lambda p=out_epub: self._open_reader_direct({"path": p, "type": "epub"})
+                )
+        elif file_type == "epub":
             details_action = menu.addAction("\U0001f4d1  Open Book Details")
             details_action.triggered.connect(lambda: self._on_card_clicked(book))
             reader_action = menu.addAction("\U0001f4d6  Open in Reader")
@@ -1532,11 +1880,13 @@ class EpubLibraryDialog(QDialog):
             open_action.triggered.connect(lambda: self._on_card_clicked(book))
         menu.addSeparator()
         folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
-        # Prefer the explicit translation output folder when this is an
-        # in-progress novel; fall back to the original_path's directory for
-        # files moved to Library, and finally the source path's directory.
-        output_folder = (book.get("output_folder")
-                         or os.path.dirname(book.get("original_path", book["path"])))
+        # For in-progress cards the card "path" IS the output folder; for
+        # completed library EPUBs use the file's parent directory.
+        if file_type == "in_progress":
+            output_folder = book.get("output_folder") or book.get("path", "")
+        else:
+            output_folder = (book.get("output_folder")
+                             or os.path.dirname(book.get("path", "")))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
         lib_action = menu.addAction("\U0001f4c1  Open Library Folder")
         lib_action.triggered.connect(lambda: _open_folder_in_explorer(get_library_dir()))
@@ -1545,161 +1895,22 @@ class EpubLibraryDialog(QDialog):
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
         menu.exec(pos)
 
-    def _relocate_to_library(self):
-        outside = [b for b in self._books if not b.get("in_library")]
-        if not outside:
-            return
-
-        names = "\n".join(f"  \u2022 {b['name']}{os.path.splitext(b['path'])[1]}" for b in outside[:20])
-        if len(outside) > 20:
-            names += f"\n  \u2026 and {len(outside) - 20} more"
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Organize into Library")
-        msg.setText(
-            f"Move {len(outside)} file{'s' if len(outside) != 1 else ''} into the Library folder?\n\n"
-            f"{names}\n\n"
-            f"Destination:\n  {get_library_dir()}\n\n"
-            f"You can undo this afterwards if needed."
-        )
-        msg.setIcon(QMessageBox.Question)
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.No)
-        msg.setStyleSheet("""
-            QMessageBox QPushButton { min-width: 80px; min-height: 30px; font-size: 10pt; padding: 4px 16px; }
-            QMessageBox QDialogButtonBox { qproperty-centerButtons: true; }
-        """)
-        if msg.exec() != QMessageBox.Yes:
-            return
-
-        lib_dir = get_library_dir()
-        moved = 0
-        errors = []
-        move_log: list[tuple[str, str]] = []
-        for book in outside:
-            src = book["path"]
-            dst = os.path.join(lib_dir, os.path.basename(src))
-            if os.path.exists(dst):
-                base, ext = os.path.splitext(os.path.basename(src))
-                counter = 1
-                while os.path.exists(dst):
-                    dst = os.path.join(lib_dir, f"{base} ({counter}){ext}")
-                    counter += 1
-            try:
-                shutil.move(src, dst)
-                move_log.append((src, dst))
-                logger.info("Library move: %s -> %s", src, dst)
-                moved += 1
-            except Exception as exc:
-                errors.append(f"{os.path.basename(src)}: {exc}")
-
-        self._last_move_log = move_log
-
-        # Persist original source paths for cover lookup and Open Output Folder
-        if move_log:
-            origins = _load_origins()
-            for src, dst in move_log:
-                origins[os.path.basename(dst)] = src
-            _save_origins(origins)
-
-        summary = f"Moved {moved} file{'s' if moved != 1 else ''} to Library."
-        if move_log:
-            summary += "\n\nOriginal locations:"
-            for src, dst in move_log[:10]:
-                summary += f"\n  {os.path.basename(dst)}  \u2190  {os.path.dirname(src)}"
-            if len(move_log) > 10:
-                summary += f"\n  \u2026 and {len(move_log) - 10} more"
-        if errors:
-            summary += f"\n\n{len(errors)} error{'s' if len(errors) != 1 else ''}:\n" + "\n".join(errors[:5])
-        QMessageBox.information(self, "Done", summary)
-        self._load_books()
-
-    def _undo_relocate(self):
-        """Move files back to their original locations (session or persisted)."""
-        # Use in-memory log if available, otherwise rebuild from library_origins.txt
-        move_pairs = list(self._last_move_log)  # [(original_src, library_dst), ...]
-        if not move_pairs:
-            origins = _load_origins()
-            lib_dir = get_library_dir()
-            for lib_name, orig_src in origins.items():
-                lib_dst = os.path.join(lib_dir, lib_name)
-                if os.path.isfile(lib_dst):
-                    move_pairs.append((orig_src, lib_dst))
-        if not move_pairs:
-            return
-
-        names = "\n".join(
-            f"  \u2022 {os.path.basename(dst)}  \u2192  {os.path.dirname(src)}"
-            for src, dst in move_pairs[:15]
-        )
-        if len(move_pairs) > 15:
-            names += f"\n  \u2026 and {len(move_pairs) - 15} more"
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Undo Move")
-        msg.setText(
-            f"Move {len(move_pairs)} file{'s' if len(move_pairs) != 1 else ''} back to "
-            f"their original locations?\n\n{names}"
-        )
-        msg.setIcon(QMessageBox.Question)
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.No)
-        msg.setStyleSheet("""
-            QMessageBox QPushButton { min-width: 80px; min-height: 30px; font-size: 10pt; padding: 4px 16px; }
-            QMessageBox QDialogButtonBox { qproperty-centerButtons: true; }
-        """)
-        if msg.exec() != QMessageBox.Yes:
-            return
-
-        restored = 0
-        errors = []
-        for src, dst in move_pairs:
-            if not os.path.isfile(dst):
-                errors.append(f"{os.path.basename(dst)}: file not found in Library")
-                continue
-            # Ensure original directory still exists
-            orig_dir = os.path.dirname(src)
-            try:
-                os.makedirs(orig_dir, exist_ok=True)
-            except OSError:
-                pass
-            try:
-                shutil.move(dst, src)
-                logger.info("Library undo: %s -> %s", dst, src)
-                restored += 1
-            except Exception as exc:
-                errors.append(f"{os.path.basename(dst)}: {exc}")
-
-        # Remove origins entries for undone files
-        if restored:
-            origins = _load_origins()
-            for src, dst in self._last_move_log:
-                origins.pop(os.path.basename(dst), None)
-            _save_origins(origins)
-
-        self._last_move_log.clear()
-
-        summary = f"Restored {restored} file{'s' if restored != 1 else ''} to original location{'s' if restored != 1 else ''}." 
-        if errors:
-            summary += f"\n\n{len(errors)} error{'s' if len(errors) != 1 else ''}:\n" + "\n".join(errors[:5])
-        QMessageBox.information(self, "Undo Complete", summary)
-        self._load_books()
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not self._cards:
+        # Debounce: re-flow cards once the user stops dragging (300ms).
+        if not (self._ip_cards or self._comp_cards):
             return
-        # Debounce: reload after user stops resizing (300ms)
         if not hasattr(self, '_resize_timer'):
             self._resize_timer = QTimer(self)
             self._resize_timer.setSingleShot(True)
-            self._resize_timer.timeout.connect(self._load_books)
+            self._resize_timer.timeout.connect(self._refresh_view)
         self._resize_timer.start(300)
 
     def closeEvent(self, event):
-        """Hide the dialog instead of closing — persist settings."""
+        """Hide the dialog instead of closing \u2014 persist settings."""
         self._config['epub_library_sort'] = self._sort_mode
         self._config['epub_library_card_size'] = self._card_size
+        self._config['epub_library_tab'] = self._current_tab
         event.ignore()
         self.hide()
 
@@ -1873,23 +2084,54 @@ class _BookDetailsLoader(QThread):
 
     def run(self):
         try:
-            details = _parse_epub_details(self._book["path"])
-            cover = _extract_cover(self._book["path"])
+            book_path = self._book.get("path", "") or ""
+            book_type = self._book.get("type", "epub")
             progress_file = self._book.get("progress_file")
             output_folder = self._book.get("output_folder")
-            # When the book came from the normal library walk (not the
-            # in-progress scan) we don't yet know whether a progress file sits
-            # next to it. Check the enclosing directory for the standard
-            # translator artifacts so completed EPUBs that live inside their
-            # own output folder still get per-chapter status and translated
-            # titles in the details dialog.
-            if not progress_file or not output_folder:
-                parent = os.path.dirname(self._book.get("path", ""))
-                if parent and os.path.isdir(parent):
-                    candidate_pf = os.path.join(parent, "translation_progress.json")
-                    if os.path.isfile(candidate_pf):
-                        progress_file = candidate_pf
-                        output_folder = parent
+
+            # Tab-driven dispatch:
+            #   * in_progress card: ``path`` is an OUTPUT FOLDER. We look for
+            #     the source EPUB via ``source_epub.txt`` or any .epub in the
+            #     folder; if none is found we still build the details page
+            #     from metadata.json + translation_progress.json alone.
+            #   * epub card: ``path`` points at a real .epub. We also probe
+            #     the sibling translation_progress.json so completed EPUBs
+            #     inside an output folder still get per-chapter status.
+            source_epub = ""
+            if book_type == "in_progress":
+                output_folder = output_folder or book_path
+                if output_folder and os.path.isdir(output_folder):
+                    progress_file = progress_file or os.path.join(
+                        output_folder, "translation_progress.json")
+                    # Authoritative pointer file first, then any .epub in
+                    # the folder (which may be the compiled output).
+                    pointed = _read_source_epub_pointer(output_folder)
+                    if pointed:
+                        source_epub = pointed
+                    if not source_epub:
+                        for entry in os.scandir(output_folder):
+                            if (entry.is_file(follow_symlinks=False)
+                                    and entry.name.lower().endswith(".epub")):
+                                source_epub = entry.path
+                                break
+            else:
+                source_epub = book_path if os.path.isfile(book_path) else ""
+                if not progress_file or not output_folder:
+                    parent_dir = os.path.dirname(book_path)
+                    if parent_dir and os.path.isdir(parent_dir):
+                        candidate_pf = os.path.join(parent_dir, "translation_progress.json")
+                        if os.path.isfile(candidate_pf):
+                            progress_file = progress_file or candidate_pf
+                            output_folder = output_folder or parent_dir
+
+            details = _parse_epub_details(source_epub) if source_epub else {
+                "title": "", "authors": [], "publisher": "", "language": "",
+                "date": "", "description": "", "subjects": [], "identifier": "",
+                "chapters": [],
+            }
+            cover = _extract_cover(source_epub) if source_epub else None
+            if not cover and output_folder and os.path.isdir(output_folder):
+                cover = _find_cover_in_dir(output_folder)
             prog = None
             if progress_file and os.path.isfile(progress_file):
                 summary = _read_progress_summary(progress_file)
@@ -1929,6 +2171,31 @@ class _BookDetailsLoader(QThread):
             # (instead of misleadingly labeling every chapter "Pending").
             has_progress_context = bool(prog is not None
                                          or (output_folder and os.path.isdir(output_folder)))
+
+            # Source EPUB absent: synthesize a spine from the progress file's
+            # ``original_basename`` entries so the Chapters list still works.
+            if not details.get("chapters") and prog_chapters:
+                def _sort_key(item):
+                    info = item[1]
+                    try:
+                        return int(info.get("actual_num") or info.get("chapter_num") or 0)
+                    except (TypeError, ValueError):
+                        return 0
+                synth = []
+                for key, info in sorted(prog_chapters.items(), key=_sort_key):
+                    if not isinstance(info, dict):
+                        continue
+                    ob = info.get("original_basename") or info.get("output_file") or key
+                    title = ob
+                    title = os.path.splitext(os.path.basename(title))[0]
+                    title = title.replace("_", " ").replace("-", " ").strip() or title
+                    synth.append({
+                        "href": ob,
+                        "filename": os.path.basename(ob),
+                        "title": title,
+                    })
+                if synth:
+                    details["chapters"] = synth
 
             import re as _re
             for idx, ch in enumerate(details.get("chapters", [])):
