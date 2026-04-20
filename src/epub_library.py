@@ -2012,6 +2012,7 @@ class _BookCard(QFrame):
         layout.addLayout(info_row)
 
         # In-progress indicator: small status pill + overlay ribbon on the cover
+        has_progress_row = False
         if book.get("is_in_progress"):
             total = int(book.get("total_chapters", 0) or 0)
             done = int(book.get("completed_chapters", 0) or 0)
@@ -2025,6 +2026,7 @@ class _BookCard(QFrame):
             if state == "completed":
                 pass
             else:
+                has_progress_row = True
                 pct = int(round((done / total) * 100)) if total else 0
                 progress_row = QHBoxLayout()
                 progress_row.setContentsMargins(0, 0, 0, 0)
@@ -2071,13 +2073,15 @@ class _BookCard(QFrame):
                 self._progress_ribbon.move(0, 0)
                 self._progress_ribbon.show()
 
-        # Trailing stretch + fixed card height so every card — whether
-        # in-progress, not-started, or completed — occupies the exact same
-        # footprint in the grid. The reserved block covers the size / badge
-        # row, the (optional) progress pill row, layout spacings, and the
-        # content margins.
+        # Trailing stretch + fixed card height so every card within the
+        # same tab occupies a uniform footprint. Completed cards skip the
+        # progress-pill reservation so they don't render with a dead band
+        # of empty space at the bottom where the pill would have been on
+        # the In Progress tab.
         layout.addStretch()
-        reserved_h = 54 + p.get("spacing", 4)
+        reserved_h = 32 + p.get("spacing", 4)
+        if has_progress_row:
+            reserved_h += 22  # pill row height + extra inter-widget spacing
         self.setFixedHeight(self._cover_h + max_title_h + reserved_h)
 
     def set_selected(self, selected: bool):
@@ -4288,6 +4292,10 @@ class BookDetailsDialog(QDialog):
         self._metadata_json: dict = {}
         self._loader: _BookDetailsLoader | None = None
         self._active_reader: QDialog | None = None
+        # Gate chapter-row activations until Phase 2 has actually built the
+        # list. Prevents stray double-clicks during the "Loading chapters…"
+        # phase from being dispatched to a half-populated chapter list.
+        self._chapters_loaded = False
         # Whether the "show special files" toggle is on. Its initial state is
         # coupled to the global "Translate Special Files" setting (Other
         # Settings): if the translator is configured to handle cover / nav /
@@ -4942,6 +4950,11 @@ class BookDetailsDialog(QDialog):
             layout.addStretch()
 
     def _populate_chapters(self):
+        # Tear down before rebuilding and disable activation for the window
+        # of time while we're mutating the list — this flag is read from
+        # :meth:`_on_chapter_activated` to squash spurious clicks that
+        # might land while Phase 2 is still populating rows.
+        self._chapters_loaded = False
         # Clear previous rows
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
@@ -4952,11 +4965,25 @@ class BookDetailsDialog(QDialog):
 
         for info in self._chapters_info:
             row = _ChapterRow(info, parent=self._chap_container)
-            row.activated.connect(self._open_reader)
+            row.activated.connect(self._on_chapter_activated)
             self._chap_layout.addWidget(row)
         self._chap_layout.addStretch()
         self._apply_chapter_filter(self._toc_search.text())
         self._update_toc_toggle_label()
+        # Rows are now safe to open.
+        self._chapters_loaded = True
+
+    def _on_chapter_activated(self, idx: int):
+        """Open the reader at *idx* only if the chapter list is fully loaded.
+
+        Chapter rows emit ``activated`` on double-click (see
+        :class:`_ChapterRow`), but if a click manages to arrive while the
+        spine is still being populated we silently ignore it rather than
+        opening a reader positioned into a half-built list.
+        """
+        if not self._chapters_loaded:
+            return
+        self._open_reader(initial_chapter=idx)
 
     def _visible_counts(self) -> tuple[int, int]:
         """Return (done, total) considering the special-files toggle.
@@ -5257,6 +5284,8 @@ class _ChapterRow(QFrame):
 
     Displays translated title + filename when the chapter has been translated;
     otherwise shows the raw source title with a muted "pending" label.
+    Activation requires a double-click so an accidental single click — e.g.
+    while scrolling through a long spine — doesn't launch the reader.
     """
     activated = Signal(int)
 
@@ -5264,6 +5293,7 @@ class _ChapterRow(QFrame):
         super().__init__(parent)
         self.info = info
         self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Double-click to open this chapter in the reader")
         self.setStyleSheet("""
             _ChapterRow { background: #1a1a2a; border: 1px solid #242438; border-radius: 6px; }
             _ChapterRow:hover { border-color: #6c63ff; background: #232340; }
@@ -5333,9 +5363,13 @@ class _ChapterRow(QFrame):
         if badge is not None:
             layout.addWidget(badge, 0, Qt.AlignRight)
 
-    def mousePressEvent(self, event):
-        self.activated.emit(int(self.info.get("index", 0)))
-        super().mousePressEvent(event)
+    def mouseDoubleClickEvent(self, event):
+        # Opening the reader now requires a full double-click. A single click
+        # is a no-op (handled by the default ``mousePressEvent``) so the row
+        # still highlights on hover / press without launching anything.
+        if event.button() == Qt.LeftButton:
+            self.activated.emit(int(self.info.get("index", 0)))
+        super().mouseDoubleClickEvent(event)
 
 
 # ---------------------------------------------------------------------------
