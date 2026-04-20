@@ -117,9 +117,10 @@ def get_model_options() -> List[str]:
         # GLM Models
         # Text / Reasoning
         "GLM-5.1", "GLM-5", "GLM-4.7",
-        "GLM-4.7-Flash", "GLM-4.6", "GLM-4.5",
+        "GLM-4.7-Flash", "GLM-4.6", "GLM-4.5", "GLM-4.5-Flash",
 
         # Vision / Multimodal
+        "GLM-5V-Turbo",
         "GLM-4.6V", "GLM-4.6V-Flash", "GLM-4.6V-FlashX",
         "GLM-4.5V",
 
@@ -129,9 +130,10 @@ def get_model_options() -> List[str]:
 
         # Text / Reasoning (za prefix)
         "za/GLM-5.1", "za/GLM-5", "za/GLM-4.7",
-        "za/GLM-4.7-Flash", "za/GLM-4.6", "za/GLM-4.5",
+        "za/GLM-4.7-Flash", "za/GLM-4.6", "za/GLM-4.5", "za/GLM-4.5-Flash",
 
         # Vision / Multimodal (za prefix)
+        "za/GLM-5V-Turbo",
         "za/GLM-4.6V", "za/GLM-4.6V-Flash", "za/GLM-4.6V-FlashX",
         "za/GLM-4.5V",
 

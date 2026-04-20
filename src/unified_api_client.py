@@ -11653,6 +11653,184 @@ class UnifiedClient:
                 self._debug_log(f"{provider_name} SDK error after all retries: {e}")
                 raise UnifiedClientError(f"{provider_name} SDK error: {e}")
 
+    def _summarize_request_payload(self, call_kwargs: Optional[dict]) -> str:
+        """Build a compact, safe summary of an OpenAI-compatible request payload.
+
+        Mirrors the shape of what was actually sent (model, token/temp/stream,
+        per-message role + content-part types + sizes, image counts, extra_body
+        keys). Never dumps full text or base64 image bytes.
+        """
+        if not isinstance(call_kwargs, dict):
+            return "<no payload>"
+        try:
+            parts: List[str] = []
+            model = call_kwargs.get("model")
+            if model is not None:
+                parts.append(f"model={model!r}")
+            for k in ("temperature", "top_p", "max_tokens", "max_completion_tokens",
+                      "max_output_tokens", "stream", "n"):
+                if k in call_kwargs and call_kwargs.get(k) is not None:
+                    parts.append(f"{k}={call_kwargs.get(k)!r}")
+
+            msgs = call_kwargs.get("messages")
+            if isinstance(msgs, list):
+                msg_descs = []
+                total_images = 0
+                for i, m in enumerate(msgs):
+                    if not isinstance(m, dict):
+                        msg_descs.append(f"#{i}=<non-dict>")
+                        continue
+                    role = m.get("role", "?")
+                    content = m.get("content")
+                    if isinstance(content, str):
+                        msg_descs.append(f"#{i}[{role}]=text({len(content)}ch)")
+                    elif isinstance(content, list):
+                        kinds: Dict[str, int] = {}
+                        text_chars = 0
+                        img_bytes = 0
+                        for p in content:
+                            if not isinstance(p, dict):
+                                kinds["non-dict"] = kinds.get("non-dict", 0) + 1
+                                continue
+                            pt = p.get("type", "?")
+                            kinds[pt] = kinds.get(pt, 0) + 1
+                            if pt == "text":
+                                try:
+                                    text_chars += len(str(p.get("text", "")))
+                                except Exception:
+                                    pass
+                            elif pt == "image_url":
+                                total_images += 1
+                                iu = p.get("image_url")
+                                url = iu.get("url") if isinstance(iu, dict) else iu
+                                if isinstance(url, str):
+                                    if url.startswith("data:"):
+                                        # Length of base64 payload is a reasonable proxy for size
+                                        try:
+                                            b64 = url.split(",", 1)[1]
+                                            img_bytes += len(b64) * 3 // 4
+                                        except Exception:
+                                            pass
+                                    else:
+                                        kinds["image_url/remote"] = kinds.get("image_url/remote", 0) + 1
+                        desc_bits = [f"{k}={v}" for k, v in kinds.items()]
+                        if text_chars:
+                            desc_bits.append(f"text_chars={text_chars}")
+                        if img_bytes:
+                            desc_bits.append(f"~img_bytes={img_bytes}")
+                        msg_descs.append(f"#{i}[{role}]=[{', '.join(desc_bits)}]")
+                    elif content is None:
+                        msg_descs.append(f"#{i}[{role}]=<none>")
+                    else:
+                        msg_descs.append(f"#{i}[{role}]={type(content).__name__}")
+                parts.append(f"messages=[{'; '.join(msg_descs)}]")
+                parts.append(f"total_images={total_images}")
+
+            extra_body = call_kwargs.get("extra_body")
+            if isinstance(extra_body, dict) and extra_body:
+                parts.append(f"extra_body_keys={sorted(extra_body.keys())}")
+
+            # Surface any unusual top-level kwargs beyond the well-known set
+            known = {
+                "model", "messages", "temperature", "top_p", "max_tokens",
+                "max_completion_tokens", "max_output_tokens", "stream", "n",
+                "extra_headers", "extra_body", "tools", "tool_choice",
+                "response_format", "stop", "presence_penalty", "frequency_penalty",
+                "seed", "user", "logprobs", "top_logprobs",
+            }
+            extras = sorted(k for k in call_kwargs.keys() if k not in known)
+            if extras:
+                parts.append(f"other_kwargs={extras}")
+
+            return "; ".join(parts)
+        except Exception as _e:
+            try:
+                return f"<payload summary failed: {_e}>"
+            except Exception:
+                return "<payload summary failed>"
+
+    def _log_zhipu_400_diagnostics(self, provider: str, label_part: str,
+                                   call_kwargs: Optional[dict], err_str: str) -> None:
+        """Print extra diagnostics for Zhipu/Z.AI 400 parameter errors.
+
+        Zhipu's error body for code 1210 is just "API 调用参数有误" with no
+        detail about WHICH parameter is wrong. This helper dumps what we
+        actually sent (sanitized) and points at the most common causes.
+        """
+        try:
+            summary = self._summarize_request_payload(call_kwargs)
+        except Exception:
+            summary = "<payload summary unavailable>"
+        try:
+            print(f"🔎 [{provider}]{label_part} request payload: {summary}")
+        except Exception:
+            pass
+
+        # Targeted hints based on the current payload
+        hints: List[str] = []
+        try:
+            model = str((call_kwargs or {}).get("model") or "")
+            msgs = (call_kwargs or {}).get("messages") or []
+            has_images = False
+            bad_roles: List[str] = []
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                r = m.get("role")
+                if r not in (None, "system", "user", "assistant", "tool"):
+                    bad_roles.append(str(r))
+                c = m.get("content")
+                if isinstance(c, list):
+                    for p in c:
+                        if isinstance(p, dict) and p.get("type") == "image_url":
+                            has_images = True
+                            break
+
+            model_l = model.lower()
+            is_vision_model = (
+                "v" in model_l.split("glm-", 1)[-1].split("-", 1)[0]
+                if model_l.startswith("glm-") else False
+            )
+            # Be more conservative: explicit known vision variants
+            known_vision_markers = (
+                "glm-4.6v", "glm-4.5v", "glm-4.1v", "glm-4v", "-vision",
+                "cogvlm", "cogview",
+            )
+            is_vision_model = is_vision_model or any(mk in model_l for mk in known_vision_markers)
+
+            if has_images and not is_vision_model:
+                hints.append(
+                    f"the request contains image_url parts but model {model!r} is not a known "
+                    f"Zhipu vision variant. Use a multimodal GLM model (e.g. GLM-4.6V, "
+                    f"GLM-4.6V-Flash, GLM-4.5V, GLM-4.1V-Thinking) for image input."
+                )
+
+            if bad_roles:
+                hints.append(
+                    f"unsupported message role(s) {sorted(set(bad_roles))}; Zhipu accepts only "
+                    f"'system', 'user', 'assistant' (and 'tool' for tool calls)."
+                )
+
+            # 1214 is documented as '${field} 参数非法' — pass that through directly if present
+            if "1214" in err_str:
+                hints.append("Zhipu error 1214 indicates a specific field is invalid — check content-part types and image_url format (data:image/{jpeg|png};base64,...).")
+            elif "1211" in err_str:
+                hints.append("Zhipu error 1211 indicates the model code does not exist — verify the model spelling/case.")
+            elif "1212" in err_str:
+                hints.append("Zhipu error 1212 indicates the model does not support this call method — the selected model may be text-only.")
+            elif "1213" in err_str:
+                hints.append("Zhipu error 1213 indicates a required field was not received — check required parameters for this endpoint.")
+            elif "1215" in err_str:
+                hints.append("Zhipu error 1215 indicates two mutually exclusive fields were set together — check the docs for conflicting parameters.")
+        except Exception:
+            pass
+
+        for h in hints:
+            try:
+                print(f"   ↳ hint: {h}")
+            except Exception:
+                pass
+
     def _summarize_exception(self, err: Exception, *, max_len: int = 300) -> str:
         """Return a short, user-friendly exception string.
 
@@ -16288,6 +16466,30 @@ class UnifiedClient:
                                     # Some providers return full HTML pages for 5xx errors (e.g., 504); condense them.
                                     if not self._is_stop_requested():
                                         print(f"🛑 [{provider}]{label_part} SDK call failed: {self._summarize_exception(sdk_err)}")
+                                        # Zhipu/Z.AI return a generic `1210 API 调用参数有误` for every
+                                        # parameter error without saying which field is wrong. Dump a
+                                        # sanitized summary of what we sent plus targeted hints so the
+                                        # user can tell whether the issue is e.g. an image sent to a
+                                        # text-only GLM model.
+                                        try:
+                                            if provider in ('zhipu', 'za'):
+                                                http_status_dbg = None
+                                                try:
+                                                    http_status_dbg = self._extract_http_status_from_exception(sdk_err)
+                                                except Exception:
+                                                    http_status_dbg = None
+                                                is_param_error = (
+                                                    http_status_dbg == 400
+                                                    or "'code': '1210'" in err_str
+                                                    or '"code": "1210"' in err_str
+                                                    or "code 400" in err_str.lower()
+                                                )
+                                                if is_param_error:
+                                                    self._log_zhipu_400_diagnostics(
+                                                        provider, label_part, call_kwargs, err_str,
+                                                    )
+                                        except Exception:
+                                            pass
                                 raise
                     
                     # Enhanced extraction for Gemini endpoints
