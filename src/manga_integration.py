@@ -7967,7 +7967,7 @@ class MangaTranslationTab(QObject):
                 print(f"💾 Saving config with skip_inpainting={self.skip_inpainting_value}")
                 self._save_rendering_settings()
                 print("✅ Config saved and environment variables reinitialized")
-                
+
                 # Verify the environment variable was set correctly
                 import os
                 env_value = os.environ.get('MANGA_SKIP_INPAINTING', 'NOT SET')
@@ -7977,10 +7977,58 @@ class MangaTranslationTab(QObject):
                     print(f"✅ Environment variable matches toggle state (expected={expected_value})")
                 else:
                     print(f"⚠️ WARNING: Environment variable mismatch! Expected '{expected_value}' but got '{env_value}'")
+
+                # If the user just turned Skip Inpainter OFF, kick off the
+                # shared-inpainter preload in the background so the first
+                # Translate/Clean action doesn't pay the cold-load cost.
+                # We only preload for the 'local' method — cloud/hybrid either
+                # don't need a local model or handle it lazily.
+                try:
+                    if not self.skip_inpainting_value and not getattr(self, '_shutting_down', False):
+                        method = str(getattr(self, 'inpaint_method_value', '') or '').lower()
+                        if method == 'local':
+                            self._trigger_inpainter_preload_after_toggle()
+                except Exception as _pre_err:
+                    print(f"⚠️ Failed to schedule inpainter preload after toggle: {_pre_err}")
         except Exception as e:
             import traceback
             print(f"❌ CRITICAL ERROR in toggle function: {e}")
             print(traceback.format_exc())
+
+    def _trigger_inpainter_preload_after_toggle(self):
+        """Kick off `ImageRenderer._preload_shared_inpainter` in a daemon thread.
+
+        Called from `_toggle_inpaint_visibility` when the Skip Inpainter
+        checkbox is turned OFF so that the inpainter pool is warm by the time
+        the user presses Translate / Clean / Translate All. Mirrors the
+        background preload started in `MangaTranslationTab.__init__`.
+        """
+        try:
+            # Avoid stacking concurrent preload threads
+            existing = getattr(self, '_toggle_preload_thread', None)
+            if existing is not None and existing.is_alive():
+                print("🔁 Inpainter preload already in progress — skipping duplicate trigger")
+                return
+            self._log("🔁 Skip Inpainter disabled — preloading inpainter in background", "info")
+
+            def _bg_preload():
+                try:
+                    if getattr(self, '_shutting_down', False):
+                        return
+                    # Re-check the flag inside the worker in case the user
+                    # toggled Skip back ON while we were scheduling.
+                    if bool(getattr(self, 'skip_inpainting_value', False)):
+                        return
+                    ImageRenderer._preload_shared_inpainter(self)
+                except Exception as e:
+                    print(f"[TOGGLE_PRELOAD] Background inpainter preload failed: {e}")
+
+            self._toggle_preload_thread = threading.Thread(
+                target=_bg_preload, name="InpainterPreload-AfterToggle", daemon=True
+            )
+            self._toggle_preload_thread.start()
+        except Exception as e:
+            print(f"[TOGGLE_PRELOAD] Failed to start preload thread: {e}")
 
     def _on_inpaint_method_change(self):
         """Show appropriate inpainting settings based on method"""
