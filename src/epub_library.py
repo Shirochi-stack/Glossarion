@@ -611,7 +611,19 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
     and :func:`_count_translated_response_files` so the toggle actually
     shifts both numerator and denominator together (otherwise the
     filesystem / spine counts shrink but the progress-file count stays
-    fixed and the dreaded 98 %↔1 00 % pair never changes).
+    fixed and the dreaded 98 %↛1 00 % pair never changes).
+
+    **File-existence verification**: entries whose ``status`` is
+    ``"completed"`` are only counted as completed when the
+    corresponding ``output_file`` still exists on disk (relative to
+    the progress file's folder). The translator writes
+    ``response_*.html`` files during translation and marks the
+    progress entry ``completed`` — but if the user later manually
+    deletes one of those files, the JSON still carries the stale
+    ``completed`` status. Without this verification the card would
+    keep reading e.g. 60/60 even though only 55 of the response
+    files remain on disk. Any demoted entries are counted as
+    ``in_progress`` instead so the fraction reflects reality.
     """
     import json as _json
     import re as _re
@@ -625,6 +637,8 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
     completed = 0
     in_progress = 0
     failed = 0
+    output_folder = os.path.dirname(progress_file) if progress_file else ""
+    output_folder_ok = bool(output_folder) and os.path.isdir(output_folder)
     for key, ch in chapters.items():
         if not isinstance(ch, dict):
             continue
@@ -652,6 +666,20 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
                 continue
         total += 1
         status = ch.get("status", "")
+        # Phantom-completion check: the progress JSON may say
+        # "completed" but the actual output file could have been
+        # deleted by the user. Verify it's still on disk before
+        # counting it as done — otherwise the card fraction lies.
+        if status == "completed" and output_folder_ok:
+            of = ch.get("output_file") or ""
+            if of:
+                candidate = of if os.path.isabs(of) else os.path.join(
+                    output_folder, of)
+                if not os.path.isfile(candidate):
+                    # Demote locally for counting. The JSON itself
+                    # isn't rewritten — the translator's own progress
+                    # manager is the source of truth for that.
+                    status = "in_progress"
         if status == "completed":
             completed += 1
         elif status in ("in_progress", "pending"):
