@@ -4440,16 +4440,11 @@ class BookDetailsDialog(QDialog):
         self._meta_grid = QGridLayout()
         self._meta_grid.setContentsMargins(0, 0, 0, 0)
         self._meta_grid.setHorizontalSpacing(14)
-        # Bumped vertical spacing keeps wrapped value labels from visually
-        # colliding with the next row's key label (e.g. multi-line "Title"
-        # running into "Author" on Qt's conservative sizeHint path). Bumped
-        # way up so long Korean / CJK titles have plenty of vertical
-        # breathing room without clipping their ascenders into the
-        # METADATA heading above.
-        self._meta_grid.setVerticalSpacing(36)
-        # Reserve extra height on the Title row specifically so even a
-        # single-line title doesn't sit right against the heading.
-        self._meta_grid.setRowMinimumHeight(0, 64)
+        # Tight uniform vertical spacing — only the Title row gets extra
+        # breathing room, and that’s provided by :func:`_fit_title_text`
+        # below (dynamically shrinking the Title font instead of padding
+        # every row with 36 px of whitespace).
+        self._meta_grid.setVerticalSpacing(8)
         # Let the second column stretch so long titles wrap across more
         # horizontal space instead of clipping vertically.
         self._meta_grid.setColumnStretch(0, 0)
@@ -4485,6 +4480,7 @@ class BookDetailsDialog(QDialog):
         # common CJK novel title fits on one line in the Title row.
         meta_wrapper.setMinimumWidth(380)
         meta_wrapper.setMaximumWidth(540)
+        self._meta_wrapper = meta_wrapper
         hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
         body_layout.addLayout(hero)
 
@@ -4643,6 +4639,14 @@ class BookDetailsDialog(QDialog):
 
         synopsis = (self._metadata_json.get("description")
                     or self._details.get("description") or "").strip()
+        if synopsis:
+            # Collapse any run of blank lines (i.e. a newline followed by
+            # one or more whitespace-only lines) down to a single newline
+            # so the synopsis renders compactly instead of with huge gaps
+            # between sentences that happen to be paragraph-separated in
+            # the source metadata.
+            import re as _re
+            synopsis = _re.sub(r"\n\s*\n+", "\n", synopsis)
         self._synopsis_lbl.setText(synopsis if synopsis else "No synopsis available.")
 
         # Metadata grid
@@ -4663,14 +4667,49 @@ class BookDetailsDialog(QDialog):
             ("\U0001f310 Language", language or "\u2014"),
             ("\U0001f4c5 Year", year or "\u2014"),
         ]
+        # Estimate the horizontal space available to the value column.
+        # ``meta_wrapper`` is between 380–540 px wide; the key column is
+        # ~100 px ("\U0001f3db\ufe0f Publisher" is the widest) and the grid
+        # has 14 px horizontal spacing. If the wrapper has already been laid
+        # out we use its real width; otherwise fall back to the conservative
+        # minimum so shrink-to-fit kicks in even on first paint.
+        wrapper_w = self._meta_wrapper.width() if getattr(self, "_meta_wrapper", None) else 0
+        if wrapper_w < 300:
+            wrapper_w = 380
+        val_avail_w = max(200, wrapper_w - 100 - 14 - 4)
         for i, (key, val) in enumerate(rows):
             k_lbl = QLabel(key)
             k_lbl.setProperty("class", "meta-k")
             k_lbl.setStyleSheet("color: #7a8599; font-size: 8.5pt;")
-            v_lbl = QLabel(str(val))
+            v_lbl = QLabel()
             v_lbl.setProperty("class", "meta-v")
-            v_lbl.setStyleSheet("color: #e0e0e0; font-size: 9.5pt; font-weight: bold;")
             v_lbl.setWordWrap(True)
+            if i == 0:
+                # Title row — dynamically shrink the font if the title would
+                # otherwise wrap past the reserved box, and only fall back
+                # to an ellipsis as a last resort. Matches the flash card
+                # title behavior.
+                title_box_h = 52
+                v_lbl.setFixedHeight(title_box_h)
+                v_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+                fitted_text, fitted_pt = _fit_title_text(
+                    str(val),
+                    avail_width=val_avail_w,
+                    max_height=title_box_h,
+                    base_pt=9.5,
+                    base_font=v_lbl.font(),
+                    min_pt=7.5,
+                )
+                v_lbl.setText(fitted_text)
+                v_lbl.setToolTip(str(val))
+                v_lbl.setStyleSheet(
+                    f"color: #e0e0e0; font-size: {fitted_pt:g}pt; font-weight: bold;"
+                )
+            else:
+                v_lbl.setText(str(val))
+                v_lbl.setStyleSheet(
+                    "color: #e0e0e0; font-size: 9.5pt; font-weight: bold;"
+                )
             self._meta_grid.addWidget(k_lbl, i, 0, Qt.AlignTop | Qt.AlignLeft)
             self._meta_grid.addWidget(v_lbl, i, 1, Qt.AlignTop | Qt.AlignLeft)
 
