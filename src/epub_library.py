@@ -136,18 +136,41 @@ def _origins_file() -> str:
     return os.path.join(get_library_dir(), "library_origins.txt")
 
 
-def _load_origins() -> dict[str, str]:
-    """Load {library_basename: original_source_path} mapping."""
+# Structured origins format (v2):
+#   { "version": 2,
+#     "raw":        { "<basename in Library/Raw>":        "<absolute original path>" },
+#     "translated": { "<basename in Library/Translated>": "<absolute original path>" } }
+#
+# Legacy v1 format was a flat ``{basename: original_path}`` dict and is
+# promoted into the ``translated`` bucket on read so the user's existing
+# undo history is preserved.
+
+
+def _load_origins() -> dict:
+    """Load the structured origins mapping (auto-upgrades the legacy format)."""
     import json
     try:
         with open(_origins_file(), "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+        return {"version": 2, "raw": {}, "translated": {}}
+    if not isinstance(data, dict):
+        return {"version": 2, "raw": {}, "translated": {}}
+    # Legacy flat mapping → promote to ``translated``.
+    if "version" not in data and "raw" not in data and "translated" not in data:
+        return {"version": 2, "raw": {}, "translated": dict(data)}
+    data.setdefault("version", 2)
+    data.setdefault("raw", {})
+    data.setdefault("translated", {})
+    if not isinstance(data["raw"], dict):
+        data["raw"] = {}
+    if not isinstance(data["translated"], dict):
+        data["translated"] = {}
+    return data
 
 
-def _save_origins(origins: dict[str, str]):
-    """Save the origins mapping."""
+def _save_origins(origins: dict):
+    """Persist the structured origins mapping."""
     import json
     try:
         with open(_origins_file(), "w", encoding="utf-8") as f:
@@ -1114,12 +1137,17 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
 
     results.sort(key=lambda r: r["mtime"], reverse=True)
 
-    # Attach original source paths for files that were moved to Library
+    # Attach original source paths for files that were moved to Library.
+    # v2 origins are split into raw/translated buckets; flatten them for
+    # this lookup since we just want "original path for this basename".
     origins = _load_origins()
+    flat_origins: dict[str, str] = {}
+    for bucket in ("raw", "translated"):
+        flat_origins.update(origins.get(bucket, {}) or {})
     for r in results:
         basename = os.path.basename(r["path"])
-        if basename in origins:
-            r["original_path"] = origins[basename]
+        if basename in flat_origins:
+            r["original_path"] = flat_origins[basename]
 
     return results
 
@@ -1734,18 +1762,33 @@ class EpubLibraryDialog(QDialog):
         self._ip_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         ip_action_row.addWidget(self._ip_count_label)
         ip_action_row.addStretch()
-        self._organize_raw_btn = QPushButton("\U0001f4e5  Organize Raw")
-        self._organize_raw_btn.setCursor(Qt.PointingHandCursor)
-        self._organize_raw_btn.setToolTip(
-            "Copy every in-progress card's raw source file into Library/Raw "
-            "and rewrite its source pointer. Idempotent and safe to re-run."
+        self._organize_btn = QPushButton("\U0001f4e5  Organize Files into Library")
+        self._organize_btn.setCursor(Qt.PointingHandCursor)
+        self._organize_btn.setToolTip(
+            "Move every resolvable raw source into Library/Raw and every "
+            "compiled EPUB into Library/Translated. Each move is recorded "
+            "so it can be reversed by Undo Move."
         )
-        self._organize_raw_btn.setStyleSheet(
+        self._organize_btn.setStyleSheet(
             "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
             "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
             "QPushButton:hover { background: #4a6a8a; }")
-        self._organize_raw_btn.clicked.connect(self._organize_raw_into_library)
-        ip_action_row.addWidget(self._organize_raw_btn)
+        self._organize_btn.clicked.connect(self._organize_into_library)
+        ip_action_row.addWidget(self._organize_btn)
+
+        self._undo_btn = QPushButton("\u21a9  Undo Move")
+        self._undo_btn.setCursor(Qt.PointingHandCursor)
+        self._undo_btn.setToolTip(
+            "Restore previously organized files back to their original "
+            "locations. You'll be asked whether to undo Raw, Translated, "
+            "or All."
+        )
+        self._undo_btn.setStyleSheet(
+            "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #5a32a3; }")
+        self._undo_btn.clicked.connect(self._undo_organize_prompt)
+        ip_action_row.addWidget(self._undo_btn)
 
         self._import_btn = QPushButton("\u2795  Import EPUB")
         self._import_btn.setCursor(Qt.PointingHandCursor)
@@ -2026,63 +2069,110 @@ class EpubLibraryDialog(QDialog):
             logger.debug("Failed to emit import_epub_requested: %s",
                          traceback.format_exc())
 
-    def _organize_raw_into_library(self):
-        """Move every raw source file referenced by an in-progress card into
-        Library/Raw (copies, preserving the original when the source lives
-        outside the library already). Updates each card's source_epub.txt
-        pointer so future scans resolve against the library copy.
+    def _organize_into_library(self):
+        """Move raw sources into Library/Raw *and* compiled EPUBs into
+        Library/Translated, recording every move in a reversible origins
+        file (``Library/library_origins.txt``). Per-file policy:
+
+          * **Raw** sources are MOVED from their current location into
+            Library/Raw and the card's ``source_epub.txt`` pointer is
+            rewritten so future scans resolve to the library copy.
+          * **Translated** compiled EPUBs are MOVED from their output
+            folder into Library/Translated (the output folder itself
+            stays on disk, minus the EPUB).
+
+        The operation is idempotent: files already inside their
+        destination folder are skipped silently.
         """
         raw_dir = get_library_raw_dir()
-        raw_dir_abs = os.path.normcase(os.path.normpath(os.path.abspath(raw_dir)))
-        outside = []
+        trans_dir = get_library_translated_dir()
+        raw_abs = os.path.normcase(os.path.normpath(os.path.abspath(raw_dir)))
+        trans_abs = os.path.normcase(os.path.normpath(os.path.abspath(trans_dir)))
+
+        # Collect raw sources that aren't already in Library/Raw.
+        raw_moves: list[tuple[dict, str]] = []
         for book in self._in_progress_books:
             p = book.get("raw_source_path") or ""
             if not p or not os.path.isfile(p):
                 continue
             parent = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(p))))
-            if parent == raw_dir_abs:
+            if parent == raw_abs:
                 continue
-            outside.append((book, p))
-        if not outside:
-            QMessageBox.information(self, "Organize raw sources",
-                                    "All resolvable raw sources are already in "
-                                    "Library/Raw. Nothing to move.")
+            raw_moves.append((book, p))
+
+        # Collect compiled EPUBs that aren't already in Library/Translated.
+        translated_moves: list[tuple[dict, str]] = []
+        for book in self._completed_books:
+            # Skip Library entries (they already live in Library/Translated).
+            if book.get("in_library"):
+                continue
+            p = book.get("path") or ""
+            if not p or not os.path.isfile(p):
+                continue
+            if not p.lower().endswith(".epub"):
+                continue  # only compiled .epub files get organized for now
+            parent = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(p))))
+            if parent == trans_abs:
+                continue
+            translated_moves.append((book, p))
+
+        if not raw_moves and not translated_moves:
+            QMessageBox.information(
+                self, "Organize Files into Library",
+                "All resolvable files are already in Library/Raw or "
+                "Library/Translated. Nothing to move.")
             return
-        sample = "\n".join(f"  \u2022 {os.path.basename(p)}" for _, p in outside[:15])
-        if len(outside) > 15:
-            sample += f"\n  \u2026 and {len(outside) - 15} more"
+
+        preview = []
+        if raw_moves:
+            preview.append(
+                f"Raw \u2192 Library/Raw: {len(raw_moves)} file"
+                f"{'s' if len(raw_moves) != 1 else ''}")
+        if translated_moves:
+            preview.append(
+                f"Translated \u2192 Library/Translated: {len(translated_moves)} file"
+                f"{'s' if len(translated_moves) != 1 else ''}")
+
         msg = QMessageBox(self)
-        msg.setWindowTitle("Organize raw sources")
+        msg.setWindowTitle("Organize Files into Library")
         msg.setText(
-            f"Copy {len(outside)} raw source file"
-            f"{'s' if len(outside) != 1 else ''} into Library/Raw?\n\n{sample}\n\n"
-            f"Destination:\n  {raw_dir}"
+            "Move the following files into the Library?\n\n"
+            + "\n".join("  \u2022 " + line for line in preview)
+            + "\n\nThis is reversible via the Undo Move button."
         )
         msg.setIcon(QMessageBox.Question)
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.No)
         if msg.exec() != QMessageBox.Yes:
             return
-        copied = 0
+
+        origins = _load_origins()
+        raw_origins = dict(origins.get("raw", {}) or {})
+        trans_origins = dict(origins.get("translated", {}) or {})
+
+        moved_raw = 0
+        moved_trans = 0
         errors: list[str] = []
-        for book, src in outside:
+
+        def _unique_dest(directory: str, base_name: str) -> str:
+            cand = os.path.join(directory, base_name)
+            if not os.path.isfile(cand):
+                return cand
+            stem, ext = os.path.splitext(base_name)
+            counter = 2
+            while True:
+                cand = os.path.join(directory, f"{stem} ({counter}){ext}")
+                if not os.path.isfile(cand):
+                    return cand
+                counter += 1
+
+        # Raw sources: MOVE + update source_epub.txt pointer.
+        for book, src in raw_moves:
             try:
-                base_name = os.path.basename(src)
-                dest = os.path.join(raw_dir, base_name)
-                if os.path.abspath(src) != os.path.abspath(dest):
-                    if os.path.isfile(dest):
-                        stem, ext = os.path.splitext(base_name)
-                        counter = 2
-                        while True:
-                            cand = os.path.join(raw_dir, f"{stem} ({counter}){ext}")
-                            if not os.path.isfile(cand):
-                                dest = cand
-                                break
-                            counter += 1
-                    shutil.copy2(src, dest)
+                dest = _unique_dest(raw_dir, os.path.basename(src))
+                shutil.move(src, dest)
+                raw_origins[os.path.basename(dest)] = os.path.abspath(src)
                 record_library_raw_input(dest)
-                # Update the source_epub.txt pointer in the book's output
-                # folder so future scans resolve to the library copy.
                 out_folder = book.get("output_folder") or ""
                 if out_folder and os.path.isdir(out_folder):
                     try:
@@ -2091,15 +2181,166 @@ class EpubLibraryDialog(QDialog):
                             f.write(dest)
                     except OSError as pe:
                         logger.debug("Update source_epub.txt failed: %s", pe)
-                copied += 1
+                moved_raw += 1
             except Exception as exc:
-                errors.append(f"{os.path.basename(src)}: {exc}")
-        summary = f"Copied {copied} file{'s' if copied != 1 else ''} into Library/Raw."
+                errors.append(f"raw:{os.path.basename(src)}: {exc}")
+
+        # Translated compiled EPUBs: MOVE into Library/Translated.
+        for book, src in translated_moves:
+            try:
+                dest = _unique_dest(trans_dir, os.path.basename(src))
+                shutil.move(src, dest)
+                trans_origins[os.path.basename(dest)] = os.path.abspath(src)
+                moved_trans += 1
+            except Exception as exc:
+                errors.append(f"translated:{os.path.basename(src)}: {exc}")
+
+        origins["raw"] = raw_origins
+        origins["translated"] = trans_origins
+        _save_origins(origins)
+
+        summary_parts = []
+        if moved_raw:
+            summary_parts.append(
+                f"Moved {moved_raw} raw source"
+                f"{'s' if moved_raw != 1 else ''} into Library/Raw.")
+        if moved_trans:
+            summary_parts.append(
+                f"Moved {moved_trans} compiled EPUB"
+                f"{'s' if moved_trans != 1 else ''} into Library/Translated.")
+        summary = "\n".join(summary_parts) or "Nothing was moved."
         if errors:
             summary += (f"\n\n{len(errors)} error"
                         f"{'s' if len(errors) != 1 else ''}:\n"
                         + "\n".join(errors[:5]))
-        QMessageBox.information(self, "Organize raw sources", summary)
+        QMessageBox.information(self, "Organize Files into Library", summary)
+        self._load_books()
+
+    def _undo_organize_prompt(self):
+        """Ask the user which category to undo, then reverse those moves.
+
+        Prompts with three buttons: Raw, Translated, All. Each button
+        moves the affected files back to their original locations (from
+        the origins registry) and rewrites any stale ``source_epub.txt``
+        pointers.
+        """
+        origins = _load_origins()
+        raw_map = dict(origins.get("raw", {}) or {})
+        trans_map = dict(origins.get("translated", {}) or {})
+        if not raw_map and not trans_map:
+            QMessageBox.information(
+                self, "Undo Move",
+                "No previous organize operation is recorded. Nothing to undo.")
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Undo Move")
+        raw_count = len(raw_map)
+        trans_count = len(trans_map)
+        msg.setText(
+            f"Which category do you want to restore to the original location?\n\n"
+            f"  \u2022 Raw sources in Library/Raw: {raw_count}\n"
+            f"  \u2022 Translated EPUBs in Library/Translated: {trans_count}"
+        )
+        msg.setIcon(QMessageBox.Question)
+        btn_raw = msg.addButton("Raw", QMessageBox.AcceptRole)
+        btn_trans = msg.addButton("Translated", QMessageBox.AcceptRole)
+        btn_all = msg.addButton("All", QMessageBox.AcceptRole)
+        btn_cancel = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(btn_all if (raw_map and trans_map) else (btn_raw or btn_trans))
+        msg.exec()
+        chosen = msg.clickedButton()
+        if chosen is None or chosen is btn_cancel:
+            return
+        restore_raw = chosen is btn_raw or chosen is btn_all
+        restore_trans = chosen is btn_trans or chosen is btn_all
+
+        restored_raw = 0
+        restored_trans = 0
+        errors: list[str] = []
+
+        if restore_raw and raw_map:
+            raw_dir = get_library_raw_dir()
+            remaining = {}
+            for lib_name, orig_path in raw_map.items():
+                lib_file = os.path.join(raw_dir, lib_name)
+                if not os.path.isfile(lib_file):
+                    errors.append(f"raw:{lib_name}: not found in Library/Raw")
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(orig_path) or ".", exist_ok=True)
+                except OSError:
+                    pass
+                try:
+                    shutil.move(lib_file, orig_path)
+                    restored_raw += 1
+                    # Any output folders whose source_epub.txt still points
+                    # at the library copy get rewritten back to the original.
+                    try:
+                        for root in _resolve_output_roots(self._config):
+                            try:
+                                for sub in os.scandir(root):
+                                    if not sub.is_dir(follow_symlinks=False):
+                                        continue
+                                    sidecar = os.path.join(sub.path, "source_epub.txt")
+                                    if not os.path.isfile(sidecar):
+                                        continue
+                                    try:
+                                        with open(sidecar, "r", encoding="utf-8") as f:
+                                            raw_text = f.read().strip()
+                                    except OSError:
+                                        continue
+                                    if (os.path.normcase(os.path.normpath(raw_text)) ==
+                                            os.path.normcase(os.path.normpath(lib_file))):
+                                        try:
+                                            with open(sidecar, "w", encoding="utf-8") as f:
+                                                f.write(orig_path)
+                                        except OSError:
+                                            pass
+                            except (PermissionError, OSError):
+                                continue
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    remaining[lib_name] = orig_path
+                    errors.append(f"raw:{lib_name}: {exc}")
+            origins["raw"] = remaining
+
+        if restore_trans and trans_map:
+            trans_dir = get_library_translated_dir()
+            remaining = {}
+            for lib_name, orig_path in trans_map.items():
+                lib_file = os.path.join(trans_dir, lib_name)
+                if not os.path.isfile(lib_file):
+                    errors.append(f"translated:{lib_name}: not found in Library/Translated")
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(orig_path) or ".", exist_ok=True)
+                except OSError:
+                    pass
+                try:
+                    shutil.move(lib_file, orig_path)
+                    restored_trans += 1
+                except Exception as exc:
+                    remaining[lib_name] = orig_path
+                    errors.append(f"translated:{lib_name}: {exc}")
+            origins["translated"] = remaining
+
+        _save_origins(origins)
+
+        summary_parts = []
+        if restore_raw:
+            summary_parts.append(
+                f"Raw restored: {restored_raw}/{len(raw_map) if raw_map else 0}")
+        if restore_trans:
+            summary_parts.append(
+                f"Translated restored: {restored_trans}/{len(trans_map) if trans_map else 0}")
+        summary = "\n".join(summary_parts) or "Nothing was restored."
+        if errors:
+            summary += (f"\n\n{len(errors)} error"
+                        f"{'s' if len(errors) != 1 else ''}:\n"
+                        + "\n".join(errors[:5]))
+        QMessageBox.information(self, "Undo Move", summary)
         self._load_books()
 
     def _refresh_view(self):
