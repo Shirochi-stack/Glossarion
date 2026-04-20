@@ -1560,10 +1560,22 @@ class MangaTranslator:
         
         # Note: self.manga_settings is a property that reads fresh from config
 
-        # Initialize local inpainter if configured (uses pool system)
-        # Skip if skip_inpainter_init=True (e.g., when creating temp instance for pool access)
-        if not skip_inpainter_init and self.manga_settings.get('inpainting', {}).get('method') == 'local':
+        # Initialize local inpainter if configured (uses pool system).
+        # Skip if:
+        #   - skip_inpainter_init=True (e.g., when creating temp instance for pool access), OR
+        #   - the Skip Inpainter toggle is on (self.skip_inpainting set from
+        #     config['manga_skip_inpainting'] a few lines above). Without this
+        #     check, the constructor blocks on a 30s inpaint-pool polling loop
+        #     and spams "⏳ Still waiting for inpainter pool..." even though the
+        #     user asked for inpainting to be skipped entirely.
+        if (
+            not skip_inpainter_init
+            and not getattr(self, 'skip_inpainting', False)
+            and self.manga_settings.get('inpainting', {}).get('method') == 'local'
+        ):
             self._initialize_local_inpainter()
+        elif getattr(self, 'skip_inpainting', False):
+            self._log("🚫 Skip Inpainter enabled — not initializing local inpainter pool", "debug")
             
         # NOTE: All advanced settings are now accessed dynamically via properties
         # This allows settings changes to take effect immediately without GUI restart
@@ -10225,7 +10237,15 @@ class MangaTranslator:
         return created
 
     def _initialize_local_inpainter(self):
-        """Initialize local inpainting if configured"""
+        """Initialize local inpainting if configured.
+
+        Short-circuits immediately when the Skip Inpainter toggle is on so the
+        caller doesn't block on the inpaint-pool polling loop.
+        """
+        # Defense in depth: if skip_inpainting is on, don't touch the pool.
+        if getattr(self, 'skip_inpainting', False):
+            self._log("🚫 Skip Inpainter enabled — _initialize_local_inpainter() short-circuited", "debug")
+            return False
         try:
             from local_inpainter import LocalInpainter, HybridInpainter, AnimeMangaInpaintModel
             
