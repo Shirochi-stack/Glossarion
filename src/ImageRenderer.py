@@ -4067,6 +4067,65 @@ def _restore_recognize_button(self):
     except Exception:
         pass
 
+def _refresh_live_gui_state_for_manga_action(self):
+    """Sync manga workflow actions with the current main GUI state.
+
+    The Start Translation button in `manga_integration.py` explicitly triggers
+    a refresh from the main GUI before kicking off work, which makes it pick up
+    the latest API key / model selection. The image-preview workflow buttons
+    (Translate / Translate All) skipped that step, and the full-page-context
+    path also reuses a cached `_manga_translator` whose `UnifiedClient` was
+    built from whatever key/model were present on the first run.
+
+    Result: changing the API key or model in the main GUI had no effect for the
+    workflow buttons until the whole GUI was restarted.
+
+    This helper mirrors the Start Translation behaviour and additionally drops
+    the cached translator/client instances so the next request rebuilds against
+    the live GUI values.
+    """
+    # 1) Re-read / refresh from the main GUI if available
+    try:
+        if hasattr(self, '_refresh_context_settings'):
+            self._refresh_context_settings()
+        elif hasattr(self, 'refresh_btn') and self.refresh_btn:
+            self.refresh_btn.click()
+    except Exception as e:
+        try:
+            self._log(f"⚠️ Warning: Could not refresh from main GUI: {e}", "debug")
+        except Exception:
+            pass
+
+    # 2) Invalidate the cached MangaTranslator so full-page-context rebuilds a
+    #    fresh UnifiedClient using the current API key / model.
+    try:
+        if hasattr(self, '_manga_translator') and self._manga_translator is not None:
+            try:
+                if hasattr(self._manga_translator, 'restore_print'):
+                    self._manga_translator.restore_print()
+            except Exception:
+                pass
+            self._manga_translator = None
+            try:
+                self._log("🔄 Cleared cached manga translator to use current API key/model", "debug")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3) Drop the main GUI's cached client as well so any code path that uses
+    #    `main_gui.client` will recreate it from the live GUI values.
+    try:
+        if hasattr(self, 'main_gui') and self.main_gui is not None:
+            if getattr(self.main_gui, 'client', None) is not None:
+                self.main_gui.client = None
+                try:
+                    self._log("🔄 Cleared cached main GUI client to use current API key/model", "debug")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def _on_translate_text_clicked(self):
     """Translate recognized text using the selected API - runs full pipeline if needed"""
     self._log("🐛 Translate button clicked - starting translation", "info")
