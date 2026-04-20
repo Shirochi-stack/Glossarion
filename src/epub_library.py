@@ -4527,6 +4527,14 @@ class BookDetailsDialog(QDialog):
             # User has an explicit preference — honor it, but also respect
             # the translate-special toggle so turning it ON auto-propagates.
             self._show_special_files = bool(_stored_show) or _translate_special
+        # "Show raw titles" overrides the default "translated when completed,
+        # raw otherwise" rule used by :class:`_ChapterRow` so every row shows
+        # the source-language title regardless of translation status. Only
+        # meaningful for in-progress EPUBs (where translated titles exist);
+        # the toggle is hidden otherwise.
+        self._show_raw_titles = bool(
+            self._config.get("epub_details_show_raw_titles", False)
+        )
 
         epub_path = book["path"]
         pretty = book.get("name") or os.path.splitext(os.path.basename(epub_path))[0]
@@ -4811,6 +4819,24 @@ class BookDetailsDialog(QDialog):
         """)
         self._special_cb.toggled.connect(self._on_special_files_toggled)
         chap_header.addWidget(self._special_cb)
+        # "Show raw titles" toggle: when checked, every chapter row displays
+        # the source-language title instead of the translated one (if any).
+        # Only useful for in-progress EPUBs where translated titles exist —
+        # hidden otherwise via :meth:`_on_details_ready`.
+        self._raw_titles_cb = QCheckBox("Show raw titles")
+        self._raw_titles_cb.setToolTip(
+            "Show the source-language chapter titles instead of the "
+            "translated titles, even for chapters that have already been "
+            "translated."
+        )
+        self._raw_titles_cb.setChecked(self._show_raw_titles)
+        self._raw_titles_cb.setStyleSheet(self._special_cb.styleSheet())
+        self._raw_titles_cb.toggled.connect(self._on_raw_titles_toggled)
+        # Hidden by default; the details-ready handler flips it on for
+        # in-progress EPUBs that actually have translated chapters to
+        # distinguish from.
+        self._raw_titles_cb.hide()
+        chap_header.addWidget(self._raw_titles_cb)
         self._toc_search = QLineEdit()
         self._toc_search.setObjectName("toc-search")
         self._toc_search.setPlaceholderText("\U0001f50d  Search chapters\u2026")
@@ -5085,6 +5111,24 @@ class BookDetailsDialog(QDialog):
             self._start_btn.setText("\U0001f4d6  Start reading")
             self._raw_btn.hide()
 
+        # "Show raw titles" toggle is only meaningful for in-progress EPUBs
+        # that actually have translated chapters available — otherwise
+        # every row is already rendered from the raw title and there's
+        # nothing to switch between.
+        raw_titles_applicable = bool(
+            self._book.get("is_in_progress") and has_translated
+        )
+        self._raw_titles_cb.setVisible(
+            raw_titles_applicable and self._chap_container.isVisible()
+        )
+        # Keep the flag accurate: if the toggle becomes inapplicable after
+        # a refresh we don't want the checkbox state to stay "checked"
+        # invisibly and force raw rendering on an unrelated book.
+        if not raw_titles_applicable:
+            if self._show_raw_titles:
+                self._show_raw_titles = False
+                self._raw_titles_cb.setChecked(False)
+
         # Chapter rows
         self._populate_chapters()
         # Button availability is handled inside :meth:`_apply_hero_payload`
@@ -5180,8 +5224,13 @@ class BookDetailsDialog(QDialog):
                 w.setParent(None)
                 w.deleteLater()
 
+        show_raw_title = bool(self._show_raw_titles)
         for info in self._chapters_info:
-            row = _ChapterRow(info, parent=self._chap_container)
+            row = _ChapterRow(
+                info,
+                parent=self._chap_container,
+                show_raw_title=show_raw_title,
+            )
             row.activated.connect(self._on_chapter_activated)
             row.clicked.connect(self._on_chapter_clicked)
             if info.get("index") == self._selected_chapter_idx:
@@ -5279,11 +5328,35 @@ class BookDetailsDialog(QDialog):
         # flips the checkbox.
         self._update_progress_strip()
 
+    def _on_raw_titles_toggled(self, checked: bool):
+        """Swap every chapter row between translated-title and raw-title mode."""
+        new_value = bool(checked)
+        if new_value == self._show_raw_titles:
+            return
+        self._show_raw_titles = new_value
+        try:
+            self._config["epub_details_show_raw_titles"] = self._show_raw_titles
+        except Exception:
+            pass
+        # Re-populate the chapter list so every _ChapterRow is rebuilt with
+        # the new primary-title policy. Cheaper than retrofitting the rows
+        # in place and matches the pattern used for other toggles.
+        if self._chapters_loaded:
+            self._populate_chapters()
+
     def _toggle_chapters(self):
         show = not self._chap_container.isVisible()
         self._chap_container.setVisible(show)
         self._toc_search.setVisible(show)
         self._special_cb.setVisible(show)
+        # Only show the "Show raw titles" checkbox when the book actually
+        # has translated content to switch away from AND the chapter
+        # section is expanded.
+        has_translated = any(c.get("translated_path") for c in self._chapters_info)
+        raw_titles_applicable = bool(
+            self._book.get("is_in_progress") and has_translated
+        )
+        self._raw_titles_cb.setVisible(show and raw_titles_applicable)
         self._update_toc_toggle_label()
 
     @Slot(str)
@@ -5534,7 +5607,7 @@ class _ChapterRow(QFrame):
         "QFrame#chapterRow:hover { border: 2px solid #c0b8ff; background: #343670; }"
     )
 
-    def __init__(self, info: dict, parent=None):
+    def __init__(self, info: dict, parent=None, show_raw_title: bool = False):
         super().__init__(parent)
         self.info = info
         self._selected = False
@@ -5554,7 +5627,16 @@ class _ChapterRow(QFrame):
         status = info.get("status", "") or ""
         translated = info.get("translated_title") or ""
         raw = info.get("raw_title") or ""
-        if translated and status == "completed":
+        # When the caller asks for raw titles explicitly, we always show the
+        # source-language title as the primary text (falling back to filename
+        # if the spine parse couldn't extract one). Otherwise the normal rule
+        # applies: translated title when the chapter is complete, raw title
+        # while it's still pending.
+        if show_raw_title:
+            primary = QLabel(raw or info.get("filename", ""))
+            primary.setProperty("class", "raw")
+            primary.setStyleSheet("color: #c8cbe0; font-size: 10pt; font-weight: bold;")
+        elif translated and status == "completed":
             primary = QLabel(translated)
             primary.setProperty("class", "translated")
             primary.setStyleSheet("color: #e0e0e0; font-size: 10pt; font-weight: bold;")
@@ -5563,6 +5645,13 @@ class _ChapterRow(QFrame):
             primary.setProperty("class", "raw")
             primary.setStyleSheet("color: #c8cbe0; font-size: 10pt; font-weight: bold;")
         primary.setWordWrap(True)
+        # If both titles exist and we're in raw-titles mode, expose the
+        # translated version as a tooltip so the user still has one-click
+        # access to it without flipping the checkbox.
+        if show_raw_title and translated and translated != raw:
+            primary.setToolTip(f"Translated: {translated}")
+        elif (not show_raw_title) and translated and status == "completed" and raw and raw != translated:
+            primary.setToolTip(f"Raw: {raw}")
         text_col.addWidget(primary)
 
         sub = QLabel(info.get("filename", ""))
