@@ -307,7 +307,15 @@ def _extract_cover(epub_path: str) -> str | None:
     name_hash = hashlib.md5(epub_path.encode("utf-8")).hexdigest()[:12]
     cached = os.path.join(cache_dir, f"{name_hash}.jpg")
     if os.path.isfile(cached):
-        return cached
+        # Guard against stale 0-byte caches left behind by crashed writes:
+        # returning one of those to QPixmap produces a null pixmap and hides
+        # the cover silently. Re-extract when the cache is clearly empty.
+        try:
+            if os.path.getsize(cached) > 0:
+                return cached
+            os.remove(cached)
+        except OSError:
+            pass
 
     # Fast path: read EPUB as a zip and extract cover via OPF metadata
     # This avoids the heavy ebooklib.read_epub() which fully parses the DOM
@@ -3345,14 +3353,10 @@ class BookDetailsDialog(QDialog):
         self._cover_lbl.setStyleSheet(
             "background: #2a2a3e; border-radius: 6px; color: #555; font-size: 32pt;"
         )
-        icon_path = _find_halgakos_icon()
-        if icon_path:
-            pm = QPixmap(icon_path)
-            if not pm.isNull():
-                scaled = pm.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self._cover_lbl.setPixmap(scaled)
-        else:
-            self._cover_lbl.setText("\U0001f4d6")
+        # Initial placeholder: Halgakos brand icon (or emoji as last resort).
+        # ``_apply_halgakos_fallback`` is reused by ``_on_details_ready`` so
+        # the same defensive rendering path runs when cover extraction fails.
+        self._apply_halgakos_fallback()
         hero.addWidget(self._cover_lbl, 0, Qt.AlignTop)
 
         # Center column: title, author, actions, synopsis
@@ -3412,7 +3416,7 @@ class BookDetailsDialog(QDialog):
 
         self._source_btn = QPushButton("\U0001f517")
         self._source_btn.setProperty("class", "icon-btn")
-        self._source_btn.setToolTip("Reveal source EPUB")
+        self._source_btn.setToolTip("Reveal source file")
         self._source_btn.setCursor(Qt.PointingHandCursor)
         self._source_btn.clicked.connect(self._reveal_source)
         self._source_btn_opacity = QGraphicsOpacityEffect(self._source_btn)
@@ -3546,12 +3550,46 @@ class BookDetailsDialog(QDialog):
         self._loader.error.connect(self._on_details_error)
         self._loader.start()
 
+    def _apply_halgakos_fallback(self):
+        """Render the Halgakos brand icon into the cover label.
+
+        Scaled to fit the full cover-label footprint so freshly imported
+        Not Started cards (which have no extractable EPUB cover on disk
+        yet) still render a visible thumbnail instead of an empty dark
+        box. Falls back to a book emoji if the icon file fails to load.
+        """
+        icon_path = _find_halgakos_icon()
+        applied = False
+        if icon_path:
+            try:
+                pm = QPixmap(icon_path)
+                if not pm.isNull():
+                    # Fill the full label footprint (240×340) rather than a
+                    # small 160×160 centered icon so the fallback doesn't
+                    # read as "no thumbnail" against the dark background.
+                    scaled = pm.scaled(
+                        self._cover_lbl.width(),
+                        self._cover_lbl.height(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                    self._cover_lbl.setPixmap(scaled)
+                    self._cover_lbl.setText("")
+                    applied = True
+            except Exception:
+                logger.debug("Halgakos pixmap failed: %s",
+                             traceback.format_exc())
+        if not applied:
+            self._cover_lbl.setPixmap(QPixmap())
+            self._cover_lbl.setText("\U0001f4d6")
+
     @Slot(dict)
     def _on_details_ready(self, payload: dict):
         self._details = payload.get("details", {}) or {}
         self._chapters_info = payload.get("chapters_info", []) or []
         self._metadata_json = payload.get("metadata_json", {}) or {}
         cover_path = payload.get("cover", "")
+        cover_applied = False
         if cover_path:
             try:
                 pm = QPixmap(cover_path)
@@ -3560,8 +3598,14 @@ class BookDetailsDialog(QDialog):
                                        Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     self._cover_lbl.setPixmap(scaled)
                     self._cover_lbl.setText("")
+                    cover_applied = True
             except Exception:
-                pass
+                logger.debug("Cover pixmap load failed for %s: %s",
+                             cover_path, traceback.format_exc())
+        if not cover_applied:
+            # No real cover could be extracted — keep the Halgakos branding
+            # in place so the details dialog never shows an empty box.
+            self._apply_halgakos_fallback()
 
         title = (self._metadata_json.get("title") or self._details.get("title")
                  or self._book.get("name", ""))
@@ -3661,14 +3705,18 @@ class BookDetailsDialog(QDialog):
             else "Output folder not available for this book"
         )
 
-        src_path = self._book.get("path", "") or ""
+        # For in-progress cards ``path`` is the output folder, not the raw
+        # source file — prefer ``raw_source_path`` so the reveal button
+        # targets the actual file on disk.
+        src_path = (self._book.get("raw_source_path", "")
+                    or self._book.get("path", "") or "")
         source_ok = bool(src_path) and os.path.isfile(src_path)
         self._source_btn.setEnabled(source_ok)
         self._source_btn.setCursor(Qt.PointingHandCursor if source_ok else Qt.ForbiddenCursor)
         self._source_btn_opacity.setOpacity(1.0 if source_ok else 0.35)
         self._source_btn.setToolTip(
-            "Reveal source EPUB" if source_ok
-            else "Source EPUB file not found on disk"
+            "Reveal source file" if source_ok
+            else "Source file not found on disk"
         )
 
     def _fill_chip_row(self, layout: QHBoxLayout, values: list[str]):
@@ -3820,22 +3868,37 @@ class BookDetailsDialog(QDialog):
     def _open_reader(self, initial_chapter: int | None = None, raw_only: bool = False):
         """Dispatch to the appropriate viewer based on the resolved source type.
 
-        EPUB sources use the integrated :class:`EpubReaderDialog` with the
-        optional translated overlay. TXT / PDF / HTML / image sources are
-        handed off to the OS default viewer, mirroring the dispatch used by
-        :meth:`EpubLibraryDialog._on_card_clicked`.
+        EPUB sources — whether ``book['path']`` is the EPUB itself (completed
+        cards) or the output folder that holds one (in-progress cards) — use
+        the integrated :class:`EpubReaderDialog` with the optional translated
+        overlay. Only TXT / PDF / HTML / image workspaces fall through to the
+        OS default viewer.
         """
         try:
             book_path = self._book.get("path", "") or ""
             raw_source = self._book.get("raw_source_path", "") or ""
             compiled = self._book.get("compiled_output_path", "") or ""
-            book_path_is_file = bool(book_path) and os.path.isfile(book_path)
-            book_path_is_epub = book_path_is_file and book_path.lower().endswith(".epub")
 
-            # EPUB sources keep the rich integrated reader with overlay +
-            # initial-chapter support. Everything else falls through to the
-            # system viewer below.
-            if book_path_is_epub:
+            def _is_epub_file(p: str) -> bool:
+                return bool(p) and p.lower().endswith(".epub") and os.path.isfile(p)
+
+            # Resolve the EPUB to hand to EpubReaderDialog. For in-progress
+            # cards ``book['path']`` is the OUTPUT FOLDER (not a file), so we
+            # MUST consult ``raw_source_path`` / ``compiled_output_path`` too.
+            # Priority:
+            #   * raw_only or is_in_progress → raw_source first (that's the
+            #     reader base the translated overlay sits on top of).
+            #   * completed / library        → book_path first (compiled or
+            #     library EPUB is what the user wants to read).
+            if raw_only or self._book.get("is_in_progress"):
+                epub_candidates = [raw_source, book_path, compiled]
+            else:
+                epub_candidates = [book_path, raw_source, compiled]
+            epub_for_reader = next(
+                (p for p in epub_candidates if _is_epub_file(p)), ""
+            )
+
+            if epub_for_reader:
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 QApplication.processEvents()
                 overlay: dict[str, dict] = {}
@@ -3861,7 +3924,7 @@ class BookDetailsDialog(QDialog):
                 if isinstance(initial_chapter, int) and 0 <= initial_chapter < len(self._chapters_info):
                     initial_filename = self._chapters_info[initial_chapter].get("filename") or None
                 reader = EpubReaderDialog(
-                    book_path,
+                    epub_for_reader,
                     config=self._config,
                     parent=self,
                     initial_chapter=initial_chapter,
@@ -3877,10 +3940,8 @@ class BookDetailsDialog(QDialog):
                 reader.show()
                 return
 
-            # Non-EPUB dispatch: resolve a concrete file to hand off to the
-            # system viewer. Never pass ``book_path`` through when it points
-            # at an in-progress output folder — that's what caused the
-            # EpubReaderDialog crash on TXT/PDF workspaces.
+            # No EPUB base resolvable — the workspace is TXT / PDF / HTML /
+            # image. Hand off to the OS default viewer with a concrete file.
             chapter_translated = ""
             if (not raw_only
                     and isinstance(initial_chapter, int)
@@ -3889,6 +3950,7 @@ class BookDetailsDialog(QDialog):
                 if tp and os.path.isfile(tp):
                     chapter_translated = tp
 
+            book_path_is_file = bool(book_path) and os.path.isfile(book_path)
             target = ""
             if raw_only:
                 if raw_source and os.path.isfile(raw_source):
@@ -3963,7 +4025,11 @@ class BookDetailsDialog(QDialog):
             _open_folder_in_explorer(folder)
 
     def _reveal_source(self):
-        path = self._book.get("path")
+        # Prefer the resolved raw source (EPUB/TXT/PDF) — for in-progress
+        # cards ``book['path']`` is the output folder, which we can't pass
+        # to the "reveal in explorer" helper as a file selection.
+        path = (self._book.get("raw_source_path", "")
+                or self._book.get("path", "") or "")
         if path and os.path.isfile(path):
             _open_folder_in_explorer(path)
 
