@@ -1186,17 +1186,15 @@ def detect_ai_artifacts(text):
     # Only check the first ~500 chars — leaked thinking always appears at
     # the very start, never mid-chapter.  This avoids false positives from
     # prose like "Let me check" in dialogue or "thought" as a section header.
+    #
+    # NOTE: We intentionally do NOT flag a bare first line of "thought" or
+    # "thinking" on its own.  Many novels legitimately begin chapters,
+    # sections, or scene breaks with the single word "Thought" / "Thinking"
+    # (e.g. a character's inner monologue heading), which produced too many
+    # false positives.  Only flag clear, unambiguously AI-only phrases.
     _preamble_zone = text[:500]
     _thinking_hits = []
-    # "thought" / "thinking" must be the very first non-empty line
-    _first_line = ''
-    for _line in _preamble_zone.splitlines():
-        if _line.strip():
-            _first_line = _line.strip().lower()
-            break
-    if _first_line in ('thought', 'thinking'):
-        _thinking_hits.append(_first_line)
-    # These are unambiguously AI-only phrases
+    # These are unambiguously AI-only phrases (chain-of-thought leakage)
     for tp in [
         r'The user wants (?:a |me to )',
         r'(?:I need to|Let me) (?:translate|analyze|verify)',

@@ -5419,15 +5419,50 @@ Recent translations to summarize:
     
     def _show_model_context_menu(self, position):
         """Show context menu for model management."""
-        from PySide6.QtWidgets import QMenu
-        
+        from PySide6.QtWidgets import QMenu, QApplication
+
         menu = QMenu(self.model_combo)
+
+        # Resolve the combo's internal line edit for copy/paste operations
+        line_edit = self.model_combo.lineEdit()
+        clipboard = QApplication.clipboard()
+
+        # Cut
+        cut_action = menu.addAction("✂️ Cut")
+        cut_action.setShortcut("Ctrl+X")
+        if line_edit is None or line_edit.isReadOnly() or not line_edit.hasSelectedText():
+            cut_action.setEnabled(False)
+
+        # Copy
+        copy_action = menu.addAction("📋 Copy")
+        copy_action.setShortcut("Ctrl+C")
+        if line_edit is None or not line_edit.hasSelectedText():
+            # Fall back to copying the full current text if nothing is selected
+            if not self.model_combo.currentText():
+                copy_action.setEnabled(False)
+
+        # Paste
+        paste_action = menu.addAction("📥 Paste")
+        paste_action.setShortcut("Ctrl+V")
+        if line_edit is None or line_edit.isReadOnly() or not clipboard.text():
+            paste_action.setEnabled(False)
+
+        menu.addSeparator()
         manage_action = menu.addAction("⚙️ Manage Models...")
-        
+
         action = menu.exec(self.model_combo.mapToGlobal(position))
-        
+
         if action == manage_action:
             self._open_model_manager()
+        elif action == cut_action and line_edit is not None:
+            line_edit.cut()
+        elif action == copy_action:
+            if line_edit is not None and line_edit.hasSelectedText():
+                line_edit.copy()
+            else:
+                clipboard.setText(self.model_combo.currentText())
+        elif action == paste_action and line_edit is not None:
+            line_edit.paste()
 
     def _open_model_manager(self):
         """Open a dialog for managing the model dropdown list."""
