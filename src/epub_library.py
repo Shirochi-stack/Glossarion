@@ -3014,8 +3014,16 @@ class EpubLibraryDialog(QDialog):
 
     # -- Tab / scan / render helpers ----------------------------------------
 
+    @Slot()
     def _rotate_spinner(self):
-        """Rotate the Halgakos icon by 15° each tick (matches reader)."""
+        """Rotate the Halgakos icon by 15° each tick (matches reader).
+
+        Decorated with ``@Slot()`` so PySide6 registers it in the Qt
+        meta-object system. Without the decorator, ``QTimer.timeout``
+        can fail to resolve the slot by name at invocation time
+        (``AttributeError: Slot 'EpubLibraryDialog::_rotate_spinner()'
+        not found``).
+        """
         if self._spin_pixmap:
             self._spin_angle = (self._spin_angle + 15) % 360
             t = QTransform().rotate(self._spin_angle)
@@ -6924,9 +6932,16 @@ class _OverlayMergeThread(QThread):
     keeps the UI responsive while the worker hits the disk.
 
     Emits ``done(overlaid_chapters, merged_images, overlay_applied)``
-    once all reads finish.
+    once all reads finish. The container payloads ride as ``object``
+    (plain Python references) rather than ``list`` / ``dict`` so
+    PySide6 doesn't try to marshal them into ``QVariantList`` /
+    ``QVariantMap`` — that pathway fails slot lookup on the main
+    thread with ``AttributeError: Slot 'EpubReaderDialog::
+    _on_overlay_merge_done(QVariantList,QVariantMap,bool)' not
+    found``, even though the matching Python method exists. Matches
+    the pattern used by :class:`_EpubCacheLoaderThread.hit`.
     """
-    done = Signal(list, dict, bool)
+    done = Signal(object, object, bool)
 
     def __init__(self, raw_chapters, images, filenames, overlay_map,
                  extra_image_dirs, parent=None):
@@ -7907,15 +7922,23 @@ class EpubReaderDialog(QDialog):
             "QPushButton:hover { background: #3a3a5e; }")
         return btn
 
+    @Slot()
     def _rotate_spinner(self):
-        """Rotate the Halgakos icon by 15° each tick."""
+        """Rotate the Halgakos icon by 15° each tick.
+
+        Decorated with ``@Slot()`` so PySide6 registers it in the Qt
+        meta-object system. Without the decorator, ``QTimer.timeout``
+        can fail to resolve the slot by name at invocation time
+        (``AttributeError: Slot 'EpubReaderDialog::_rotate_spinner()'
+        not found``).
+        """
         if self._spin_pixmap:
             self._spin_angle = (self._spin_angle + 15) % 360
             t = QTransform().rotate(self._spin_angle)
             rotated = self._spin_pixmap.transformed(t, Qt.FastTransformation)
             self._spin_label.setPixmap(rotated)
 
-    # ── Loading ────────────────────────────────────────────────────────────
+    # ── Loading ───────────────────────────────────────────────────
 
     def _start_loading(self):
         self._toolbar_widget.hide()
@@ -8042,9 +8065,17 @@ class EpubReaderDialog(QDialog):
         self._overlay_thread.done.connect(self._on_overlay_merge_done)
         self._overlay_thread.start()
 
+    @Slot(object, object, bool)
     def _on_overlay_merge_done(self, overlaid_chapters, merged_images,
                                overlay_applied: bool):
-        """Merge worker finished: hand off to the main-thread finalizer."""
+        """Merge worker finished: hand off to the main-thread finalizer.
+
+        ``@Slot(object, object, bool)`` matches the updated signature
+        of :attr:`_OverlayMergeThread.done` — both sides use ``object``
+        so the payload is a raw Python reference and PySide6 doesn't
+        try (and fail) to look up a ``(QVariantList, QVariantMap, bool)``
+        slot on ``EpubReaderDialog``.
+        """
         raw_chapters = getattr(self, "_pending_raw_chapters", []) or []
         filenames = getattr(self, "_pending_filenames", []) or []
         self._pending_raw_chapters = []
