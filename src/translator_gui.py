@@ -2767,56 +2767,59 @@ Text to analyze:
         """Initialize all default prompt templates"""
         self.default_manual_glossary_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
+You must strictly return ONLY CSV format with columns separated by commas.
 Columns and entry types in this exact order provided:
 
-{fields1}
+{fields}
 
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
-The description column is mandatory and must be detailed
-IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
+{description_mandatory}
+IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
-Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
+Critical Requirement: The translated name{description_in_language} column must be in {language}, While the raw name column must the same as the source language.
+The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
-character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
- 
+character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
+character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
+- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"{description_excluded_note}
+- Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
 - REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
 - If unsure whether something is a proper noun/name, skip it
-- The description column must contain detailed context/explanation
-- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
+- {description_detailed}
+- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "女学生" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
-        
+
         self.default_unified_auto_glosary_prompt3 = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with columns separated by the Unit Separator character (U+001F).
-Columns in this exact order: type\x1fraw_name\x1ftranslated_name\x1fgender\x1fdescription
+You must strictly return ONLY CSV format with columns separated by commas.
+Columns in this exact order: type,raw_name,translated_name,gender,description
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-IMPORTANT: Do NOT use commas as field separators. Use ONLY the Unit Separator character (U+001F) between columns. Commas may appear freely within field values.
+IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
+The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
 For example:
-character\x1f\u1ac0\uc774\ud788\ub9ac\u1410 \ub098\uc560\x1fDihirit Ade\x1ffemale\x1fThe enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character\x1f\u1ac0\ub8a4\uc0ac\ub09c\x1fKim Sang-hyu\x1fmale\x1fA master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
+character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But", "Protagonist". (The description column is excluded from this restriction)
+- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
+- Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
 - REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
@@ -2824,7 +2827,7 @@ CRITICAL EXTRACTION RULES:
 - The description column must contain detailed context/explanation
 - The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
-- You must create {marker} glossary entries (one or more per window; do not invent placeholders).
+- You must create {{marker}} glossary entries (one or more per window; do not invent placeholders).
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
