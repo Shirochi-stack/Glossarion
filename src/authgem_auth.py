@@ -2192,20 +2192,21 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
     t_total = time.time() - t_start
 
     # Infer thinking when the endpoint doesn't stream thought parts
-    # (Code Assist strips thought content from the SSE stream)
+    # (Code Assist strips thought content from the SSE stream).
+    # Always log the count — including 0 — so the user can see when a
+    # request skipped thinking (e.g. thinking disabled / minimal level).
     if not state.get("_thinking_started") and not state["thought_parts"]:
         ttft = state.get("_ttft", 0)
         um = state["usage_metadata"]
         thinking_tokens = um.get("thoughtsTokenCount", 0) if um else 0
         if log_stream:
-            if thinking_tokens > 0:
-                _log(f"🧠 [authgem] Model used {thinking_tokens} thinking tokens (TTFT {ttft:.1f}s)")
-            elif ttft > 5.0:
-                _log(f"🧠 [authgem] Model thinking inferred from TTFT ({ttft:.1f}s) — endpoint doesn't stream thoughts")
+            _log(f"🧠 [authgem] Model used {thinking_tokens} thinking tokens (TTFT {ttft:.1f}s)")
 
     if log_stream:
         _log(f"📡 AuthGem: Stream finished in {t_total:.1f}s ({state['streamed_chars']} chars)")
-        # Report thinking tokens used (from usageMetadata or estimation)
+        # Report thinking tokens used (from usageMetadata or estimation).
+        # Always log — including 0 — so the user can see whether thinking
+        # was actually used on this request.
         try:
             um = state.get("usage_metadata") or {}
             _thinking_tok = um.get("thoughtsTokenCount", 0) or 0
@@ -2217,8 +2218,7 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
                 _diff = _total - _prompt - _completion
                 if _diff > 0:
                     _thinking_tok = _diff
-            if _thinking_tok > 0:
-                _log(f"   💭 Thinking tokens used: {_thinking_tok:,}")
+            _log(f"   💭 Thinking tokens used: {_thinking_tok:,}")
         except Exception:
             pass
 
