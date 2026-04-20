@@ -6554,6 +6554,47 @@ class _ChapterRow(QFrame):
 # EPUB Reader — background loader thread
 # ---------------------------------------------------------------------------
 
+class _EpubCacheLoaderThread(QThread):
+    """Read the pickled EPUB cache off the UI thread.
+
+    ``pickle.load`` on a large cache (hundreds of chapters + embedded
+    image bytes) blocks the Qt event loop for up to a second, visibly
+    freezing the Halgakos spinner that's supposed to be animating while
+    the user waits. Running the read in a dedicated QThread keeps the
+    spinner smooth and lets the main thread dispatch paint events
+    throughout.
+
+    Emits ``hit(chapters, images, filenames)`` on a successful cache
+    read, or ``miss()`` when the cache is absent / invalid / empty and
+    the caller should fall back to the full :class:`_EpubLoaderThread`
+    re-parse.
+    """
+    hit = Signal(object, object, list)
+    miss = Signal()
+
+    def __init__(self, epub_path: str, show_special_files: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self._epub_path = epub_path
+        self._show_special_files = bool(show_special_files)
+
+    def run(self):
+        try:
+            cached = _load_epub_cache(
+                self._epub_path,
+                show_special_files=self._show_special_files,
+            )
+        except Exception:
+            logger.debug("Cache load failed in worker: %s",
+                         traceback.format_exc())
+            cached = None
+        if cached:
+            chapters, images, filenames = cached
+            self.hit.emit(chapters, images, list(filenames or []))
+        else:
+            self.miss.emit()
+
+
 class _OverlayMergeThread(QThread):
     """Off-UI-thread merge of the reader's loaded chapters against the
     translated-chapter overlay and any extra image directories.
@@ -7562,20 +7603,45 @@ class EpubReaderDialog(QDialog):
         self._content_widget.hide()
         self._spin_angle = 0
         self._spin_timer.start()
-        # Try cache first
-        cached = _load_epub_cache(
-            self._epub_path, show_special_files=self._show_special_files)
-        if cached:
-            chapters, images, filenames = cached
-            # Older caches may not carry filenames. If an overlay is requested
-            # but filenames are missing we MUST reparse the EPUB so the overlay
-            # can map correctly — otherwise we'd silently keep the raw text.
-            if self._translated_overlay and not filenames:
-                pass  # fall through to loader below
-            else:
-                QTimer.singleShot(0, lambda: self._on_epub_loaded_from_cache(
-                    chapters, images, filenames))
-                return
+        # Probe the cache in a worker thread so the pickle.load doesn't
+        # freeze the spinner. The worker emits ``hit`` with the cached
+        # data on success, or ``miss`` to fall through to the full
+        # :class:`_EpubLoaderThread` re-parse.
+        prev_cache = getattr(self, "_cache_loader_thread", None)
+        if prev_cache is not None:
+            try:
+                prev_cache.hit.disconnect()
+                prev_cache.miss.disconnect()
+            except Exception:
+                pass
+            try:
+                prev_cache.quit()
+            except Exception:
+                pass
+        self._cache_loader_thread = _EpubCacheLoaderThread(
+            self._epub_path,
+            show_special_files=self._show_special_files,
+            parent=self,
+        )
+        self._cache_loader_thread.hit.connect(self._on_cache_hit)
+        self._cache_loader_thread.miss.connect(self._on_cache_miss)
+        self._cache_loader_thread.start()
+
+    @Slot(object, object, list)
+    def _on_cache_hit(self, chapters, images, filenames):
+        """Cache worker delivered hit — finalize or fall back to reparse."""
+        filenames = list(filenames or [])
+        # Older caches may not carry filenames. If an overlay is requested
+        # but filenames are missing we MUST reparse the EPUB so the overlay
+        # can map correctly — otherwise we'd silently keep the raw text.
+        if self._translated_overlay and not filenames:
+            self._on_cache_miss()
+            return
+        self._on_epub_loaded_from_cache(chapters, images, filenames)
+
+    @Slot()
+    def _on_cache_miss(self):
+        """Cache worker had nothing usable — kick off the full reparse."""
         self._loader_thread = _EpubLoaderThread(
             self._epub_path, self,
             show_special_files=self._show_special_files,
@@ -7586,13 +7652,34 @@ class EpubReaderDialog(QDialog):
 
     @Slot()
     def _on_loader_done(self):
-        """Loader finished — read data from cache file (avoids large signal data)."""
-        cached = _load_epub_cache(
-            self._epub_path, show_special_files=self._show_special_files)
-        if cached:
-            self._on_epub_loaded_from_cache(*cached)
-        else:
-            self._on_epub_error("Failed to read EPUB cache after loading.")
+        """Loader finished — re-read data from cache in a worker so the
+        pickle.load doesn't re-freeze the spinner right before the
+        reader is about to render.
+        """
+        prev_cache = getattr(self, "_cache_loader_thread", None)
+        if prev_cache is not None:
+            try:
+                prev_cache.hit.disconnect()
+                prev_cache.miss.disconnect()
+            except Exception:
+                pass
+            try:
+                prev_cache.quit()
+            except Exception:
+                pass
+        reader_thread = _EpubCacheLoaderThread(
+            self._epub_path,
+            show_special_files=self._show_special_files,
+            parent=self,
+        )
+        # Post-reparse cache-miss shouldn't re-trigger the parser (that
+        # would loop forever) — surface it as an error instead.
+        reader_thread.hit.connect(self._on_cache_hit)
+        reader_thread.miss.connect(
+            lambda: self._on_epub_error(
+                "Failed to read EPUB cache after loading."))
+        self._cache_loader_thread = reader_thread
+        reader_thread.start()
 
     def _on_epub_loaded_from_cache(self, chapters, images, filenames=None):
         self._spin_timer.stop()
