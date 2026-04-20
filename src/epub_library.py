@@ -43,13 +43,92 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def get_library_dir() -> str:
-    """Return the dedicated Glossarion Library folder."""
+    """Return the dedicated Glossarion Library folder (root).
+
+    The library is organized into two subfolders:
+      * ``Raw/``        — curated raw source EPUBs the user has imported.
+      * ``Translated/`` — curated compiled EPUBs (finished translations).
+    """
     docs = Path.home() / "Documents" / "Glossarion" / "Library"
     try:
         docs.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
     return str(docs)
+
+
+def get_library_raw_dir() -> str:
+    """Return ``Library/Raw`` — home for imported raw source EPUBs."""
+    raw = Path(get_library_dir()) / "Raw"
+    try:
+        raw.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(raw)
+
+
+def get_library_translated_dir() -> str:
+    """Return ``Library/Translated`` — home for curated compiled EPUBs."""
+    trans = Path(get_library_dir()) / "Translated"
+    try:
+        trans.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(trans)
+
+
+def get_library_raw_inputs_file() -> str:
+    """Return ``Library/Raw/library_raw_inputs.txt`` — one path per line.
+
+    Tracks every raw input file that has been run through the translator.
+    The list is append-only; duplicates are collapsed on read.
+    """
+    return os.path.join(get_library_raw_dir(), "library_raw_inputs.txt")
+
+
+def load_library_raw_inputs() -> list[str]:
+    """Return the deduplicated list of raw input paths recorded so far."""
+    path = get_library_raw_inputs_file()
+    if not os.path.isfile(path):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                p = line.strip()
+                if not p:
+                    continue
+                key = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(p)
+    except OSError:
+        return []
+    return out
+
+
+def record_library_raw_input(path: str) -> None:
+    """Append *path* to the raw-inputs registry (no-op on failure / dup)."""
+    if not path:
+        return
+    try:
+        abs_path = os.path.abspath(path)
+    except (TypeError, ValueError):
+        return
+    existing = {
+        os.path.normcase(os.path.normpath(os.path.abspath(p)))
+        for p in load_library_raw_inputs()
+    }
+    if os.path.normcase(os.path.normpath(abs_path)) in existing:
+        return
+    reg = get_library_raw_inputs_file()
+    try:
+        with open(reg, "a", encoding="utf-8") as f:
+            f.write(abs_path + "\n")
+    except OSError:
+        logger.debug("Could not append to %s", reg)
 
 
 def _origins_file() -> str:
@@ -525,6 +604,38 @@ def _read_source_epub_pointer(folder: str) -> str | None:
     return os.path.normpath(candidate) if os.path.isfile(candidate) else None
 
 
+def _find_raw_source_for_folder(folder: str) -> str | None:
+    """Try to locate the raw source file that fed this output folder.
+
+    Search order:
+      1. ``<folder>/source_epub.txt`` — authoritative pointer.
+      2. ``Library/Raw/<folder_basename>.<ext>`` — imported raw source.
+      3. ``<folder_basename>.<ext>`` in the allowed output roots.
+      4. Any entry in ``library_raw_inputs.txt`` whose stem matches.
+    """
+    # 1. source_epub.txt pointer
+    pointed = _read_source_epub_pointer(folder)
+    if pointed and os.path.isfile(pointed):
+        return pointed
+    folder_name = os.path.basename(os.path.normpath(folder))
+    if not folder_name:
+        return None
+    # 2. Library/Raw
+    raw_dir = get_library_raw_dir()
+    for ext in (".epub", ".txt", ".pdf", ".html"):
+        candidate = os.path.join(raw_dir, folder_name + ext)
+        if os.path.isfile(candidate):
+            return candidate
+    # 3. Raw-inputs registry
+    for p in load_library_raw_inputs():
+        if not os.path.isfile(p):
+            continue
+        stem, _ = os.path.splitext(os.path.basename(p))
+        if stem == folder_name:
+            return p
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Cover helpers
 # ---------------------------------------------------------------------------
@@ -587,12 +698,14 @@ def _find_cover_in_dir(folder: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def scan_library_completed(config: dict | None = None) -> list[dict]:
-    """Scan the Library folder for completed EPUBs.
+    """Scan ``Library/Translated`` for completed EPUBs.
 
-    The Library folder (``Documents/Glossarion/Library``) is a curated shelf:
-    all EPUBs inside are treated as finished works with no translation context.
+    The Translated subfolder is a curated shelf: every EPUB inside is treated
+    as a finished work with no translation context. The legacy Library root
+    (``Library/*.epub``) is also scanned so pre-refactor layouts still work,
+    but Translated takes priority.
     """
-    library_dir = os.path.normpath(os.path.abspath(get_library_dir()))
+    library_dir = os.path.normpath(os.path.abspath(get_library_translated_dir()))
     results: list[dict] = []
     seen: set[str] = set()
 
@@ -699,12 +812,20 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 if not compiled and total <= 0:
                     continue
 
+                # Mandatory: a raw source file must be resolvable for the
+                # In Progress tab. Folders whose source EPUB is missing
+                # (moved, deleted, on a disconnected drive) are hidden
+                # rather than shown as ghost cards. Completed entries
+                # (with a compiled output) are always kept.
+                raw_source_path = _find_raw_source_for_folder(folder)
+                if not compiled and not raw_source_path:
+                    continue
+
                 # Classify source kind (epub / txt / pdf / image / other) so
-                # the card can show a meaningful type badge. We peek at the
-                # source_epub.txt pointer first (authoritative when present),
-                # then fall back to filesystem heuristics.
-                source_pointer = _read_source_epub_pointer(folder) or ""
-                workspace_kind = _detect_workspace_kind(folder, source_pointer)
+                # the card can show a meaningful type badge. We prefer the
+                # resolved raw source extension, then fall back to the
+                # filesystem heuristic applied to the output folder.
+                workspace_kind = _detect_workspace_kind(folder, raw_source_path or "")
 
                 metadata_json: dict = {}
                 if has_metadata:
@@ -752,6 +873,10 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     "mtime": stat.st_mtime,
                     "in_library": False,
                     "type": card_type,
+                    # Source file on disk (resolved via source_epub.txt,
+                    # Library/Raw match, or raw-inputs registry). Used by
+                    # the "Load for translation" action.
+                    "raw_source_path": raw_source_path or "",
                     # The workspace kind is the *source* type (epub/txt/pdf
                     # /image/other). Independent of ``type`` (which may be
                     # the compiled output kind). Used by the card to pick
@@ -1609,10 +1734,24 @@ class EpubLibraryDialog(QDialog):
         self._ip_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         ip_action_row.addWidget(self._ip_count_label)
         ip_action_row.addStretch()
+        self._organize_raw_btn = QPushButton("\U0001f4e5  Organize Raw")
+        self._organize_raw_btn.setCursor(Qt.PointingHandCursor)
+        self._organize_raw_btn.setToolTip(
+            "Copy every in-progress card's raw source file into Library/Raw "
+            "and rewrite its source pointer. Idempotent and safe to re-run."
+        )
+        self._organize_raw_btn.setStyleSheet(
+            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #4a6a8a; }")
+        self._organize_raw_btn.clicked.connect(self._organize_raw_into_library)
+        ip_action_row.addWidget(self._organize_raw_btn)
+
         self._import_btn = QPushButton("\u2795  Import EPUB")
         self._import_btn.setCursor(Qt.PointingHandCursor)
         self._import_btn.setToolTip(
-            "Pick a source EPUB to load into Glossarion for translation."
+            "Copy an EPUB into Library/Raw and create a new output folder "
+            "for it so you can translate it later."
         )
         self._import_btn.setStyleSheet(
             "QPushButton { background: #6c63ff; color: white; border-radius: 4px; "
@@ -1792,14 +1931,20 @@ class EpubLibraryDialog(QDialog):
         _open_folder_in_explorer(lib)
 
     def _import_epub(self):
-        """Let the user pick a source EPUB; forward it to the parent GUI."""
+        """Pick a raw source EPUB, copy it into Library/Raw, and scaffold an
+        output folder in the configured output root with a source_epub.txt
+        pointer. This is how the In Progress tab picks the book up later.
+
+        The import does NOT push the file into the translator's input field
+        — that's what the context-menu "Load for translation" action is for.
+        """
         from PySide6.QtWidgets import QFileDialog
         start_dir = str(Path.home() / "Downloads")
         if not os.path.isdir(start_dir):
             start_dir = str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import EPUB to translate", start_dir,
-            "EPUB files (*.epub);;All files (*.*)",
+            self, "Import EPUB into Library", start_dir,
+            "EPUB files (*.epub);;All supported (*.epub *.txt *.pdf);;All files (*.*)",
         )
         if not path:
             return
@@ -1807,18 +1952,155 @@ class EpubLibraryDialog(QDialog):
         if not os.path.isfile(path):
             QMessageBox.warning(self, "Import EPUB", "Selected path is not a file.")
             return
-        # Let the parent GUI (TranslatorGUI) pick it up; fall back to just
-        # opening the file's folder if no consumer is connected.
         try:
-            self.import_epub_requested.emit(path)
-        except Exception:
-            logger.debug("Failed to emit import_epub_requested: %s", traceback.format_exc())
-        # Give the user a confirmation that the import was accepted.
+            raw_dir = get_library_raw_dir()
+            dest = os.path.join(raw_dir, os.path.basename(path))
+            # Don't overwrite a different file with the same name — append a
+            # counter suffix like "name (2).epub" as File Explorer does.
+            if (os.path.abspath(path) != os.path.abspath(dest)
+                    and os.path.isfile(dest)):
+                stem, ext = os.path.splitext(os.path.basename(path))
+                counter = 2
+                while True:
+                    candidate = os.path.join(raw_dir, f"{stem} ({counter}){ext}")
+                    if not os.path.isfile(candidate):
+                        dest = candidate
+                        break
+                    counter += 1
+            if os.path.abspath(path) != os.path.abspath(dest):
+                shutil.copy2(path, dest)
+            record_library_raw_input(dest)
+        except Exception as exc:
+            logger.error("Import copy failed: %s\n%s", exc, traceback.format_exc())
+            QMessageBox.warning(self, "Import EPUB",
+                                f"Could not copy the EPUB into Library/Raw:\n{exc}")
+            return
+        # Scaffold the output folder so the card appears in the In Progress
+        # tab right away (empty progress file + source_epub.txt pointer).
+        try:
+            roots = _resolve_output_roots(self._config)
+            if roots:
+                output_root = roots[0]
+                base = os.path.splitext(os.path.basename(dest))[0]
+                output_folder = os.path.join(output_root, base)
+                os.makedirs(output_folder, exist_ok=True)
+                sidecar = os.path.join(output_folder, "source_epub.txt")
+                with open(sidecar, "w", encoding="utf-8") as f:
+                    f.write(dest)
+                progress_file_path = os.path.join(output_folder, "translation_progress.json")
+                if not os.path.isfile(progress_file_path):
+                    import json as _json
+                    with open(progress_file_path, "w", encoding="utf-8") as pf:
+                        _json.dump({"chapters": {}, "chapter_chunks": {}, "version": "2.1"},
+                                   pf, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.error("Output scaffold failed: %s\n%s", exc, traceback.format_exc())
+            QMessageBox.warning(self, "Import EPUB",
+                                f"Copied into Library/Raw, but could not create the "
+                                f"output folder:\n{exc}")
+            return
         QMessageBox.information(
             self, "Import EPUB",
-            f"Loaded for translation:\n{os.path.basename(path)}\n\n"
-            f"Start the translation from the main window to see it here.",
+            f"Imported into Library/Raw:\n{os.path.basename(dest)}\n\n"
+            f"An output folder has been created. Right-click the card and\n"
+            f"choose \u201cLoad for translation\u201d when you're ready to translate.",
         )
+        # Force a refresh so the card shows up immediately.
+        QTimer.singleShot(0, self._load_books)
+
+    def _load_for_translation(self, book: dict):
+        """Push the card's raw source path into the translator's input field.
+
+        Emits :attr:`import_epub_requested` which :class:`TranslatorGUI`
+        handles. Falls back to a warning when no raw path is available.
+        """
+        raw = book.get("raw_source_path") or book.get("path") or ""
+        if not raw or not os.path.isfile(raw):
+            QMessageBox.warning(self, "Load for translation",
+                                "No raw source file is available for this card.")
+            return
+        try:
+            self.import_epub_requested.emit(raw)
+            record_library_raw_input(raw)
+        except Exception:
+            logger.debug("Failed to emit import_epub_requested: %s",
+                         traceback.format_exc())
+
+    def _organize_raw_into_library(self):
+        """Move every raw source file referenced by an in-progress card into
+        Library/Raw (copies, preserving the original when the source lives
+        outside the library already). Updates each card's source_epub.txt
+        pointer so future scans resolve against the library copy.
+        """
+        raw_dir = get_library_raw_dir()
+        raw_dir_abs = os.path.normcase(os.path.normpath(os.path.abspath(raw_dir)))
+        outside = []
+        for book in self._in_progress_books:
+            p = book.get("raw_source_path") or ""
+            if not p or not os.path.isfile(p):
+                continue
+            parent = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(p))))
+            if parent == raw_dir_abs:
+                continue
+            outside.append((book, p))
+        if not outside:
+            QMessageBox.information(self, "Organize raw sources",
+                                    "All resolvable raw sources are already in "
+                                    "Library/Raw. Nothing to move.")
+            return
+        sample = "\n".join(f"  \u2022 {os.path.basename(p)}" for _, p in outside[:15])
+        if len(outside) > 15:
+            sample += f"\n  \u2026 and {len(outside) - 15} more"
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Organize raw sources")
+        msg.setText(
+            f"Copy {len(outside)} raw source file"
+            f"{'s' if len(outside) != 1 else ''} into Library/Raw?\n\n{sample}\n\n"
+            f"Destination:\n  {raw_dir}"
+        )
+        msg.setIcon(QMessageBox.Question)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        if msg.exec() != QMessageBox.Yes:
+            return
+        copied = 0
+        errors: list[str] = []
+        for book, src in outside:
+            try:
+                base_name = os.path.basename(src)
+                dest = os.path.join(raw_dir, base_name)
+                if os.path.abspath(src) != os.path.abspath(dest):
+                    if os.path.isfile(dest):
+                        stem, ext = os.path.splitext(base_name)
+                        counter = 2
+                        while True:
+                            cand = os.path.join(raw_dir, f"{stem} ({counter}){ext}")
+                            if not os.path.isfile(cand):
+                                dest = cand
+                                break
+                            counter += 1
+                    shutil.copy2(src, dest)
+                record_library_raw_input(dest)
+                # Update the source_epub.txt pointer in the book's output
+                # folder so future scans resolve to the library copy.
+                out_folder = book.get("output_folder") or ""
+                if out_folder and os.path.isdir(out_folder):
+                    try:
+                        with open(os.path.join(out_folder, "source_epub.txt"),
+                                  "w", encoding="utf-8") as f:
+                            f.write(dest)
+                    except OSError as pe:
+                        logger.debug("Update source_epub.txt failed: %s", pe)
+                copied += 1
+            except Exception as exc:
+                errors.append(f"{os.path.basename(src)}: {exc}")
+        summary = f"Copied {copied} file{'s' if copied != 1 else ''} into Library/Raw."
+        if errors:
+            summary += (f"\n\n{len(errors)} error"
+                        f"{'s' if len(errors) != 1 else ''}:\n"
+                        + "\n".join(errors[:5]))
+        QMessageBox.information(self, "Organize raw sources", summary)
+        self._load_books()
 
     def _refresh_view(self):
         """Re-filter + re-render both tab grids from the cached scan data."""
@@ -1934,6 +2216,16 @@ class EpubLibraryDialog(QDialog):
         for c in range(grid_layout.columnCount()):
             grid_layout.setColumnStretch(c, 0)
         grid_layout.setColumnStretch(cols, 1)
+
+        # Pack cards to the top of the viewport: give the row below the
+        # last populated row all of the vertical stretch. Without this,
+        # QGridLayout distributes the extra vertical space across rows and
+        # leaves a giant gap between rows 1 and 2 in the Completed tab when
+        # there are fewer rows than viewport height.
+        last_row = (len(books) - 1) // cols + 1
+        for r in range(last_row):
+            grid_layout.setRowStretch(r, 0)
+        grid_layout.setRowStretch(last_row, 1)
 
     def _populate_in_progress(self, books: list[dict]):
         self._populate_grid_common(
@@ -2055,6 +2347,16 @@ class EpubLibraryDialog(QDialog):
         else:
             open_action = menu.addAction("\U0001f4c2  Open File")
             open_action.triggered.connect(lambda: self._on_card_clicked(book))
+        # "Load for translation" — pushes the card's raw source into the
+        # translator's input field (moved out of the Import EPUB button).
+        raw = book.get("raw_source_path") or ""
+        if not raw and file_type == "epub" and os.path.isfile(book.get("path", "")):
+            raw = book["path"]
+        if raw and os.path.isfile(raw):
+            menu.addSeparator()
+            load_action = menu.addAction("\U0001f501  Load for translation")
+            load_action.setToolTip("Set this file as the translator's current input.")
+            load_action.triggered.connect(lambda b=book: self._load_for_translation(b))
         menu.addSeparator()
         folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
         # For in-progress cards the card "path" IS the output folder; for

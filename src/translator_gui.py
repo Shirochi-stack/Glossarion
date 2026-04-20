@@ -9862,6 +9862,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
         
+        # Record every selected raw input in the Library's raw-inputs
+        # registry so the library dialog can find it later (even if the
+        # file itself lives outside the Library folder).
+        try:
+            from epub_library import record_library_raw_input
+            for _p in (self.selected_files or []):
+                if _p and os.path.isfile(_p):
+                    record_library_raw_input(_p)
+        except Exception:
+            pass
+
         # Reset stop flags
         self.stop_requested = False
         self._glossary_stop_was_requested = False  # Reset glossary stop flag from previous run
