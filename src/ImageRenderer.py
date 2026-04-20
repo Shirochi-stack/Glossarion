@@ -4070,10 +4070,15 @@ def _restore_recognize_button(self):
 def _on_translate_text_clicked(self):
     """Translate recognized text using the selected API - runs full pipeline if needed"""
     self._log("🐛 Translate button clicked - starting translation", "info")
-    
+
     # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
     # This MUST happen on the main thread BEFORE any cancellation checks
     _reset_cancellation_flags(self)
+
+    # Refresh from the main GUI so this button picks up the CURRENT api_key
+    # and model without needing a GUI restart (same behaviour as the
+    # Start Translation button in manga_integration._start_translation).
+    _refresh_live_gui_state_for_manga_action(self)
     
     try:
         # GUARD: Prevent processing during rendering
@@ -10516,10 +10521,15 @@ def _restore_translate_button(self):
 def _on_translate_all_clicked(self):
     """Translate all images in the preview list"""
     self._log("🚀 Starting batch translation of all images", "info")
-    
+
     # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
     # This MUST happen on the main thread BEFORE any cancellation checks
     _reset_cancellation_flags(self)
+
+    # Refresh from the main GUI so this button picks up the CURRENT api_key
+    # and model without needing a GUI restart (same behaviour as the
+    # Start Translation button in manga_integration._start_translation).
+    _refresh_live_gui_state_for_manga_action(self)
     
     try:
         # Mark batch mode active (used to suppress preview shuffles)
