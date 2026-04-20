@@ -1106,15 +1106,27 @@ class MangaTranslationTab(QObject):
         return inpainting_method == 'local'
     
     def _check_preload_status(self):
-        """Check preload thread status and update button states accordingly."""
+        """Check preload thread status and update button states accordingly.
+
+        Detects an in-flight preload from ANY source so the
+        Translate / Translate All / Clean / Start Translation buttons show
+        the waiting state instead of letting the user kick off a translation
+        that immediately stalls in `_initialize_local_inpainter` with
+        repeated '⏳ Still waiting for inpainter pool...' log lines.
+        """
         try:
-            # Check if we should show waiting state
-            preload_running = (hasattr(self, '_preload_thread') and 
-                              self._preload_thread and 
-                              self._preload_thread.is_alive())
+            # Init-driven preload (started in __init__)
+            init_preload = getattr(self, '_preload_thread', None)
+            init_running = bool(init_preload and init_preload.is_alive())
+
+            # Toggle-off driven preload (started by _trigger_inpainter_preload_after_toggle)
+            toggle_preload = getattr(self, '_toggle_preload_thread', None)
+            toggle_running = bool(toggle_preload and toggle_preload.is_alive())
+
+            preload_running = init_running or toggle_running
             local_inpainting = self._is_local_inpainting_enabled()
             should_wait = preload_running and local_inpainting
-            
+
             if should_wait:
                 # Disable buttons and show "Waiting..." state
                 self._set_translation_buttons_waiting(True)
@@ -8027,6 +8039,15 @@ class MangaTranslationTab(QObject):
                 target=_bg_preload, name="InpainterPreload-AfterToggle", daemon=True
             )
             self._toggle_preload_thread.start()
+
+            # Flip the workflow/start buttons to the "⏳ Waiting for model..."
+            # state right away so the user can't click Translate before the
+            # pool is warm. `_check_preload_status` polls every 500ms and
+            # restores the buttons once the thread finishes.
+            try:
+                QTimer.singleShot(0, self._check_preload_status)
+            except Exception:
+                pass
         except Exception as e:
             print(f"[TOGGLE_PRELOAD] Failed to start preload thread: {e}")
 
