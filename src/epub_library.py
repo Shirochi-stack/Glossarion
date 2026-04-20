@@ -4880,6 +4880,46 @@ class _BookDetailsLoader(QThread):
                     base = stem
                 return base.lower()
 
+            # --- Paired raw-EPUB title harvest (library entries only) ---
+            #
+            # For a Completed-tab library entry the EPUB we just parsed IS
+            # the compiled translation — every ``ch['title']`` is already
+            # translated, so there's no distinction between raw and
+            # translated titles. When a paired raw EPUB exists
+            # (``raw_source_path`` from the scanner, or resolved via
+            # :func:`_find_raw_source_for_library_epub`), parse its spine
+            # too and remember a filename-normalized + index-based lookup
+            # of source-language titles. :func:`_resolve_chapter` below
+            # then swaps the title semantics so the BookDetails
+            # "Show raw titles" toggle has something to flip to.
+            library_raw_title_by_norm: dict[str, str] = {}
+            library_raw_titles_by_index: list[str] = []
+            if (self._book.get("in_library")
+                    and not self._book.get("is_in_progress")):
+                raw_path = self._book.get("raw_source_path", "") or ""
+                if not raw_path:
+                    try:
+                        raw_path = _find_raw_source_for_library_epub(book_path) or ""
+                    except Exception:
+                        raw_path = ""
+                        logger.debug("Library-raw title resolve failed: %s",
+                                     traceback.format_exc())
+                if (raw_path and os.path.isfile(raw_path)
+                        and raw_path.lower().endswith(".epub")):
+                    try:
+                        raw_details = _parse_epub_details(
+                            raw_path, parse_chapter_titles=True)
+                    except Exception:
+                        raw_details = None
+                        logger.debug("Raw EPUB parse failed for %s: %s",
+                                     raw_path, traceback.format_exc())
+                    for rc in (raw_details or {}).get("chapters", []) or []:
+                        rt = (rc.get("title") or "").strip()
+                        library_raw_titles_by_index.append(rt)
+                        fn = rc.get("filename") or ""
+                        if fn and rt:
+                            library_raw_title_by_norm.setdefault(_norm(fn), rt)
+
             prog_by_basename: dict[str, dict] = {}
             prog_by_output: dict[str, dict] = {}
             for key, info in prog_chapters.items():
@@ -4964,6 +5004,27 @@ class _BookDetailsLoader(QThread):
                             break
                     if translated_path:
                         translated_title = _read_translated_chapter_title(translated_path)
+                # Library-paired case: the loader parsed the COMPILED
+                # EPUB, so ``raw_title`` right now is already translated.
+                # Swap it with the paired raw EPUB's title (filename
+                # normalized first, then index as a fallback) and promote
+                # the compiled title to ``translated_title`` so
+                # _ChapterRow + the Show-raw-titles toggle behave the
+                # same way they do for in-progress books.
+                if library_raw_title_by_norm or library_raw_titles_by_index:
+                    paired_raw = library_raw_title_by_norm.get(norm_key, "")
+                    if (not paired_raw
+                            and idx < len(library_raw_titles_by_index)):
+                        paired_raw = library_raw_titles_by_index[idx]
+                    if paired_raw and paired_raw != raw_title:
+                        translated_title = raw_title  # compiled title
+                        raw_title = paired_raw
+                        if not status:
+                            # The book IS a completed translation — mark
+                            # the row as completed so the default title
+                            # policy in _ChapterRow picks the translated
+                            # version (not the raw).
+                            status = "completed"
                 if not status:
                     status = "pending" if has_progress_context else ""
                 if is_gallery:
@@ -5630,13 +5691,19 @@ class BookDetailsDialog(QDialog):
             self._start_btn.setText("\U0001f4d6  Start reading")
             self._raw_btn.hide()
 
-        # "Show raw titles" toggle is only meaningful for in-progress EPUBs
-        # that actually have translated chapters available — otherwise
-        # every row is already rendered from the raw title and there's
-        # nothing to switch between.
-        raw_titles_applicable = bool(
-            self._book.get("is_in_progress") and has_translated
+        # "Show raw titles" toggle is meaningful whenever at least one
+        # chapter has BOTH a raw title and a distinct translated title
+        # — covers in-progress books (titles harvested from source spine
+        # + response files) AND Completed-tab library entries that have
+        # a paired raw EPUB (titles harvested from both EPUBs by the
+        # loader's library-raw pass).
+        has_distinct_titles = any(
+            (c.get("raw_title") or "")
+            and (c.get("translated_title") or "")
+            and (c.get("raw_title") or "") != (c.get("translated_title") or "")
+            for c in self._chapters_info
         )
+        raw_titles_applicable = has_distinct_titles
         self._raw_titles_cb.setVisible(
             raw_titles_applicable and self._chap_container.isVisible()
         )
@@ -5868,14 +5935,16 @@ class BookDetailsDialog(QDialog):
         self._chap_container.setVisible(show)
         self._toc_search.setVisible(show)
         self._special_cb.setVisible(show)
-        # Only show the "Show raw titles" checkbox when the book actually
-        # has translated content to switch away from AND the chapter
-        # section is expanded.
-        has_translated = any(c.get("translated_path") for c in self._chapters_info)
-        raw_titles_applicable = bool(
-            self._book.get("is_in_progress") and has_translated
+        # Mirror the applicability rule used in :meth:`_on_details_ready`
+        # so the toggle surfaces for any book — in-progress OR library
+        # — whose chapter rows carry distinct raw + translated titles.
+        has_distinct_titles = any(
+            (c.get("raw_title") or "")
+            and (c.get("translated_title") or "")
+            and (c.get("raw_title") or "") != (c.get("translated_title") or "")
+            for c in self._chapters_info
         )
-        self._raw_titles_cb.setVisible(show and raw_titles_applicable)
+        self._raw_titles_cb.setVisible(show and has_distinct_titles)
         self._update_toc_toggle_label()
 
     @Slot(str)
@@ -6099,22 +6168,26 @@ class BookDetailsDialog(QDialog):
         """Return the output-folder path the 📁 button should open, or "".
 
         Shared by both the button's enable / tooltip state and the click
-        handler so the two can't disagree (previously the click path had
-        a richer fallback chain than the enable check, leaving the button
-        dim even when an openable folder existed). Resolution order:
+        handler so the two can't disagree. A "real" output folder is one
+        the translator actually wrote into — we refuse to dress up
+        ``Library/Translated`` (where a compiled EPUB just happens to
+        live) as an output folder, because that's never what the user
+        means when they click 📁. Resolution order:
+
           1. ``book['output_folder']`` — ``scan_output_folders`` sets
              this for in-progress + promoted-compiled cards.
           2. ``library_origins['translated']`` — for Library/Translated
-             entries the stored "pre-organize" path's parent is the
-             original output folder (usually still on disk — only the
-             compiled EPUB was moved out).
-          3. ``os.path.dirname(book['path'])`` — last resort (opens
-             Library/Translated for organized books).
+             entries the stored "pre-organize" path's parent was the
+             original output folder; usually still on disk because
+             organize only moves the compiled EPUB out.
+
+        When neither resolves to an existing directory we return ``""``
+        so the caller can disable the button instead of opening the
+        book's own containing folder.
         """
-        candidates: list[str] = []
         out = self._book.get("output_folder") or ""
-        if out:
-            candidates.append(out)
+        if out and os.path.isdir(out):
+            return out
         if self._book.get("in_library"):
             try:
                 origins = _load_origins()
@@ -6123,17 +6196,11 @@ class BookDetailsDialog(QDialog):
                     self._book.get("path", "")))
                 if orig_path:
                     orig_folder = os.path.dirname(str(orig_path))
-                    if orig_folder:
-                        candidates.append(orig_folder)
+                    if orig_folder and os.path.isdir(orig_folder):
+                        return orig_folder
             except Exception:
                 logger.debug("Output-folder origins lookup failed: %s",
                              traceback.format_exc())
-        fallback = os.path.dirname(self._book.get("path", "") or "")
-        if fallback:
-            candidates.append(fallback)
-        for folder in candidates:
-            if folder and os.path.isdir(folder):
-                return folder
         return ""
 
     def _resolve_source_file_target(self) -> str:
