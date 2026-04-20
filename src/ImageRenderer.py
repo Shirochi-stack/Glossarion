@@ -2623,9 +2623,29 @@ def _get_detection_config(self) -> dict:
     return detection_config
 
 def _get_inpaint_config(self) -> dict:
-    """Get inpainting configuration from settings"""
+    """Get inpainting configuration from settings.
+
+    Respects the Skip Inpainter toggle (self.skip_inpainting_value in PySide6
+    build, mirrored to config['manga_skip_inpainting']). When skipped, the
+    returned method is 'none' and a 'skip' flag is set so callers can early-out.
+    """
+    # Prefer the live GUI state, fall back to persisted config
+    skip = False
+    try:
+        if hasattr(self, 'skip_inpainting_value'):
+            skip = bool(self.skip_inpainting_value)
+        elif hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
+            skip = bool(self.main_gui.config.get('manga_skip_inpainting', False))
+    except Exception:
+        skip = False
+
+    method = 'none' if skip else (
+        self.inpaint_method_value if hasattr(self, 'inpaint_method_value') else 'none'
+    )
+
     inpaint_config = {
-        'method': self.inpaint_method_value if hasattr(self, 'inpaint_method_value') else 'none',
+        'skip': skip,
+        'method': method,
         'model_type': self.local_model_type_value if hasattr(self, 'local_model_type_value') else 'lama',
         'model_path': self.local_model_path_value if hasattr(self, 'local_model_path_value') else '',
         'quality': self.inpaint_quality_value if hasattr(self, 'inpaint_quality_value') else 'high',
@@ -4284,11 +4304,21 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
                 traceback.print_exc()
                 with inpaint_lock:
                     inpaint_result['completed'] = True
-        
-        # Start inpainting in background thread (non-blocking)
-        inpaint_thread = threading.Thread(target=run_inpainting_concurrent, daemon=True)
-        inpaint_thread.start()
-        print(f"[TRANSLATE_CONCURRENT] Started inpainting in parallel thread")
+
+        # Respect Skip Inpainter toggle: don't spawn the inpainting thread at all.
+        _inpaint_cfg = _get_inpaint_config(self)
+        if _inpaint_cfg.get('skip') or _inpaint_cfg.get('method') == 'none':
+            self._log("🚫 Skip Inpainter enabled — skipping inpainting for this image", "info")
+            print("[TRANSLATE_CONCURRENT] Inpainting skipped (Skip Inpainter toggle ON)")
+            with inpaint_lock:
+                inpaint_result['completed'] = True
+                inpaint_result['cleaned_path'] = None
+            inpaint_thread = None
+        else:
+            # Start inpainting in background thread (non-blocking)
+            inpaint_thread = threading.Thread(target=run_inpainting_concurrent, daemon=True)
+            inpaint_thread.start()
+            print(f"[TRANSLATE_CONCURRENT] Started inpainting in parallel thread")
         
         # ===== CANCELLATION CHECK: Before starting translation =====
         if _is_translation_cancelled(self):
@@ -4320,8 +4350,9 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         # This doesn't block the translation API calls - those already happened above
         # Even if stop was requested, we wait for inpainting since discarding a
         # completed clean is equally wasteful.
-        inpaint_thread.join(timeout=30)  # Wait up to 30 seconds for inpainting
-        
+        if inpaint_thread is not None:
+            inpaint_thread.join(timeout=30)  # Wait up to 30 seconds for inpainting
+
         with inpaint_lock:
             cleaned_image_path = inpaint_result.get('cleaned_path')
             if not inpaint_result['completed']:
@@ -10648,9 +10679,15 @@ def _run_translate_all_background(self, image_paths: list):
                 try:
                     inpaint_config = _get_inpaint_config(self, )
                     inpaint_method = inpaint_config.get('method', 'none')
-                    
+                    inpaint_skipped = bool(inpaint_config.get('skip', False))
+
+                    # Respect Skip Inpainter toggle first
+                    if inpaint_skipped:
+                        self._log(f"🚫 [{idx}/{total}] Skip Inpainter enabled — skipping cleaning", "info")
+                        image_path_for_rendering = image_path
+                        self._cleaned_image_path = None
                     # Only run inpainting if method is not 'none' and is 'local' or 'hybrid'
-                    if inpaint_method in ['local', 'hybrid']:
+                    elif inpaint_method in ['local', 'hybrid']:
                         self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")
                         cleaned_path = _run_inpainting_sync(self, image_path, regions)
                         
