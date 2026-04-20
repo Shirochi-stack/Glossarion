@@ -100,7 +100,13 @@ def _epub_cache_key(epub_path: str) -> str:
 
 
 def _load_epub_cache(epub_path: str):
-    """Try to load cached EPUB data. Returns (chapters, images) or None."""
+    """Try to load cached EPUB data.
+
+    Returns ``(chapters, images, filenames)`` where ``filenames`` is a parallel
+    list of source item names (one per chapter entry) or ``None`` on failure.
+    ``filenames`` is empty when the cache predates that field — callers must
+    handle that gracefully.
+    """
     import pickle
     try:
         key = _epub_cache_key(epub_path)
@@ -109,20 +115,24 @@ def _load_epub_cache(epub_path: str):
             with open(cache_file, "rb") as f:
                 data = pickle.load(f)
             if isinstance(data, dict) and "chapters" in data and "images" in data:
-                return data["chapters"], data["images"]
+                return data["chapters"], data["images"], data.get("filenames", [])
     except Exception:
         pass
     return None
 
 
-def _save_epub_cache(epub_path: str, chapters, images):
+def _save_epub_cache(epub_path: str, chapters, images, filenames=None):
     """Save parsed EPUB data to disk cache."""
     import pickle
     try:
         key = _epub_cache_key(epub_path)
         cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
         with open(cache_file, "wb") as f:
-            pickle.dump({"chapters": chapters, "images": images}, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump({
+                "chapters": chapters,
+                "images": images,
+                "filenames": list(filenames or []),
+            }, f, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception:
         pass
 
@@ -331,18 +341,25 @@ def _open_folder_in_explorer(path: str):
 # ---------------------------------------------------------------------------
 
 def _resolve_output_roots(config: dict | None = None) -> list[str]:
-    """Return the list of directories the translator writes output folders into.
+    """Return the directory the translator writes output folders into.
 
-    Strictly only: the OUTPUT_DIRECTORY override (env or config) and the default
-    directory (app dir on Windows, CWD elsewhere). The personal Library folder
-    is intentionally excluded — in-progress novels are looked up only in these
-    roots, per spec.
+    When the OUTPUT_DIRECTORY override is configured (env or
+    ``config['output_directory']``) it is used *strictly* — the default dir is
+    NOT also scanned. This matches the user expectation that turning on an
+    output override in Other Settings points the in-progress reader at that
+    path alone. When no override is set, only the default directory (app dir
+    on Windows, CWD elsewhere) is used.
     """
-    roots: list[str] = []
     config = config or {}
     override = os.environ.get("OUTPUT_DIRECTORY") or config.get("output_directory")
-    if override and os.path.isdir(override):
-        roots.append(os.path.abspath(override))
+    if override:
+        override_abs = os.path.abspath(override)
+        if os.path.isdir(override_abs):
+            return [override_abs]
+        # Override is set but points at a missing directory — still treat it
+        # as strict (return no roots) rather than silently falling back to
+        # the default, which would violate user expectations.
+        return []
     if platform.system() == "Windows":
         if getattr(sys, "frozen", False):
             default_dir = os.path.dirname(sys.executable)
@@ -351,16 +368,8 @@ def _resolve_output_roots(config: dict | None = None) -> list[str]:
     else:
         default_dir = os.getcwd()
     if os.path.isdir(default_dir):
-        roots.append(os.path.abspath(default_dir))
-    # De-duplicate while preserving order
-    seen_roots: set[str] = set()
-    unique_roots: list[str] = []
-    for r in roots:
-        key = os.path.normcase(os.path.normpath(r))
-        if key not in seen_roots:
-            seen_roots.add(key)
-            unique_roots.append(r)
-    return unique_roots
+        return [os.path.abspath(default_dir)]
+    return []
 
 
 def _read_progress_summary(progress_file: str) -> dict | None:
@@ -442,12 +451,28 @@ def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
          translator.
       2. A basename match (folder name == EPUB basename) in the allowed roots.
 
+    EPUBs already organized into the Library folder are *never* reported as
+    in-progress: the Library is the curated/read-only shelf and the progress
+    view is deliberately limited to active translations.
+
     Returns a list of dicts compatible with the rest of the scanner (with
     extra in-progress metadata).
     """
     roots = _resolve_output_roots(config)
     if not roots:
         return []
+
+    library_dir_norm = os.path.normcase(os.path.normpath(os.path.abspath(get_library_dir())))
+
+    def _is_in_library(path: str) -> bool:
+        """True when *path* resolves inside the Glossarion Library folder."""
+        try:
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        except (TypeError, ValueError):
+            return False
+        return (norm == library_dir_norm
+                or norm.startswith(library_dir_norm + os.sep)
+                or os.path.normcase(os.path.dirname(norm)) == library_dir_norm)
 
     # Index every EPUB in the roots by basename (without extension) so we can
     # match folders to source files without a second filesystem walk per folder.
@@ -496,6 +521,12 @@ def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
                     source_path = epub_by_base.get(folder_name) or epub_by_base.get(folder_name.lower())
                 if not source_path or not os.path.isfile(source_path):
                     # No source EPUB visible — skip so we don't surface a ghost entry.
+                    continue
+                # Never mark Library-organized EPUBs as in-progress: the user
+                # wants those to look clean (no progress badge) in the library
+                # unless a progress file is explicitly present inside the
+                # configured output root — which this path is not.
+                if _is_in_library(source_path):
                     continue
                 try:
                     stat = os.stat(source_path)
@@ -569,21 +600,12 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
 
     _walk(library_dir, max_depth=4)
 
-    override = os.environ.get("OUTPUT_DIRECTORY") or config.get("output_directory")
-    if override and os.path.isdir(override):
-        _walk(os.path.abspath(override))
-
-    # 3. App directory — on Windows, CWD can be Downloads/Desktop when
-    #    launching an .exe, which is far too broad.  Use the exe/script dir instead.
-    if platform.system() == "Windows":
-        if getattr(sys, "frozen", False):
-            app_dir = os.path.dirname(sys.executable)
-        else:
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-    else:
-        # macOS / Linux: CWD is typically the project folder
-        app_dir = os.getcwd()
-    _walk(app_dir)
+    # Strictly honor the OUTPUT_DIRECTORY override: when set, we walk only
+    # that directory for translation outputs / in-progress sources. Without
+    # an override, we walk the default (app dir / CWD). This mirrors the
+    # same rule applied by :func:`_find_in_progress_novels`.
+    for root in _resolve_output_roots(config):
+        _walk(root)
 
     # In-progress novels: source EPUBs with a translation_progress.json but no
     # compiled .epub yet. Strictly limited to the default / override output dirs.
@@ -595,9 +617,15 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
     for ip in in_progress:
         norm = os.path.normpath(os.path.abspath(ip["path"]))
         if norm in seen:
-            # Annotate the existing result with in-progress data.
+            # Annotate the existing result with in-progress data — but never
+            # for library-organized EPUBs. The Library shelf is supposed to
+            # stay status-free unless a matching progress file was found in
+            # the configured output root; _find_in_progress_novels already
+            # guards against that, but be defensive here as well.
             for r in results:
                 if os.path.normpath(os.path.abspath(r["path"])) == norm:
+                    if r.get("in_library"):
+                        break
                     r.update({
                         "is_in_progress": True,
                         "output_folder": ip["output_folder"],
@@ -2172,7 +2200,14 @@ class BookDetailsDialog(QDialog):
         self._meta_grid = QGridLayout()
         self._meta_grid.setContentsMargins(0, 0, 0, 0)
         self._meta_grid.setHorizontalSpacing(14)
-        self._meta_grid.setVerticalSpacing(6)
+        # Bumped vertical spacing keeps wrapped value labels from visually
+        # colliding with the next row's key label (e.g. multi-line "Title"
+        # running into "Author" on Qt's conservative sizeHint path).
+        self._meta_grid.setVerticalSpacing(14)
+        # Let the second column stretch so long titles wrap across more
+        # horizontal space instead of clipping vertically.
+        self._meta_grid.setColumnStretch(0, 0)
+        self._meta_grid.setColumnStretch(1, 1)
         meta_col.addLayout(self._meta_grid)
 
         # Genres / Tags containers (filled in populate step)
@@ -2199,7 +2234,10 @@ class BookDetailsDialog(QDialog):
 
         meta_wrapper = QWidget()
         meta_wrapper.setLayout(meta_col)
-        meta_wrapper.setFixedWidth(280)
+        # Wider column so long titles / author names don't wrap aggressively
+        # and collide with the next metadata row.
+        meta_wrapper.setMinimumWidth(320)
+        meta_wrapper.setMaximumWidth(380)
         hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
         body_layout.addLayout(hero)
 
@@ -2469,20 +2507,29 @@ class BookDetailsDialog(QDialog):
 
     # -- Actions ------------------------------------------------------------
 
-    def _build_translated_overlay(self) -> tuple[dict[int, dict], list[str]]:
+    def _build_translated_overlay(self) -> tuple[dict[str, dict], list[str]]:
         """Return (overlay, extra_image_dirs) for a translated reader view.
 
-        The overlay maps spine-chapter index → translated HTML path + title so
-        the reader can swap source content with translated content in place,
-        leaving pending chapters as raw fallback. Image directories let the
-        reader resolve assets that only exist in the translator's output.
+        The overlay maps the source chapter's filename (lowercased basename)
+        → translated HTML path + title so the reader can swap source content
+        with translated content in place. Keying by filename (rather than
+        index) avoids ordering/skip mismatches between the reader's loader
+        (manifest order, filters short chapters) and our own spine-based
+        parser. Image directories let the reader resolve assets that only
+        exist in the translator's output.
         """
-        overlay: dict[int, dict] = {}
+        overlay: dict[str, dict] = {}
         for ci in self._chapters_info:
             path = ci.get("translated_path") or ""
             if not path or not os.path.isfile(path):
                 continue
-            overlay[int(ci.get("index", 0))] = {
+            filename = ci.get("filename") or ""
+            if not filename:
+                continue
+            key = os.path.basename(filename).lower()
+            if not key:
+                continue
+            overlay[key] = {
                 "path": path,
                 "title": ci.get("translated_title") or "",
             }
@@ -2499,7 +2546,7 @@ class BookDetailsDialog(QDialog):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
-            overlay: dict[int, dict] = {}
+            overlay: dict[str, dict] = {}
             extra_dirs: list[str] = []
             window_title = None
             # Only offer the translated overlay when the book is actually an
@@ -2514,11 +2561,19 @@ class BookDetailsDialog(QDialog):
                                     or self._book.get("name"))
                     if window_title:
                         window_title = f"{window_title} (Translated)"
+            # Translate the spine-index initial_chapter into a filename so the
+            # reader resolves it against its own (manifest-ordered) chapter
+            # list. This also prevents off-by-one jumps when the source EPUB
+            # has nav/toc items that are skipped by the reader's loader.
+            initial_filename = None
+            if isinstance(initial_chapter, int) and 0 <= initial_chapter < len(self._chapters_info):
+                initial_filename = self._chapters_info[initial_chapter].get("filename") or None
             reader = EpubReaderDialog(
                 self._book["path"],
                 config=self._config,
                 parent=self,
                 initial_chapter=initial_chapter,
+                initial_chapter_filename=initial_filename,
                 translated_overlay=overlay or None,
                 extra_image_dirs=extra_dirs or None,
                 window_title=window_title,
@@ -2668,6 +2723,7 @@ class _EpubLoaderThread(QThread):
                         images[basename] = item.get_content()
 
             chapters: list[tuple[str, str]] = []
+            filenames: list[str] = []
             for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
                 try:
                     content = item.get_content().decode("utf-8", errors="replace")
@@ -2690,13 +2746,17 @@ class _EpubLoaderThread(QThread):
                         title = os.path.splitext(os.path.basename(item.get_name()))[0]
                         title = title.replace("_", " ").replace("-", " ").title()
                     if len(title) > 50:
-                        title = title[:47] + "…"
+                        title = title[:47] + "\u2026"
                     chapters.append((title, content))
+                    # Record the source item name (e.g. 'OEBPS/chapter0001.xhtml')
+                    # in parallel so downstream code can correlate reader
+                    # chapters with spine filenames.
+                    filenames.append(item.get_name() or "")
                 except Exception:
                     logger.debug("Skipped chapter: %s", traceback.format_exc())
 
             # Write to cache (avoids emitting large data through Qt signals)
-            _save_epub_cache(self._epub_path, chapters, images)
+            _save_epub_cache(self._epub_path, chapters, images, filenames)
             self.done.emit()
         except Exception as exc:
             logger.error("EPUB load error: %s\n%s", exc, traceback.format_exc())
@@ -2735,6 +2795,7 @@ class EpubReaderDialog(QDialog):
 
     def __init__(self, epub_path: str, config: dict | None = None, parent=None,
                  initial_chapter: int | None = None,
+                 initial_chapter_filename: str | None = None,
                  translated_overlay: dict | None = None,
                  extra_image_dirs: list[str] | None = None,
                  window_title: str | None = None):
@@ -2742,6 +2803,7 @@ class EpubReaderDialog(QDialog):
         self._epub_path = epub_path
         self._config = config or {}
         self._chapters: list[tuple[str, str]] = []
+        self._chapter_filenames: list[str] = []
         self._images: dict[str, bytes] = {}
         # Restore persisted reader settings
         self._font_size = self._config.get('epub_reader_font_size', 14)
@@ -2752,24 +2814,33 @@ class EpubReaderDialog(QDialog):
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
         # Optional — caller can request opening at a specific chapter index.
         # The index is clamped to the available chapter range once the EPUB
-        # has finished loading (see _on_epub_loaded_from_cache).
+        # has finished loading (see _on_epub_loaded_from_cache). When the
+        # ``initial_chapter_filename`` is provided it takes precedence (index
+        # is resolved by matching the filename basename, so the selection is
+        # correct regardless of spine/manifest ordering differences).
         self._initial_chapter = initial_chapter if isinstance(initial_chapter, int) and initial_chapter >= 0 else None
-        # Optional translated-content overlay for in-progress novels. Maps a
-        # zero-based source chapter index to either a translated HTML file path
-        # (str) or a dict of the form ``{"path": str, "title": Optional[str]}``.
-        # Entries are applied right after the source EPUB is loaded so the
-        # reader's existing pagination/theme pipeline is reused as-is.
-        self._translated_overlay: dict[int, dict] = {}
+        self._initial_chapter_filename = (
+            os.path.basename(str(initial_chapter_filename)).lower()
+            if initial_chapter_filename else None
+        )
+        # Optional translated-content overlay for in-progress novels. Keyed by
+        # the lowercased basename of the source chapter filename (e.g.
+        # ``"chapter0001.xhtml"``) so overlay mapping is robust across the
+        # various spine/manifest ordering differences between the reader's
+        # loader and the BookDetailsDialog's spine parser. Each value is a
+        # dict of the form ``{"path": str, "title": Optional[str]}``.
+        self._translated_overlay: dict[str, dict] = {}
         if isinstance(translated_overlay, dict):
             for k, v in translated_overlay.items():
-                try:
-                    idx = int(k)
-                except (TypeError, ValueError):
+                if not k:
+                    continue
+                key = os.path.basename(str(k)).lower()
+                if not key:
                     continue
                 if isinstance(v, str):
-                    self._translated_overlay[idx] = {"path": v}
+                    self._translated_overlay[key] = {"path": v}
                 elif isinstance(v, dict) and v.get("path"):
-                    self._translated_overlay[idx] = dict(v)
+                    self._translated_overlay[key] = dict(v)
         # Extra image search directories (e.g. <output_folder>/images,
         # <output_folder>/translated_images) used to augment the EPUB's own
         # image table so translated chapters can resolve their assets.
@@ -3223,8 +3294,16 @@ class EpubReaderDialog(QDialog):
         # Try cache first
         cached = _load_epub_cache(self._epub_path)
         if cached:
-            QTimer.singleShot(0, lambda: self._on_epub_loaded_from_cache(cached[0], cached[1]))
-            return
+            chapters, images, filenames = cached
+            # Older caches may not carry filenames. If an overlay is requested
+            # but filenames are missing we MUST reparse the EPUB so the overlay
+            # can map correctly — otherwise we'd silently keep the raw text.
+            if self._translated_overlay and not filenames:
+                pass  # fall through to loader below
+            else:
+                QTimer.singleShot(0, lambda: self._on_epub_loaded_from_cache(
+                    chapters, images, filenames))
+                return
         self._loader_thread = _EpubLoaderThread(self._epub_path, self)
         self._loader_thread.done.connect(lambda: self._on_loader_done())
         self._loader_thread.error.connect(lambda msg: self._on_epub_error(msg))
@@ -3235,20 +3314,27 @@ class EpubReaderDialog(QDialog):
         """Loader finished — read data from cache file (avoids large signal data)."""
         cached = _load_epub_cache(self._epub_path)
         if cached:
-            self._on_epub_loaded_from_cache(cached[0], cached[1])
+            self._on_epub_loaded_from_cache(*cached)
         else:
             self._on_epub_error("Failed to read EPUB cache after loading.")
 
-    def _on_epub_loaded_from_cache(self, chapters, images):
+    def _on_epub_loaded_from_cache(self, chapters, images, filenames=None):
         self._spin_timer.stop()
+        filenames = list(filenames or [])
         # Apply translated-content overlay: swap source HTML (and optionally
         # the chapter title) with translated versions for chapters that have
         # a response_*.html on disk. Source chapters without an overlay entry
         # are left untouched so the user can still read pending chapters raw.
+        # Overlay is keyed by the source filename basename so chapter-order
+        # differences between the reader's loader and the BookDetailsDialog's
+        # spine parser don't cause off-by-one mismatches (bug: raw+translated
+        # rows appearing as duplicates in the TOC).
         if self._translated_overlay and chapters:
             merged: list[tuple[str, str]] = []
             for idx, (title, content) in enumerate(chapters):
-                ov = self._translated_overlay.get(idx)
+                fname = filenames[idx] if idx < len(filenames) else ""
+                key = os.path.basename(fname).lower() if fname else ""
+                ov = self._translated_overlay.get(key) if key else None
                 if ov:
                     path = ov.get("path") or ""
                     if path and os.path.isfile(path):
@@ -3295,6 +3381,9 @@ class EpubReaderDialog(QDialog):
             images = merged_images
         self._chapters = chapters
         self._images = images
+        # Keep filenames around so callers can resolve chapter indices by
+        # source filename (used by initial_chapter_filename lookup + TOC jumps).
+        self._chapter_filenames = [os.path.basename(f or "").lower() for f in filenames]
         self._chapter_page_cache = {}  # {chapter_index: page_count}
         self._loaded_chapter = -1  # track which chapter's HTML is loaded
 
@@ -3312,8 +3401,17 @@ class EpubReaderDialog(QDialog):
             # caller; otherwise default to the first chapter. The index is
             # clamped to the loaded chapter range so stale requests (e.g. a
             # chapter that was removed between sessions) fall back cleanly.
+            # Filename takes priority — BookDetailsDialog passes the source
+            # chapter filename so the selection is stable across ordering
+            # differences between its spine-based list and the reader's
+            # manifest-ordered list.
             initial = 0
-            if self._initial_chapter is not None:
+            if self._initial_chapter_filename:
+                try:
+                    initial = self._chapter_filenames.index(self._initial_chapter_filename)
+                except ValueError:
+                    initial = 0
+            elif self._initial_chapter is not None:
                 initial = max(0, min(self._initial_chapter, len(self._chapters) - 1))
             # Select initial chapter silently — the priming sequence below
             # drives the initial render so we don't want setCurrentRow to
