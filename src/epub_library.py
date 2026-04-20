@@ -2096,6 +2096,13 @@ class _BookCard(QFrame):
             return
         self._selected = new_value
         self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
+        # A stylesheet swap on a QFrame whose children override background /
+        # attribute properties doesn't always trigger the hover-state
+        # recomputation on its own — force a polish + repaint so the new
+        # border / background shows immediately on click.
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     @property
     def selected(self) -> bool:
@@ -4296,6 +4303,9 @@ class BookDetailsDialog(QDialog):
         # list. Prevents stray double-clicks during the "Loading chapters…"
         # phase from being dispatched to a half-populated chapter list.
         self._chapters_loaded = False
+        # Single-selected chapter row (by spine index). ``None`` means no
+        # row currently has focus.
+        self._selected_chapter_idx: int | None = None
         # Whether the "show special files" toggle is on. Its initial state is
         # coupled to the global "Translate Special Files" setting (Other
         # Settings): if the translator is configured to handle cover / nav /
@@ -4966,12 +4976,23 @@ class BookDetailsDialog(QDialog):
         for info in self._chapters_info:
             row = _ChapterRow(info, parent=self._chap_container)
             row.activated.connect(self._on_chapter_activated)
+            row.clicked.connect(self._on_chapter_clicked)
+            if info.get("index") == self._selected_chapter_idx:
+                row.set_selected(True)
             self._chap_layout.addWidget(row)
         self._chap_layout.addStretch()
         self._apply_chapter_filter(self._toc_search.text())
         self._update_toc_toggle_label()
         # Rows are now safe to open.
         self._chapters_loaded = True
+
+    def _on_chapter_clicked(self, idx: int):
+        """Update the single-select focus to the clicked chapter row."""
+        self._selected_chapter_idx = idx
+        for i in range(self._chap_layout.count()):
+            w = self._chap_layout.itemAt(i).widget()
+            if isinstance(w, _ChapterRow):
+                w.set_selected(w.info.get("index") == idx)
 
     def _on_chapter_activated(self, idx: int):
         """Open the reader at *idx* only if the chapter list is fully loaded.
@@ -5284,20 +5305,34 @@ class _ChapterRow(QFrame):
 
     Displays translated title + filename when the chapter has been translated;
     otherwise shows the raw source title with a muted "pending" label.
-    Activation requires a double-click so an accidental single click — e.g.
-    while scrolling through a long spine — doesn't launch the reader.
+    A single click selects the row (visual focus only); a double click
+    activates it and opens the reader. This mirrors the flash-card UX in
+    :class:`EpubLibraryDialog`.
     """
     activated = Signal(int)
+    # Emitted on a single left-click so the parent dialog can update the
+    # "currently focused" chapter row. Separate from :attr:`activated` so
+    # selecting a row doesn't also open the reader.
+    clicked = Signal(int)
+
+    _BASE_STYLE = (
+        "_ChapterRow { background: #1a1a2a; border: 1px solid #242438; border-radius: 6px; }"
+        "_ChapterRow:hover { border: 1px solid #6c63ff; background: #232340; }"
+    )
+    _SELECTED_STYLE = (
+        "_ChapterRow { background: #2a2d5a; border: 2px solid #8078ff; border-radius: 6px; }"
+        "_ChapterRow:hover { border: 2px solid #a097ff; background: #343670; }"
+    )
 
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
         self.info = info
+        self._selected = False
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("Double-click to open this chapter in the reader")
-        self.setStyleSheet("""
-            _ChapterRow { background: #1a1a2a; border: 1px solid #242438; border-radius: 6px; }
-            _ChapterRow:hover { border-color: #6c63ff; background: #232340; }
-        """)
+        self.setToolTip(
+            "Click to select — double-click to open this chapter in the reader"
+        )
+        self.setStyleSheet(self._BASE_STYLE)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -5363,10 +5398,33 @@ class _ChapterRow(QFrame):
         if badge is not None:
             layout.addWidget(badge, 0, Qt.AlignRight)
 
+    def set_selected(self, selected: bool) -> None:
+        """Toggle the row's "focused" visual state (purple border/background)."""
+        new_value = bool(selected)
+        if new_value == self._selected:
+            return
+        self._selected = new_value
+        self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
+        # Same polish + repaint dance as :class:`_BookCard` so the stylesheet
+        # swap takes effect immediately even though hover rules are live.
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    @property
+    def selected(self) -> bool:
+        return self._selected
+
+    def mousePressEvent(self, event):
+        # Single left-click = focus/select. Actual activation happens on
+        # double-click via :meth:`mouseDoubleClickEvent`.
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(int(self.info.get("index", 0)))
+        super().mousePressEvent(event)
+
     def mouseDoubleClickEvent(self, event):
-        # Opening the reader now requires a full double-click. A single click
-        # is a no-op (handled by the default ``mousePressEvent``) so the row
-        # still highlights on hover / press without launching anything.
+        # Opening the reader requires a full double-click so accidental
+        # single clicks (e.g. while scrolling) don't launch anything.
         if event.button() == Qt.LeftButton:
             self.activated.emit(int(self.info.get("index", 0)))
         super().mouseDoubleClickEvent(event)
