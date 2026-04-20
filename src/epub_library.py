@@ -330,6 +330,195 @@ def _open_folder_in_explorer(path: str):
 # Scanner
 # ---------------------------------------------------------------------------
 
+def _resolve_output_roots(config: dict | None = None) -> list[str]:
+    """Return the list of directories the translator writes output folders into.
+
+    Strictly only: the OUTPUT_DIRECTORY override (env or config) and the default
+    directory (app dir on Windows, CWD elsewhere). The personal Library folder
+    is intentionally excluded — in-progress novels are looked up only in these
+    roots, per spec.
+    """
+    roots: list[str] = []
+    config = config or {}
+    override = os.environ.get("OUTPUT_DIRECTORY") or config.get("output_directory")
+    if override and os.path.isdir(override):
+        roots.append(os.path.abspath(override))
+    if platform.system() == "Windows":
+        if getattr(sys, "frozen", False):
+            default_dir = os.path.dirname(sys.executable)
+        else:
+            default_dir = os.path.dirname(os.path.abspath(__file__))
+    else:
+        default_dir = os.getcwd()
+    if os.path.isdir(default_dir):
+        roots.append(os.path.abspath(default_dir))
+    # De-duplicate while preserving order
+    seen_roots: set[str] = set()
+    unique_roots: list[str] = []
+    for r in roots:
+        key = os.path.normcase(os.path.normpath(r))
+        if key not in seen_roots:
+            seen_roots.add(key)
+            unique_roots.append(r)
+    return unique_roots
+
+
+def _read_progress_summary(progress_file: str) -> dict | None:
+    """Return a lightweight summary of translation_progress.json or None on failure.
+
+    The summary counts chapter statuses so the library card can render a
+    fraction/percentage without paying for the full OPF-aware match.
+    """
+    import json as _json
+    try:
+        with open(progress_file, "r", encoding="utf-8") as f:
+            prog = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return None
+    chapters = prog.get("chapters", {}) or {}
+    total = len(chapters)
+    completed = 0
+    in_progress = 0
+    failed = 0
+    for ch in chapters.values():
+        status = (ch or {}).get("status", "")
+        if status == "completed":
+            completed += 1
+        elif status in ("in_progress", "pending"):
+            in_progress += 1
+        elif status in ("failed", "qa_failed"):
+            failed += 1
+    return {
+        "total": total,
+        "completed": completed,
+        "in_progress": in_progress,
+        "failed": failed,
+        "prog": prog,
+    }
+
+
+def _folder_has_output_epub(folder: str) -> str | None:
+    """Return the path to the first .epub in *folder* or None."""
+    try:
+        for entry in os.scandir(folder):
+            if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".epub"):
+                return entry.path
+    except (PermissionError, OSError):
+        pass
+    return None
+
+
+def _read_source_epub_pointer(folder: str) -> str | None:
+    """Return the source EPUB path recorded in ``source_epub.txt`` if present.
+
+    The translator drops this sidecar file inside the output folder pointing at
+    the original input EPUB — a more reliable hint than matching folder names.
+    Forward and backward slashes are normalized; relative paths are resolved
+    against the output folder itself.
+    """
+    sidecar = os.path.join(folder, "source_epub.txt")
+    if not os.path.isfile(sidecar):
+        return None
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    candidate = raw.replace("/", os.sep).replace("\\", os.sep)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(folder, candidate)
+    return os.path.normpath(candidate) if os.path.isfile(candidate) else None
+
+
+def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
+    """Locate novels whose translation is in progress (no output EPUB yet).
+
+    Strictly only inspects the output roots returned by :func:`_resolve_output_roots`.
+    For each first-level subfolder that contains a `translation_progress.json`
+    and has NO output `.epub`, try to find the source EPUB via (in priority order):
+      1. ``<folder>/source_epub.txt`` — authoritative pointer written by the
+         translator.
+      2. A basename match (folder name == EPUB basename) in the allowed roots.
+
+    Returns a list of dicts compatible with the rest of the scanner (with
+    extra in-progress metadata).
+    """
+    roots = _resolve_output_roots(config)
+    if not roots:
+        return []
+
+    # Index every EPUB in the roots by basename (without extension) so we can
+    # match folders to source files without a second filesystem walk per folder.
+    epub_by_base: dict[str, str] = {}
+    for root in roots:
+        try:
+            for entry in os.scandir(root):
+                if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".epub"):
+                    base = os.path.splitext(entry.name)[0]
+                    # Prefer first match; tolerate case-insensitive dupes
+                    epub_by_base.setdefault(base, entry.path)
+                    epub_by_base.setdefault(base.lower(), entry.path)
+        except (PermissionError, OSError):
+            continue
+
+    results: list[dict] = []
+    seen_folders: set[str] = set()
+    for root in roots:
+        try:
+            it = os.scandir(root)
+        except (PermissionError, OSError):
+            continue
+        with it:
+            for entry in it:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                folder = entry.path
+                folder_key = os.path.normcase(os.path.normpath(folder))
+                if folder_key in seen_folders:
+                    continue
+                seen_folders.add(folder_key)
+                progress_file = os.path.join(folder, "translation_progress.json")
+                if not os.path.isfile(progress_file):
+                    continue
+                if _folder_has_output_epub(folder):
+                    # Already done — normal scan will pick up the .epub.
+                    continue
+                summary = _read_progress_summary(progress_file)
+                if summary is None:
+                    continue
+                folder_name = entry.name
+                # 1. Authoritative pointer file written by the translator.
+                source_path = _read_source_epub_pointer(folder)
+                # 2. Fall back to folder-name↔basename match within the allowed roots.
+                if not source_path:
+                    source_path = epub_by_base.get(folder_name) or epub_by_base.get(folder_name.lower())
+                if not source_path or not os.path.isfile(source_path):
+                    # No source EPUB visible — skip so we don't surface a ghost entry.
+                    continue
+                try:
+                    stat = os.stat(source_path)
+                except OSError:
+                    continue
+                results.append({
+                    "name": folder_name,
+                    "path": source_path,
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                    "in_library": False,
+                    "type": "epub",
+                    "is_in_progress": True,
+                    "output_folder": folder,
+                    "progress_file": progress_file,
+                    "total_chapters": summary["total"],
+                    "completed_chapters": summary["completed"],
+                    "failed_chapters": summary["failed"],
+                    "pending_chapters": max(0, summary["total"] - summary["completed"]),
+                })
+    return results
+
+
 def scan_for_epubs(config: dict | None = None) -> list[dict]:
     config = config or {}
     results: list[dict] = []
@@ -395,6 +584,33 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
         # macOS / Linux: CWD is typically the project folder
         app_dir = os.getcwd()
     _walk(app_dir)
+
+    # In-progress novels: source EPUBs with a translation_progress.json but no
+    # compiled .epub yet. Strictly limited to the default / override output dirs.
+    try:
+        in_progress = _find_in_progress_novels(config)
+    except Exception:
+        logger.debug("In-progress scan failed: %s", traceback.format_exc())
+        in_progress = []
+    for ip in in_progress:
+        norm = os.path.normpath(os.path.abspath(ip["path"]))
+        if norm in seen:
+            # Annotate the existing result with in-progress data.
+            for r in results:
+                if os.path.normpath(os.path.abspath(r["path"])) == norm:
+                    r.update({
+                        "is_in_progress": True,
+                        "output_folder": ip["output_folder"],
+                        "progress_file": ip["progress_file"],
+                        "total_chapters": ip["total_chapters"],
+                        "completed_chapters": ip["completed_chapters"],
+                        "failed_chapters": ip["failed_chapters"],
+                        "pending_chapters": ip["pending_chapters"],
+                    })
+                    break
+            continue
+        seen.add(norm)
+        results.append(ip)
 
     results.sort(key=lambda r: r["mtime"], reverse=True)
 
@@ -622,8 +838,8 @@ class _BookCard(QFrame):
 
         # Size + file type badge on same row
         file_type = book.get("type", "epub")
-        type_info = {"epub": ("📕EPUB", "#6c63ff"), "pdf": ("📄PDF", "#e74c3c"), "txt": ("📝TXT", "#2ecc71")}
-        badge_text, badge_color = type_info.get(file_type, ("📕EPUB", "#6c63ff"))
+        type_info = {"epub": ("\U0001f4d5EPUB", "#6c63ff"), "pdf": ("\U0001f4c4PDF", "#e74c3c"), "txt": ("\U0001f4d7TXT", "#2ecc71")}
+        badge_text, badge_color = type_info.get(file_type, ("\U0001f4d5EPUB", "#6c63ff"))
         size_mb = book["size"] / (1024 * 1024)
         size_str = f"{size_mb:.1f} MB" if size_mb >= 1 else f"{book['size'] / 1024:.0f} KB"
         info_row = QHBoxLayout()
@@ -637,6 +853,39 @@ class _BookCard(QFrame):
         info_row.addWidget(badge_lbl)
         info_row.addStretch()
         layout.addLayout(info_row)
+
+        # In-progress indicator: small percent pill + overlay ribbon on the cover
+        if book.get("is_in_progress"):
+            total = int(book.get("total_chapters", 0) or 0)
+            done = int(book.get("completed_chapters", 0) or 0)
+            pct = int(round((done / total) * 100)) if total else 0
+            progress_row = QHBoxLayout()
+            progress_row.setContentsMargins(0, 0, 0, 0)
+            progress_row.setSpacing(4)
+            pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
+            pill.setToolTip(f"Translation in progress \u2014 {pct}% ({done}/{total} chapters)")
+            pill.setStyleSheet(
+                "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
+                "border: 1px solid #6c63ff; border-radius: 3px; "
+                "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+            )
+            progress_row.addWidget(pill)
+            if total:
+                pct_lbl = QLabel(f"{pct}%")
+                pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold;")
+                progress_row.addWidget(pct_lbl)
+            progress_row.addStretch()
+            layout.addLayout(progress_row)
+
+            # Corner ribbon on the cover label (absolutely positioned child)
+            self._progress_ribbon = QLabel("IN PROGRESS", self.cover_label)
+            self._progress_ribbon.setStyleSheet(
+                "color: #fff; background: rgba(108, 99, 255, 0.92); "
+                "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
+                "border-bottom-right-radius: 3px;"
+            )
+            self._progress_ribbon.move(0, 0)
+            self._progress_ribbon.show()
 
     def _set_fallback_icon(self, icon_path: str):
         try:
@@ -1201,8 +1450,27 @@ class EpubLibraryDialog(QDialog):
                 logger.error("Could not open file: %s\n%s", exc, traceback.format_exc())
                 QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
             return
+        # EPUB: open the web-like book details page instead of jumping directly
+        # into the reader. Users who want the old "straight to reader" behavior
+        # can use the "Open in Reader" context menu action.
         try:
-            # Set loading cursor
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            dialog = BookDetailsDialog(book, config=self._config, parent=self)
+            QApplication.restoreOverrideCursor()
+            dialog.setModal(False)
+            dialog.setAttribute(Qt.WA_DeleteOnClose)
+            self._active_details = dialog  # prevent GC
+            dialog.show()
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            tb = traceback.format_exc()
+            logger.error("Could not open book details: %s\n%s", exc, tb)
+            QMessageBox.warning(self, "Error", f"Could not open book details:\n{exc}\n\nDetails:\n{tb}")
+
+    def _open_reader_direct(self, book):
+        """Bypass the details page and open the reader for an EPUB card."""
+        try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
             reader = EpubReaderDialog(book["path"], config=self._config, parent=self)
@@ -1225,19 +1493,27 @@ class EpubLibraryDialog(QDialog):
             QMenu::item { padding: 6px 20px; border-radius: 3px; }
             QMenu::item:selected { background: #3a3a5e; }
         """)
-        open_label = "📖  Open in Reader" if book.get("type", "epub") == "epub" else "📂  Open File"
-        open_action = menu.addAction(open_label)
-        open_action.triggered.connect(lambda: self._on_card_clicked(book))
+        is_epub = book.get("type", "epub") == "epub"
+        if is_epub:
+            details_action = menu.addAction("\U0001f4d1  Open Book Details")
+            details_action.triggered.connect(lambda: self._on_card_clicked(book))
+            reader_action = menu.addAction("\U0001f4d6  Open in Reader")
+            reader_action.triggered.connect(lambda: self._open_reader_direct(book))
+        else:
+            open_action = menu.addAction("\U0001f4c2  Open File")
+            open_action.triggered.connect(lambda: self._on_card_clicked(book))
         menu.addSeparator()
-        folder_action = menu.addAction("📂  Open Output Folder")
-        # Use original_path's directory if available (for files moved to Library)
-        original = book.get("original_path", book["path"])
-        output_folder = os.path.dirname(original)
+        folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
+        # Prefer the explicit translation output folder when this is an
+        # in-progress novel; fall back to the original_path's directory for
+        # files moved to Library, and finally the source path's directory.
+        output_folder = (book.get("output_folder")
+                         or os.path.dirname(book.get("original_path", book["path"])))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
-        lib_action = menu.addAction("📁  Open Library Folder")
+        lib_action = menu.addAction("\U0001f4c1  Open Library Folder")
         lib_action.triggered.connect(lambda: _open_folder_in_explorer(get_library_dir()))
         menu.addSeparator()
-        copy_path_action = menu.addAction("📋  Copy Path")
+        copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
         menu.exec(pos)
 
@@ -1401,6 +1677,899 @@ class EpubLibraryDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Book Details — metadata / TOC parser
+# ---------------------------------------------------------------------------
+
+def _parse_epub_details(epub_path: str) -> dict:
+    """Extract OPF metadata, spine order and per-chapter raw titles.
+
+    Returns a dict shaped roughly like the OPF DC schema plus a ``chapters``
+    list of ``{'href', 'filename', 'title'}``. All fields are best-effort and
+    may be empty strings/lists on failure.
+    """
+    import zipfile
+    import posixpath
+    from xml.etree import ElementTree as ET
+    from html import unescape
+
+    details = {
+        "title": "",
+        "authors": [],
+        "publisher": "",
+        "language": "",
+        "date": "",
+        "description": "",
+        "subjects": [],
+        "identifier": "",
+        "chapters": [],
+    }
+
+    try:
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            names = zf.namelist()
+            names_set = set(names)
+
+            opf_path = None
+            if "META-INF/container.xml" in names_set:
+                try:
+                    container_xml = zf.read("META-INF/container.xml").decode("utf-8", errors="replace")
+                    container_tree = ET.fromstring(container_xml)
+                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+                    rootfile = container_tree.find(".//c:rootfile", ns)
+                    if rootfile is not None:
+                        opf_path = rootfile.get("full-path")
+                except Exception:
+                    pass
+            if not opf_path:
+                for zname in names:
+                    if zname.lower().endswith(".opf"):
+                        opf_path = zname
+                        break
+            if not opf_path or opf_path not in names_set:
+                return details
+
+            opf_xml = zf.read(opf_path).decode("utf-8", errors="replace")
+            tree = ET.fromstring(opf_xml)
+            opf_dir = posixpath.dirname(opf_path)
+
+            DC = "http://purl.org/dc/elements/1.1/"
+            OPF = "http://www.idpf.org/2007/opf"
+
+            def _dc(tag: str) -> list[str]:
+                return [
+                    (el.text or "").strip()
+                    for el in tree.findall(f".//{{{DC}}}{tag}")
+                    if (el.text or "").strip()
+                ]
+
+            titles = _dc("title")
+            details["title"] = titles[0] if titles else ""
+            details["authors"] = _dc("creator")
+            publishers = _dc("publisher")
+            details["publisher"] = publishers[0] if publishers else ""
+            languages = _dc("language")
+            details["language"] = languages[0] if languages else ""
+            dates = _dc("date")
+            details["date"] = dates[0] if dates else ""
+            descriptions = _dc("description")
+            details["description"] = unescape(descriptions[0]) if descriptions else ""
+            details["subjects"] = _dc("subject")
+            identifiers = _dc("identifier")
+            details["identifier"] = identifiers[0] if identifiers else ""
+
+            # Build a manifest id -> (href, media_type) lookup so we can
+            # resolve spine itemrefs into concrete chapter files.
+            manifest: dict[str, tuple[str, str]] = {}
+            for item_el in tree.findall(f".//{{{OPF}}}item"):
+                item_id = item_el.get("id", "")
+                href = item_el.get("href", "")
+                media = item_el.get("media-type", "")
+                if not item_id or not href:
+                    continue
+                full_href = posixpath.normpath(posixpath.join(opf_dir, href)) if opf_dir else href
+                manifest[item_id] = (full_href, media)
+
+            spine_el = tree.find(f".//{{{OPF}}}spine")
+            ordered_hrefs: list[tuple[str, str]] = []  # [(id, href)]
+            if spine_el is not None:
+                for itemref in spine_el.findall(f"{{{OPF}}}itemref"):
+                    idref = itemref.get("idref")
+                    if idref and idref in manifest:
+                        ordered_hrefs.append((idref, manifest[idref][0]))
+
+            # Parse each chapter file for a title. Keep it cheap: only peek at
+            # the first ~32KB which is more than enough for <title>/<h1>.
+            from bs4 import BeautifulSoup
+            chapters = []
+            for idref, href in ordered_hrefs:
+                media_type = manifest.get(idref, ("", ""))[1]
+                if media_type and ("html" not in media_type.lower() and "xhtml" not in media_type.lower()):
+                    # Non-text spine item — still include so index matches.
+                    chapters.append({"href": href, "filename": os.path.basename(href),
+                                     "title": os.path.splitext(os.path.basename(href))[0]})
+                    continue
+                title = ""
+                if href in names_set:
+                    try:
+                        raw = zf.read(href)[:32_768]
+                        soup = BeautifulSoup(raw, "html.parser")
+                        t = soup.find("title")
+                        if t and t.get_text(strip=True):
+                            title = t.get_text(strip=True)
+                        if not title:
+                            for h in soup.find_all(["h1", "h2", "h3"]):
+                                ht = h.get_text(strip=True)
+                                if ht:
+                                    title = ht
+                                    break
+                    except Exception:
+                        logger.debug("Chapter title parse failed: %s", traceback.format_exc())
+                if not title:
+                    title = os.path.splitext(os.path.basename(href))[0]
+                    title = title.replace("_", " ").replace("-", " ").strip() or title
+                chapters.append({"href": href, "filename": os.path.basename(href), "title": title})
+            details["chapters"] = chapters
+    except Exception:
+        logger.debug("EPUB details parse failed: %s", traceback.format_exc())
+
+    return details
+
+
+def _read_translated_chapter_title(path: str) -> str:
+    """Extract a translated-chapter title from a response_*.html file."""
+    try:
+        from bs4 import BeautifulSoup
+        with open(path, "rb") as f:
+            raw = f.read(32_768)
+        soup = BeautifulSoup(raw, "html.parser")
+        t = soup.find("title")
+        if t and t.get_text(strip=True):
+            return t.get_text(strip=True)
+        for h in soup.find_all(["h1", "h2", "h3"]):
+            ht = h.get_text(strip=True)
+            if ht:
+                return ht
+    except Exception:
+        logger.debug("Translated title parse failed for %s: %s", path, traceback.format_exc())
+    return ""
+
+
+class _BookDetailsLoader(QThread):
+    """Parse EPUB metadata + TOC + translation status off the UI thread."""
+    done = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, book: dict, parent=None):
+        super().__init__(parent)
+        self._book = book
+
+    def run(self):
+        try:
+            details = _parse_epub_details(self._book["path"])
+            cover = _extract_cover(self._book["path"])
+            progress_file = self._book.get("progress_file")
+            output_folder = self._book.get("output_folder")
+            prog = None
+            if progress_file and os.path.isfile(progress_file):
+                summary = _read_progress_summary(progress_file)
+                if summary is not None:
+                    prog = summary["prog"]
+
+            # Resolve each spine chapter to a translation status.
+            chapters_info = []
+            prog_chapters = (prog or {}).get("chapters", {}) or {}
+            # Build lookup by normalized basename (no extension, no response_ prefix).
+            def _norm(name: str) -> str:
+                base = os.path.basename(name or "")
+                if base.lower().startswith("response_"):
+                    base = base[len("response_"):]
+                while True:
+                    stem, ext = os.path.splitext(base)
+                    if not ext:
+                        break
+                    base = stem
+                return base.lower()
+
+            prog_by_basename: dict[str, dict] = {}
+            prog_by_output: dict[str, dict] = {}
+            for key, info in prog_chapters.items():
+                if not isinstance(info, dict):
+                    continue
+                ob = info.get("original_basename") or ""
+                of = info.get("output_file") or ""
+                if ob:
+                    prog_by_basename.setdefault(_norm(ob), info)
+                if of:
+                    prog_by_output.setdefault(_norm(of), info)
+
+            import re as _re
+            for idx, ch in enumerate(details.get("chapters", [])):
+                filename = ch["filename"]
+                raw_title = ch["title"]
+                # Special files mirror Retranslation_GUI's classifier: no digit
+                # anywhere in the filename → special (cover, nav, toc, info,
+                # message, etc.). The BookDetailsDialog filters these out by
+                # default, matching the Progress Manager's behavior.
+                is_special = not bool(_re.search(r"\d", filename))
+                norm_key = _norm(filename)
+                match = prog_by_basename.get(norm_key) or prog_by_output.get(norm_key)
+                status = (match or {}).get("status", "")
+                output_file = (match or {}).get("output_file", "")
+                translated_title = ""
+                translated_path = ""
+                # Check disk — the progress file can lag behind real files.
+                if output_folder and os.path.isdir(output_folder):
+                    candidate_names = []
+                    if output_file:
+                        candidate_names.append(output_file)
+                    base = os.path.splitext(filename)[0]
+                    candidate_names.append(f"response_{base}.html")
+                    candidate_names.append(f"response_{base}.xhtml")
+                    candidate_names.append(f"{base}.html")
+                    candidate_names.append(f"{base}.xhtml")
+                    for candidate in candidate_names:
+                        p = os.path.join(output_folder, candidate)
+                        if os.path.isfile(p):
+                            translated_path = p
+                            if not status:
+                                status = "completed"
+                            break
+                    if translated_path:
+                        translated_title = _read_translated_chapter_title(translated_path)
+                if not status:
+                    status = "pending"
+                chapters_info.append({
+                    "index": idx,
+                    "filename": filename,
+                    "raw_title": raw_title,
+                    "translated_title": translated_title,
+                    "translated_path": translated_path,
+                    "status": status,
+                    "is_special": is_special,
+                })
+
+            # Optional metadata.json overrides (translator-produced).
+            metadata_json = None
+            if output_folder:
+                meta_path = os.path.join(output_folder, "metadata.json")
+                if os.path.isfile(meta_path):
+                    try:
+                        import json as _json
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            metadata_json = _json.load(f)
+                    except Exception:
+                        metadata_json = None
+
+            self.done.emit({
+                "details": details,
+                "cover": cover or "",
+                "chapters_info": chapters_info,
+                "metadata_json": metadata_json or {},
+                "progress": prog or {},
+            })
+        except Exception as exc:
+            logger.error("Book details load error: %s\n%s", exc, traceback.format_exc())
+            self.error.emit(f"{exc}")
+
+
+# ---------------------------------------------------------------------------
+# Book Details Dialog
+# ---------------------------------------------------------------------------
+
+class BookDetailsDialog(QDialog):
+    """Web-like book page: cover, metadata, synopsis, and collapsible TOC.
+
+    Clicking a chapter launches the EPUB reader positioned at that chapter.
+    Opens instead of jumping straight into the reader when a library card is
+    activated.
+    """
+
+    def __init__(self, book: dict, config: dict | None = None, parent=None):
+        super().__init__(parent)
+        self._book = book
+        self._config = config or {}
+        self._details: dict = {}
+        self._chapters_info: list[dict] = []
+        self._metadata_json: dict = {}
+        self._loader: _BookDetailsLoader | None = None
+        self._active_reader: QDialog | None = None
+        # Whether the "show special files" toggle is on (hidden by default to
+        # match Retranslation_GUI's Progress Manager behavior for EPUBs).
+        self._show_special_files = bool(self._config.get("epub_details_show_special_files", False))
+
+        epub_path = book["path"]
+        pretty = book.get("name") or os.path.splitext(os.path.basename(epub_path))[0]
+        self.setWindowTitle(pretty)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
+        screen = self.screen()
+        if screen:
+            avail = screen.availableGeometry()
+            self.resize(int(avail.width() * 0.62), int(avail.height() * 0.8))
+            self.setMinimumSize(int(avail.width() * 0.42), int(avail.height() * 0.5))
+        else:
+            self.resize(1100, 780)
+            self.setMinimumSize(700, 500)
+
+        icon_path = _find_halgakos_icon()
+        if icon_path:
+            self.setWindowIcon(QIcon(icon_path))
+
+        self._setup_ui()
+        self._start_loading()
+
+    # -- UI construction ----------------------------------------------------
+
+    def _setup_ui(self):
+        self.setStyleSheet("""
+            QDialog { background: #12121e; }
+            QLabel#title { color: #e0e0e0; font-size: 22pt; font-weight: bold; }
+            QLabel#author { color: #9aa2b8; font-size: 11pt; }
+            QLabel#section { color: #b0b0c0; font-size: 10pt; font-weight: bold;
+                             letter-spacing: 1px; }
+            QLabel.meta-k { color: #7a8599; font-size: 8.5pt; }
+            QLabel.meta-v { color: #e0e0e0; font-size: 9.5pt; font-weight: bold; }
+            QLabel.tag { color: #c8cbe0; background: #2a2a3e;
+                         border: 1px solid #3a3a5e; border-radius: 10px;
+                         padding: 3px 9px; font-size: 8.5pt; }
+            QLabel.pending { color: #7a8599; font-size: 8pt; font-style: italic; }
+            QLabel.filename { color: #8a8fa8; font-size: 8.5pt; font-family: 'Consolas','Menlo',monospace; }
+            QLabel.translated { color: #e0e0e0; font-size: 10pt; font-weight: bold; }
+            QLabel.raw { color: #c8cbe0; font-size: 10pt; font-weight: bold; }
+            QPushButton#start {
+                background: #ff8a3d; color: #1e1616; font-weight: bold;
+                font-size: 11pt; padding: 8px 18px; border-radius: 6px; border: none;
+            }
+            QPushButton#start:hover { background: #ffa05c; }
+            QPushButton.icon-btn {
+                background: #2a2a3e; color: #e0e0e0; border: 1px solid #3a3a5e;
+                border-radius: 6px; padding: 6px 10px; font-size: 10pt;
+            }
+            QPushButton.icon-btn:hover { background: #3a3a5e; }
+            QPushButton#toc-toggle {
+                background: transparent; color: #b0b0c0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 6px 12px; font-size: 10pt; font-weight: bold;
+                text-align: left;
+            }
+            QPushButton#toc-toggle:hover { color: #e0e0e0; border-color: #6c63ff; }
+            QLineEdit#toc-search {
+                background: #1e1e2e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 6px 10px; font-size: 9.5pt;
+            }
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical { width: 10px; background: #12121e; }
+            QScrollBar::handle:vertical { background: #3a3a5e; border-radius: 5px;
+                                          min-height: 24px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        """)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Top bar with a back / close button
+        topbar = QHBoxLayout()
+        topbar.setContentsMargins(14, 10, 14, 6)
+        topbar.setSpacing(8)
+        back_btn = QPushButton("\u2190  Back to Library")
+        back_btn.setCursor(Qt.PointingHandCursor)
+        back_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #8a8fa8; border: none;"
+            " font-size: 9.5pt; padding: 4px 6px; }"
+            "QPushButton:hover { color: #e0e0e0; }"
+        )
+        back_btn.clicked.connect(self.close)
+        topbar.addWidget(back_btn)
+        topbar.addStretch()
+        outer.addLayout(topbar)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        body = QWidget()
+        self._scroll.setWidget(body)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(32, 14, 32, 32)
+        body_layout.setSpacing(18)
+
+        # ── Hero row: cover + title + actions + metadata ──
+        hero = QHBoxLayout()
+        hero.setSpacing(28)
+
+        # Cover
+        self._cover_lbl = QLabel()
+        self._cover_lbl.setFixedSize(240, 340)
+        self._cover_lbl.setAlignment(Qt.AlignCenter)
+        self._cover_lbl.setStyleSheet(
+            "background: #2a2a3e; border-radius: 6px; color: #555; font-size: 32pt;"
+        )
+        icon_path = _find_halgakos_icon()
+        if icon_path:
+            pm = QPixmap(icon_path)
+            if not pm.isNull():
+                scaled = pm.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._cover_lbl.setPixmap(scaled)
+        else:
+            self._cover_lbl.setText("\U0001f4d6")
+        hero.addWidget(self._cover_lbl, 0, Qt.AlignTop)
+
+        # Center column: title, author, actions, synopsis
+        center = QVBoxLayout()
+        center.setSpacing(8)
+        self._title_lbl = QLabel(self._book.get("name", ""))
+        self._title_lbl.setObjectName("title")
+        self._title_lbl.setWordWrap(True)
+        center.addWidget(self._title_lbl)
+        self._author_lbl = QLabel("")
+        self._author_lbl.setObjectName("author")
+        self._author_lbl.setWordWrap(True)
+        center.addWidget(self._author_lbl)
+
+        # Progress strip (only for in-progress novels)
+        self._progress_strip = QLabel("")
+        self._progress_strip.setStyleSheet(
+            "color: #ffd166; background: rgba(108, 99, 255, 0.14);"
+            " border: 1px solid #6c63ff; border-radius: 6px;"
+            " padding: 6px 10px; font-size: 9.5pt; font-weight: bold;"
+        )
+        self._progress_strip.hide()
+        center.addWidget(self._progress_strip)
+
+        # Action row
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self._start_btn = QPushButton("\U0001f4d6  Start reading")
+        self._start_btn.setObjectName("start")
+        self._start_btn.setCursor(Qt.PointingHandCursor)
+        self._start_btn.clicked.connect(lambda: self._open_reader())
+        actions.addWidget(self._start_btn)
+
+        self._folder_btn = QPushButton("\U0001f4c2")
+        self._folder_btn.setProperty("class", "icon-btn")
+        self._folder_btn.setToolTip("Open output folder in file explorer")
+        self._folder_btn.setCursor(Qt.PointingHandCursor)
+        self._folder_btn.clicked.connect(self._open_output_folder)
+        actions.addWidget(self._folder_btn)
+
+        self._source_btn = QPushButton("\U0001f517")
+        self._source_btn.setProperty("class", "icon-btn")
+        self._source_btn.setToolTip("Reveal source EPUB")
+        self._source_btn.setCursor(Qt.PointingHandCursor)
+        self._source_btn.clicked.connect(self._reveal_source)
+        actions.addWidget(self._source_btn)
+
+        actions.addStretch()
+        center.addLayout(actions)
+
+        # Synopsis block
+        synopsis_heading = QLabel("SYNOPSIS")
+        synopsis_heading.setObjectName("section")
+        center.addSpacing(6)
+        center.addWidget(synopsis_heading)
+        self._synopsis_lbl = QLabel("Loading\u2026")
+        self._synopsis_lbl.setWordWrap(True)
+        self._synopsis_lbl.setStyleSheet("color: #c8cbe0; font-size: 10pt; line-height: 1.55;")
+        center.addWidget(self._synopsis_lbl)
+        center.addStretch()
+        hero.addLayout(center, 1)
+
+        # Metadata column
+        meta_col = QVBoxLayout()
+        meta_col.setSpacing(14)
+        meta_heading = QLabel("METADATA")
+        meta_heading.setObjectName("section")
+        meta_col.addWidget(meta_heading)
+        self._meta_grid = QGridLayout()
+        self._meta_grid.setContentsMargins(0, 0, 0, 0)
+        self._meta_grid.setHorizontalSpacing(14)
+        self._meta_grid.setVerticalSpacing(6)
+        meta_col.addLayout(self._meta_grid)
+
+        # Genres / Tags containers (filled in populate step)
+        self._genres_heading = QLabel("GENRES")
+        self._genres_heading.setObjectName("section")
+        meta_col.addWidget(self._genres_heading)
+        self._genres_row = QWidget()
+        self._genres_layout = QHBoxLayout(self._genres_row)
+        self._genres_layout.setContentsMargins(0, 0, 0, 0)
+        self._genres_layout.setSpacing(6)
+        self._genres_layout.addStretch()
+        meta_col.addWidget(self._genres_row)
+
+        self._tags_heading = QLabel("TAGS")
+        self._tags_heading.setObjectName("section")
+        meta_col.addWidget(self._tags_heading)
+        self._tags_row = QWidget()
+        self._tags_layout = QHBoxLayout(self._tags_row)
+        self._tags_layout.setContentsMargins(0, 0, 0, 0)
+        self._tags_layout.setSpacing(6)
+        self._tags_layout.addStretch()
+        meta_col.addWidget(self._tags_row)
+        meta_col.addStretch()
+
+        meta_wrapper = QWidget()
+        meta_wrapper.setLayout(meta_col)
+        meta_wrapper.setFixedWidth(280)
+        hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
+        body_layout.addLayout(hero)
+
+        # ── Chapters section (expanded by default) ──
+        chap_header = QHBoxLayout()
+        chap_header.setSpacing(10)
+        self._toc_toggle = QPushButton("\u25bc  Chapters")
+        self._toc_toggle.setObjectName("toc-toggle")
+        self._toc_toggle.setCursor(Qt.PointingHandCursor)
+        self._toc_toggle.clicked.connect(self._toggle_chapters)
+        chap_header.addWidget(self._toc_toggle)
+        chap_header.addStretch()
+        # "Show special files" toggle mirrors the Progress Manager's behavior.
+        # Hidden by default for EPUBs so files like cover/nav/toc/info don't
+        # clutter the list; user state is persisted via config.
+        from PySide6.QtWidgets import QCheckBox
+        self._special_cb = QCheckBox("Show special files (cover, nav, toc)")
+        self._special_cb.setToolTip(
+            "When enabled, shows special files (files without chapter numbers "
+            "like cover, nav, toc, info, message, etc.)"
+        )
+        self._special_cb.setChecked(self._show_special_files)
+        self._special_cb.setStyleSheet("""
+            QCheckBox { color: #c8cbe0; font-size: 9pt; spacing: 6px; padding: 4px 6px; }
+            QCheckBox::indicator {
+                width: 14px; height: 14px;
+                border: 1px solid #5a9fd4; border-radius: 2px;
+                background-color: #1e1e2e;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4; border-color: #5a9fd4;
+                image: none;
+            }
+            QCheckBox::indicator:hover { border-color: #7bb3e0; }
+        """)
+        self._special_cb.toggled.connect(self._on_special_files_toggled)
+        chap_header.addWidget(self._special_cb)
+        self._toc_search = QLineEdit()
+        self._toc_search.setObjectName("toc-search")
+        self._toc_search.setPlaceholderText("\U0001f50d  Search chapters\u2026")
+        self._toc_search.setFixedWidth(260)
+        self._toc_search.textChanged.connect(self._apply_chapter_filter)
+        chap_header.addWidget(self._toc_search)
+        body_layout.addLayout(chap_header)
+
+        self._chap_container = QWidget()
+        self._chap_layout = QVBoxLayout(self._chap_container)
+        self._chap_layout.setContentsMargins(4, 4, 4, 4)
+        self._chap_layout.setSpacing(4)
+        # Visible by default — the TOC is the main reading entry point.
+        body_layout.addWidget(self._chap_container)
+
+        body_layout.addStretch()
+        outer.addWidget(self._scroll, 1)
+
+    # -- Data population ----------------------------------------------------
+
+    def _start_loading(self):
+        self._synopsis_lbl.setText("Loading book details\u2026")
+        self._loader = _BookDetailsLoader(self._book, self)
+        self._loader.done.connect(self._on_details_ready)
+        self._loader.error.connect(self._on_details_error)
+        self._loader.start()
+
+    @Slot(dict)
+    def _on_details_ready(self, payload: dict):
+        self._details = payload.get("details", {}) or {}
+        self._chapters_info = payload.get("chapters_info", []) or []
+        self._metadata_json = payload.get("metadata_json", {}) or {}
+        cover_path = payload.get("cover", "")
+        if cover_path:
+            try:
+                pm = QPixmap(cover_path)
+                if not pm.isNull():
+                    scaled = pm.scaled(self._cover_lbl.width(), self._cover_lbl.height(),
+                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self._cover_lbl.setPixmap(scaled)
+                    self._cover_lbl.setText("")
+            except Exception:
+                pass
+
+        title = (self._metadata_json.get("title") or self._details.get("title")
+                 or self._book.get("name", ""))
+        self._title_lbl.setText(title or self._book.get("name", ""))
+        authors = list(self._metadata_json.get("authors") or self._details.get("authors") or [])
+        if isinstance(authors, str):
+            authors = [authors]
+        self._author_lbl.setText(", ".join(authors) if authors else "")
+
+        synopsis = (self._metadata_json.get("description")
+                    or self._details.get("description") or "").strip()
+        self._synopsis_lbl.setText(synopsis if synopsis else "No synopsis available.")
+
+        # Metadata grid
+        while self._meta_grid.count():
+            item = self._meta_grid.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        publisher = self._metadata_json.get("publisher") or self._details.get("publisher") or "\u2014"
+        language = self._metadata_json.get("language") or self._details.get("language") or "\u2014"
+        year = (self._metadata_json.get("date") or self._details.get("date") or "").strip()
+        year = year[:4] if year and year[:4].isdigit() else (year or "\u2014")
+        rows = [
+            ("\U0001f4d8 Title", title or "\u2014"),
+            ("\u270d\ufe0f Author", ", ".join(authors) if authors else "\u2014"),
+            ("\U0001f3db\ufe0f Publisher", publisher or "\u2014"),
+            ("\U0001f310 Language", language or "\u2014"),
+            ("\U0001f4c5 Year", year or "\u2014"),
+        ]
+        for i, (key, val) in enumerate(rows):
+            k_lbl = QLabel(key)
+            k_lbl.setProperty("class", "meta-k")
+            k_lbl.setStyleSheet("color: #7a8599; font-size: 8.5pt;")
+            v_lbl = QLabel(str(val))
+            v_lbl.setProperty("class", "meta-v")
+            v_lbl.setStyleSheet("color: #e0e0e0; font-size: 9.5pt; font-weight: bold;")
+            v_lbl.setWordWrap(True)
+            self._meta_grid.addWidget(k_lbl, i, 0, Qt.AlignTop | Qt.AlignLeft)
+            self._meta_grid.addWidget(v_lbl, i, 1, Qt.AlignTop | Qt.AlignLeft)
+
+        # Genres / tags — OPF subjects is a good default source; the translator
+        # doesn't always distinguish between the two so we fan them out across
+        # both rows when metadata.json has explicit genres/tags fields.
+        subjects = list(self._details.get("subjects") or [])
+        genres = list(self._metadata_json.get("genres") or []) or subjects[:3]
+        tags = list(self._metadata_json.get("tags") or []) or subjects
+        self._fill_chip_row(self._genres_layout, genres)
+        self._fill_chip_row(self._tags_layout, tags)
+        self._genres_heading.setVisible(bool(genres))
+        self._genres_row.setVisible(bool(genres))
+        self._tags_heading.setVisible(bool(tags))
+        self._tags_row.setVisible(bool(tags))
+
+        # In-progress strip
+        if self._book.get("is_in_progress"):
+            done = sum(1 for c in self._chapters_info if c["status"] == "completed")
+            total = len(self._chapters_info) or int(self._book.get("total_chapters", 0) or 0)
+            if total:
+                pct = int(round((done / total) * 100))
+                self._progress_strip.setText(
+                    f"\u23f3  Translation in progress \u2014 {done}/{total} chapters ({pct}%)"
+                )
+            else:
+                self._progress_strip.setText("\u23f3  Translation in progress")
+            self._progress_strip.show()
+            self._start_btn.setText("\U0001f4d6  Read raw source")
+        else:
+            self._progress_strip.hide()
+            self._start_btn.setText("\U0001f4d6  Start reading")
+
+        # Chapter rows
+        self._populate_chapters()
+
+        # Button availability
+        self._folder_btn.setEnabled(bool(self._book.get("output_folder")))
+        self._source_btn.setEnabled(os.path.isfile(self._book.get("path", "") or ""))
+
+    def _fill_chip_row(self, layout: QHBoxLayout, values: list[str]):
+        # Remove all but the trailing stretch
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        stretch_item = layout.takeAt(0)
+        for v in values[:12]:
+            if not v:
+                continue
+            chip = QLabel(v)
+            chip.setProperty("class", "tag")
+            chip.setStyleSheet(
+                "color: #c8cbe0; background: #2a2a3e; "
+                "border: 1px solid #3a3a5e; border-radius: 10px; "
+                "padding: 3px 9px; font-size: 8.5pt;"
+            )
+            layout.addWidget(chip)
+        if stretch_item is not None:
+            layout.addItem(stretch_item)
+        else:
+            layout.addStretch()
+
+    def _populate_chapters(self):
+        # Clear previous rows
+        while self._chap_layout.count():
+            item = self._chap_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+        for info in self._chapters_info:
+            row = _ChapterRow(info, parent=self._chap_container)
+            row.activated.connect(self._open_reader)
+            self._chap_layout.addWidget(row)
+        self._chap_layout.addStretch()
+        self._apply_chapter_filter(self._toc_search.text())
+        self._update_toc_toggle_label()
+
+    def _visible_counts(self) -> tuple[int, int]:
+        """Return (done, total) considering the special-files toggle."""
+        if self._show_special_files:
+            items = self._chapters_info
+        else:
+            items = [c for c in self._chapters_info if not c.get("is_special")]
+        total = len(items)
+        done = sum(1 for c in items if c.get("status") == "completed")
+        return done, total
+
+    def _update_toc_toggle_label(self):
+        done, total = self._visible_counts()
+        prefix = "\u25bc  Chapters" if self._chap_container.isVisible() else "\u25b6  Chapters"
+        suffix = f"  ({done}/{total})" if total else "  (\u2014)"
+        self._toc_toggle.setText(prefix + suffix)
+
+    def _apply_chapter_filter(self, text: str):
+        needle = (text or "").strip().lower()
+        for i in range(self._chap_layout.count()):
+            w = self._chap_layout.itemAt(i).widget()
+            if not isinstance(w, _ChapterRow):
+                continue
+            info = w.info
+            # Hide special files unless the toggle is on.
+            if not self._show_special_files and info.get("is_special"):
+                w.setVisible(False)
+                continue
+            if not needle:
+                w.setVisible(True)
+                continue
+            hay = " ".join(str(x) for x in (info.get("raw_title", ""),
+                                            info.get("translated_title", ""),
+                                            info.get("filename", ""))).lower()
+            w.setVisible(needle in hay)
+        self._update_toc_toggle_label()
+
+    def _on_special_files_toggled(self, checked: bool):
+        self._show_special_files = bool(checked)
+        # Persist for next time this dialog (or another book) opens.
+        try:
+            self._config["epub_details_show_special_files"] = self._show_special_files
+        except Exception:
+            pass
+        self._apply_chapter_filter(self._toc_search.text())
+
+    def _toggle_chapters(self):
+        show = not self._chap_container.isVisible()
+        self._chap_container.setVisible(show)
+        self._toc_search.setVisible(show)
+        self._special_cb.setVisible(show)
+        self._update_toc_toggle_label()
+
+    @Slot(str)
+    def _on_details_error(self, message: str):
+        self._synopsis_lbl.setText(f"Failed to load book details: {message}")
+
+    # -- Actions ------------------------------------------------------------
+
+    def _open_reader(self, initial_chapter: int | None = None):
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            reader = EpubReaderDialog(
+                self._book["path"],
+                config=self._config,
+                parent=self,
+                initial_chapter=initial_chapter,
+            )
+            QApplication.restoreOverrideCursor()
+            reader.setModal(False)
+            reader.setAttribute(Qt.WA_DeleteOnClose)
+            self._active_reader = reader
+            reader.show()
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            logger.error("Could not open reader from details: %s\n%s", exc, traceback.format_exc())
+            QMessageBox.warning(self, "Error", f"Could not open EPUB reader:\n{exc}")
+
+    def _open_output_folder(self):
+        folder = self._book.get("output_folder") or os.path.dirname(self._book.get("path", ""))
+        if folder:
+            _open_folder_in_explorer(folder)
+
+    def _reveal_source(self):
+        path = self._book.get("path")
+        if path and os.path.isfile(path):
+            _open_folder_in_explorer(path)
+
+    # -- Qt lifecycle --------------------------------------------------------
+
+    def closeEvent(self, event):
+        if self._loader is not None:
+            try:
+                self._loader.quit()
+                self._loader.wait(200)
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+
+class _ChapterRow(QFrame):
+    """One row in the Book Details chapter list.
+
+    Displays translated title + filename when the chapter has been translated;
+    otherwise shows the raw source title with a muted "pending" label.
+    """
+    activated = Signal(int)
+
+    def __init__(self, info: dict, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("""
+            _ChapterRow { background: #1a1a2a; border: 1px solid #242438; border-radius: 6px; }
+            _ChapterRow:hover { border-color: #6c63ff; background: #232340; }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(12)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        status = info.get("status", "pending")
+        translated = info.get("translated_title") or ""
+        raw = info.get("raw_title") or ""
+        if translated and status == "completed":
+            primary = QLabel(translated)
+            primary.setProperty("class", "translated")
+            primary.setStyleSheet("color: #e0e0e0; font-size: 10pt; font-weight: bold;")
+        else:
+            primary = QLabel(raw or info.get("filename", ""))
+            primary.setProperty("class", "raw")
+            primary.setStyleSheet("color: #c8cbe0; font-size: 10pt; font-weight: bold;")
+        primary.setWordWrap(True)
+        text_col.addWidget(primary)
+
+        sub = QLabel(info.get("filename", ""))
+        sub.setProperty("class", "filename")
+        sub.setStyleSheet("color: #8a8fa8; font-size: 8.5pt; font-family: 'Consolas','Menlo',monospace;")
+        text_col.addWidget(sub)
+        layout.addLayout(text_col, 1)
+
+        if status == "completed":
+            badge = QLabel("\u2714 Translated")
+            badge.setStyleSheet(
+                "color: #7ec87e; background: rgba(126, 200, 126, 0.12);"
+                " border: 1px solid #7ec87e; border-radius: 10px;"
+                " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
+            )
+        elif status in ("failed", "qa_failed"):
+            badge = QLabel("\u26a0 " + ("QA failed" if status == "qa_failed" else "Failed"))
+            badge.setStyleSheet(
+                "color: #ff9e6d; background: rgba(255, 158, 109, 0.12);"
+                " border: 1px solid #ff9e6d; border-radius: 10px;"
+                " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
+            )
+        elif status == "in_progress":
+            badge = QLabel("\u23f3 Working")
+            badge.setStyleSheet(
+                "color: #ffd166; background: rgba(255, 209, 102, 0.12);"
+                " border: 1px solid #ffd166; border-radius: 10px;"
+                " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
+            )
+        else:
+            badge = QLabel("Pending")
+            badge.setStyleSheet(
+                "color: #7a8599; background: #2a2a3e;"
+                " border: 1px solid #3a3a5e; border-radius: 10px;"
+                " padding: 2px 10px; font-size: 8pt;"
+            )
+        layout.addWidget(badge, 0, Qt.AlignRight)
+
+    def mousePressEvent(self, event):
+        self.activated.emit(int(self.info.get("index", 0)))
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # EPUB Reader — background loader thread
 # ---------------------------------------------------------------------------
 
@@ -1500,7 +2669,8 @@ _READER_THEMES = [
 class EpubReaderDialog(QDialog):
     """EPUB reader with chapter navigation, layout modes, and theme support."""
 
-    def __init__(self, epub_path: str, config: dict | None = None, parent=None):
+    def __init__(self, epub_path: str, config: dict | None = None, parent=None,
+                 initial_chapter: int | None = None):
         super().__init__(parent)
         self._epub_path = epub_path
         self._config = config or {}
@@ -1513,6 +2683,10 @@ class EpubReaderDialog(QDialog):
         self._font_family = self._config.get('epub_reader_font_family', 'Georgia')
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
+        # Optional — caller can request opening at a specific chapter index.
+        # The index is clamped to the available chapter range once the EPUB
+        # has finished loading (see _on_epub_loaded_from_cache).
+        self._initial_chapter = initial_chapter if isinstance(initial_chapter, int) and initial_chapter >= 0 else None
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
         self._loader_thread: _EpubLoaderThread | None = None
@@ -1993,13 +3167,20 @@ class EpubReaderDialog(QDialog):
         self._content_widget.show()
 
         if self._chapters:
-            # Select first chapter silently — the priming sequence below
+            # Honor an explicit initial chapter if one was requested by the
+            # caller; otherwise default to the first chapter. The index is
+            # clamped to the loaded chapter range so stale requests (e.g. a
+            # chapter that was removed between sessions) fall back cleanly.
+            initial = 0
+            if self._initial_chapter is not None:
+                initial = max(0, min(self._initial_chapter, len(self._chapters) - 1))
+            # Select initial chapter silently — the priming sequence below
             # drives the initial render so we don't want setCurrentRow to
             # also fire _on_chapter_selected.
             self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(0)
+            self._toc_list.setCurrentRow(initial)
             self._toc_list.blockSignals(False)
-            self._current_row = 0
+            self._current_row = initial
             self._current_page = 0
 
             # Prime the reader: if we're opening in a paginated mode
