@@ -1524,15 +1524,15 @@ SIZE_6XL = "6xl"
 _ALL_SIZES = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL, SIZE_5XL, SIZE_6XL]
 
 _SIZE_PRESETS = {
-    SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8pt", "title_max_len": 18, "spacing": 3},
-    SIZE_NORMAL:  {"card_w": 140, "cover_h": 175, "title_size": "8.5pt", "title_max_len": 24, "spacing": 4},
-    SIZE_LARGE:   {"card_w": 180, "cover_h": 225, "title_size": "9pt", "title_max_len": 32, "spacing": 5},
-    SIZE_XL:      {"card_w": 230, "cover_h": 290, "title_size": "9.5pt", "title_max_len": 40, "spacing": 6},
-    SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10pt", "title_max_len": 50, "spacing": 8},
-    SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "10.5pt", "title_max_len": 60, "spacing": 10},
-    SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11pt", "title_max_len": 70, "spacing": 12},
-    SIZE_5XL:     {"card_w": 530, "cover_h": 660, "title_size": "11.5pt", "title_max_len": 80, "spacing": 14},
-    SIZE_6XL:     {"card_w": 630, "cover_h": 790, "title_size": "12pt", "title_max_len": 90, "spacing": 16},
+    SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8pt", "title_max_len": 36, "title_max_h": 64, "spacing": 3},
+    SIZE_NORMAL:  {"card_w": 140, "cover_h": 175, "title_size": "8.5pt", "title_max_len": 48, "title_max_h": 72, "spacing": 4},
+    SIZE_LARGE:   {"card_w": 180, "cover_h": 225, "title_size": "9pt", "title_max_len": 64, "title_max_h": 80, "spacing": 5},
+    SIZE_XL:      {"card_w": 230, "cover_h": 290, "title_size": "9.5pt", "title_max_len": 80, "title_max_h": 88, "spacing": 6},
+    SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10pt", "title_max_len": 100, "title_max_h": 96, "spacing": 8},
+    SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "10.5pt", "title_max_len": 120, "title_max_h": 104, "spacing": 10},
+    SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11pt", "title_max_len": 140, "title_max_h": 112, "spacing": 12},
+    SIZE_5XL:     {"card_w": 530, "cover_h": 660, "title_size": "11.5pt", "title_max_len": 160, "title_max_h": 120, "spacing": 14},
+    SIZE_6XL:     {"card_w": 630, "cover_h": 790, "title_size": "12pt", "title_max_len": 180, "title_max_h": 128, "spacing": 16},
 }
 
 
@@ -1877,7 +1877,7 @@ class _BookCard(QFrame):
             title = title[:max_len - 2] + "…"
         title_lbl = QLabel(title)
         title_lbl.setWordWrap(True)
-        title_lbl.setMaximumHeight(36)
+        title_lbl.setMaximumHeight(p.get("title_max_h", 36))
         title_lbl.setAttribute(Qt.WA_TranslucentBackground)
         title_lbl.setStyleSheet(f"color: #e0e0e0; font-size: {p.get('title_size', '9pt')}; font-weight: bold; background: transparent;")
         title_lbl.setToolTip(book["name"])
