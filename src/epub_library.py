@@ -184,10 +184,19 @@ def _origins_file() -> str:
     return os.path.join(get_library_dir(), "library_origins.txt")
 
 
-# Structured origins format (v2):
-#   { "version": 2,
+# Structured origins format (v3):
+#   { "version": 3,
 #     "raw":        { "<basename in Library/Raw>":        "<absolute original path>" },
-#     "translated": { "<basename in Library/Translated>": "<absolute original path>" } }
+#     "translated": { "<basename in Library/Translated>": "<absolute original path>" },
+#     "pairs":      { "<basename in Library/Translated>": "<basename in Library/Raw>" } }
+#
+# The ``pairs`` bucket is a direct translated↔raw link for books whose
+# compiled and source EPUBs were organized together. It's consulted by
+# :func:`_find_raw_source_for_library_epub` *first* because filename-stem
+# matching fails when the raw is named in one language and the compiled
+# in another (common for translations) — and the output-folder fallback
+# breaks as soon as that folder is deleted or its ``source_epub.txt``
+# sidecar drifts out of sync.
 #
 # Legacy v1 format was a flat ``{basename: original_path}`` dict and is
 # promoted into the ``translated`` bucket on read so the user's existing
@@ -201,19 +210,22 @@ def _load_origins() -> dict:
         with open(_origins_file(), "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"version": 2, "raw": {}, "translated": {}}
+        return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
     if not isinstance(data, dict):
-        return {"version": 2, "raw": {}, "translated": {}}
+        return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
     # Legacy flat mapping → promote to ``translated``.
     if "version" not in data and "raw" not in data and "translated" not in data:
-        return {"version": 2, "raw": {}, "translated": dict(data)}
-    data.setdefault("version", 2)
+        return {"version": 3, "raw": {}, "translated": dict(data), "pairs": {}}
+    data.setdefault("version", 3)
     data.setdefault("raw", {})
     data.setdefault("translated", {})
+    data.setdefault("pairs", {})
     if not isinstance(data["raw"], dict):
         data["raw"] = {}
     if not isinstance(data["translated"], dict):
         data["translated"] = {}
+    if not isinstance(data["pairs"], dict):
+        data["pairs"] = {}
     return data
 
 
@@ -1002,13 +1014,18 @@ def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
     and has to recover the original source by name matching + the origins
     registry. Search order:
 
+      0. ``library_origins['pairs']`` — an explicit translated↔raw
+         mapping written at organize time. This is the ONLY step that
+         survives a raw whose filename stem doesn't match the compiled
+         EPUB's stem (e.g. a Korean raw paired with an English
+         translation), which is the common case for real translations.
       1. ``Library/Raw/<same-stem>.epub`` — direct basename match, the
          common case for files organized into the library together.
       2. ``load_library_raw_inputs()`` — any registered raw input whose
          filename stem matches.
-      3. ``library_origins['translated']`` — when this compiled EPUB was
-         organized from an output folder, that folder's ``source_epub.txt``
-         / Library/Raw match is usually the raw counterpart.
+      3. ``library_origins['translated']`` → source output folder →
+         ``source_epub.txt`` pointer. Works until the output folder is
+         deleted or the sidecar is stale.
 
     Returns an absolute path string, or ``""`` when nothing matched.
     """
@@ -1017,8 +1034,21 @@ def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
     stem = os.path.splitext(os.path.basename(library_epub_path))[0]
     if not stem:
         return ""
-    # 1. Library/Raw/<stem>.epub (case-insensitive extension match)
     raw_dir = get_library_raw_dir()
+    # 0. Explicit translated→raw pairing persisted at organize time.
+    try:
+        origins = _load_origins()
+        pairs = origins.get("pairs", {}) or {}
+        pair_raw_basename = pairs.get(os.path.basename(library_epub_path))
+        if pair_raw_basename:
+            pair_path = os.path.join(raw_dir, pair_raw_basename)
+            if os.path.isfile(pair_path):
+                return os.path.abspath(pair_path)
+    except Exception:
+        logger.debug("Library-raw pairs lookup failed: %s",
+                     traceback.format_exc())
+        origins = {}
+    # 1. Library/Raw/<stem>.epub (case-insensitive extension match)
     try:
         with os.scandir(raw_dir) as it:
             for entry in it:
@@ -1042,8 +1072,7 @@ def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
             return os.path.abspath(p)
     # 3. origins["translated"] → source output folder → raw resolver
     try:
-        origins = _load_origins()
-        trans_map = origins.get("translated", {}) or {}
+        trans_map = (origins or _load_origins()).get("translated", {}) or {}
         orig_path = trans_map.get(os.path.basename(library_epub_path))
         if orig_path:
             orig_folder = os.path.dirname(orig_path)
@@ -3469,10 +3498,17 @@ class EpubLibraryDialog(QDialog):
         origins = _load_origins()
         raw_origins = dict(origins.get("raw", {}) or {})
         trans_origins = dict(origins.get("translated", {}) or {})
+        pair_map = dict(origins.get("pairs", {}) or {})
 
         moved_raw = 0
         moved_trans = 0
         errors: list[str] = []
+        # Per-book dest-basename trackers (keyed by ``id(book)``) so we can
+        # pair translated↔raw after both moves finish. Books that only
+        # have one side moved in this run contribute a partial entry and
+        # we fall back to ``raw_source_path`` on the book dict below.
+        raw_dest_by_book: dict[int, str] = {}
+        trans_dest_by_book: dict[int, str] = {}
 
         def _unique_dest(directory: str, base_name: str) -> str:
             cand = os.path.join(directory, base_name)
@@ -3501,6 +3537,7 @@ class EpubLibraryDialog(QDialog):
                             f.write(dest)
                     except OSError as pe:
                         logger.debug("Update source_epub.txt failed: %s", pe)
+                raw_dest_by_book[id(book)] = os.path.basename(dest)
                 moved_raw += 1
             except Exception as exc:
                 errors.append(f"raw:{os.path.basename(src)}: {exc}")
@@ -3511,12 +3548,46 @@ class EpubLibraryDialog(QDialog):
                 dest = _unique_dest(trans_dir, os.path.basename(src))
                 shutil.move(src, dest)
                 trans_origins[os.path.basename(dest)] = os.path.abspath(src)
+                trans_dest_by_book[id(book)] = os.path.basename(dest)
                 moved_trans += 1
             except Exception as exc:
                 errors.append(f"translated:{os.path.basename(src)}: {exc}")
 
+        # Pair up translated↔raw so later lookups don't have to rely on
+        # filename-stem matching (which fails when raw and translated are
+        # in different languages) or the output-folder sidecar (which
+        # fails if that folder is later deleted). For each book whose
+        # translated was moved, its raw is either:
+        #   * in ``raw_dest_by_book`` (we just organized it), or
+        #   * already filed under ``Library/Raw`` from a previous import
+        #     (pick it up via the book's ``raw_source_path``).
+        for book_id, trans_basename in trans_dest_by_book.items():
+            raw_basename = raw_dest_by_book.get(book_id)
+            if not raw_basename:
+                # Fall back to the book's pre-existing raw if it already
+                # lives in Library/Raw.
+                paired_book = None
+                for source_list in (self._completed_books,
+                                    self._in_progress_books):
+                    for b in source_list:
+                        if id(b) == book_id:
+                            paired_book = b
+                            break
+                    if paired_book is not None:
+                        break
+                if paired_book is not None:
+                    rp = paired_book.get("raw_source_path") or ""
+                    if rp and os.path.isfile(rp):
+                        rp_parent = os.path.normcase(os.path.normpath(
+                            os.path.abspath(os.path.dirname(rp))))
+                        if rp_parent == raw_abs:
+                            raw_basename = os.path.basename(rp)
+            if raw_basename:
+                pair_map[trans_basename] = raw_basename
+
         origins["raw"] = raw_origins
         origins["translated"] = trans_origins
+        origins["pairs"] = pair_map
         _save_origins(origins)
 
         summary_parts = []
@@ -3547,6 +3618,7 @@ class EpubLibraryDialog(QDialog):
         origins = _load_origins()
         raw_map = dict(origins.get("raw", {}) or {})
         trans_map = dict(origins.get("translated", {}) or {})
+        pair_map = dict(origins.get("pairs", {}) or {})
         if not raw_map and not trans_map:
             QMessageBox.information(
                 self, "Undo Move",
@@ -3625,6 +3697,16 @@ class EpubLibraryDialog(QDialog):
                     remaining[lib_name] = orig_path
                     errors.append(f"raw:{lib_name}: {exc}")
             origins["raw"] = remaining
+            # Drop any pair entries that reference a raw basename we
+            # just restored — the raw no longer lives in Library/Raw
+            # so a future ``_find_raw_source_for_library_epub`` lookup
+            # would otherwise return a stale path.
+            restored_basenames = set(raw_map.keys()) - set(remaining.keys())
+            if restored_basenames and pair_map:
+                pair_map = {
+                    tb: rb for tb, rb in pair_map.items()
+                    if rb not in restored_basenames
+                }
 
         if restore_trans and trans_map:
             trans_dir = get_library_translated_dir()
@@ -3645,7 +3727,16 @@ class EpubLibraryDialog(QDialog):
                     remaining[lib_name] = orig_path
                     errors.append(f"translated:{lib_name}: {exc}")
             origins["translated"] = remaining
+            # A translated file that's been restored out of Library/
+            # Translated can no longer be looked up as a pair key.
+            restored_trans_basenames = set(trans_map.keys()) - set(remaining.keys())
+            if restored_trans_basenames and pair_map:
+                pair_map = {
+                    tb: rb for tb, rb in pair_map.items()
+                    if tb not in restored_trans_basenames
+                }
 
+        origins["pairs"] = pair_map
         _save_origins(origins)
 
         summary_parts = []
@@ -6006,16 +6097,74 @@ class BookDetailsDialog(QDialog):
             QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
 
     def _open_output_folder(self):
-        folder = self._book.get("output_folder") or os.path.dirname(self._book.get("path", ""))
-        if folder:
-            _open_folder_in_explorer(folder)
+        """Open the book's output folder in the system file explorer.
+
+        Resolution order (stops at the first directory that exists on disk):
+          1. ``book['output_folder']`` — set by ``scan_output_folders`` for
+             in-progress + promoted-compiled cards.
+          2. ``library_origins['translated']`` — for Library/Translated
+             entries this points at the pre-organize path, whose parent
+             is the original output folder. That folder usually still
+             exists after organize (only the compiled EPUB was moved out).
+          3. ``os.path.dirname(book['path'])`` — last resort (opens
+             Library/Translated for organized books).
+        """
+        candidates: list[str] = []
+        out = self._book.get("output_folder") or ""
+        if out:
+            candidates.append(out)
+        if self._book.get("in_library"):
+            try:
+                origins = _load_origins()
+                trans_map = origins.get("translated", {}) or {}
+                orig_path = trans_map.get(os.path.basename(
+                    self._book.get("path", "")))
+                if orig_path:
+                    orig_folder = os.path.dirname(str(orig_path))
+                    if orig_folder:
+                        candidates.append(orig_folder)
+            except Exception:
+                logger.debug("Output-folder origins lookup failed: %s",
+                             traceback.format_exc())
+        fallback = os.path.dirname(self._book.get("path", "") or "")
+        if fallback:
+            candidates.append(fallback)
+        for folder in candidates:
+            if folder and os.path.isdir(folder):
+                _open_folder_in_explorer(folder)
+                return
 
     def _reveal_source(self):
-        # Prefer the resolved raw source (EPUB/TXT/PDF) — for in-progress
-        # cards ``book['path']`` is the output folder, which we can't pass
-        # to the "reveal in explorer" helper as a file selection.
-        path = (self._book.get("raw_source_path", "")
-                or self._book.get("path", "") or "")
+        """Reveal the raw source file in the system file explorer.
+
+        Falls back through progressively weaker signals so organized
+        library entries whose book dict pre-dates the ``pairs`` registry
+        still land on the correct raw file:
+          1. ``book['raw_source_path']`` — populated by the scanners when
+             they can resolve it directly.
+          2. ``_find_raw_source_for_library_epub`` — re-runs the full
+             lookup (pairs → stem match → origins) for library entries
+             whose cached dict was built before the pair was written.
+          3. ``book['path']`` — last resort for non-EPUB / non-library
+             cards; for in-progress cards this is the output folder,
+             which the OS viewer will open as a directory.
+        """
+        path = self._book.get("raw_source_path", "") or ""
+        if (not path or not os.path.isfile(path)) and self._book.get("in_library"):
+            lib_path = self._book.get("path", "") or ""
+            try:
+                resolved = _find_raw_source_for_library_epub(lib_path)
+            except Exception:
+                resolved = ""
+                logger.debug("Reveal-source library lookup failed: %s",
+                             traceback.format_exc())
+            if resolved and os.path.isfile(resolved):
+                # Cache on the book dict so subsequent actions in this
+                # dialog (e.g. the reader's Raw toggle) pick it up too.
+                self._book["raw_source_path"] = resolved
+                path = resolved
+        if not path or not os.path.isfile(path):
+            path = self._book.get("path", "") or ""
         if path and os.path.isfile(path):
             _open_folder_in_explorer(path)
 
