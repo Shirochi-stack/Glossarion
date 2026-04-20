@@ -1863,7 +1863,13 @@ class _BookCard(QFrame):
         self.cover_label = QLabel()
         self.cover_label.setFixedSize(self._card_w - 8, self._cover_h)
         self.cover_label.setAlignment(Qt.AlignCenter)
-        self.cover_label.setStyleSheet("background: #2a2a3e; border-radius: 4px; color: #555; font-size: 28pt;")
+        # Cover background matches the card bg so the placeholder doesn't
+        # read as a "blackboard" rectangle behind a small Halgakos icon;
+        # real covers still fill the label and dominate whatever bg is
+        # underneath.
+        self.cover_label.setStyleSheet(
+            "background: transparent; border-radius: 4px; color: #555; font-size: 28pt;"
+        )
         icon_path = _find_halgakos_icon()
         if icon_path:
             self._set_fallback_icon(icon_path)
@@ -4237,8 +4243,10 @@ class BookDetailsDialog(QDialog):
         self._cover_lbl = QLabel()
         self._cover_lbl.setFixedSize(240, 340)
         self._cover_lbl.setAlignment(Qt.AlignCenter)
+        # Match the dialog bg so the cover area blends cleanly instead of
+        # reading as a lighter-colored panel around a small Halgakos fallback.
         self._cover_lbl.setStyleSheet(
-            "background: #2a2a3e; border-radius: 6px; color: #555; font-size: 32pt;"
+            "background: transparent; border-radius: 6px; color: #555; font-size: 32pt;"
         )
         # Initial placeholder: Halgakos brand icon (or emoji as last resort).
         # ``_apply_halgakos_fallback`` is reused by ``_on_details_ready`` so
@@ -4395,26 +4403,16 @@ class BookDetailsDialog(QDialog):
         # "Show special files" toggle mirrors the Progress Manager's behavior.
         # Hidden by default for EPUBs so files like cover/nav/toc/info don't
         # clutter the list; user state is persisted via config.
-        from PySide6.QtWidgets import QCheckBox
-        self._special_cb = QCheckBox("Show special files (cover, nav, toc)")
+        # Styled with a visible ✓ overlay so it matches the rest of the
+        # app's checkboxes (see :meth:`TranslatorGUI._create_styled_checkbox`).
+        self._special_cb = self._create_app_styled_checkbox(
+            "Show special files (cover, nav, toc)"
+        )
         self._special_cb.setToolTip(
             "When enabled, shows special files (files without chapter numbers "
             "like cover, nav, toc, info, message, etc.)"
         )
         self._special_cb.setChecked(self._show_special_files)
-        self._special_cb.setStyleSheet("""
-            QCheckBox { color: #c8cbe0; font-size: 9pt; spacing: 6px; padding: 4px 6px; }
-            QCheckBox::indicator {
-                width: 14px; height: 14px;
-                border: 1px solid #5a9fd4; border-radius: 2px;
-                background-color: #1e1e2e;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #5a9fd4; border-color: #5a9fd4;
-                image: none;
-            }
-            QCheckBox::indicator:hover { border-color: #7bb3e0; }
-        """)
         self._special_cb.toggled.connect(self._on_special_files_toggled)
         chap_header.addWidget(self._special_cb)
         self._toc_search = QLineEdit()
@@ -4466,6 +4464,75 @@ class BookDetailsDialog(QDialog):
         )
         self._chap_layout.addWidget(loading)
         self._chap_layout.addStretch()
+
+    def _create_app_styled_checkbox(self, text: str):
+        """Return a QCheckBox styled to match the rest of the app.
+
+        Mirrors :meth:`TranslatorGUI._create_styled_checkbox` — Qt's
+        default ``QCheckBox::indicator:checked`` just fills the box with
+        the checked color, which users find unclear. The overlay adds an
+        explicit ✓ glyph positioned over the indicator so the checked
+        state reads at a glance.
+        """
+        from PySide6.QtWidgets import QCheckBox
+        cb = QCheckBox(text)
+        cb.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+                font-size: 9pt;
+                padding: 4px 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled { color: #666666; }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        # Checkmark overlay — a transparent child QLabel positioned over
+        # the indicator. Shown only when checked.
+        check = QLabel("\u2713", cb)
+        check.setStyleSheet(
+            "QLabel { color: white; background: transparent;"
+            " font-weight: bold; font-size: 11px; }"
+        )
+        check.setAlignment(Qt.AlignCenter)
+        check.hide()
+        check.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def _position():
+            try:
+                check.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+
+        def _update():
+            try:
+                if cb.isChecked():
+                    _position()
+                    check.show()
+                else:
+                    check.hide()
+            except RuntimeError:
+                pass
+
+        cb.stateChanged.connect(_update)
+        QTimer.singleShot(0, _update)
+        return cb
 
     def _apply_halgakos_fallback(self):
         """Render the Halgakos brand icon into the cover label.
