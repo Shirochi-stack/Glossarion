@@ -256,6 +256,12 @@ def _load_epub_cache(epub_path: str):
     list of source item names (one per chapter entry) or ``None`` on failure.
     ``filenames`` is empty when the cache predates that field — callers must
     handle that gracefully.
+
+    Cache entries with an **empty chapter list** are treated as invalid and
+    discarded. They're almost always the fingerprint of a past load failure
+    (e.g. an EPUB with non-standard ``media-type="text/html"`` that the old
+    strict ITEM_DOCUMENT walker couldn't see). Returning None here forces a
+    re-parse with the current, lenient spine-first resolver.
     """
     import pickle
     try:
@@ -265,7 +271,15 @@ def _load_epub_cache(epub_path: str):
             with open(cache_file, "rb") as f:
                 data = pickle.load(f)
             if isinstance(data, dict) and "chapters" in data and "images" in data:
-                return data["chapters"], data["images"], data.get("filenames", [])
+                chapters = data["chapters"] or []
+                if not chapters:
+                    # Stale / bad cache — drop it and force a fresh parse.
+                    try:
+                        os.remove(cache_file)
+                    except OSError:
+                        pass
+                    return None
+                return chapters, data["images"], data.get("filenames", [])
     except Exception:
         pass
     return None
@@ -5930,9 +5944,81 @@ class _EpubLoaderThread(QThread):
                     if basename not in images:
                         images[basename] = item.get_content()
 
+            # --- Chapter item resolution ------------------------------------
+            #
+            # Strategy (matches Calibre / KOReader / iBooks leniency):
+            #
+            #   1. **Spine-first.** Walk ``book.spine`` in reading order and
+            #      pick up every item it references. The spine is
+            #      authoritative; anything that's in the spine IS a content
+            #      document regardless of what media-type the manifest
+            #      declares. This fixes EPUBs produced by buggy tools (e.g.
+            #      WebToEpub) that mark every chapter as
+            #      ``media-type="text/html"`` — those become ITEM_UNKNOWN
+            #      inside ebooklib and are invisible to
+            #      ``get_items_of_type(ITEM_DOCUMENT)`` even though they're
+            #      perfectly readable HTML.
+            #
+            #   2. **ITEM_DOCUMENT fallback.** If the spine is missing /
+            #      empty / unusable, fall back to ebooklib's strict
+            #      classification. This preserves the historical behavior
+            #      for well-formed EPUBs whose spine pointer is broken but
+            #      whose manifest is clean.
+            #
+            #   3. **Extension-only last resort.** If neither pass turned
+            #      up anything beyond (at most) a cover page, sweep the
+            #      full manifest and include every item whose filename ends
+            #      in .html / .xhtml / .htm. Ordering is then manifest
+            #      order — not ideal, but vastly better than an empty
+            #      "No readable content" dialog.
+            _HTML_EXTS = (".html", ".xhtml", ".htm")
+
+            chapter_items: list = []
+            seen_names: set[str] = set()
+
+            def _add_item(it) -> None:
+                if it is None:
+                    return
+                name = it.get_name() or ""
+                if not name or name in seen_names:
+                    return
+                if not name.lower().endswith(_HTML_EXTS):
+                    return
+                seen_names.add(name)
+                chapter_items.append(it)
+
+            # Pass 1: spine order.
+            try:
+                spine = getattr(book, "spine", None) or []
+                for entry in spine:
+                    # Spine entries are commonly (idref, linear_flag) but
+                    # some producers emit a bare idref string. Accept both.
+                    if isinstance(entry, (tuple, list)):
+                        item_id = entry[0] if entry else None
+                    else:
+                        item_id = entry
+                    if not item_id:
+                        continue
+                    _add_item(book.get_item_with_id(str(item_id)))
+            except Exception:
+                logger.debug("Spine walk failed: %s", traceback.format_exc())
+
+            # Pass 2: ebooklib's ITEM_DOCUMENT classification.
+            if not chapter_items:
+                for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                    _add_item(item)
+
+            # Pass 3: extension-only sweep across the whole manifest. Only
+            # runs when we found nothing (or just a single cover-like item)
+            # via the authoritative passes, so well-formed EPUBs don't pay
+            # any extra cost here.
+            if len(chapter_items) <= 1:
+                for item in book.get_items():
+                    _add_item(item)
+
             chapters: list[tuple[str, str]] = []
             filenames: list[str] = []
-            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            for item in chapter_items:
                 try:
                     content = item.get_content().decode("utf-8", errors="replace")
                     soup = BeautifulSoup(content, "html.parser")
