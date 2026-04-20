@@ -4244,29 +4244,66 @@ class EpubLibraryDialog(QDialog):
     def _delete_books_prompt(self, books: list):
         """Confirm + delete the backing file / folder for each book.
 
-        For ``type == "in_progress"`` cards the target is the output folder
-        (``book['output_folder']`` or ``book['path']``) and we remove it
-        recursively. For every other card (completed EPUB / TXT / PDF /
-        Library entry) we delete ``book['path']`` as a file. Deletions
-        are irreversible — the user sees a single confirmation dialog
-        summarizing everything that will be removed.
+        Target resolution:
+
+          * **Library entries** (``in_library=True``) — delete
+            ``book['path']`` as a single file. These live in
+            ``Library/Translated`` and don't own a surrounding workspace.
+          * **Output-folder cards** (``type == "in_progress"`` OR any
+            completed card with a resolvable ``output_folder``) —
+            delete the folder recursively so every sibling artefact
+            goes with it. This previously only fired for in-progress
+            cards, which meant a compiled PDF sitting next to a
+            ``*_translated.html`` would only remove the PDF — the next
+            scan would promote the HTML as the new compiled output and
+            re-spawn a card over the same folder, forcing the user to
+            hit Delete a second time.
+          * Everything else — delete ``book['path']`` as a plain file.
+
+        Deletions are irreversible — the user sees a single
+        confirmation dialog summarizing everything that will be
+        removed.
         """
         if not books:
             return
         # Resolve targets: (label, path, is_folder)
         targets: list[tuple[str, str, bool]] = []
+        seen_targets: set[str] = set()
+
+        def _queue(label: str, pth: str, is_folder: bool) -> None:
+            key = os.path.normcase(os.path.normpath(os.path.abspath(pth)))
+            if key in seen_targets:
+                return
+            seen_targets.add(key)
+            targets.append((label, pth, is_folder))
+
         for b in books:
             file_type = b.get("type", "epub")
+            in_library = bool(b.get("in_library"))
+            output_folder = b.get("output_folder") or ""
+            # In-progress cards always delete the folder.
             if file_type == "in_progress":
-                folder = b.get("output_folder") or b.get("path", "") or ""
+                folder = output_folder or b.get("path", "") or ""
                 if folder and os.path.isdir(folder):
-                    targets.append((b.get("name") or os.path.basename(folder),
-                                    folder, True))
-            else:
-                p = b.get("path", "") or ""
-                if p and os.path.isfile(p):
-                    targets.append((b.get("name") or os.path.basename(p),
-                                    p, False))
+                    _queue(b.get("name") or os.path.basename(folder),
+                           folder, True)
+                continue
+            # Completed but NOT library-filed: the card represents the
+            # entire output-folder workspace (compiled file plus any
+            # ``response_*``, ``_translated.*``, ``images/``, etc.).
+            # Delete the folder so a single click actually cleans up
+            # every artefact — otherwise the next auto-refresh scan
+            # would promote the leftover ``_translated.html`` /
+            # ``_translated.txt`` into a new card.
+            if (not in_library and output_folder
+                    and os.path.isdir(output_folder)):
+                _queue(b.get("name") or os.path.basename(output_folder),
+                       output_folder, True)
+                continue
+            # Library entry (or any other loose file-backed card).
+            p = b.get("path", "") or ""
+            if p and os.path.isfile(p):
+                _queue(b.get("name") or os.path.basename(p), p, False)
         if not targets:
             QMessageBox.information(
                 self, "Delete",
