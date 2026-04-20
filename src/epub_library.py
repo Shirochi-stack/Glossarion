@@ -2891,21 +2891,35 @@ class EpubLibraryDialog(QDialog):
         )
         if not paths:
             return
-        self._import_paths_into_library(paths, source="picker")
+        self._import_paths_into_library(paths, source="picker", target="raw")
 
-    def _import_paths_into_library(self, paths, source: str = "picker"):
+    def _import_paths_into_library(self, paths, source: str = "picker",
+                                   target: str = "raw"):
         """Core import pipeline used by both the file picker and drag-drop.
 
-        Copies each supported file into ``Library/Raw`` (counter-suffix on
-        name collision), scaffolds an output folder with a
-        ``source_epub.txt`` sidecar + empty ``translation_progress.json``,
-        and refreshes the library once all files have been processed.
-        Shows a single summary dialog at the end so batch imports don't
-        spam modal messages.
+        Copies each supported file into the library (counter-suffix on name
+        collision), and refreshes the library once all files have been
+        processed. Shows a single summary dialog at the end so batch imports
+        don't spam modal messages.
+
+        *target* selects the destination:
+          * ``"raw"`` (default): copy into ``Library/Raw`` and scaffold an
+            output folder with a ``source_epub.txt`` sidecar + empty
+            ``translation_progress.json``. Used by the "Import EPUB" button
+            and by drag-drop while the **In Progress** tab is active.
+          * ``"translated"``: copy EPUBs into ``Library/Translated`` with no
+            scaffolding (the files are already finished compiled outputs).
+            Only ``.epub`` is accepted; other types are reported as skipped.
+            Used by drag-drop while the **Completed** tab is active.
         """
         if not paths:
             return
-        supported_exts = (".epub", ".txt", ".pdf", ".html", ".htm")
+        if target == "translated":
+            supported_exts = (".epub",)
+            dest_label = "Library/Translated"
+        else:
+            supported_exts = (".epub", ".txt", ".pdf", ".html", ".htm")
+            dest_label = "Library/Raw"
         imported: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
@@ -2918,9 +2932,20 @@ class EpubLibraryDialog(QDialog):
                     skipped.append(f"{os.path.basename(raw_path)} (not a file)")
                     continue
                 if not path.lower().endswith(supported_exts):
-                    skipped.append(f"{os.path.basename(path)} (unsupported type)")
+                    # On the Completed tab only .epub makes sense; non-EPUBs
+                    # are called out explicitly so the user understands why
+                    # a mixed drop didn't land.
+                    if target == "translated":
+                        skipped.append(
+                            f"{os.path.basename(path)} "
+                            f"(only EPUBs go to Library/Translated)"
+                        )
+                    else:
+                        skipped.append(
+                            f"{os.path.basename(path)} (unsupported type)"
+                        )
                     continue
-                dest = self._import_single_file(path)
+                dest = self._import_single_file(path, target=target)
                 if dest:
                     imported.append(dest)
             except Exception as exc:
@@ -2938,11 +2963,12 @@ class EpubLibraryDialog(QDialog):
             if imported and not errors:
                 self._show_toast(
                     f"\u2705  Imported {len(imported)} file"
-                    f"{'s' if len(imported) != 1 else ''} into Library/Raw"
+                    f"{'s' if len(imported) != 1 else ''} into {dest_label}"
                 )
             elif imported and errors:
                 self._show_toast(
-                    f"\u26a0\ufe0f  Imported {len(imported)}, failed {len(errors)}"
+                    f"\u26a0\ufe0f  Imported {len(imported)} into {dest_label}, "
+                    f"failed {len(errors)}"
                 )
             elif errors:
                 self._show_toast(
@@ -2950,10 +2976,19 @@ class EpubLibraryDialog(QDialog):
                     f"{'s' if len(errors) != 1 else ''})"
                 )
             elif skipped:
-                self._show_toast(
-                    f"\u2139\ufe0f  Skipped {len(skipped)} unsupported file"
-                    f"{'s' if len(skipped) != 1 else ''}"
-                )
+                # Translated-target skips are already self-describing
+                # ("only EPUBs go to Library/Translated"); use a matching
+                # short toast so users understand why nothing landed.
+                if target == "translated":
+                    self._show_toast(
+                        f"\u2139\ufe0f  Only EPUBs can be dropped onto the "
+                        f"Completed tab ({len(skipped)} skipped)"
+                    )
+                else:
+                    self._show_toast(
+                        f"\u2139\ufe0f  Skipped {len(skipped)} unsupported "
+                        f"file{'s' if len(skipped) != 1 else ''}"
+                    )
             return
         # Summary dialog — one message per batch, not per file.
         title = "Import"
@@ -2961,7 +2996,7 @@ class EpubLibraryDialog(QDialog):
         if imported:
             parts.append(
                 f"Imported {len(imported)} file{'s' if len(imported) != 1 else ''} "
-                f"into Library/Raw."
+                f"into {dest_label}."
             )
             if len(imported) <= 10:
                 parts.append("\n".join(
@@ -2991,16 +3026,25 @@ class EpubLibraryDialog(QDialog):
         else:
             QMessageBox.warning(self, title, body)
 
-    def _import_single_file(self, path: str) -> str | None:
-        """Copy *path* into Library/Raw and scaffold its output folder.
+    def _import_single_file(self, path: str, target: str = "raw") -> str | None:
+        """Copy *path* into the appropriate library subfolder.
 
-        Returns the destination path in Library/Raw on success, None on
-        failure. Raises no exceptions — failures are logged and surfaced
-        via the caller's aggregated error list.
+        *target* is either ``"raw"`` (→ ``Library/Raw`` + output-folder
+        scaffold for the translator) or ``"translated"`` (→
+        ``Library/Translated``, no scaffold — the file is treated as a
+        finished compiled EPUB). Name collisions append a counter suffix
+        (``name (2).epub``) so no pre-existing file is clobbered.
+
+        Returns the destination path on success, None on failure. Raises
+        no exceptions — failures are logged and surfaced via the caller's
+        aggregated error list.
         """
+        if target == "translated":
+            dest_dir = get_library_translated_dir()
+        else:
+            dest_dir = get_library_raw_dir()
         try:
-            raw_dir = get_library_raw_dir()
-            dest = os.path.join(raw_dir, os.path.basename(path))
+            dest = os.path.join(dest_dir, os.path.basename(path))
             # Don't overwrite a different file with the same name — append a
             # counter suffix like "name (2).epub" as File Explorer does.
             if (os.path.abspath(path) != os.path.abspath(dest)
@@ -3008,18 +3052,25 @@ class EpubLibraryDialog(QDialog):
                 stem, ext = os.path.splitext(os.path.basename(path))
                 counter = 2
                 while True:
-                    candidate = os.path.join(raw_dir, f"{stem} ({counter}){ext}")
+                    candidate = os.path.join(dest_dir, f"{stem} ({counter}){ext}")
                     if not os.path.isfile(candidate):
                         dest = candidate
                         break
                     counter += 1
             if os.path.abspath(path) != os.path.abspath(dest):
                 shutil.copy2(path, dest)
-            record_library_raw_input(dest)
+            # Only raw imports feed the translator pipeline — the raw-inputs
+            # registry + per-book output scaffold are meaningless (and
+            # actively misleading) for a finished compiled EPUB that's
+            # being filed under Library/Translated.
+            if target == "raw":
+                record_library_raw_input(dest)
         except Exception as exc:
             logger.error("Import copy failed for %s: %s\n%s",
                          path, exc, traceback.format_exc())
             raise
+        if target != "raw":
+            return dest
         try:
             roots = _resolve_output_roots(self._config)
             if roots:
@@ -3938,18 +3989,39 @@ class EpubLibraryDialog(QDialog):
 
     # -- Drag & drop import -------------------------------------------------
 
-    _DND_SUPPORTED_EXTS = (".epub", ".txt", ".pdf", ".html", ".htm")
+    # Extensions accepted by each tab's drop zone. The In Progress tab
+    # lands everything on the raw source pipeline (EPUB / TXT / PDF /
+    # HTML) while the Completed tab only makes sense for finished
+    # compiled EPUBs, so it filters down to just ``.epub``.
+    _DND_RAW_EXTS = (".epub", ".txt", ".pdf", ".html", ".htm")
+    _DND_TRANSLATED_EXTS = (".epub",)
+
+    def _drop_target_kind(self) -> str:
+        """Return ``"translated"`` when the Completed tab is active, else ``"raw"``."""
+        try:
+            return "translated" if self._tabs.currentIndex() == 1 else "raw"
+        except Exception:
+            return "raw"
+
+    def _allowed_drop_exts(self) -> tuple:
+        """Return the tuple of file extensions currently accepted by the drop zone."""
+        return (self._DND_TRANSLATED_EXTS
+                if self._drop_target_kind() == "translated"
+                else self._DND_RAW_EXTS)
 
     def _dnd_accept_event(self, event) -> bool:
-        """Return True iff the drag payload contains at least one supported file."""
+        """Return True iff the drag payload contains at least one file accepted
+        by the currently active tab (EPUB-only on Completed, EPUB/TXT/PDF/HTML
+        on In Progress)."""
         mime = event.mimeData()
         if not mime or not mime.hasUrls():
             return False
+        allowed = self._allowed_drop_exts()
         for url in mime.urls():
             if not url.isLocalFile():
                 continue
             path = url.toLocalFile()
-            if path and path.lower().endswith(self._DND_SUPPORTED_EXTS):
+            if path and path.lower().endswith(allowed):
                 return True
         return False
 
@@ -3978,40 +4050,57 @@ class EpubLibraryDialog(QDialog):
         if not mime or not mime.hasUrls():
             event.ignore()
             return
+        target = self._drop_target_kind()
+        allowed = self._allowed_drop_exts()
         paths: list[str] = []
         for url in mime.urls():
             if not url.isLocalFile():
                 continue
             p = url.toLocalFile()
-            if p and p.lower().endswith(self._DND_SUPPORTED_EXTS):
+            if p and p.lower().endswith(allowed):
                 paths.append(p)
         if not paths:
             event.ignore()
             return
         event.acceptProposedAction()
-        # Switch to the In Progress tab so the freshly-imported cards are
-        # visible as soon as the scan refresh lands.
-        try:
-            self._tabs.setCurrentIndex(0)
-        except Exception:
-            pass
+        # Stay on the active tab: drops on Completed mean "file these
+        # compiled EPUBs into Library/Translated" and the user should see
+        # the Completed list refresh in-place. Drops on In Progress stay
+        # on that tab so the new Raw import card appears where expected.
+        dest_label = "Library/Translated" if target == "translated" else "Library/Raw"
         # Immediate toast so the user sees something happened even before
         # the import pipeline finishes. The pipeline will replace this with
-        # a final "Imported N" status in :meth:`_import_paths_into_library`.
+        # a final "Imported N into <dest>" status in
+        # :meth:`_import_paths_into_library`.
         self._show_toast(
             f"\U0001f4e5  Importing {len(paths)} file"
-            f"{'s' if len(paths) != 1 else ''}\u2026",
+            f"{'s' if len(paths) != 1 else ''} into {dest_label}\u2026",
             auto_hide_ms=0,
         )
-        self._import_paths_into_library(paths, source="drop")
+        self._import_paths_into_library(paths, source="drop", target=target)
 
     # -- Overlay / toast helpers --------------------------------------------
 
     def _show_drop_overlay(self, visible: bool):
-        """Show / hide the purple "drop to import" overlay panel."""
+        """Show / hide the purple "drop to import" overlay panel.
+
+        The overlay's text is refreshed on every show so the user sees
+        which library subfolder the active tab will route drops into
+        (Raw for In Progress, Translated for Completed).
+        """
         if getattr(self, "_drop_overlay", None) is None:
             return
         if visible:
+            if self._drop_target_kind() == "translated":
+                self._drop_overlay.setText(
+                    "\U0001f4e5\n\nDrop EPUBs to import into Library/Translated\n\n"
+                    "EPUB only"
+                )
+            else:
+                self._drop_overlay.setText(
+                    "\U0001f4e5\n\nDrop files to import into Library/Raw\n\n"
+                    "EPUB \u00b7 PDF \u00b7 TXT \u00b7 HTML"
+                )
             self._reposition_overlays()
             self._drop_overlay.show()
             self._drop_overlay.raise_()
