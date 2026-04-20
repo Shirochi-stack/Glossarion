@@ -8684,54 +8684,102 @@ class MangaTranslator:
                     if 'source' in entry and 'target' in entry and entry['source']:
                         glossary_replacements.append((entry['source'], entry['target']))
             
-            # OPTIMIZATION: Single pass through translations to map to regions
+            # OPTIMIZATION: Single pass through translations to map to regions.
+            # Priority order for each translation key:
+            #   1) Exact match in region_key_map (region.text / normalized / f"[i] ...").
+            #   2) `[N]` index prefix — robust fallback when the API collapses or
+            #      alters whitespace/newlines inside the key (Gemini/Vertex often
+            #      drop newlines between Japanese characters when emitting JSON
+            #      keys). The `[N]` prefix is authoritative for ordering.
+            import re as _re_map
+            _index_prefix_re = _re_map.compile(r'^\s*\[(\d+)\]\s*')
+
+            def _apply_translation(region_idx: int, translated_text: str, match_kind: str) -> None:
+                region = regions[region_idx]
+                # Apply glossary replacements efficiently
+                text = translated_text
+                if text and glossary_replacements:
+                    for source, target in glossary_replacements:
+                        if source in text:
+                            text = text.replace(source, target)
+                # Assign translation
+                result[region.text] = text
+                region.translated_text = text
+                matched_regions.add(region_idx)
+                if text:
+                    all_originals.append(f"[{region_idx+1}] {region.text}")
+                    all_translations.append(f"[{region_idx+1}] {text}")
+                if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                    self._log(
+                        f"  ✅ Matched ({match_kind}): '{region.text[:30]}...' → '{text[:30]}...'",
+                        "debug",
+                    )
+
             matched_regions = set()  # Track which regions got translations
+            index_prefix_fallbacks = 0
             for key, translated_text in translations.items():
+                region_idx = None
+                match_kind = None
                 if key in region_key_map:
                     region_idx = region_key_map[key]
-                    if region_idx not in matched_regions:  # Avoid duplicate assignments
-                        region = regions[region_idx]
-                        
-                        # Apply glossary replacements efficiently
-                        if translated_text and glossary_replacements:
-                            for source, target in glossary_replacements:
-                                if source in translated_text:
-                                    translated_text = translated_text.replace(source, target)
-                        
-                        # Assign translation
-                        result[region.text] = translated_text
-                        region.translated_text = translated_text
-                        matched_regions.add(region_idx)
-                        
-                        if translated_text:
-                            all_originals.append(f"[{region_idx+1}] {region.text}")
-                            all_translations.append(f"[{region_idx+1}] {translated_text}")
-                        
-                        # Debug logging only if enabled
-                        if self.manga_settings.get('advanced', {}).get('debug_mode', False):
-                            self._log(f"  ✅ Matched: '{region.text[:30]}...' → '{translated_text[:30]}...'", "debug")
-            
-            # OPTIMIZATION: Handle unmatched regions (position-based fallback)
-            # Only if counts match exactly and we still have unmatched regions
-            if len(matched_regions) < len(regions) and len(translation_values) == len(regions):
+                    match_kind = "exact"
+                else:
+                    # Fallback: parse `[N]` prefix directly from the key
+                    m = _index_prefix_re.match(key)
+                    if m:
+                        idx = int(m.group(1))
+                        if 0 <= idx < len(regions):
+                            region_idx = idx
+                            match_kind = "index-prefix"
+                            index_prefix_fallbacks += 1
+                if region_idx is None or region_idx in matched_regions:
+                    continue
+                _apply_translation(region_idx, translated_text, match_kind)
+
+            if index_prefix_fallbacks:
+                self._log(
+                    f"  ℹ️ Mapped {index_prefix_fallbacks} translation(s) via [N] index prefix "
+                    f"(API normalized text keys)",
+                    "info",
+                )
+
+            # OPTIMIZATION: Handle unmatched regions (position-based fallback).
+            # Trigger when counts align OR when the API consistently used [N]
+            # prefixes — in that case the order is trustworthy even if counts
+            # don't line up exactly.
+            translations_had_index_prefix = any(
+                isinstance(k, str) and _index_prefix_re.match(k) for k in translations.keys()
+            )
+            if len(matched_regions) < len(regions) and (
+                len(translation_values) == len(regions) or translations_had_index_prefix
+            ):
                 for i, region in enumerate(regions):
-                    if i not in matched_regions and i < len(translation_values):
-                        translated_text = translation_values[i]
-                        
-                        # Apply glossary replacements
-                        if translated_text and glossary_replacements:
-                            for source, target in glossary_replacements:
-                                if source in translated_text:
-                                    translated_text = translated_text.replace(source, target)
-                        
-                        result[region.text] = translated_text
-                        region.translated_text = translated_text
-                        
-                        if translated_text:
-                            all_originals.append(f"[{i+1}] {region.text}")
-                            all_translations.append(f"[{i+1}] {translated_text}")
-                        
-                        self._log(f"  ⚠️ Using position-based fallback for region {i}", "debug")
+                    if i in matched_regions or i >= len(translation_values):
+                        continue
+                    translated_text = translation_values[i]
+                    if translated_text and glossary_replacements:
+                        for source, target in glossary_replacements:
+                            if source in translated_text:
+                                translated_text = translated_text.replace(source, target)
+                    result[region.text] = translated_text
+                    region.translated_text = translated_text
+                    matched_regions.add(i)
+                    if translated_text:
+                        all_originals.append(f"[{i+1}] {region.text}")
+                        all_translations.append(f"[{i+1}] {translated_text}")
+                    self._log(f"  ⚠️ Using position-based fallback for region {i}", "debug")
+
+            # Report summary so partial successes are visible
+            if matched_regions:
+                self._log(
+                    f"  📊 Translation mapping: {len(matched_regions)}/{len(regions)} regions matched",
+                    "info",
+                )
+            else:
+                self._log(
+                    f"  ⚠️ Translation mapping: 0/{len(regions)} regions matched — no usable keys in response",
+                    "warning",
+                )
             
             # Check for stop signal
             if self._check_stop():
