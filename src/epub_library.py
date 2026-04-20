@@ -1878,7 +1878,8 @@ class _BookCard(QFrame):
         title_lbl = QLabel(title)
         title_lbl.setWordWrap(True)
         title_lbl.setMaximumHeight(36)
-        title_lbl.setStyleSheet(f"color: #e0e0e0; font-size: {p.get('title_size', '9pt')}; font-weight: bold;")
+        title_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        title_lbl.setStyleSheet(f"color: #e0e0e0; font-size: {p.get('title_size', '9pt')}; font-weight: bold; background: transparent;")
         title_lbl.setToolTip(book["name"])
         layout.addWidget(title_lbl)
 
@@ -1906,10 +1907,12 @@ class _BookCard(QFrame):
         info_row.setContentsMargins(0, 0, 0, 0)
         info_row.setSpacing(4)
         size_lbl = QLabel(size_str)
-        size_lbl.setStyleSheet("color: #888; font-size: 7.5pt;")
+        size_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        size_lbl.setStyleSheet("color: #888; font-size: 7.5pt; background: transparent;")
         info_row.addWidget(size_lbl)
         badge_lbl = QLabel(badge_text)
-        badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold;")
+        badge_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold; background: transparent;")
         info_row.addWidget(badge_lbl)
         info_row.addStretch()
         layout.addLayout(info_row)
@@ -1956,7 +1959,8 @@ class _BookCard(QFrame):
                     progress_row.addWidget(pill)
                     if total:
                         pct_lbl = QLabel(f"{pct}%")
-                        pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold;")
+                        pct_lbl.setAttribute(Qt.WA_TranslucentBackground)
+                        pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold; background: transparent;")
                         progress_row.addWidget(pct_lbl)
                     ribbon_text = "IN PROGRESS"
                     ribbon_bg = "rgba(108, 99, 255, 0.92)"
