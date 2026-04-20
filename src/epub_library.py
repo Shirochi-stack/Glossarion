@@ -1899,6 +1899,35 @@ class _SelectableGrid(QWidget):
         super().mouseReleaseEvent(event)
 
 
+def _card_raw_title(book: dict) -> str:
+    """Best-guess raw / source-language title for a library flash card.
+
+    Resolution order:
+      1. ``metadata.json`` explicit ``original_title`` / ``raw_title`` /
+         ``source_title`` keys when the translator stored one.
+      2. ``folder_name`` — for in-progress workspaces this equals the raw
+         EPUB's basename (output folders are scaffolded from the source
+         filename).
+      3. Stem of ``raw_source_path`` when the scanner resolved one.
+      4. Stem of ``original_path`` recorded in the origins registry (for
+         Library-organized files that were moved from elsewhere).
+      5. Fall back to the card's default ``name``.
+    """
+    md = book.get("metadata_json") or {}
+    for key in ("original_title", "raw_title", "source_title"):
+        val = md.get(key)
+        if val:
+            return str(val)
+    fn = book.get("folder_name")
+    if fn:
+        return str(fn)
+    for path_key in ("raw_source_path", "original_path"):
+        p = book.get(path_key) or ""
+        if p:
+            return os.path.splitext(os.path.basename(p))[0]
+    return str(book.get("name", ""))
+
+
 class _BookCard(QFrame):
     clicked = Signal(dict)
     context_menu_requested = Signal(dict, object)
@@ -1923,7 +1952,8 @@ class _BookCard(QFrame):
         "QFrame#bookCard:hover { border: 2px solid #c0b8ff; background: #343670; }"
     )
 
-    def __init__(self, book: dict, preset: dict | None = None, parent=None):
+    def __init__(self, book: dict, preset: dict | None = None, parent=None,
+                 show_raw_title: bool = False):
         super().__init__(parent)
         self.book = book
         p = preset or _SIZE_PRESETS[SIZE_NORMAL]
@@ -1931,6 +1961,7 @@ class _BookCard(QFrame):
         self._cover_h = p["cover_h"]
         self._has_cover = False
         self._selected = False
+        self._show_raw_title = bool(show_raw_title)
 
         self.setObjectName("bookCard")
         self.setFixedWidth(self._card_w)
@@ -1955,8 +1986,13 @@ class _BookCard(QFrame):
         # Title: try to render the full name at the preset font size; shrink
         # the font (down to ``title_min_size``) if it wraps past the max
         # height, and fall back to an ellipsis only as a last resort. See
-        # :func:`_fit_title_text`.
-        full_title = book["name"]
+        # :func:`_fit_title_text`. When the library's "Show raw titles"
+        # toggle is on, :func:`_card_raw_title` picks the source-language
+        # title instead of whatever ``book['name']`` resolved to.
+        if self._show_raw_title:
+            full_title = _card_raw_title(book) or book.get("name", "")
+        else:
+            full_title = book["name"]
         base_pt = _parse_pt(p.get("title_size", "9pt"))
         min_pt = _parse_pt(p.get("title_min_size", "6.5pt"))
         max_title_h = p.get("title_max_h", 36)
@@ -2215,6 +2251,12 @@ class EpubLibraryDialog(QDialog):
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._current_tab = self._config.get('epub_library_tab', 0)
+        # When True, every flash card renders the raw source-language title
+        # instead of the (possibly translated) ``book['name']``. See
+        # :func:`_card_raw_title` for the resolution rules.
+        self._show_raw_titles = bool(
+            self._config.get('epub_library_show_raw_titles', False)
+        )
         self._scanner_thread: _DualScannerThread | None = None
         # Enable drag-and-drop of EPUB / TXT / PDF / HTML files onto the
         # dialog. Drops are routed through the same import pipeline as the
@@ -2381,6 +2423,29 @@ class EpubLibraryDialog(QDialog):
             btn = self._make_size_btn(text, tip, key)
             self._size_btns[key] = btn
             toolbar.addWidget(btn)
+        toolbar.addSpacing(16)
+        # "Show raw titles" toggle: when checked, every flash card displays
+        # the raw source-language title instead of the translated one. Same
+        # visual language as the sort buttons so it reads as a persistent
+        # filter rather than a one-shot action.
+        self._raw_titles_btn = QPushButton("\U0001f524  Raw titles")
+        self._raw_titles_btn.setToolTip(
+            "Show the raw source-language title on every card instead of \n"
+            "the translated / compiled-EPUB title. Useful for finding a \n"
+            "book by its original name."
+        )
+        self._raw_titles_btn.setFixedHeight(26)
+        self._raw_titles_btn.setCursor(Qt.PointingHandCursor)
+        self._raw_titles_btn.setCheckable(True)
+        self._raw_titles_btn.setChecked(self._show_raw_titles)
+        self._raw_titles_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+            QPushButton:checked { background: #6c63ff; border-color: #7c73ff; color: #fff; }
+        """)
+        self._raw_titles_btn.toggled.connect(self._on_raw_titles_toggled)
+        toolbar.addWidget(self._raw_titles_btn)
         toolbar.addStretch()
         self._count_label = QLabel("")
         self._count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
@@ -2653,6 +2718,21 @@ class EpubLibraryDialog(QDialog):
         self._card_size = size_key
         for k, btn in self._size_btns.items():
             btn.setChecked(k == size_key)
+        self._refresh_view()
+
+    def _on_raw_titles_toggled(self, checked: bool):
+        """Flip every card between raw and translated title rendering."""
+        new_value = bool(checked)
+        if new_value == self._show_raw_titles:
+            return
+        self._show_raw_titles = new_value
+        try:
+            self._config["epub_library_show_raw_titles"] = self._show_raw_titles
+        except Exception:
+            pass
+        # Cheapest reliable path: rebuild the cards so each :class:`_BookCard`
+        # picks the title through its constructor. Cards are lightweight and
+        # we already do this on sort / size changes.
         self._refresh_view()
 
     def _sorted_books(self, books):
@@ -3396,8 +3476,9 @@ class EpubLibraryDialog(QDialog):
         grid_layout.setVerticalSpacing(spacing + 2)
         cols = max(1, (self.width() - 40) // (card_w + spacing))
 
+        show_raw_title = bool(getattr(self, "_show_raw_titles", False))
         for idx, book in enumerate(books):
-            card = _BookCard(book, preset=preset)
+            card = _BookCard(book, preset=preset, show_raw_title=show_raw_title)
             card.clicked.connect(self._on_card_clicked)
             card.context_menu_requested.connect(self._show_context_menu)
             card.select_requested.connect(self._on_card_select_requested)
