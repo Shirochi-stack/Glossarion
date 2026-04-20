@@ -6569,6 +6569,56 @@ class _ChapterRow(QFrame):
 # EPUB Reader — background loader thread
 # ---------------------------------------------------------------------------
 
+if _HAS_WEBENGINE:
+    class _WheelCapturingView(QWebEngineView):
+        """QWebEngineView subclass that surfaces wheel events as a signal.
+
+        Out of the box wheel events on a QWebEngineView are consumed
+        by the internal Chromium render widget before they ever reach
+        Python. The usual Qt workaround is to install an event filter
+        on every child widget the view spawns (they host the actual
+        render surface). We do that here plus re-run the install for
+        any children added after the first page load (Qt creates those
+        lazily). Emits ``wheel_scrolled(delta_y, modifiers)`` for the
+        reader dialog to translate into page-turn / zoom behavior.
+        """
+        wheel_scrolled = Signal(int, object)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._install_filter_on_children()
+
+        def childEvent(self, event):
+            from PySide6.QtCore import QEvent
+            if event.type() == QEvent.ChildAdded:
+                child = event.child()
+                try:
+                    if hasattr(child, "installEventFilter"):
+                        child.installEventFilter(self)
+                except Exception:
+                    pass
+            super().childEvent(event)
+
+        def _install_filter_on_children(self):
+            from PySide6.QtWidgets import QWidget
+            for c in self.findChildren(QWidget):
+                try:
+                    c.installEventFilter(self)
+                except Exception:
+                    pass
+
+        def eventFilter(self, obj, event):
+            from PySide6.QtCore import QEvent
+            if event.type() == QEvent.Wheel:
+                delta = event.angleDelta().y()
+                if delta != 0:
+                    self.wheel_scrolled.emit(delta, event.modifiers())
+                    # Consume the event so Chromium doesn't also
+                    # scroll / zoom the page in parallel.
+                    return True
+            return super().eventFilter(obj, event)
+
+
 class _EpubCacheLoaderThread(QThread):
     """Read the pickled EPUB cache off the UI thread.
 
@@ -7461,12 +7511,16 @@ class EpubReaderDialog(QDialog):
 
         def _make_reader_widget():
             if _HAS_WEBENGINE:
-                w = QWebEngineView()
+                # Use the wheel-capturing subclass so mouse wheel events
+                # can drive page navigation / font zoom instead of being
+                # silently swallowed by the internal Chromium scroller.
+                w = _WheelCapturingView()
                 w.setUrl(QUrl("about:blank"))
                 # Set page background to match theme (prevents white flash)
                 from PySide6.QtGui import QColor
                 t = self._get_theme()
                 w.page().setBackgroundColor(QColor(t['bg']))
+                w.wheel_scrolled.connect(self._on_reader_wheel_scrolled)
             else:
                 w = QTextBrowser()
                 w.setOpenExternalLinks(False)
@@ -8062,6 +8116,60 @@ class EpubReaderDialog(QDialog):
             else:
                 self._reader.page().runJavaScript(_hide)
         self._render_current()
+
+    def _on_reader_wheel_scrolled(self, delta_y: int, modifiers) -> None:
+        """Route a wheel event from a reader pane to the right action.
+
+        :class:`_WheelCapturingView` consumes every wheel event its
+        Chromium child emits and routes it here. We dispatch based on
+        modifier + current layout mode:
+
+          * **Ctrl + wheel**  → font size zoom (matches Ctrl+= / Ctrl+-
+            shortcuts). Works in every layout.
+          * **Plain wheel in paginated modes** (single / double page)
+            → previous / next page. Scrolling up turns back, scrolling
+            down turns forward — matches what Chromium would do to a
+            scrollable page.
+          * **Plain wheel in scroll modes** (single-chapter scroll,
+            all-scroll) → fall back to a manual ``window.scrollBy``
+            inside the page so the normal scrolling behaviour is
+            preserved (we swallowed the event at the filter level, so
+            Chromium won't do it for us).
+        """
+        if not delta_y:
+            return
+        # Ctrl + wheel: font zoom regardless of layout.
+        try:
+            ctrl = bool(modifiers & Qt.ControlModifier)
+        except Exception:
+            ctrl = False
+        if ctrl:
+            self._change_font_size(1 if delta_y > 0 else -1)
+            return
+        # Paginated modes: turn pages.
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            if delta_y > 0:
+                self._prev_chapter()
+            else:
+                self._next_chapter()
+            return
+        # Scroll modes: replicate the browser's own wheel-scroll since
+        # the event filter already swallowed the native behaviour. We
+        # invert the sign because angleDelta y>0 means "wheel up" and
+        # scrollBy expects positive values to scroll the page DOWN.
+        if not _HAS_WEBENGINE:
+            return
+        pixels = int(-delta_y)
+        js = f"window.scrollBy({{top: {pixels}, left: 0, behavior: 'auto'}});"
+        try:
+            if self._layout_mode == LAYOUT_DOUBLE:
+                self._reader_left.page().runJavaScript(js)
+                self._reader_right.page().runJavaScript(js)
+            else:
+                self._reader.page().runJavaScript(js)
+        except Exception:
+            logger.debug("Wheel scroll passthrough failed: %s",
+                         traceback.format_exc())
 
     def _on_font_family_changed(self, family):
         """Update reader font family and re-render."""
