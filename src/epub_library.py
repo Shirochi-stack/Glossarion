@@ -5868,18 +5868,9 @@ class BookDetailsDialog(QDialog):
     def _populate_chapters_batch_tick(self):
         """Render the next :data:`_POPULATE_BATCH_SIZE` chapter rows.
 
-        Each row is faded in via a ``QGraphicsOpacityEffect`` +
-        ``QPropertyAnimation``; the animation's start time is staggered
-        by a few milliseconds per position in the batch so rows cascade
-        into view instead of all popping in together. The effect and
-        animation are parented to the row itself, so both die with the
-        row when the list is rebuilt — no manual cleanup needed.
-
         Stops the driving ``QTimer`` and finalizes the TOC state once
         every row has been appended to the layout.
         """
-        from PySide6.QtWidgets import QGraphicsOpacityEffect
-        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
         infos = getattr(self, "_populate_infos", None) or []
         start = int(getattr(self, "_populate_idx", 0) or 0)
         end = min(start + self._POPULATE_BATCH_SIZE, len(infos))
@@ -5897,24 +5888,6 @@ class BookDetailsDialog(QDialog):
             if info.get("index") == selected_idx:
                 row.set_selected(True)
             self._chap_layout.addWidget(row)
-
-            # Start hidden (opacity 0) then animate up to fully opaque.
-            effect = QGraphicsOpacityEffect(row)
-            effect.setOpacity(0.0)
-            row.setGraphicsEffect(effect)
-            anim = QPropertyAnimation(effect, b"opacity", row)
-            anim.setDuration(220)
-            anim.setStartValue(0.0)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            # Stagger by position within this batch. Capping the delay
-            # at 16 * (batch_size - 1) keeps even a full batch's tail
-            # finishing within ~840 ms, which still feels snappy.
-            stagger_ms = (i - start) * 16
-            if stagger_ms > 0:
-                QTimer.singleShot(stagger_ms, anim.start)
-            else:
-                anim.start()
         self._populate_idx = end
         if end >= len(infos):
             # Final tick: cap the layout with the stretch, apply any
