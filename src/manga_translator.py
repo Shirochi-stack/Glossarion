@@ -9597,7 +9597,16 @@ class MangaTranslator:
     def preload_local_inpainters(self, local_method: str, model_path: str, count: int) -> int:
         """Preload N local inpainting instances sequentially into the shared pool for parallel panel translation.
         Returns the number of instances successfully preloaded.
+
+        Defense in depth: if Skip Inpainter is on (either self.skip_inpainting
+        or config['manga_skip_inpainting']), short-circuit immediately.
         """
+        if getattr(self, 'skip_inpainting', False) or (
+            hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None)
+            and bool(self.main_gui.config.get('manga_skip_inpainting', False))
+        ):
+            self._log("🚫 Skip Inpainter enabled — preload_local_inpainters() short-circuited", "debug")
+            return 0
         try:
             from local_inpainter import LocalInpainter
         except Exception:
@@ -9803,7 +9812,16 @@ class MangaTranslator:
         """Preload N local inpainting instances concurrently into the shared pool.
         Honors advanced toggles for panel/region parallelism to pick a reasonable parallelism.
         Returns number of instances successfully preloaded.
+
+        Defense in depth: if Skip Inpainter is on (either self.skip_inpainting
+        or config['manga_skip_inpainting']), short-circuit immediately.
         """
+        if getattr(self, 'skip_inpainting', False) or (
+            hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None)
+            and bool(self.main_gui.config.get('manga_skip_inpainting', False))
+        ):
+            self._log("🚫 Skip Inpainter enabled — preload_local_inpainters_concurrent() short-circuited", "debug")
+            return 0
         try:
             from local_inpainter import LocalInpainter
         except Exception:

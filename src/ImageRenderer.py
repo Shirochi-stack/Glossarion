@@ -6149,15 +6149,34 @@ def _preload_shared_bubble_detector(self):
         print(f"[PRELOAD_DETECTOR] Traceback: {traceback.format_exc()}")
 
 def _preload_shared_inpainter(self):
-    """Preload inpainter into the pool for fast access on first use"""
+    """Preload inpainter into the pool for fast access on first use.
+
+    Short-circuits when the Skip Inpainter toggle is on (live value on the
+    MangaTranslationTab instance, falling back to persisted
+    config['manga_skip_inpainting']) so we don't waste time loading a model
+    the user explicitly asked us to skip.
+    """
     try:
         import os
         from manga_translator import MangaTranslator
-        
+
+        # Respect Skip Inpainter toggle before anything else
+        skip_inpainting = False
+        try:
+            if hasattr(self, 'skip_inpainting_value'):
+                skip_inpainting = bool(self.skip_inpainting_value)
+            elif hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
+                skip_inpainting = bool(self.main_gui.config.get('manga_skip_inpainting', False))
+        except Exception:
+            skip_inpainting = False
+        if skip_inpainting:
+            print("[PRELOAD_INPAINTER] Skipping preload - Skip Inpainter toggle is ON")
+            return
+
         # Get current inpainting settings
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
-        
+
         if inpaint_method != 'local':
             print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")
             return

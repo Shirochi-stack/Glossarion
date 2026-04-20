@@ -12215,11 +12215,18 @@ class MangaTranslationTab(QObject):
                         self._log(f"⚠️ Bubble detector preload skipped: {_e}", "warning")
             except Exception:
                 pass
-            # 2) Preload LOCAL inpainting instances for panel parallelism
+            # 2) Preload LOCAL inpainting instances for panel parallelism.
+            # Honor the Skip Inpainter toggle: if it's on, don't preload at all.
             inpaint_preload_event = None
             try:
                 inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
-                if (
+                skip_inpainting_flag = bool(
+                    getattr(self, 'skip_inpainting_value',
+                            self.main_gui.config.get('manga_skip_inpainting', False))
+                )
+                if skip_inpainting_flag:
+                    self._log("🚫 Skip Inpainter enabled — skipping panel inpainter preload", "info")
+                elif (
                     effective_workers > 1
                     and inpaint_method == 'local'
                     and hasattr(self, 'translator')
