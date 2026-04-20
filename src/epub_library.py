@@ -5753,8 +5753,13 @@ class BookDetailsDialog(QDialog):
             for c in self._chapters_info
         )
         raw_titles_applicable = has_distinct_titles
+        # Use the intent flag (not the container's live visibility) —
+        # :meth:`_populate_chapters` hides the container while the
+        # loading placeholder is up, so ``isVisible()`` would spuriously
+        # report "collapsed" here and the checkbox would never surface.
+        section_expanded = bool(getattr(self, "_chap_section_expanded", True))
         self._raw_titles_cb.setVisible(
-            raw_titles_applicable and self._chap_container.isVisible()
+            raw_titles_applicable and section_expanded
         )
         # Keep the flag accurate: if the toggle becomes inapplicable after
         # a refresh we don't want the checkbox state to stay "checked"
@@ -7817,6 +7822,34 @@ class EpubReaderDialog(QDialog):
         self._chapters_raw = raw_chapters
         self._chapters_overlaid = overlaid_chapters
         chapters = raw_chapters if (self._show_raw and overlay_applied) else overlaid_chapters
+        # Expose the Show-raw pill when EITHER a translated overlay
+        # landed on at least one chapter (overlay mode) OR a dual-path
+        # alt EPUB was wired up by the caller (Completed tab with a
+        # resolved raw source). Otherwise there's nothing to toggle
+        # against and the pill stays hidden.
+        has_dual_path = bool(getattr(self, "_raw_epub_alt_path", ""))
+        if getattr(self, "_raw_btn", None) is not None:
+            self._raw_btn.setVisible(bool(overlay_applied) or has_dual_path)
+            # Sync the pill's checked state with the actually-rendered
+            # flavor — this can diverge from the persisted default when
+            # overlay mode couldn't satisfy the "raw" preference (no
+            # chapter had an overlay entry) or when a dual-path reload
+            # already swapped ``_epub_path`` to the raw file.
+            try:
+                raw_alt = getattr(self, "_raw_epub_alt_path", "") or ""
+                currently_raw = bool(
+                    (overlay_applied and self._show_raw)
+                    or (has_dual_path and raw_alt
+                        and os.path.normcase(os.path.abspath(
+                            self._epub_path))
+                        == os.path.normcase(os.path.abspath(raw_alt)))
+                )
+            except Exception:
+                currently_raw = bool(
+                    overlay_applied and self._show_raw)
+            self._raw_btn.blockSignals(True)
+            self._raw_btn.setChecked(currently_raw)
+            self._raw_btn.blockSignals(False)
         self._chapters = chapters
         self._images = images
         # Keep filenames around so callers can resolve chapter indices by
