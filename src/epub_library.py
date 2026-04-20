@@ -1160,12 +1160,22 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
 def split_output_folders_by_status(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     """Split ``scan_output_folders`` results into (completed, in_progress).
 
-    An entry goes to *completed* when any compiled output (epub/pdf/txt/html)
-    exists on disk. Everything else is still in progress.
+    An entry goes to *completed* when any of these is true:
+      * a compiled output (epub/pdf/txt/html) exists on disk
+      * ``translation_state == "completed"`` — all spine chapters are
+        translated (done >= total) even if the user hasn't compiled the
+        output EPUB yet. At 100% progress it's no longer "in progress".
+    Everything else is still in progress.
     """
-    completed = [r for r in rows if r.get("has_compiled_output") or r.get("has_output_epub")]
-    in_progress = [r for r in rows
-                   if not (r.get("has_compiled_output") or r.get("has_output_epub"))]
+    completed: list[dict] = []
+    in_progress: list[dict] = []
+    for r in rows:
+        if (r.get("has_compiled_output")
+                or r.get("has_output_epub")
+                or r.get("translation_state") == "completed"):
+            completed.append(r)
+        else:
+            in_progress.append(r)
     return completed, in_progress
 
 
@@ -1637,6 +1647,20 @@ class _CoverLoader(QThread):
 class _BookCard(QFrame):
     clicked = Signal(dict)
     context_menu_requested = Signal(dict, object)
+    # Emitted on left-click so the parent dialog can manage multi-selection
+    # (Ctrl-click toggles, plain click replaces). Payload: (book, modifiers).
+    select_requested = Signal(dict, object)
+
+    _BASE_STYLE = (
+        "_BookCard { background: #1e1e2e; border: 1px solid #2a2a3e;"
+        " border-radius: 6px; }"
+        "_BookCard:hover { border: 1px solid #6c63ff; background: #252540; }"
+    )
+    _SELECTED_STYLE = (
+        "_BookCard { background: #2a2d5a; border: 2px solid #8078ff;"
+        " border-radius: 6px; }"
+        "_BookCard:hover { border: 2px solid #a097ff; background: #343670; }"
+    )
 
     def __init__(self, book: dict, preset: dict | None = None, parent=None):
         super().__init__(parent)
@@ -1645,13 +1669,11 @@ class _BookCard(QFrame):
         self._card_w = p["card_w"]
         self._cover_h = p["cover_h"]
         self._has_cover = False
+        self._selected = False
 
         self.setFixedWidth(self._card_w)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet("""
-            _BookCard { background: #1e1e2e; border: 1px solid #2a2a3e; border-radius: 6px; }
-            _BookCard:hover { border: 1px solid #6c63ff; background: #252540; }
-        """)
+        self.setStyleSheet(self._BASE_STYLE)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 6)
@@ -1718,50 +1740,74 @@ class _BookCard(QFrame):
             state = book.get("translation_state") or (
                 "in_progress" if total else "not_started"
             )
-            pct = int(round((done / total) * 100)) if total else 0
-            progress_row = QHBoxLayout()
-            progress_row.setContentsMargins(0, 0, 0, 0)
-            progress_row.setSpacing(4)
-            if state == "not_started":
-                pill = QLabel("\U0001f195 Not started")
-                pill.setToolTip("Imported into Library/Raw, translation not started yet.")
-                pill.setStyleSheet(
-                    "color: #8ab4d0; background: rgba(138, 180, 208, 0.15); "
-                    "border: 1px solid #8ab4d0; border-radius: 3px; "
-                    "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
-                )
-                progress_row.addWidget(pill)
-                ribbon_text = "NOT STARTED"
-                ribbon_bg = "rgba(138, 180, 208, 0.92)"
+            # 100% translated = no longer in progress. Such cards render on
+            # the Completed tab (see :func:`split_output_folders_by_status`)
+            # without any ribbon / pill so they look like regular completed
+            # entries even though the user hasn't compiled an EPUB yet.
+            if state == "completed":
+                pass
             else:
-                pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
-                pill.setToolTip(
-                    f"Translation in progress \u2014 {pct}% ({done}/{total} chapters)"
-                )
-                pill.setStyleSheet(
-                    "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
-                    "border: 1px solid #6c63ff; border-radius: 3px; "
-                    "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
-                )
-                progress_row.addWidget(pill)
-                if total:
-                    pct_lbl = QLabel(f"{pct}%")
-                    pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold;")
-                    progress_row.addWidget(pct_lbl)
-                ribbon_text = "IN PROGRESS"
-                ribbon_bg = "rgba(108, 99, 255, 0.92)"
-            progress_row.addStretch()
-            layout.addLayout(progress_row)
+                pct = int(round((done / total) * 100)) if total else 0
+                progress_row = QHBoxLayout()
+                progress_row.setContentsMargins(0, 0, 0, 0)
+                progress_row.setSpacing(4)
+                if state == "not_started":
+                    pill = QLabel("\U0001f195 Not started")
+                    pill.setToolTip("Imported into Library/Raw, translation not started yet.")
+                    pill.setStyleSheet(
+                        "color: #8ab4d0; background: rgba(138, 180, 208, 0.15); "
+                        "border: 1px solid #8ab4d0; border-radius: 3px; "
+                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                    )
+                    progress_row.addWidget(pill)
+                    ribbon_text = "NOT STARTED"
+                    ribbon_bg = "rgba(138, 180, 208, 0.92)"
+                else:
+                    pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
+                    pill.setToolTip(
+                        f"Translation in progress \u2014 {pct}% ({done}/{total} chapters)"
+                    )
+                    pill.setStyleSheet(
+                        "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
+                        "border: 1px solid #6c63ff; border-radius: 3px; "
+                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                    )
+                    progress_row.addWidget(pill)
+                    if total:
+                        pct_lbl = QLabel(f"{pct}%")
+                        pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold;")
+                        progress_row.addWidget(pct_lbl)
+                    ribbon_text = "IN PROGRESS"
+                    ribbon_bg = "rgba(108, 99, 255, 0.92)"
+                progress_row.addStretch()
+                layout.addLayout(progress_row)
 
-            # Corner ribbon on the cover label (absolutely positioned child)
-            self._progress_ribbon = QLabel(ribbon_text, self.cover_label)
-            self._progress_ribbon.setStyleSheet(
-                f"color: #fff; background: {ribbon_bg}; "
-                "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
-                "border-bottom-right-radius: 3px;"
-            )
-            self._progress_ribbon.move(0, 0)
-            self._progress_ribbon.show()
+                # Corner ribbon on the cover label (absolutely positioned child)
+                self._progress_ribbon = QLabel(ribbon_text, self.cover_label)
+                self._progress_ribbon.setStyleSheet(
+                    f"color: #fff; background: {ribbon_bg}; "
+                    "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
+                    "border-bottom-right-radius: 3px;"
+                )
+                self._progress_ribbon.move(0, 0)
+                self._progress_ribbon.show()
+
+    def set_selected(self, selected: bool):
+        """Toggle the card's "selected" visual state.
+
+        Used by :class:`EpubLibraryDialog` to render multi-selection for
+        batch actions like "Load N for translation". Stylesheet-only
+        change — no layout recomputation, so this is cheap.
+        """
+        new_value = bool(selected)
+        if new_value == self._selected:
+            return
+        self._selected = new_value
+        self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
+
+    @property
+    def selected(self) -> bool:
+        return self._selected
 
     def _set_fallback_icon(self, icon_path: str):
         try:
@@ -1792,6 +1838,11 @@ class _BookCard(QFrame):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Forward to the parent dialog so it can update multi-selection
+            # state. Ctrl/Shift modifiers extend or toggle the selection;
+            # plain click replaces it with just this card.
+            self.select_requested.emit(self.book, event.modifiers())
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
@@ -1806,6 +1857,9 @@ class EpubLibraryDialog(QDialog):
     # Emitted when the user imports a new EPUB from the "In Progress" tab.
     # Parents (e.g. TranslatorGUI) can connect to set it as the input file.
     import_epub_requested = Signal(str)
+    # Emitted when the user triggers a multi-card "Load N for translation"
+    # action. Payload is a list of absolute paths.
+    import_epubs_requested = Signal(list)
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
@@ -1827,6 +1881,14 @@ class EpubLibraryDialog(QDialog):
         self._completed_books: list[dict] = []
         self._ip_cards: list[_BookCard] = []
         self._comp_cards: list[_BookCard] = []
+        # Multi-selection state, keyed by ``book['path']``. One set per tab
+        # so switching tabs doesn't clobber the other tab's selection. The
+        # sets are consulted every time ``_populate_grid_common`` rebuilds
+        # the cards (which happens on scan / auto-refresh / sort / filter)
+        # so selection survives refreshes as long as the book path is
+        # still present in the scan result.
+        self._selected_paths_ip: set[str] = set()
+        self._selected_paths_comp: set[str] = set()
         self._cover_threads: list[_CoverLoader] = []
         # Restore persisted settings
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
@@ -2337,6 +2399,42 @@ class EpubLibraryDialog(QDialog):
             logger.debug("Failed to emit import_epub_requested: %s",
                          traceback.format_exc())
 
+    def _load_multi_for_translation(self, paths: list):
+        """Push one-or-many raw source paths into the translator's input.
+
+        Deduplicates by normalized path, emits ``import_epubs_requested``
+        when more than one file is loaded (so the receiver can show a
+        "N files selected" summary), or ``import_epub_requested`` for the
+        single-file case. Every loaded path is recorded in the raw-inputs
+        registry so subsequent library scans can resolve it.
+        """
+        if not paths:
+            return
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for p in paths:
+            if not p or not os.path.isfile(p):
+                continue
+            key = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(p)
+        if not uniq:
+            QMessageBox.warning(self, "Load for translation",
+                                "No resolvable raw source files in the selection.")
+            return
+        try:
+            if len(uniq) == 1:
+                self.import_epub_requested.emit(uniq[0])
+            else:
+                self.import_epubs_requested.emit(uniq)
+            for p in uniq:
+                record_library_raw_input(p)
+        except Exception:
+            logger.debug("Failed to emit multi import: %s",
+                         traceback.format_exc())
+
     def _organize_into_library(self):
         """Move raw sources into Library/Raw *and* compiled EPUBs into
         Library/Translated, recording every move in a reversible origins
@@ -2670,8 +2768,15 @@ class EpubLibraryDialog(QDialog):
         count_label: QLabel,
         empty_label: QLabel,
         count_word: str,
+        selected_paths: set[str] | None = None,
     ):
         """Shared render pipeline used by both tabs."""
+        selected_paths = selected_paths if selected_paths is not None else set()
+        # Prune the selection set of paths that no longer exist in this
+        # scan result — otherwise organize / undo / delete operations can
+        # leave stale entries that silently skew "Load N for translation".
+        current_paths = {b.get("path", "") for b in books}
+        selected_paths &= current_paths
         for card in card_list:
             try:
                 card.setParent(None)
@@ -2707,6 +2812,11 @@ class EpubLibraryDialog(QDialog):
             card = _BookCard(book, preset=preset)
             card.clicked.connect(self._on_card_clicked)
             card.context_menu_requested.connect(self._show_context_menu)
+            card.select_requested.connect(self._on_card_select_requested)
+            # Re-apply previous selection state from the tab's selection set
+            # so auto-refresh doesn't wipe the user's multi-card selection.
+            if book.get("path", "") in selected_paths:
+                card.set_selected(True)
             card_list.append(card)
             row, col = divmod(idx, cols)
             grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
@@ -2741,13 +2851,48 @@ class EpubLibraryDialog(QDialog):
         self._populate_grid_common(
             books, self._ip_grid_layout, self._ip_cards,
             self._ip_count_label, self._ip_empty_label, "novel",
+            selected_paths=self._selected_paths_ip,
         )
 
     def _populate_completed(self, books: list[dict]):
         self._populate_grid_common(
             books, self._comp_grid_layout, self._comp_cards,
             self._comp_count_label, self._comp_empty_label, "book",
+            selected_paths=self._selected_paths_comp,
         )
+
+    def _active_selection(self) -> tuple[set[str], list[_BookCard]]:
+        """Return (selection_set, card_list) for the currently active tab."""
+        if self._tabs.currentIndex() == 0:
+            return self._selected_paths_ip, self._ip_cards
+        return self._selected_paths_comp, self._comp_cards
+
+    def _on_card_select_requested(self, book: dict, modifiers):
+        """Handle left-click selection with modifier semantics.
+
+        - Ctrl-click toggles this card in the active-tab selection set.
+        - Shift-click adds without clearing.
+        - Plain click replaces the selection with just this card.
+
+        Visual updates are applied to every card in the active tab so
+        multi-selection reads correctly (highlighted borders).
+        """
+        selected, cards = self._active_selection()
+        path = book.get("path", "") or ""
+        if not path:
+            return
+        if modifiers & Qt.ControlModifier:
+            if path in selected:
+                selected.discard(path)
+            else:
+                selected.add(path)
+        elif modifiers & Qt.ShiftModifier:
+            selected.add(path)
+        else:
+            selected.clear()
+            selected.add(path)
+        for c in cards:
+            c.set_selected(c.book.get("path", "") in selected)
 
     def _on_cover_loaded(self, book_path: str, cover_path: str):
         if not cover_path:
@@ -2839,6 +2984,21 @@ class EpubLibraryDialog(QDialog):
             QMenu::item { padding: 6px 20px; border-radius: 3px; }
             QMenu::item:selected { background: #3a3a5e; }
         """)
+        # Selection-aware: if the right-clicked card isn't part of the
+        # current selection, treat this as a single-card action (replace
+        # selection with just this card). Otherwise keep the existing
+        # multi-selection intact so "Load N for translation" can act on it.
+        selected, cards = self._active_selection()
+        path = book.get("path", "") or ""
+        if path and path not in selected:
+            selected.clear()
+            selected.add(path)
+            for c in cards:
+                c.set_selected(c.book.get("path", "") in selected)
+        selected_books = [c.book for c in cards
+                          if c.book.get("path", "") in selected]
+        if not selected_books:
+            selected_books = [book]
         file_type = book.get("type", "epub")
         if file_type == "in_progress":
             details_action = menu.addAction("\U0001f4d1  Open Book Details")
@@ -2874,16 +3034,32 @@ class EpubLibraryDialog(QDialog):
             open_action.triggered.connect(lambda: self._on_card_clicked(book))
         # "Load for translation" — pushes the card's raw source into the
         # translator's input field (moved out of the Import EPUB button).
-        raw = book.get("raw_source_path") or ""
-        if not raw and file_type == "epub" and os.path.isfile(book.get("path", "")):
-            raw = book["path"]
-        if raw and os.path.isfile(raw):
+        # When multiple cards are selected, the label becomes
+        # "Load N files for translation" and the action emits all resolvable
+        # raw paths at once via :attr:`import_epubs_requested`.
+        def _resolve_raw(b: dict) -> str:
+            r = b.get("raw_source_path") or ""
+            if (not r and b.get("type") == "epub"
+                    and os.path.isfile(b.get("path", ""))):
+                r = b["path"]
+            return r if r and os.path.isfile(r) else ""
+
+        raw_candidates = [p for p in (_resolve_raw(b) for b in selected_books) if p]
+        if raw_candidates:
             menu.addSeparator()
-            load_action = menu.addAction("\U0001f501  Load for translation")
-            load_action.setToolTip("Set this file as the translator's current input.")
-            # See "NOTE" above — close over ``book`` without a default arg
-            # so Qt's ``checked`` bool can't overwrite it.
-            load_action.triggered.connect(lambda: self._load_for_translation(book))
+            if len(raw_candidates) > 1:
+                label = f"\U0001f501  Load {len(raw_candidates)} files for translation"
+                tooltip = ("Set these files as the translator's current input "
+                           "(batch translation).")
+            else:
+                label = "\U0001f501  Load for translation"
+                tooltip = "Set this file as the translator's current input."
+            load_action = menu.addAction(label)
+            load_action.setToolTip(tooltip)
+            # See "NOTE" above — close over ``raw_candidates`` without a
+            # default arg so Qt's ``checked`` bool can't overwrite it.
+            load_action.triggered.connect(
+                lambda: self._load_multi_for_translation(raw_candidates))
         menu.addSeparator()
         folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
         # For in-progress cards the card "path" IS the output folder; for
@@ -3528,10 +3704,13 @@ class BookDetailsDialog(QDialog):
         # Bumped vertical spacing keeps wrapped value labels from visually
         # colliding with the next row's key label (e.g. multi-line "Title"
         # running into "Author" on Qt's conservative sizeHint path). Bumped
-        # further to give long Korean / CJK titles enough upward headroom
-        # to render without clipping their ascenders into the METADATA
-        # heading above.
-        self._meta_grid.setVerticalSpacing(22)
+        # way up so long Korean / CJK titles have plenty of vertical
+        # breathing room without clipping their ascenders into the
+        # METADATA heading above.
+        self._meta_grid.setVerticalSpacing(36)
+        # Reserve extra height on the Title row specifically so even a
+        # single-line title doesn't sit right against the heading.
+        self._meta_grid.setRowMinimumHeight(0, 64)
         # Let the second column stretch so long titles wrap across more
         # horizontal space instead of clipping vertically.
         self._meta_grid.setColumnStretch(0, 0)
@@ -3563,10 +3742,10 @@ class BookDetailsDialog(QDialog):
         meta_wrapper = QWidget()
         meta_wrapper.setLayout(meta_col)
         # Wider column so long titles / author names don't wrap aggressively
-        # and collide with the next metadata row. Bumped from 380 so the
+        # and collide with the next metadata row. Bumped further so the
         # common CJK novel title fits on one line in the Title row.
-        meta_wrapper.setMinimumWidth(360)
-        meta_wrapper.setMaximumWidth(480)
+        meta_wrapper.setMinimumWidth(380)
+        meta_wrapper.setMaximumWidth(540)
         hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
         body_layout.addLayout(hero)
 
@@ -3758,14 +3937,23 @@ class BookDetailsDialog(QDialog):
                                   if not c.get("is_special")]
             done = sum(1 for c in progress_items if c["status"] == "completed")
             total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
-            if total:
+            # When the book has reached 100% translation, the card already
+            # renders on the Completed tab without an "in progress" ribbon
+            # (see :func:`split_output_folders_by_status`). Hide the details
+            # strip too so the dialog doesn't contradict the card.
+            translation_done = bool(total) and done >= total
+            state = self._book.get("translation_state") or ""
+            if translation_done or state == "completed":
+                self._progress_strip.hide()
+            elif total:
                 pct = int(round((done / total) * 100))
                 self._progress_strip.setText(
                     f"\u23f3  Translation in progress \u2014 {done}/{total} chapters ({pct}%)"
                 )
+                self._progress_strip.show()
             else:
                 self._progress_strip.setText("\u23f3  Translation in progress")
-            self._progress_strip.show()
+                self._progress_strip.show()
             # When any chapter has been translated, the primary reader shows
             # the translated content (raw fallback for pending chapters). The
             # secondary "Read raw source" button remains for the raw view.

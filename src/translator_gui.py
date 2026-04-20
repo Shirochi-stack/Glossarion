@@ -16790,6 +16790,10 @@ Important rules:
                     dlg.import_epub_requested.connect(self._handle_library_import_epub)
                 except Exception:
                     pass
+                try:
+                    dlg.import_epubs_requested.connect(self._handle_library_import_epubs)
+                except Exception:
+                    pass
                 self._epub_library_dialog = dlg
             if dlg.isVisible():
                 dlg.raise_()
@@ -16844,6 +16848,75 @@ Important rules:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Import EPUB",
                                 f"Could not import EPUB:\n{e}")
+
+    def _handle_library_import_epubs(self, paths):
+        """Library \u2192 multi-card "Load N for translation".
+
+        Accepts a list of absolute paths. Populates ``selected_files`` with
+        every resolvable file, formats the entry-epub field with a multi-
+        file summary (matching the "Select Files" button's behavior), and
+        raises the main window. Falls back to the single-file handler when
+        only one path is provided.
+        """
+        try:
+            if not paths:
+                return
+            valid = []
+            seen = set()
+            for p in paths:
+                if not p or not os.path.isfile(p):
+                    continue
+                abs_p = os.path.abspath(p)
+                key = os.path.normcase(os.path.normpath(abs_p))
+                if key in seen:
+                    continue
+                seen.add(key)
+                valid.append(abs_p)
+            if not valid:
+                return
+            if len(valid) == 1:
+                self._handle_library_import_epub(valid[0])
+                return
+            try:
+                self.selected_files = valid
+                self.current_file_index = 0
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'entry_epub') and self.entry_epub is not None:
+                    epubs = [p for p in valid if p.lower().endswith('.epub')]
+                    txts = [p for p in valid if p.lower().endswith('.txt')]
+                    pdfs = [p for p in valid if p.lower().endswith('.pdf')]
+                    parts = []
+                    if epubs:
+                        parts.append(f"{len(epubs)} EPUB")
+                    if pdfs:
+                        parts.append(f"{len(pdfs)} PDF")
+                    if txts:
+                        parts.append(f"{len(txts)} TXT")
+                    summary = ", ".join(parts) if parts else f"{len(valid)} files"
+                    self.entry_epub.setText(f"{len(valid)} files selected ({summary})")
+            except Exception:
+                pass
+            try:
+                self.append_log(
+                    f"\U0001f4d6 Loaded {len(valid)} files from library for batch translation"
+                )
+                for p in valid[:10]:
+                    self.append_log(f"   \u2022 {os.path.basename(p)}")
+                if len(valid) > 10:
+                    self.append_log(f"   \u2026 and {len(valid) - 10} more")
+            except Exception:
+                pass
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Import EPUBs",
+                                f"Could not load EPUBs:\n{e}")
 
     def _on_library_closed(self):
         """Persist config when library/reader dialogs close."""
