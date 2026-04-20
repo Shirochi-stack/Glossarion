@@ -6607,6 +6607,46 @@ LAYOUT_SINGLE = "single_page"   # Single chapter, viewport-paginated (page turns
 LAYOUT_DOUBLE = "double_page"   # Two side-by-side readers, viewport-paginated
 LAYOUT_ALL    = "all_scroll"    # All chapters concatenated, scrollable
 
+# Google Translate language codes, keyed by the translator's ``output_language``
+# dropdown values. The reader's right-click menu picks the current value from
+# ``config['output_language']`` and uses this map to fill ``tl=`` in the
+# translate.google.com URL. Source is left as ``sl=auto`` so Google sniffs
+# the language of the selected passage itself.
+_READER_GT_LANG_CODES: dict[str, str] = {
+    "english": "en",
+    "spanish": "es",
+    "french": "fr",
+    "german": "de",
+    "italian": "it",
+    "portuguese": "pt",
+    "russian": "ru",
+    "arabic": "ar",
+    "hindi": "hi",
+    "chinese": "zh-CN",
+    "chinese (simplified)": "zh-CN",
+    "simplified chinese": "zh-CN",
+    "chinese (traditional)": "zh-TW",
+    "traditional chinese": "zh-TW",
+    "japanese": "ja",
+    "korean": "ko",
+    "turkish": "tr",
+    "vietnamese": "vi",
+}
+
+
+def _target_lang_to_google_code(name: str) -> str:
+    """Map the translator's target-language name to a Google Translate code.
+
+    Falls back to English when the dropdown is empty or carries a custom
+    label the map hasn't been taught (users can type any value into the
+    editable combo, so a hard error isn't appropriate).
+    """
+    if not name:
+        return "en"
+    key = str(name).strip().lower()
+    return _READER_GT_LANG_CODES.get(key, "en")
+
+
 # Reader themes — first one is the default and matches translator_gui.py's dark palette
 _READER_THEMES = [
     {"name": "Dark",     "bg": "#1e1e1e", "fg": "#d4d4d4", "heading": "#c8c8f0",
@@ -7058,7 +7098,6 @@ class EpubReaderDialog(QDialog):
         def _make_reader_widget():
             if _HAS_WEBENGINE:
                 w = QWebEngineView()
-                w.setContextMenuPolicy(Qt.NoContextMenu)
                 w.setUrl(QUrl("about:blank"))
                 # Set page background to match theme (prevents white flash)
                 from PySide6.QtGui import QColor
@@ -7068,6 +7107,13 @@ class EpubReaderDialog(QDialog):
                 w = QTextBrowser()
                 w.setOpenExternalLinks(False)
                 w.setOpenLinks(False)
+            # Right-click menu: Google Translate + Web Search for the
+            # current selection. Applies to every reader pane so the
+            # double-page mode works the same way the single pane does.
+            w.setContextMenuPolicy(Qt.CustomContextMenu)
+            w.customContextMenuRequested.connect(
+                lambda pos, browser=w:
+                    self._show_reader_context_menu(browser, pos))
             return w
 
         # Page 0: single reader (for scroll, single page, all-scroll)
@@ -7761,6 +7807,112 @@ class EpubReaderDialog(QDialog):
                 self._loaded_chapter = row
 
     # ── Pagination helpers (CSS column-based) ───────────────────────────────
+
+    # ── Right-click context menu on the reader pane ────────────────────
+
+    def _get_reader_selection(self, browser) -> str:
+        """Return the currently-selected text in *browser*, or ``""``.
+
+        ``QWebEngineView.selectedText`` is synchronous (Qt >= 5.7) so it's
+        safe to call from the context-menu handler. ``QTextBrowser``
+        exposes the selection via its cursor instead. Both paths are
+        wrapped in try/except so a Qt oddity can't block the menu.
+        """
+        try:
+            if _HAS_WEBENGINE and hasattr(browser, "selectedText"):
+                return browser.selectedText() or ""
+            if hasattr(browser, "textCursor"):
+                return browser.textCursor().selectedText() or ""
+        except Exception:
+            logger.debug("Reader selection read failed: %s",
+                         traceback.format_exc())
+        return ""
+
+    def _show_reader_context_menu(self, browser, pos):
+        """Populate + show the right-click menu for *browser* at *pos*.
+
+        The menu carries two entries driven off the current selection:
+
+          * **Google Translate** — opens ``translate.google.com`` in the
+            default browser with ``sl=auto`` and ``tl`` wired to the
+            translator's target-language dropdown (``output_language``).
+            Useful as a quick machine-translation sanity check against
+            the in-app translation for truncation / fidelity issues.
+          * **Search on web** — opens a Google search for the selected
+            text in the default browser.
+
+        Both entries are disabled when no text is selected so the menu
+        reads clearly instead of silently doing nothing.
+        """
+        selected = (self._get_reader_selection(browser) or "").strip()
+        has_selection = bool(selected)
+        target_lang = (self._config.get("output_language") or "English").strip() or "English"
+        target_code = _target_lang_to_google_code(target_lang)
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background: #1e1e2e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 9pt; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 3px; }
+            QMenu::item:selected { background: #3a3a5e; }
+            QMenu::item:disabled { color: #555; }
+        """)
+
+        gt_action = menu.addAction(
+            f"\U0001f310  Google Translate \u2192 {target_lang}")
+        gt_action.setToolTip(
+            f"Open translate.google.com in your default browser with the "
+            f"selection machine-translated into {target_lang} "
+            f"(source language auto-detected)."
+        )
+        gt_action.setEnabled(has_selection)
+        gt_action.triggered.connect(
+            lambda: self._open_google_translate(selected, target_code))
+
+        search_action = menu.addAction("\U0001f50d  Search on web")
+        search_action.setToolTip(
+            "Open a Google search for the selected text in your default "
+            "browser."
+        )
+        search_action.setEnabled(has_selection)
+        search_action.triggered.connect(
+            lambda: self._open_web_search(selected))
+
+        menu.exec(browser.mapToGlobal(pos))
+
+    def _open_google_translate(self, text: str, target_code: str) -> None:
+        """Hand off *text* to translate.google.com via the default browser."""
+        text = (text or "").strip()
+        if not text:
+            return
+        # URL-escape but keep spaces as '+' for readability in the address bar.
+        from urllib.parse import quote
+        from PySide6.QtGui import QDesktopServices
+        encoded = quote(text, safe="")
+        url = (
+            f"https://translate.google.com/?sl=auto&tl={target_code}"
+            f"&text={encoded}&op=translate"
+        )
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            logger.debug("Google Translate open failed: %s",
+                         traceback.format_exc())
+
+    def _open_web_search(self, text: str) -> None:
+        """Hand off *text* to a Google web search in the default browser."""
+        text = (text or "").strip()
+        if not text:
+            return
+        from urllib.parse import quote
+        from PySide6.QtGui import QDesktopServices
+        encoded = quote(text, safe="")
+        url = f"https://www.google.com/search?q={encoded}"
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            logger.debug("Web search open failed: %s",
+                         traceback.format_exc())
 
     def _on_reader_load_finished(self, ok):
         """Called when QWebEngineView finishes loading HTML."""
