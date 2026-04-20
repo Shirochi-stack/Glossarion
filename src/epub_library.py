@@ -2066,6 +2066,10 @@ class BookDetailsDialog(QDialog):
                 border-radius: 6px; padding: 6px 10px; font-size: 10pt;
             }
             QPushButton.icon-btn:hover { background: #3a3a5e; }
+            QPushButton.icon-btn:disabled {
+                background: #16161f; color: #2f2f3a;
+                border: 1px dashed #2a2a3e;
+            }
             QPushButton#toc-toggle {
                 background: transparent; color: #b0b0c0;
                 border: 1px solid #3a3a5e; border-radius: 6px;
@@ -2175,11 +2179,18 @@ class BookDetailsDialog(QDialog):
         self._raw_btn.hide()
         actions.addWidget(self._raw_btn)
 
+        # Icon buttons carry a QGraphicsOpacityEffect so the *emoji itself*
+        # dims when the button is disabled — the stylesheet `color:` rule has
+        # no effect on emoji glyphs, which render from their own color table.
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
         self._folder_btn = QPushButton("\U0001f4c2")
         self._folder_btn.setProperty("class", "icon-btn")
         self._folder_btn.setToolTip("Open output folder in file explorer")
         self._folder_btn.setCursor(Qt.PointingHandCursor)
         self._folder_btn.clicked.connect(self._open_output_folder)
+        self._folder_btn_opacity = QGraphicsOpacityEffect(self._folder_btn)
+        self._folder_btn_opacity.setOpacity(1.0)
+        self._folder_btn.setGraphicsEffect(self._folder_btn_opacity)
         actions.addWidget(self._folder_btn)
 
         self._source_btn = QPushButton("\U0001f517")
@@ -2187,6 +2198,9 @@ class BookDetailsDialog(QDialog):
         self._source_btn.setToolTip("Reveal source EPUB")
         self._source_btn.setCursor(Qt.PointingHandCursor)
         self._source_btn.clicked.connect(self._reveal_source)
+        self._source_btn_opacity = QGraphicsOpacityEffect(self._source_btn)
+        self._source_btn_opacity.setOpacity(1.0)
+        self._source_btn.setGraphicsEffect(self._source_btn_opacity)
         actions.addWidget(self._source_btn)
 
         actions.addStretch()
@@ -2416,9 +2430,29 @@ class BookDetailsDialog(QDialog):
         # Chapter rows
         self._populate_chapters()
 
-        # Button availability
-        self._folder_btn.setEnabled(bool(self._book.get("output_folder")))
-        self._source_btn.setEnabled(os.path.isfile(self._book.get("path", "") or ""))
+        # Button availability — also dim the emoji + update tooltip so it's
+        # obvious why the action isn't usable. Qt's default disabled state
+        # only grays the button chrome; emoji glyphs are unaffected by the
+        # stylesheet `color:` rule, so we lower the widget's opacity directly.
+        out_folder = self._book.get("output_folder") or ""
+        folder_ok = bool(out_folder) and os.path.isdir(out_folder)
+        self._folder_btn.setEnabled(folder_ok)
+        self._folder_btn.setCursor(Qt.PointingHandCursor if folder_ok else Qt.ForbiddenCursor)
+        self._folder_btn_opacity.setOpacity(1.0 if folder_ok else 0.35)
+        self._folder_btn.setToolTip(
+            "Open output folder in file explorer" if folder_ok
+            else "Output folder not available for this book"
+        )
+
+        src_path = self._book.get("path", "") or ""
+        source_ok = bool(src_path) and os.path.isfile(src_path)
+        self._source_btn.setEnabled(source_ok)
+        self._source_btn.setCursor(Qt.PointingHandCursor if source_ok else Qt.ForbiddenCursor)
+        self._source_btn_opacity.setOpacity(1.0 if source_ok else 0.35)
+        self._source_btn.setToolTip(
+            "Reveal source EPUB" if source_ok
+            else "Source EPUB file not found on disk"
+        )
 
     def _fill_chip_row(self, layout: QHBoxLayout, values: list[str]):
         # Remove all but the trailing stretch
