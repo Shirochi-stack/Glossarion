@@ -528,25 +528,55 @@ def _resolve_output_roots(config: dict | None = None) -> list[str]:
     return []
 
 
-def _read_progress_summary(progress_file: str) -> dict | None:
+def _read_progress_summary(progress_file: str, exclude_special: bool = False) -> dict | None:
     """Return a lightweight summary of translation_progress.json or None on failure.
 
     The summary counts chapter statuses so the library card can render a
     fraction/percentage without paying for the full OPF-aware match.
+
+    When *exclude_special* is True, entries whose ``original_basename``
+    (or ``output_file``) has no digit in its stem — ``cover.xhtml``,
+    ``nav.xhtml``, … — are dropped from both the total and the status
+    tallies. This matches the heuristic used by :func:`_count_epub_spine_items`
+    and :func:`_count_translated_response_files` so the toggle actually
+    shifts both numerator and denominator together (otherwise the
+    filesystem / spine counts shrink but the progress-file count stays
+    fixed and the dreaded 98 %↔1 00 % pair never changes).
     """
     import json as _json
+    import re as _re
     try:
         with open(progress_file, "r", encoding="utf-8") as f:
             prog = _json.load(f)
     except (OSError, _json.JSONDecodeError):
         return None
     chapters = prog.get("chapters", {}) or {}
-    total = len(chapters)
+    total = 0
     completed = 0
     in_progress = 0
     failed = 0
-    for ch in chapters.values():
-        status = (ch or {}).get("status", "")
+    for key, ch in chapters.items():
+        if not isinstance(ch, dict):
+            continue
+        if exclude_special:
+            # Prefer original_basename (source file) over output_file
+            # (response_*.html) so a run started with translate_special=ON
+            # and flipped OFF still filters correctly. Fall back to the
+            # progress-file key as a last resort.
+            name = (ch.get("original_basename")
+                    or ch.get("output_file")
+                    or str(key)
+                    or "").lower()
+            if name.startswith("response_"):
+                name = name[len("response_"):]
+            stem = os.path.splitext(os.path.basename(name))[0]
+            # Only skip when we HAVE a filename to judge by — entries
+            # with no recognizable name stay in the count rather than
+            # silently disappearing.
+            if stem and not _re.search(r"\d", stem):
+                continue
+        total += 1
+        status = ch.get("status", "")
         if status == "completed":
             completed += 1
         elif status in ("in_progress", "pending"):
@@ -1020,8 +1050,15 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
 
                 # Eagerly load the progress summary so we can tell a *seed*
                 # progress file (created when the user loaded a glossary but
-                # never ran a translation) apart from an active one.
-                summary = _read_progress_summary(progress_file) if has_progress else None
+                # never ran a translation) apart from an active one. Pass
+                # ``exclude_special`` so the sidecar's counts line up with
+                # the spine / filesystem counts — otherwise the translate-
+                # special-files toggle shifts the denominator without
+                # budging the numerator and the card reads as 100 % no
+                # matter what the user does.
+                summary = _read_progress_summary(
+                    progress_file, exclude_special=exclude_special
+                ) if has_progress else None
                 progress_total = summary["total"] if summary else 0
                 progress_done = summary["completed"] if summary else 0
                 failed = summary["failed"] if summary else 0
@@ -2166,72 +2203,12 @@ class EpubLibraryDialog(QDialog):
         toolbar.addWidget(self._count_label)
         root.addLayout(toolbar)
 
-        # Global actions row (above the tabs): "More actions" toggle +
-        # Organize / Undo batch buttons. Placed here so they're visible
-        # regardless of which tab is active, and so the tab-local action
-        # rows stay focused on their own concerns (Import EPUB, Open
-        # Library Folder). Both Organize and Undo start hidden behind the
-        # "⋯" toggle — most users won't need them day-to-day.
-        self._more_actions_visible = bool(
-            self._config.get("epub_library_show_more", False))
-        global_actions_row = QHBoxLayout()
-        global_actions_row.setContentsMargins(0, 0, 0, 0)
-        global_actions_row.setSpacing(6)
-        global_actions_row.addStretch()
-        self._more_actions_btn = QPushButton("\u22ef")
-        self._more_actions_btn.setCursor(Qt.PointingHandCursor)
-        self._more_actions_btn.setCheckable(True)
-        self._more_actions_btn.setChecked(self._more_actions_visible)
-        self._more_actions_btn.setToolTip(
-            "Show / hide the Organize + Undo batch actions."
-        )
-        self._more_actions_btn.setFixedSize(32, 28)
-        self._more_actions_btn.setStyleSheet(
-            "QPushButton { background: #2a2a3e; color: #b0b0c0; "
-            "border: 1px solid #3a3a5e; border-radius: 4px; "
-            "font-size: 13pt; font-weight: bold; padding: 0; }"
-            "QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }"
-            "QPushButton:checked { background: #6c63ff; border-color: #7c73ff; "
-            "color: #fff; }"
-        )
-        self._more_actions_btn.toggled.connect(self._on_more_actions_toggled)
-        global_actions_row.addWidget(self._more_actions_btn)
-
-        self._organize_btn = QPushButton("\U0001f4e5  Organize Files into Library")
-        self._organize_btn.setCursor(Qt.PointingHandCursor)
-        self._organize_btn.setToolTip(
-            "Move every resolvable raw source into Library/Raw and every "
-            "compiled EPUB into Library/Translated. Each move is recorded "
-            "so it can be reversed by Undo Move."
-        )
-        self._organize_btn.setStyleSheet(
-            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
-            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #4a6a8a; }")
-        self._organize_btn.clicked.connect(self._organize_into_library)
-        self._organize_btn.setVisible(self._more_actions_visible)
-        global_actions_row.addWidget(self._organize_btn)
-
-        self._undo_btn = QPushButton("\u21a9  Undo Move")
-        self._undo_btn.setCursor(Qt.PointingHandCursor)
-        self._undo_btn.setToolTip(
-            "Restore previously organized files back to their original "
-            "locations. You'll be asked whether to undo Raw, Translated, "
-            "or All."
-        )
-        self._undo_btn.setStyleSheet(
-            "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
-            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #5a32a3; }")
-        self._undo_btn.clicked.connect(self._undo_organize_prompt)
-        self._undo_btn.setVisible(self._more_actions_visible)
-        global_actions_row.addWidget(self._undo_btn)
-        root.addLayout(global_actions_row)
-
         # Per-tab action bar: each tab gets its own extra button row with
-        # context-specific actions (Import EPUB for In Progress, Open Library
-        # Folder for Completed). The shared sort/size toolbar above applies
-        # to whichever tab is currently active.
+        # context-specific actions. Organize / Undo are duplicated across
+        # both tabs so the user doesn't have to hop over to In Progress to
+        # organize a Library entry. Every button label carries a live
+        # counter that reflects how many files the action would act on
+        # (see :meth:`_update_organize_counts`).
         self._tabs = QTabWidget()
         self._tabs.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #2a2a3e; border-radius: 6px;
@@ -2258,8 +2235,10 @@ class EpubLibraryDialog(QDialog):
         self._ip_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         ip_action_row.addWidget(self._ip_count_label)
         ip_action_row.addStretch()
-        # Organize / Undo live in the global-actions row above the tab
-        # widget (see ``_setup_ui``). Only Import EPUB is tab-local here.
+        self._ip_organize_btn = self._make_organize_button(kind="ip")
+        ip_action_row.addWidget(self._ip_organize_btn)
+        self._ip_undo_btn = self._make_undo_button(kind="ip")
+        ip_action_row.addWidget(self._ip_undo_btn)
         self._import_btn = QPushButton("\u2795  Import EPUB")
         self._import_btn.setCursor(Qt.PointingHandCursor)
         self._import_btn.setToolTip(
@@ -2308,6 +2287,16 @@ class EpubLibraryDialog(QDialog):
         self._comp_count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         comp_action_row.addWidget(self._comp_count_label)
         comp_action_row.addStretch()
+        # Completed tab gets its own copy of the Organize + Undo buttons so
+        # the user can move a compiled EPUB into the Library without
+        # having to bounce back to In Progress. Wired to the same
+        # handlers — the actions operate on both tabs' books regardless
+        # of which button was clicked; only the *label counters* are
+        # tab-specific.
+        self._comp_organize_btn = self._make_organize_button(kind="comp")
+        comp_action_row.addWidget(self._comp_organize_btn)
+        self._comp_undo_btn = self._make_undo_button(kind="comp")
+        comp_action_row.addWidget(self._comp_undo_btn)
         self._open_library_btn = QPushButton("\U0001f4c1  Open Library Folder")
         self._open_library_btn.setCursor(Qt.PointingHandCursor)
         self._open_library_btn.setToolTip(f"Open {get_library_dir()} in the system file explorer.")
@@ -2451,20 +2440,119 @@ class EpubLibraryDialog(QDialog):
             pass
         _open_folder_in_explorer(lib)
 
-    def _on_more_actions_toggled(self, checked: bool):
-        """Show / hide the Organize + Undo batch-operation buttons.
+    # -- Organize / Undo button factory + counters --------------------------
 
-        Persisted via ``config['epub_library_show_more']`` so the user's
-        preference survives library-dialog reopens.
+    def _make_organize_button(self, kind: str) -> QPushButton:
+        """Create an "Organize N into Library" button for the given tab kind.
+
+        *kind* is either ``"ip"`` (In Progress — counts raw sources that
+        can move into ``Library/Raw``) or ``"comp"`` (Completed — counts
+        compiled EPUBs that can move into ``Library/Translated``). The
+        label is refreshed by :meth:`_update_organize_counts` after every
+        scan.
         """
-        self._more_actions_visible = bool(checked)
+        btn = QPushButton("\U0001f4e5  Organize (0)")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #4a6a8a; }"
+            "QPushButton:disabled { background: #2a2a3e; color: #555; }"
+        )
+        btn.setToolTip(
+            "Move every resolvable raw source into Library/Raw and every "
+            "compiled EPUB into Library/Translated. Each move is recorded "
+            "so it can be reversed by Undo Move."
+        )
+        btn.clicked.connect(self._organize_into_library)
+        btn.setProperty("_organize_kind", kind)
+        return btn
+
+    def _make_undo_button(self, kind: str) -> QPushButton:
+        """Create an "Undo N" button for the given tab kind.
+
+        IP tab shows the count of raw moves that can be undone; Completed
+        tab shows the translated bucket's count. Clicking either opens
+        the same 3-way prompt (Raw / Translated / All).
+        """
+        btn = QPushButton("\u21a9  Undo (0)")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            "QPushButton { background: #6f42c1; color: white; border-radius: 4px; "
+            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #5a32a3; }"
+            "QPushButton:disabled { background: #2a2a3e; color: #555; }"
+        )
+        btn.setToolTip(
+            "Restore previously organized files back to their original "
+            "locations. You'll be asked whether to undo Raw, Translated, "
+            "or All."
+        )
+        btn.clicked.connect(self._undo_organize_prompt)
+        btn.setProperty("_undo_kind", kind)
+        return btn
+
+    def _count_raw_movable(self) -> int:
+        """Return how many In-Progress raw sources aren't already in Library/Raw."""
+        raw_abs = os.path.normcase(os.path.normpath(
+            os.path.abspath(get_library_raw_dir())))
+        count = 0
+        for book in self._in_progress_books:
+            p = book.get("raw_source_path") or ""
+            if not p or not os.path.isfile(p):
+                continue
+            parent = os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(p))))
+            if parent != raw_abs:
+                count += 1
+        return count
+
+    def _count_trans_movable(self) -> int:
+        """Return how many Completed compiled EPUBs aren't already in Library/Translated."""
+        trans_abs = os.path.normcase(os.path.normpath(
+            os.path.abspath(get_library_translated_dir())))
+        count = 0
+        for book in self._completed_books:
+            if book.get("in_library"):
+                continue
+            p = book.get("path") or ""
+            if not p or not os.path.isfile(p):
+                continue
+            if not p.lower().endswith(".epub"):
+                continue
+            parent = os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(p))))
+            if parent != trans_abs:
+                count += 1
+        return count
+
+    def _update_organize_counts(self):
+        """Refresh the Organize + Undo button labels with live counts.
+
+        Called after every scan (initial + auto-refresh). Disables each
+        button when its count is zero so the user can see at a glance
+        that there's nothing to do.
+        """
+        raw_count = self._count_raw_movable()
+        trans_count = self._count_trans_movable()
         try:
-            self._organize_btn.setVisible(self._more_actions_visible)
-            self._undo_btn.setVisible(self._more_actions_visible)
+            origins = _load_origins()
+            raw_orig = len(origins.get("raw", {}) or {})
+            trans_orig = len(origins.get("translated", {}) or {})
         except Exception:
-            pass
+            raw_orig = 0
+            trans_orig = 0
         try:
-            self._config["epub_library_show_more"] = self._more_actions_visible
+            self._ip_organize_btn.setText(
+                f"\U0001f4e5  Organize ({raw_count})")
+            self._ip_organize_btn.setEnabled(raw_count > 0)
+            self._ip_undo_btn.setText(f"\u21a9  Undo ({raw_orig})")
+            self._ip_undo_btn.setEnabled(raw_orig > 0)
+            self._comp_organize_btn.setText(
+                f"\U0001f4e5  Organize ({trans_count})")
+            self._comp_organize_btn.setEnabled(trans_count > 0)
+            self._comp_undo_btn.setText(f"\u21a9  Undo ({trans_orig})")
+            self._comp_undo_btn.setEnabled(trans_orig > 0)
         except Exception:
             pass
 
@@ -2971,6 +3059,9 @@ class EpubLibraryDialog(QDialog):
             self._in_progress_books = in_progress
             self._completed_books = completed
             self._refresh_view()
+        # Always refresh the Organize / Undo counters — origins registry may
+        # have changed even when the card list didn't (e.g. after undo).
+        self._update_organize_counts()
 
     def _load_books(self):
         """Kick off an async scan of both tabs and show the loading spinner."""
@@ -2993,6 +3084,7 @@ class EpubLibraryDialog(QDialog):
         self._completed_books = completed
         self._hide_loading()
         self._refresh_view()
+        self._update_organize_counts()
 
     def _populate_grid_common(
         self,
@@ -3341,7 +3433,118 @@ class EpubLibraryDialog(QDialog):
         menu.addSeparator()
         copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
+        # Delete — tab-specific semantics:
+        #   * In Progress → delete the output folder (recursive)
+        #   * Completed   → delete the .epub / compiled file
+        # Works with multi-selection too ("Delete N items"). Always asks
+        # for confirmation first.
+        menu.addSeparator()
+        delete_targets = list(selected_books) if len(selected_books) > 1 else [book]
+        n_del = len(delete_targets)
+        if n_del > 1:
+            delete_label = f"\U0001f5d1\ufe0f  Delete {n_del} items"
+        else:
+            delete_label = "\U0001f5d1\ufe0f  Delete"
+        delete_action = menu.addAction(delete_label)
+        delete_action.setToolTip(
+            "In Progress \u2192 deletes the output folder.  "
+            "Completed \u2192 deletes the EPUB file.  "
+            "(Asks for confirmation first.)"
+        )
+        delete_action.triggered.connect(
+            lambda: self._delete_books_prompt(delete_targets)
+        )
         menu.exec(pos)
+
+    def _delete_books_prompt(self, books: list):
+        """Confirm + delete the backing file / folder for each book.
+
+        For ``type == "in_progress"`` cards the target is the output folder
+        (``book['output_folder']`` or ``book['path']``) and we remove it
+        recursively. For every other card (completed EPUB / TXT / PDF /
+        Library entry) we delete ``book['path']`` as a file. Deletions
+        are irreversible — the user sees a single confirmation dialog
+        summarizing everything that will be removed.
+        """
+        if not books:
+            return
+        # Resolve targets: (label, path, is_folder)
+        targets: list[tuple[str, str, bool]] = []
+        for b in books:
+            file_type = b.get("type", "epub")
+            if file_type == "in_progress":
+                folder = b.get("output_folder") or b.get("path", "") or ""
+                if folder and os.path.isdir(folder):
+                    targets.append((b.get("name") or os.path.basename(folder),
+                                    folder, True))
+            else:
+                p = b.get("path", "") or ""
+                if p and os.path.isfile(p):
+                    targets.append((b.get("name") or os.path.basename(p),
+                                    p, False))
+        if not targets:
+            QMessageBox.information(
+                self, "Delete",
+                "Nothing to delete \u2014 none of the selected cards "
+                "point at a file or folder on disk.",
+            )
+            return
+
+        # Build a confirmation summary.
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Delete")
+        lines = []
+        for label, pth, is_folder in targets[:10]:
+            kind = "folder" if is_folder else "file"
+            lines.append(f"  \u2022 {label}  ({kind})")
+        if len(targets) > 10:
+            lines.append(f"  \u2026 and {len(targets) - 10} more.")
+        msg.setText(
+            f"Permanently delete {len(targets)} "
+            f"item{'s' if len(targets) != 1 else ''}?\n\n"
+            + "\n".join(lines)
+            + "\n\nThis cannot be undone."
+        )
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Cancel)
+        if msg.exec() != QMessageBox.Yes:
+            return
+
+        deleted = 0
+        errors: list[str] = []
+        for label, pth, is_folder in targets:
+            try:
+                if is_folder:
+                    shutil.rmtree(pth)
+                else:
+                    os.remove(pth)
+                deleted += 1
+                # Drop the deleted path out of every selection set so the
+                # next context-menu open doesn't resurrect it.
+                try:
+                    self._selected_paths_ip.discard(pth)
+                    self._selected_paths_comp.discard(pth)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.error("Delete failed for %s: %s\n%s",
+                             pth, exc, traceback.format_exc())
+                errors.append(f"{label}: {exc}")
+
+        summary = f"Deleted {deleted} of {len(targets)} item" \
+                  f"{'s' if len(targets) != 1 else ''}."
+        if errors:
+            summary += (
+                f"\n\n{len(errors)} error"
+                f"{'s' if len(errors) != 1 else ''}:\n"
+                + "\n".join("  \u2022 " + e for e in errors[:5])
+            )
+            QMessageBox.warning(self, "Delete", summary)
+        else:
+            QMessageBox.information(self, "Delete", summary)
+        # Re-scan so the library immediately reflects the deletions.
+        QTimer.singleShot(0, self._load_books)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
