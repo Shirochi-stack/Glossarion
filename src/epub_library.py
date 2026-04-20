@@ -7290,7 +7290,23 @@ class EpubReaderDialog(QDialog):
             # differences between its spine-based list and the reader's
             # manifest-ordered list.
             initial = 0
-            if self._initial_chapter_filename:
+            # A reload carrying a position hint (Show-raw toggle in
+            # dual-path mode) takes the highest precedence so the user
+            # lands back on the same chapter in the new flavor — the
+            # finalizer then consumes the page portion of the hint.
+            reload_hint = getattr(self, '_reload_position_hint', None)
+            if reload_hint:
+                initial = max(0, min(int(reload_hint.get("row", 0) or 0),
+                                     len(self._chapters) - 1))
+                # Promote to a page hint for the finalizer and clear the
+                # reload slot so a later organic open doesn't inherit it.
+                self._pending_page_hint = {
+                    "row": initial,
+                    "was_last_page": bool(reload_hint.get("was_last_page")),
+                    "proportion": float(reload_hint.get("proportion") or 0.0),
+                }
+                self._reload_position_hint = None
+            elif self._initial_chapter_filename:
                 try:
                     initial = self._chapter_filenames.index(self._initial_chapter_filename)
                 except ValueError:
@@ -7775,10 +7791,41 @@ class EpubReaderDialog(QDialog):
             doc.setPageSize(QSizeF(w, h))
             callback(max(1, doc.pageCount()))
 
+    def _apply_pending_page_hint(self, count: int) -> None:
+        """Resolve ``_pending_page_hint`` (if any) against *count* pages.
+
+        Called by the single / double finalizers after the fresh chapter's
+        page count is known. The hint expresses "I was on the last page"
+        or a proportional position so the Show-raw toggle can leave the
+        user on an equivalent page in the new flavor (page counts drift
+        between translations).
+        """
+        hint = getattr(self, '_pending_page_hint', None)
+        if not hint:
+            return
+        # Only apply the hint if it was recorded against the chapter
+        # we're now paginating — otherwise a stale hint from a prior
+        # chapter could hijack the position.
+        if hint.get("row") not in (None, self._current_row):
+            self._pending_page_hint = None
+            return
+        c = max(1, int(count))
+        if hint.get("was_last_page"):
+            self._current_page = c - 1
+        else:
+            prop = float(hint.get("proportion") or 0.0)
+            target = round(prop * (c - 1))
+            self._current_page = max(0, min(int(target), c - 1))
+        self._pending_page_hint = None
+
     def _finalize_single_page(self):
         """After HTML load: get page count and scroll to current page."""
         def on_count(count):
-            self._chapter_page_cache[self._current_row] = int(count)
+            count = int(count)
+            self._chapter_page_cache[self._current_row] = count
+            # Restore the pre-swap reading position when a Show-raw
+            # toggle (or equivalent reload) staged a hint.
+            self._apply_pending_page_hint(count)
             # animate=False: jump instantly so the reader doesn't visibly
             # slide from page 1 to the current page on theme/chapter change.
             self._js_scroll_to(self._reader, self._current_page, animate=False)
@@ -7790,7 +7837,9 @@ class EpubReaderDialog(QDialog):
     def _finalize_double_page(self):
         """After HTML load: get page count and position both panes."""
         def on_count(count):
-            self._chapter_page_cache[self._current_row] = int(count)
+            count = int(count)
+            self._chapter_page_cache[self._current_row] = count
+            self._apply_pending_page_hint(count)
             self._js_scroll_to(self._reader_left, self._current_page, animate=False)
             self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
             self._js_reveal(self._reader_left)
@@ -7953,11 +8002,25 @@ class EpubReaderDialog(QDialog):
             self._render_current()
 
     def closeEvent(self, event):
-        """Persist reader settings back into config."""
+        """Persist reader settings back into config.
+
+        The priming pass in :meth:`_on_epub_loaded_from_cache` temporarily
+        flips ``_layout_mode`` to :data:`LAYOUT_SCROLL` while the first
+        render happens (swapping back via ``loadFinished``). If the user
+        closes the dialog before that swap-back lands, persisting the
+        transient ``_layout_mode`` would poison the config with
+        ``"scroll"`` — and since Scroll never triggers priming, every
+        subsequent open would open in Scroll and stay there. Fall back
+        to ``_prime_saved_mode`` whenever the priming flag is still set.
+        """
         self._config['epub_reader_font_size'] = self._font_size
         self._config['epub_reader_line_spacing'] = self._line_spacing
         self._config['epub_reader_theme'] = self._theme_index
-        self._config['epub_reader_layout'] = self._layout_mode
+        if getattr(self, '_priming_initial_render', False):
+            self._config['epub_reader_layout'] = getattr(
+                self, '_prime_saved_mode', self._layout_mode)
+        else:
+            self._config['epub_reader_layout'] = self._layout_mode
         self._config['epub_reader_font_family'] = self._font_family
         self._config['epub_reader_show_raw'] = self._show_raw
         super().closeEvent(event)
@@ -7978,6 +8041,13 @@ class EpubReaderDialog(QDialog):
             toggle swaps ``_epub_path`` between the compiled and raw
             files and restarts the loader via
             :meth:`_reload_epub_from_active_path`.
+
+        Reading position survives the swap in both modes via
+        :attr:`_pending_page_hint` / :attr:`_reload_position_hint`:
+        the finalizer after pagination consumes the hint and positions
+        the reader either at the same proportional page or — if the
+        user was on the last page before the swap — at the last page
+        of the new flavor (page counts differ between translations).
         """
         new_value = bool(checked)
         if new_value == self._show_raw:
@@ -7987,6 +8057,9 @@ class EpubReaderDialog(QDialog):
             self._config['epub_reader_show_raw'] = self._show_raw
         except Exception:
             pass
+        # Snapshot the reading position so the finalizer can restore it
+        # against the (potentially differently-paginated) new content.
+        position_hint = self._capture_position_hint()
         # Dual-path mode takes precedence: it's the only meaningful
         # interpretation when no overlay was supplied. We also fall
         # through to it when overlay mode has nothing loaded yet (e.g.
@@ -8002,6 +8075,9 @@ class EpubReaderDialog(QDialog):
             if not target or not os.path.isfile(target):
                 return
             self._epub_path = target
+            # Reload pipeline consumes this hint to pick the same row
+            # and hand the page portion to the finalizer.
+            self._reload_position_hint = position_hint
             self._reload_epub_from_active_path()
             return
         # Overlay mode — in-memory chapter swap.
@@ -8021,11 +8097,40 @@ class EpubReaderDialog(QDialog):
         self._current_row = current_row
         # Force a fresh paginated render: page-count caches differ
         # between translations and the currently-loaded chapter needs to
-        # be re-set from the new source.
+        # be re-set from the new source. The finalizer will consult
+        # ``_pending_page_hint`` to pick a sensible page number once
+        # the new pagination lands.
         self._chapter_page_cache = {}
         self._loaded_chapter = -1
+        self._pending_page_hint = position_hint
         if self._chapters:
             self._render_current()
+
+    def _capture_position_hint(self) -> dict:
+        """Snapshot the current reading position for later restoration.
+
+        Returned dict carries:
+          * ``row``          — the current chapter index.
+          * ``was_last_page`` — True when the user was on the final page
+            of the chapter (so the finalizer can jump to the last page
+            of the new flavor regardless of page-count drift).
+          * ``proportion``   — relative progress through the chapter
+            [0, 1], used when ``was_last_page`` is False to pick the
+            closest equivalent page in the new pagination.
+        """
+        row = int(getattr(self, '_current_row', 0) or 0)
+        page = int(getattr(self, '_current_page', 0) or 0)
+        pages = int(self._get_chapter_pages(row)) if self._chapters else 0
+        was_last = pages > 0 and page >= pages - 1
+        if pages > 1:
+            proportion = max(0.0, min(1.0, page / (pages - 1)))
+        else:
+            proportion = 0.0
+        return {
+            "row": row,
+            "was_last_page": bool(was_last),
+            "proportion": float(proportion),
+        }
 
     def _reload_epub_from_active_path(self):
         """Restart the loader pipeline against the current ``_epub_path``.
@@ -8036,6 +8141,11 @@ class EpubReaderDialog(QDialog):
         exactly like the initial open sequence. The temp image directory
         is left behind on purpose — it's keyed by the active epub_path
         and will be re-created on the first ``_process_html`` call.
+
+        If ``_reload_position_hint`` is set (by the Show-raw toggle), it
+        is preserved across the reset so :meth:`_on_epub_loaded_from_cache`
+        can seed the initial row / page from the user's pre-swap position
+        instead of defaulting to the first chapter.
         """
         self._chapters = []
         self._chapters_raw = []
